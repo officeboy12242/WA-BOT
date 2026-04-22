@@ -521,7 +521,7 @@ class CommandController {
     async handleHelp(sock, chatId, senderJid) {
         try {
             const senderPhone = extractPhoneNumber(senderJid);
-            const isAdmin = this.groupManager.isAdmin(senderPhone);
+            const isAdmin = await this.groupManager.isAdmin(sock, chatId, senderPhone);
 
             let response = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
             response += '🤖 *BOT COMMANDS* 🤖\n';
