@@ -5,7 +5,6 @@
 
 import makeWASocket, { 
     DisconnectReason, 
-    useMultiFileAuthState,
     fetchLatestBaileysVersion,
     makeCacheableSignalKeyStore
 } from '@whiskeysockets/baileys';
@@ -13,6 +12,7 @@ import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import qrcode from 'qrcode-terminal';
 import { logger } from '../utils/logger.js';
+import { useDatabaseAuthState } from '../utils/databaseAuthState.js';
 
 class WhatsAppService {
     constructor(commandController, stickerForwarder = null) {
@@ -23,7 +23,8 @@ class WhatsAppService {
     }
 
     async connect() {
-        const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
+        // Use database auth instead of file-based auth
+        const { state, saveCreds } = await useDatabaseAuthState();
         const { version } = await fetchLatestBaileysVersion();
 
         this.sock = makeWASocket({

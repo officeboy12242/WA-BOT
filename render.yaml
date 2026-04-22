@@ -19,7 +19,5 @@ services:
         value: Created By Sassy Bot 🤖
       - key: STICKER_PACK_AUTHOR
         value: ""
-    disk:
-      name: bot-data
-      mountPath: /opt/render/project/src
-      sizeGB: 1
+    # No persistent disk needed - auth is stored in SQLite database (whatsapp_auth.db)
+    # which is committed to git and deployed with the app
