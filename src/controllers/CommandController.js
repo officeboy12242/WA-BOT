@@ -16,7 +16,8 @@ class CommandController {
 
     async handlePosted(sock, chatId) {
         try {
-            const stats = this.database.getPostedStats();
+            // Get stats for this specific group
+            const stats = this.database.getPostedStats(chatId);
             
             let response = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
             response += '📊 *COURSE STATISTICS* 📊\n';
@@ -26,7 +27,8 @@ class CommandController {
             response += `📆 *This Week:* ${stats.thisWeek} courses\n`;
             response += `📈 *This Month:* ${stats.thisMonth} courses\n\n`;
             response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-            response += '✨ Keep learning and growing! ✨';
+            response += '✨ Keep learning and growing! ✨\n\n';
+            response += '💡 Stats shown for this group only';
             
             await sock.sendMessage(chatId, { text: response });
             logger.info(`📊 Stats sent to ${chatId}`);
@@ -37,13 +39,14 @@ class CommandController {
 
     async handleClear(sock, chatId) {
         try {
-            const totalCourses = this.database.getTotalPosted();
+            // Get total courses for THIS GROUP only
+            const totalCourses = this.database.getTotalPosted(chatId);
             
             if (totalCourses === 0) {
                 let response = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
                 response += '📭 *DATABASE EMPTY* 📭\n';
                 response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
-                response += 'There are no courses in the database to clear.';
+                response += 'There are no courses in the database for this group.';
                 
                 await sock.sendMessage(chatId, { text: response });
                 logger.info(`📭 Empty database notification sent to ${chatId}`);
@@ -64,13 +67,14 @@ class CommandController {
             let response = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
             response += '⚠️ *CONFIRMATION REQUIRED* ⚠️\n';
             response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
-            response += `You are about to delete *${totalCourses}* course(s) from the database.\n\n`;
+            response += `You are about to delete *${totalCourses}* course(s) from THIS GROUP.\n\n`;
             response += '⚠️ *This action cannot be undone!*\n\n';
             response += 'To confirm, reply with:\n';
-            response += '• `/confirm` - Delete all courses\n';
+            response += '• `/confirm` - Delete courses for this group\n';
             response += '• `/cancel` - Cancel operation\n\n';
             response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-            response += '⏱️ This confirmation expires in 30 seconds';
+            response += '⏱️ This confirmation expires in 30 seconds\n';
+            response += '💡 Only this group\'s data will be cleared';
             
             await sock.sendMessage(chatId, { text: response });
             logger.info(`⚠️ Clear confirmation requested for ${chatId} (${totalCourses} courses)`);
@@ -95,18 +99,19 @@ class CommandController {
             // Remove confirmation
             this.pendingClearConfirmations.delete(chatId);
             
-            // Clear the database
-            const deletedCount = this.database.clearAllPosted();
+            // Clear the database for THIS GROUP only
+            const deletedCount = this.database.clearAllPosted(chatId);
             
             let response = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
             response += '✅ *DATABASE CLEARED* ✅\n';
-            response += '━━━━━━━━━━━━━━━━━━━━━━��━━━━\n\n';
-            response += `🗑️ Successfully deleted *${deletedCount}* course(s)\n\n`;
+            response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+            response += `🗑️ Successfully deleted *${deletedCount}* course(s) from this group\n\n`;
             response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-            response += '💡 All courses will be posted again on next check!';
+            response += '💡 These courses will be posted again on next check!\n';
+            response += '💡 Other groups are not affected';
             
             await sock.sendMessage(chatId, { text: response });
-            logger.info(`🗑️ Database cleared: ${deletedCount} courses deleted by ${chatId}`);
+            logger.info(`🗑️ Database cleared for group ${chatId}: ${deletedCount} courses deleted`);
         } catch (error) {
             logger.error(`Error confirming clear: ${error.message}`);
         }
