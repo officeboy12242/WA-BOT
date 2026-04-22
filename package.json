@@ -1,0 +1,33 @@
+{
+  "name": "whatsapp-course-bot",
+  "version": "1.0.0",
+  "description": "WhatsApp bot that posts free courses from real.discount API",
+  "main": "bot.js",
+  "type": "module",
+  "scripts": {
+    "start": "node bot-new.js",
+    "dev": "node --watch bot-new.js"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  },
+  "keywords": [
+    "whatsapp",
+    "bot",
+    "baileys",
+    "courses"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.8",
+    "axios": "^1.6.5",
+    "better-sqlite3": "^9.4.0",
+    "dotenv": "^16.4.1",
+    "pino": "^8.19.0",
+    "pino-pretty": "^10.3.1",
+    "qrcode-terminal": "^0.12.0",
+    "wa-sticker-formatter": "^4.4.4"
+  }
+}
