@@ -4,12 +4,14 @@ node_modules/
 # Environment variables
 .env
 
-# Database
-*.db
-*.db-journal
+# Database (except auth database which we want to deploy)
+posted_courses.db
+posted_courses.db-journal
 
-# WhatsApp authentication
+# WhatsApp authentication (file-based - no longer used)
 auth_info_baileys/
+
+# Note: whatsapp_auth.db is NOT ignored - it will be deployed to Render
 
 # Logs
 *.log
