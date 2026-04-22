@@ -62,6 +62,11 @@ class GroupManager {
             return true;
         }
         
+        // Check if chatId is valid
+        if (!chatId || typeof chatId !== 'string') {
+            return false;
+        }
+        
         // Check if it's a group and user is group admin
         if (chatId.endsWith('@g.us')) {
             return await this.isGroupAdmin(sock, chatId, phoneNumber);
