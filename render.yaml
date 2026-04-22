@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: whatsapp-course-bot
+    env: node
+    region: singapore
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: CHECK_INTERVAL
+        value: 180
+      - key: OWNER_NUMBERS
+        sync: false
+      - key: STICKER_TARGET_GROUPS
+        sync: false
+      - key: STICKER_PACK_NAME
+        value: Created By Sassy Bot 🤖
+      - key: STICKER_PACK_AUTHOR
+        value: ""
+    # No persistent disk needed - auth is stored in SQLite database (whatsapp_auth.db)
+    # which is committed to git and deployed with the app
