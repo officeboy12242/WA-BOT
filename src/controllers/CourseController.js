@@ -21,43 +21,17 @@ class CourseController {
         const image = course.image || '';
         const text = formatCourseMessage(course);
 
-        // Create buttons with links
-        const buttons = [
-            {
-                name: 'cta_url',
-                buttonParamsJson: JSON.stringify({
-                    display_text: '🎓 ENROLL NOW - FREE!',
-                    url: url,
-                    merchant_url: url
-                })
-            },
-            {
-                name: 'cta_url',
-                buttonParamsJson: JSON.stringify({
-                    display_text: '📚 Join Free Courses Group',
-                    url: 'https://chat.whatsapp.com/YOUR_GROUP_INVITE_LINK',
-                    merchant_url: 'https://chat.whatsapp.com/YOUR_GROUP_INVITE_LINK'
-                })
-            }
-        ];
-
         try {
             if (image) {
-                // Send with image and buttons
+                // Send with image (no buttons)
                 await sock.sendMessage(groupId, {
                     image: { url: image },
-                    caption: text,
-                    footer: '💡 Tap buttons below to take action',
-                    buttons: buttons,
-                    headerType: 4
+                    caption: text
                 });
             } else {
-                // Send text with buttons
+                // Send text only (no buttons)
                 await sock.sendMessage(groupId, {
-                    text: text,
-                    footer: '💡 Tap buttons below to take action',
-                    buttons: buttons,
-                    headerType: 1
+                    text: text
                 });
             }
 
@@ -65,26 +39,7 @@ class CourseController {
             return true;
         } catch (error) {
             logger.error(`❌ Error posting to ${groupId} [${cid}]: ${error.message}`);
-            
-            // Fallback: send without buttons if button sending fails
-            try {
-                logger.info(`⚠️ Retrying without buttons for ${groupId}...`);
-                if (image) {
-                    await sock.sendMessage(groupId, {
-                        image: { url: image },
-                        caption: text,
-                    });
-                } else {
-                    await sock.sendMessage(groupId, {
-                        text: text,
-                    });
-                }
-                logger.info(`✅ Posted (without buttons) to ${groupId}: [${cid}]`);
-                return true;
-            } catch (fallbackError) {
-                logger.error(`❌ Fallback failed for ${groupId} [${cid}]: ${fallbackError.message}`);
-                return false;
-            }
+            return false;
         }
     }
 
