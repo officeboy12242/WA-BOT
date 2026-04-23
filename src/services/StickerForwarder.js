@@ -51,16 +51,26 @@ class StickerForwarder {
             const buffer = await this.streamToBuffer(stream);
             logger.info(`✅ Downloaded sticker: ${buffer.length} bytes`);
 
+            // Create sticker with custom metadata
+            logger.info(`🎨 Creating sticker with metadata: Pack="${this.packName}", Author="${this.packAuthor}"`);
+            const sticker = new Sticker(buffer, {
+                pack: this.packName,
+                author: this.packAuthor,
+                type: 'default',
+                quality: 50
+            });
+            const stickerBuffer = await sticker.toBuffer();
+            logger.info(`✅ Sticker created with metadata: ${stickerBuffer.length} bytes`);
+
             // Forward to all target groups
             let successCount = 0;
             for (const targetGroup of this.targetGroups) {
                 try {
                     logger.info(`📤 Sending sticker to ${targetGroup}...`);
                     
-                    // Try sending the raw sticker first (without re-processing)
                     await sock.sendMessage(
                         targetGroup,
-                        { sticker: buffer }
+                        { sticker: stickerBuffer }
                     );
                     
                     successCount++;
@@ -69,30 +79,12 @@ class StickerForwarder {
                     logger.error(`❌ Failed to send to ${targetGroup}: ${err.message}`);
                     logger.error(`Error stack: ${err.stack}`);
                     this.countErrors++;
-                    
-                    // Try with wa-sticker-formatter as fallback
-                    try {
-                        logger.info(`🔄 Retrying with sticker formatter...`);
-                        const sticker = new Sticker(buffer, {
-                            pack: this.packName,
-                            author: this.packAuthor,
-                            type: 'default',
-                            quality: 50
-                        });
-                        const stickerBuffer = await sticker.toBuffer();
-                        
-                        await sock.sendMessage(
-                            targetGroup,
-                            { sticker: stickerBuffer }
-                        );
-                        
-                        successCount++;
-                        logger.info(`✅ Sticker sent with formatter to ${targetGroup}`);
-                    } catch (retryErr) {
-                        logger.error(`❌ Retry also failed: ${retryErr.message}`);
-                    }
                 }
             }
+
+            // Clear buffers to free memory
+            buffer.fill(0);
+            stickerBuffer.fill(0);
 
             if (successCount > 0) {
                 this.countSent++;
