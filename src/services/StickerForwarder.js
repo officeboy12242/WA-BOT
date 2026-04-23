@@ -64,15 +64,13 @@ class StickerForwarder {
                 try {
                     await sock.sendMessage(
                         targetGroup,
-                        { sticker: stickerBuffer },
-                        {
-                            ephemeralExpiration: 86400, // 1 day
-                            mediaUploadTimeoutMs: 60000 // 1 minute timeout
-                        }
+                        { sticker: stickerBuffer }
                     );
                     successCount++;
+                    logger.info(`✅ Sticker sent to ${targetGroup}`);
                 } catch (err) {
                     logger.error(`❌ Failed to send to ${targetGroup}: ${err.message}`);
+                    this.countErrors++;
                 }
             }
 
