@@ -56,9 +56,26 @@ class GroupManager {
         }
     }
 
-    async isAdmin(sock, chatId, phoneNumber) {
+    isAdmin(phoneNumber) {
+        // Check if user is owner
+        if (this.isOwner(phoneNumber)) {
+            return true;
+        }
+        
+        // Check if user is in admins table
+        const stmt = this.db.prepare('SELECT phone_number FROM admins WHERE phone_number = ?');
+        const admin = stmt.get(phoneNumber);
+        return admin !== undefined;
+    }
+
+    async isAdminAsync(sock, chatId, phoneNumber) {
         // Owners always have permission
         if (this.isOwner(phoneNumber)) {
+            return true;
+        }
+        
+        // Check if user is in admins table
+        if (this.isAdmin(phoneNumber)) {
             return true;
         }
         
@@ -73,6 +90,51 @@ class GroupManager {
         }
         
         return false;
+    }
+
+    addAdmin(phoneNumber) {
+        try {
+            const stmt = this.db.prepare('INSERT OR IGNORE INTO admins (phone_number) VALUES (?)');
+            stmt.run(phoneNumber);
+            logger.info(`➕ Admin added: ${phoneNumber}`);
+            return true;
+        } catch (error) {
+            logger.error(`Error adding admin: ${error.message}`);
+            return false;
+        }
+    }
+
+    removeAdmin(phoneNumber) {
+        try {
+            const stmt = this.db.prepare('DELETE FROM admins WHERE phone_number = ?');
+            const result = stmt.run(phoneNumber);
+            if (result.changes > 0) {
+                logger.info(`➖ Admin removed: ${phoneNumber}`);
+                return true;
+            }
+            return false;
+        } catch (error) {
+            logger.error(`Error removing admin: ${error.message}`);
+            return false;
+        }
+    }
+
+    getAllAdmins() {
+        try {
+            const stmt = this.db.prepare('SELECT * FROM admins ORDER BY added_at DESC');
+            const dbAdmins = stmt.all();
+            
+            // Also include owners
+            const owners = this.ownerNumbers.map(phone => ({
+                phone_number: phone,
+                added_at: 'Owner'
+            }));
+            
+            return [...owners, ...dbAdmins];
+        } catch (error) {
+            logger.error(`Error getting admins: ${error.message}`);
+            return [];
+        }
     }
 
     getAllOwners() {
