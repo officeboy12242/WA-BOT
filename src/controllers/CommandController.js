@@ -5,13 +5,73 @@
 
 import { logger } from '../utils/logger.js';
 import { extractPhoneNumber, isGroupMessage } from '../utils/permissions.js';
-
+ 
 class CommandController {
     constructor(database, botState, groupManager) {
         this.database = database;
         this.botState = botState;
         this.groupManager = groupManager;
         this.pendingClearConfirmations = new Map();
+        this.botStartTime = Date.now(); // Track bot start time
+    }
+
+    /**
+     * Format uptime in human-readable format
+     */
+    formatUptime(milliseconds) {
+        const seconds = Math.floor(milliseconds / 1000);
+        const minutes = Math.floor(seconds / 60);
+        const hours = Math.floor(minutes / 60);
+        const days = Math.floor(hours / 24);
+
+        if (days > 0) {
+            return `${days}d ${hours % 24}h ${minutes % 60}m`;
+        } else if (hours > 0) {
+            return `${hours}h ${minutes % 60}m`;
+        } else if (minutes > 0) {
+            return `${minutes}m ${seconds % 60}s`;
+        } else {
+            return `${seconds}s`;
+        }
+    }
+
+    async handlePing(sock, chatId) {
+        try {
+            const uptime = Date.now() - this.botStartTime;
+            const uptimeFormatted = this.formatUptime(uptime);
+            const currentTime = new Date().toLocaleString('en-US', {
+                timeZone: 'Asia/Kolkata',
+                dateStyle: 'full',
+                timeStyle: 'long'
+            });
+            const startTime = new Date(this.botStartTime).toLocaleString('en-US', {
+                timeZone: 'Asia/Kolkata',
+                dateStyle: 'medium',
+                timeStyle: 'short'
+            });
+            
+            // Get memory usage
+            const memUsage = process.memoryUsage();
+            const memUsedMB = (memUsage.heapUsed / 1024 / 1024).toFixed(2);
+            const memTotalMB = (memUsage.heapTotal / 1024 / 1024).toFixed(2);
+            
+            let response = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+            response += '🏓 *PONG!* 🏓\n';
+            response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+            response += '✅ *Bot is alive and running!*\n\n';
+            response += `⏰ *Current Time:*\n   ${currentTime}\n\n`;
+            response += `🚀 *Started At:*\n   ${startTime}\n\n`;
+            response += `⏱️ *Uptime:* ${uptimeFormatted}\n\n`;
+            response += `💾 *Memory Usage:* ${memUsedMB}MB / ${memTotalMB}MB\n\n`;
+            response += `📡 *Status:* ${this.botState.isPaused ? '⏸️ Paused' : '▶️ Active'}\n\n`;
+            response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+            response += '💚 All systems operational!';
+            
+            await sock.sendMessage(chatId, { text: response });
+            logger.info(`🏓 Ping response sent to ${chatId}`);
+        } catch (error) {
+            logger.error(`Error handling ping command: ${error.message}`);
+        }
     }
 
     async handlePosted(sock, chatId) {
@@ -21,7 +81,7 @@ class CommandController {
             
             let response = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
             response += '📊 *COURSE STATISTICS* 📊\n';
-            response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+            response += '━━━━━━━━━━━���━━━━━━━━━━━━━━━\n\n';
             response += `📚 *Total Courses Posted:* ${stats.total}\n\n`;
             response += `📅 *Today:* ${stats.today} courses\n`;
             response += `📆 *This Week:* ${stats.thisWeek} courses\n`;
@@ -120,7 +180,7 @@ class CommandController {
     async handleCancel(sock, chatId) {
         try {
             if (!this.pendingClearConfirmations.has(chatId)) {
-                let response = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+                let response = '━━━━━━━━��━━━━━━━━━━━━━━━━━━\n';
                 response += 'ℹ️ *NO PENDING OPERATION* ℹ️\n';
                 response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
                 response += 'There is nothing to cancel.';
@@ -148,7 +208,7 @@ class CommandController {
     async handlePause(sock, chatId) {
         try {
             if (this.botState.isPaused) {
-                let response = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+                let response = '━━━━��━━━━━━━━━━━━━━━━━━━━━━\n';
                 response += 'ℹ️ *ALREADY PAUSED* ℹ️\n';
                 response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
                 response += 'Bot is already paused.\n';
@@ -160,7 +220,7 @@ class CommandController {
 
             this.botState.isPaused = true;
             
-            let response = '━━��━━━━━━━━━━━━━━━━━━━━━━━━\n';
+            let response = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
             response += '⏸️ *BOT PAUSED* ⏸️\n';
             response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
             response += '🛑 Automatic course posting has been paused.\n\n';
@@ -196,7 +256,7 @@ class CommandController {
             response += '✅ Automatic course posting has been resumed.\n\n';
             response += 'The bot will now check for and post new courses.\n\n';
             response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-            response += '💡 Use `/pause` to stop posting';
+            response += '��� Use `/pause` to stop posting';
             
             await sock.sendMessage(chatId, { text: response });
             logger.info(`▶️ Bot resumed by ${chatId}`);
@@ -220,7 +280,7 @@ class CommandController {
             response += `⏰ *Last Check:* ${lastCheck}\n`;
             response += `📊 *Total Posted:* ${stats.total} courses\n`;
             response += `📅 *Today:* ${stats.today} courses\n\n`;
-            response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+            response += '━━━━━━━━━��━━━━━━━━━━━━━━━━━\n';
             response += this.botState.isPaused 
                 ? '💡 Use `/resume` to start posting' 
                 : '💡 Use `/pause` to stop posting';
@@ -253,7 +313,7 @@ class CommandController {
             if (!isGroupMessage(chatId)) {
                 let response = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
                 response += '❌ *NOT A GROUP* ❌\n';
-                response += '━━━━━━��━━━━━━━━━━━━━━━━━━━━\n\n';
+                response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
                 response += 'This command can only be used in groups.';
                 
                 await sock.sendMessage(chatId, { text: response });
@@ -307,7 +367,7 @@ class CommandController {
             if (!isGroupMessage(chatId)) {
                 let response = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
                 response += '❌ *NOT A GROUP* ❌\n';
-                response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+                response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
                 response += 'This command can only be used in groups.';
                 
                 await sock.sendMessage(chatId, { text: response });
@@ -358,7 +418,7 @@ class CommandController {
             const activeGroups = this.groupManager.getActiveGroups();
             const groupCount = this.groupManager.getGroupCount();
 
-            let response = '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+            let response = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
             response += '📋 *ACTIVE GROUPS* 📋\n';
             response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
             response += `📊 *Total:* ${groupCount.active} active / ${groupCount.total} total\n\n`;
@@ -435,7 +495,7 @@ class CommandController {
             
             // Check if sender is admin
             if (!this.groupManager.isAdmin(senderPhone)) {
-                let response = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+                let response = '━━━━━━━━━━━━━━━━━━━━━━━━━━��\n';
                 response += '🔒 *PERMISSION DENIED* 🔒\n';
                 response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
                 response += 'Only admins can remove other admins.';
@@ -523,6 +583,64 @@ class CommandController {
         }
     }
 
+    async handleGitHub(sock, chatId, args) {
+        try {
+            const language = args[0] || '';
+            
+            logger.info(`📡 Fetching GitHub trending repos${language ? ` for ${language}` : ''}...`);
+            const message = await this.githubAPI.getTrendingMessage(language);
+            
+            if (!message) {
+                let response = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+                response += '❌ *NO REPOS FOUND* ❌\n';
+                response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+                response += 'Could not fetch trending repositories.\n';
+                response += 'Please try again later.\n\n';
+                response += '💡 Try: /github or /github python';
+                
+                await sock.sendMessage(chatId, { text: response });
+                return;
+            }
+            
+            await sock.sendMessage(chatId, { text: message });
+            logger.info(`🔥 GitHub trending sent to ${chatId}`);
+        } catch (error) {
+            logger.error(`Error handling GitHub command: ${error.message}`);
+        }
+    }
+
+    async handleNews(sock, chatId, args) {
+        try {
+            const source = args[0] || 'devto';
+            const tag = args[1] || '';
+            
+            logger.info(`📡 Fetching tech news from ${source}${tag ? ` with tag: ${tag}` : ''}...`);
+            const message = await this.techNewsAPI.getNewsMessage(source, tag);
+            
+            if (!message) {
+                let response = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+                response += '❌ *NO NEWS FOUND* ❌\n';
+                response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+                response += 'Could not fetch tech news.\n';
+                response += 'Please try again later.\n\n';
+                response += '📰 *Available Sources:*\n';
+                response += '• `/news devto` - Dev.to articles\n';
+                response += '• `/news hackernews` - Hacker News\n';
+                response += '• `/news reddit` - Reddit r/programming\n';
+                response += '• `/news github` - GitHub Blog\n\n';
+                response += '💡 Example: /news devto javascript';
+                
+                await sock.sendMessage(chatId, { text: response });
+                return;
+            }
+            
+            await sock.sendMessage(chatId, { text: message });
+            logger.info(`📰 Tech news sent to ${chatId}`);
+        } catch (error) {
+            logger.error(`Error handling news command: ${error.message}`);
+        }
+    }
+
     async handleHelp(sock, chatId, senderJid) {
         try {
             const senderPhone = extractPhoneNumber(senderJid);
@@ -532,25 +650,31 @@ class CommandController {
             response += '🤖 *BOT COMMANDS* 🤖\n';
             response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
             response += '📌 *General Commands:*\n\n';
+            response += '• `/ping` - Check if bot is alive\n';
             response += '• `/posted` - View course statistics\n';
             response += '• `/status` - Check bot status\n';
+            response += '• `/github [language]` - GitHub trending\n';
+            response += '• `/news [source] [tag]` - Tech news\n';
+            response += '  Sources: devto, hackernews, reddit, github\n';
             response += '• `/help` - Show this help message\n\n';
 
             if (isAdmin) {
                 response += '🔧 *Admin Commands:*\n\n';
-                response += '• `/activate` - Activate group for posting\n';
+                response += '• `/activate` - Activate group\n';
                 response += '• `/deactivate` - Deactivate group\n';
-                response += '• `/groups` - List all active groups\n';
-                response += '• `/pause` - Pause automatic posting\n';
-                response += '• `/resume` - Resume automatic posting\n';
-                response += '• `/clear` - Delete all posted courses\n';
-                response += '• `/addadmin <phone>` - Add new admin\n';
+                response += '• `/groups` - List active groups\n';
+                response += '• `/pause` - Pause posting\n';
+                response += '• `/resume` - Resume posting\n';
+                response += '• `/clear` - Delete posted courses\n';
+                response += '• `/confirm` - Confirm clear operation\n';
+                response += '• `/cancel` - Cancel clear operation\n';
+                response += '• `/addadmin <phone>` - Add admin\n';
                 response += '• `/removeadmin <phone>` - Remove admin\n';
                 response += '• `/admins` - List all admins\n\n';
             }
 
             response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-            response += '💡 Free courses are posted automatically!';
+            response += '💡 Free courses posted automatically!';
             
             await sock.sendMessage(chatId, { text: response });
             logger.info(`📖 Help sent to ${chatId}`);
@@ -565,6 +689,9 @@ class CommandController {
         const args = parts.slice(1);
 
         switch (cmd) {
+            case '/ping':
+                await this.handlePing(sock, chatId);
+                break;
             case '/posted':
                 await this.handlePosted(sock, chatId);
                 break;
@@ -603,6 +730,12 @@ class CommandController {
                 break;
             case '/admins':
                 await this.handleAdmins(sock, chatId, senderJid);
+                break;
+            case '/github':
+                await this.handleGitHub(sock, chatId, args);
+                break;
+            case '/news':
+                await this.handleNews(sock, chatId, args);
                 break;
             case '/help':
                 await this.handleHelp(sock, chatId, senderJid);
