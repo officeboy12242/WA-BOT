@@ -43,34 +43,54 @@ class StickerForwarder {
             }
 
             this.countReceived++;
+            logger.info(`📥 Received sticker from ${fromGroup}`);
 
             // Download sticker
+            logger.info(`⬇️ Downloading sticker...`);
             const stream = await downloadContentFromMessage(stickerMessage, 'sticker');
             const buffer = await this.streamToBuffer(stream);
-
-            // Create sticker with metadata
-            const sticker = new Sticker(buffer, {
-                pack: this.packName,
-                author: this.packAuthor,
-                type: 'default',
-                quality: 50
-            });
-
-            const stickerBuffer = await sticker.toBuffer();
+            logger.info(`✅ Downloaded sticker: ${buffer.length} bytes`);
 
             // Forward to all target groups
             let successCount = 0;
             for (const targetGroup of this.targetGroups) {
                 try {
+                    logger.info(`📤 Sending sticker to ${targetGroup}...`);
+                    
+                    // Try sending the raw sticker first (without re-processing)
                     await sock.sendMessage(
                         targetGroup,
-                        { sticker: stickerBuffer }
+                        { sticker: buffer }
                     );
+                    
                     successCount++;
-                    logger.info(`✅ Sticker sent to ${targetGroup}`);
+                    logger.info(`✅ Sticker sent successfully to ${targetGroup}`);
                 } catch (err) {
                     logger.error(`❌ Failed to send to ${targetGroup}: ${err.message}`);
+                    logger.error(`Error stack: ${err.stack}`);
                     this.countErrors++;
+                    
+                    // Try with wa-sticker-formatter as fallback
+                    try {
+                        logger.info(`🔄 Retrying with sticker formatter...`);
+                        const sticker = new Sticker(buffer, {
+                            pack: this.packName,
+                            author: this.packAuthor,
+                            type: 'default',
+                            quality: 50
+                        });
+                        const stickerBuffer = await sticker.toBuffer();
+                        
+                        await sock.sendMessage(
+                            targetGroup,
+                            { sticker: stickerBuffer }
+                        );
+                        
+                        successCount++;
+                        logger.info(`✅ Sticker sent with formatter to ${targetGroup}`);
+                    } catch (retryErr) {
+                        logger.error(`❌ Retry also failed: ${retryErr.message}`);
+                    }
                 }
             }
 
@@ -92,12 +112,15 @@ class StickerForwarder {
                     `Sent: ${this.countSent}, In: ${this.countReceived}, Err: ${this.countErrors}, Dup: ${this.countDuplicates}`
                 );
                 return true;
+            } else {
+                logger.error(`❌ Failed to send sticker to any target group`);
             }
 
             return false;
         } catch (error) {
             this.countErrors++;
             logger.error(`❌ Error forwarding sticker: ${error.message}`);
+            logger.error(`Error stack: ${error.stack}`);
             return false;
         }
     }
