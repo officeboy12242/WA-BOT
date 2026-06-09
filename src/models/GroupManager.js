@@ -3,37 +3,32 @@
  * Handles active groups and admin management
  */
 
-import Database from 'better-sqlite3';
 import { logger } from '../utils/logger.js';
+import { extractPhoneNumber } from '../utils/permissions.js';
 
 class GroupManager {
-    constructor(dbFile = 'bot_groups.db') {
-        this.dbFile = dbFile;
-        this.db = null;
+    constructor(mongoDb) {
+        this.mongoDb = mongoDb;
+        this.groups = null;
+        this.admins = null;
+        this.ownerNumbers = [];
+        this.moderatorNumbers = [];
     }
 
-    init() {
-        this.db = new Database(this.dbFile);
-        
-        // Create tables
-        this.db.exec(`
-            CREATE TABLE IF NOT EXISTS active_groups (
-                group_id TEXT PRIMARY KEY,
-                group_name TEXT,
-                activated_by TEXT,
-                activated_at TEXT DEFAULT (datetime('now')),
-                is_active INTEGER DEFAULT 1
-            )
-        `);
-
-        this.db.exec(`
-            CREATE TABLE IF NOT EXISTS admins (
-                phone_number TEXT PRIMARY KEY,
-                added_at TEXT DEFAULT (datetime('now'))
-            )
-        `);
-
-        logger.info('✅ Group Manager DB ready: ' + this.dbFile);
+    async init() {
+        this.groups = this.mongoDb.collection('active_groups');
+        this.admins = this.mongoDb.collection('admins');
+        await Promise.all([
+            this.groups.createIndex(
+                { group_id: 1 },
+                { unique: true, name: 'active_group_id' }
+            ),
+            this.admins.createIndex(
+                { phone_number: 1 },
+                { unique: true, name: 'admin_phone_number' }
+            ),
+        ]);
+        logger.info('Mongo group manager store ready');
     }
 
     // ─── Admin Management ─────────────────────────────────────────────────────
@@ -42,8 +37,24 @@ class GroupManager {
         this.ownerNumbers = ownerNumbers || [];
     }
 
+    setModeratorNumbers(moderatorNumbers) {
+        this.moderatorNumbers = moderatorNumbers || [];
+    }
+
     isOwner(phoneNumber) {
         return this.ownerNumbers.includes(phoneNumber);
+    }
+
+    isModerator(phoneNumber) {
+        return this.moderatorNumbers.includes(phoneNumber);
+    }
+
+    async isBotAdmin(phoneNumber) {
+        const row = await this.admins.findOne(
+            { phone_number: phoneNumber },
+            { projection: { _id: 1 } }
+        );
+        return Boolean(row);
     }
 
     async isGroupAdmin(sock, groupId, phoneNumber) {
@@ -56,80 +67,239 @@ class GroupManager {
         }
     }
 
-    async isAdmin(sock, chatId, phoneNumber) {
-        // Owners always have permission
+    /**
+     * Full admin commands: owners, DB admins, and WhatsApp group admins
+     * in the group where the command was run (auto-detected live).
+     */
+    async isPrivileged(sock, chatId, phoneNumber) {
         if (this.isOwner(phoneNumber)) {
             return true;
         }
-        
-        // Check if chatId is valid
+        if (await this.isBotAdmin(phoneNumber)) {
+            return true;
+        }
+        if (chatId && typeof chatId === 'string' && chatId.endsWith('@g.us')) {
+            return this.isGroupAdmin(sock, chatId, phoneNumber);
+        }
+        return false;
+    }
+
+    /** Group staff: owners, moderators, DB admins, or WhatsApp group admin in that group */
+    async isStaff(sock, chatId, phoneNumber) {
+        if (this.isOwner(phoneNumber)) {
+            return true;
+        }
+        if (this.isModerator(phoneNumber)) {
+            return true;
+        }
+        if (await this.isBotAdmin(phoneNumber)) {
+            return true;
+        }
         if (!chatId || typeof chatId !== 'string') {
             return false;
         }
-        
-        // Check if it's a group and user is group admin
         if (chatId.endsWith('@g.us')) {
-            return await this.isGroupAdmin(sock, chatId, phoneNumber);
+            return this.isGroupAdmin(sock, chatId, phoneNumber);
         }
-        
         return false;
+    }
+
+    /** @deprecated Use isPrivileged or isStaff */
+    async isAdmin(sock, chatId, phoneNumber) {
+        return this.isPrivileged(sock, chatId, phoneNumber);
+    }
+
+    async isPrivilegedAsync(sock, chatId, senderJid) {
+        const phoneNumber = extractPhoneNumber(senderJid);
+        if (!phoneNumber) {
+            return false;
+        }
+        return this.isPrivileged(sock, chatId, phoneNumber);
+    }
+
+    async isStaffAsync(sock, chatId, senderJid) {
+        const phoneNumber = extractPhoneNumber(senderJid);
+        if (!phoneNumber) {
+            return false;
+        }
+        return this.isStaff(sock, chatId, phoneNumber);
+    }
+
+    async isAdminAsync(sock, chatId, senderJid) {
+        return this.isPrivilegedAsync(sock, chatId, senderJid);
     }
 
     getAllOwners() {
         return this.ownerNumbers.map(phone => ({ phone_number: phone }));
     }
 
+    async addAdmin(phoneNumber) {
+        if (this.isOwner(phoneNumber) || this.isModerator(phoneNumber)) {
+            return false;
+        }
+        await this.admins.updateOne(
+            { phone_number: phoneNumber },
+            {
+                $setOnInsert: {
+                    phone_number: phoneNumber,
+                    added_at: new Date(),
+                },
+            },
+            { upsert: true }
+        );
+        return true;
+    }
+
+    async removeAdmin(phoneNumber) {
+        if (this.isOwner(phoneNumber) || this.isModerator(phoneNumber)) {
+            return false;
+        }
+        const result = await this.admins.deleteOne({ phone_number: phoneNumber });
+        return result.deletedCount > 0;
+    }
+
+    getAllModerators() {
+        return this.moderatorNumbers.map((phone) => ({
+            phone_number: phone,
+            role: 'Moderator',
+        }));
+    }
+
+    async getAllAdmins() {
+        const admins = await this.admins
+            .find({}, { projection: { _id: 0 } })
+            .sort({ added_at: 1 })
+            .toArray();
+        const ownerRows = this.ownerNumbers.map((phone) => ({
+            phone_number: phone,
+            role: 'Owner',
+            added_at: 'Owner',
+        }));
+        const moderatorRows = this.moderatorNumbers.map((phone) => ({
+            phone_number: phone,
+            role: 'Moderator',
+            added_at: 'Moderator (.env)',
+        }));
+        const seen = new Set([
+            ...ownerRows.map((row) => row.phone_number),
+            ...moderatorRows.map((row) => row.phone_number),
+        ]);
+        const botAdminRows = admins
+            .filter((admin) => !seen.has(admin.phone_number))
+            .map((admin) => ({ ...admin, role: 'Bot admin' }));
+        return ownerRows.concat(moderatorRows, botAdminRows);
+    }
+
     // ─── Group Management ─────────────────────────────────────────────────────
 
-    activateGroup(groupId, groupName, activatedBy) {
-        const stmt = this.db.prepare(`
-            INSERT OR REPLACE INTO active_groups (group_id, group_name, activated_by, is_active) 
-            VALUES (?, ?, ?, 1)
-        `);
-        stmt.run(groupId, groupName, activatedBy);
+    async activateGroup(groupId, groupName, activatedBy) {
+        await this.groups.updateOne(
+            { group_id: groupId },
+            {
+                $set: {
+                    group_name: groupName,
+                    activated_by: activatedBy,
+                    activated_at: new Date(),
+                    is_active: true,
+                },
+                $setOnInsert: {
+                    group_id: groupId,
+                    insta_auto: false,
+                },
+            },
+            { upsert: true }
+        );
         logger.info(`✅ Group activated: ${groupName} (${groupId}) by ${activatedBy}`);
     }
 
-    deactivateGroup(groupId) {
-        const stmt = this.db.prepare('UPDATE active_groups SET is_active = 0 WHERE group_id = ?');
-        const result = stmt.run(groupId);
+    async setInstaAuto(groupId, groupName, enabled, activatedBy) {
+        await this.groups.updateOne(
+            { group_id: groupId },
+            {
+                $set: {
+                    group_name: groupName,
+                    insta_auto: enabled,
+                    insta_auto_by: activatedBy,
+                    insta_auto_at: new Date(),
+                },
+                $setOnInsert: {
+                    group_id: groupId,
+                    is_active: false,
+                },
+            },
+            { upsert: true }
+        );
+        logger.info(
+            `${enabled ? '📸 Insta auto ON' : '📸 Insta auto OFF'}: ${groupName} (${groupId}) by ${activatedBy}`
+        );
+    }
+
+    async isInstaAutoEnabled(groupId) {
+        const row = await this.groups.findOne(
+            { group_id: groupId },
+            { projection: { insta_auto: 1 } }
+        );
+        return row?.insta_auto === true;
+    }
+
+    async getInstaAutoGroups() {
+        return this.groups
+            .find({ insta_auto: true }, { projection: { _id: 0 } })
+            .sort({ insta_auto_at: -1 })
+            .toArray();
+    }
+
+    async deactivateGroup(groupId) {
+        const result = await this.groups.updateOne(
+            { group_id: groupId },
+            { $set: { is_active: false } }
+        );
         logger.info(`🛑 Group deactivated: ${groupId}`);
-        return result.changes > 0;
+        return result.matchedCount > 0;
     }
 
-    isGroupActive(groupId) {
-        const stmt = this.db.prepare('SELECT is_active FROM active_groups WHERE group_id = ?');
-        const row = stmt.get(groupId);
-        return row ? row.is_active === 1 : false;
+    async isGroupActive(groupId) {
+        const row = await this.groups.findOne(
+            { group_id: groupId },
+            { projection: { is_active: 1 } }
+        );
+        return row ? row.is_active === true : false;
     }
 
-    getActiveGroups() {
-        const stmt = this.db.prepare('SELECT * FROM active_groups WHERE is_active = 1 ORDER BY activated_at DESC');
-        return stmt.all();
+    async getActiveGroups() {
+        return this.groups
+            .find({ is_active: true }, { projection: { _id: 0 } })
+            .sort({ activated_at: -1 })
+            .toArray();
     }
 
-    getAllGroups() {
-        const stmt = this.db.prepare('SELECT * FROM active_groups ORDER BY activated_at DESC');
-        return stmt.all();
+    async getAllGroups() {
+        return this.groups
+            .find({}, { projection: { _id: 0 } })
+            .sort({ activated_at: -1 })
+            .toArray();
     }
 
-    getGroupInfo(groupId) {
-        const stmt = this.db.prepare('SELECT * FROM active_groups WHERE group_id = ?');
-        return stmt.get(groupId);
+    async getGroupInfo(groupId) {
+        return this.groups.findOne(
+            { group_id: groupId },
+            { projection: { _id: 0 } }
+        );
     }
 
-    getGroupCount() {
-        const active = this.db.prepare('SELECT COUNT(*) as count FROM active_groups WHERE is_active = 1').get().count;
-        const total = this.db.prepare('SELECT COUNT(*) as count FROM active_groups').get().count;
+    async getGroupCount() {
+        const [active, total] = await Promise.all([
+            this.groups.countDocuments({ is_active: true }),
+            this.groups.countDocuments({}),
+        ]);
         return { active, total };
     }
 
     // ─── Utility ──────────────────────────────────────────────────────────────
 
     close() {
-        if (this.db) {
-            this.db.close();
-        }
+        this.groups = null;
+        this.admins = null;
     }
 }
 

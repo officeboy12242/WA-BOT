@@ -1,77 +1,81 @@
 /**
  * Auth Database Model
- * Stores WhatsApp authentication data in SQLite database
- * This allows auth to persist on Render without needing persistent disk
+ * Stores WhatsApp authentication data in MongoDB.
  */
 
-import Database from 'better-sqlite3';
 import { logger } from '../utils/logger.js';
 
 class AuthDatabase {
-    constructor(dbFile = 'whatsapp_auth.db') {
-        this.dbFile = dbFile;
-        this.db = null;
+    constructor(mongoDb) {
+        this.mongoDb = mongoDb;
+        this.collection = null;
+        this.cache = new Map();
     }
 
-    init() {
-        this.db = new Database(this.dbFile);
-        
-        // Create table for storing auth data as key-value pairs
-        this.db.exec(`
-            CREATE TABLE IF NOT EXISTS auth_data (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                updated_at TEXT DEFAULT (datetime('now'))
-            )
-        `);
-        
-        logger.info('✅ Auth DB ready: ' + this.dbFile);
+    async init() {
+        this.collection = this.mongoDb.collection('auth_data');
+        await this.collection.createIndex(
+            { key: 1 },
+            { unique: true, name: 'auth_data_key' }
+        );
+
+        this.cache.clear();
+        const rows = await this.collection.find({}, { projection: { _id: 0, key: 1, value: 1 } }).toArray();
+        for (const row of rows) {
+            this.cache.set(row.key, row.value);
+        }
+
+        logger.info(`Mongo auth store ready (${this.cache.size} record(s))`);
     }
 
     // Save auth data (creds or keys)
     // Value should already be stringified by caller
-    set(key, value) {
-        const stmt = this.db.prepare(`
-            INSERT OR REPLACE INTO auth_data (key, value, updated_at) 
-            VALUES (?, ?, datetime('now'))
-        `);
-        // Value is already a JSON string from databaseAuthState
+    async set(key, value) {
         const valueStr = typeof value === 'string' ? value : JSON.stringify(value);
-        stmt.run(key, valueStr);
+        this.cache.set(key, valueStr);
+        await this.collection.updateOne(
+            { key },
+            {
+                $set: {
+                    value: valueStr,
+                    updated_at: new Date(),
+                },
+                $setOnInsert: {
+                    key,
+                },
+            },
+            { upsert: true }
+        );
     }
 
     // Get auth data
     // Returns raw string, caller will parse it
     get(key) {
-        const stmt = this.db.prepare('SELECT value FROM auth_data WHERE key = ?');
-        const row = stmt.get(key);
-        return row ? row.value : null;
+        return this.cache.get(key) || null;
     }
 
     // Delete auth data
-    delete(key) {
-        const stmt = this.db.prepare('DELETE FROM auth_data WHERE key = ?');
-        stmt.run(key);
+    async delete(key) {
+        this.cache.delete(key);
+        await this.collection.deleteOne({ key });
     }
 
     // Clear all auth data (logout)
-    clearAll() {
-        const stmt = this.db.prepare('DELETE FROM auth_data');
-        const result = stmt.run();
-        logger.info(`🗑️ Cleared ${result.changes} auth records`);
-        return result.changes;
+    async clearAll() {
+        this.cache.clear();
+        const result = await this.collection.deleteMany({});
+        logger.info(`Cleared ${result.deletedCount || 0} auth records`);
+        return result.deletedCount || 0;
     }
 
     // Get all keys (for debugging)
     getAllKeys() {
-        const stmt = this.db.prepare('SELECT key FROM auth_data');
-        return stmt.all().map(row => row.key);
+        return Array.from(this.cache.keys());
     }
 
     close() {
-        if (this.db) {
-            this.db.close();
-        }
+        this.cache.clear();
+        this.collection = null;
     }
 }
 

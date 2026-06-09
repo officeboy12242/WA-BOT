@@ -23,11 +23,14 @@
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.8",
     "axios": "^1.6.5",
-    "better-sqlite3": "^9.4.0",
+    "cheerio": "^1.2.0",
     "dotenv": "^16.4.1",
+    "file-type": "^18.7.0",
+    "mongodb": "^6.21.0",
     "pino": "^8.19.0",
     "pino-pretty": "^10.3.1",
     "qrcode-terminal": "^0.12.0",
+    "snapsave-media-downloader": "^2.4.0",
     "wa-sticker-formatter": "^4.4.4"
   }
 }

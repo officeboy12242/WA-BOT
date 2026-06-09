@@ -28,16 +28,14 @@ git push -u origin main
 5. Click **"Advanced"** and add Environment Variables:
    ```
    OWNER_NUMBERS=918830285258
+   MONGODB_URI=mongodb+srv://username:password@cluster.example.mongodb.net/?appName=telegramUdemy
+   MONGODB_DB_NAME=telegramUdemy
    STICKER_TARGET_GROUPS=917887499710-1621848242@g.us
    STICKER_PACK_NAME=Created By Sassy Bot 🤖
    STICKER_PACK_AUTHOR=
    ```
 
-6. Add Persistent Disk:
-   - Click **"Add Disk"**
-   - Name: `bot-data`
-   - Mount Path: `/opt/render/project/src/auth_info_baileys`
-   - Size: 1 GB
+6. Make sure `MONGODB_URI` is set as a secret environment variable. MongoDB stores WhatsApp session data, posted course history, groups, and admins.
 
 7. Click **"Create Web Service"**
 
@@ -86,7 +84,7 @@ Render auto-deploys!
 - Refresh logs page
 
 **Bot disconnects?**
-- Check if disk is mounted
+- Check that MongoDB is reachable
 - Rescan QR code
 
 **Stickers not forwarding?**

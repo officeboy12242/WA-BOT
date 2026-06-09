@@ -6,25 +6,47 @@
 import makeWASocket, { 
     DisconnectReason, 
     fetchLatestBaileysVersion,
-    makeCacheableSignalKeyStore
+    makeCacheableSignalKeyStore,
+    normalizeMessageContent
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import qrcode from 'qrcode-terminal';
 import { logger } from '../utils/logger.js';
 import { useDatabaseAuthState } from '../utils/databaseAuthState.js';
+import { extractInstagramUrl } from '../utils/instagramUrl.js';
+import { getMessageSenderJid, getTextForUrlScan, getTextFromWAMessage } from '../utils/waMessage.js';
+
+/** Non-group chats where auto Instagram download is allowed (includes @lid privacy chats). */
+function shouldAutoDetectInstaLink(chatId) {
+    if (!chatId || typeof chatId !== 'string') {
+        return false;
+    }
+    if (chatId.endsWith('@g.us')) {
+        return false;
+    }
+    if (chatId === 'status@broadcast' || chatId.endsWith('@broadcast')) {
+        return false;
+    }
+    if (chatId.includes('newsletter')) {
+        return false;
+    }
+    return true;
+}
 
 class WhatsAppService {
-    constructor(commandController, stickerForwarder = null) {
+    constructor(commandController, stickerForwarder = null, authDatabase, groupManager = null) {
         this.sock = null;
         this.isReady = false;
         this.commandController = commandController;
         this.stickerForwarder = stickerForwarder;
+        this.authDatabase = authDatabase;
+        this.groupManager = groupManager;
     }
 
     async connect() {
         // Use database auth instead of file-based auth
-        const { state, saveCreds } = await useDatabaseAuthState();
+        const { state, saveCreds } = await useDatabaseAuthState(this.authDatabase);
         const { version } = await fetchLatestBaileysVersion();
 
         this.sock = makeWASocket({
@@ -85,30 +107,84 @@ class WhatsAppService {
             }
         });
 
-        this.sock.ev.on('creds.update', saveCreds);
+        this.sock.ev.on('creds.update', () => {
+            void saveCreds();
+        });
 
-        // Listen for messages (commands and stickers)
-        this.sock.ev.on('messages.upsert', async ({ messages }) => {
-            const msg = messages[0];
-            if (!msg.message) return;
-
-            const chatId = msg.key.remoteJid;
-            const senderJid = msg.key.participant || msg.key.remoteJid;
-            
-            // Handle stickers
-            if (msg.message.stickerMessage && this.stickerForwarder) {
-                await this.stickerForwarder.forwardSticker(this.sock, msg.message.stickerMessage, chatId);
+        // Handle each message concurrently so one slow command does not block others.
+        this.sock.ev.on('messages.upsert', ({ messages, type }) => {
+            if (type && type !== 'notify' && type !== 'append') {
+                return;
             }
-
-            // Handle commands
-            const messageText = msg.message.conversation || 
-                               msg.message.extendedTextMessage?.text || 
-                               '';
-            
-            if (messageText.startsWith('/')) {
-                await this.commandController.handleCommand(this.sock, chatId, messageText, senderJid);
+            for (const msg of messages) {
+                void this.processIncomingMessage(msg).catch((err) => {
+                    logger.error('Message handling error:', err?.message || err);
+                });
             }
         });
+    }
+
+    async processIncomingMessage(msg) {
+        if (!msg?.message || msg.key.fromMe) {
+            return;
+        }
+
+        const chatId = msg.key.remoteJid;
+        const senderJid = getMessageSenderJid(msg.key);
+        if (!chatId) {
+            return;
+        }
+        if (chatId.endsWith('@g.us') && !senderJid) {
+            logger.warn('Group message with no sender participant; ignoring');
+            return;
+        }
+
+        const unwrapped = normalizeMessageContent(msg.message) || msg.message;
+        if (unwrapped.stickerMessage && this.stickerForwarder) {
+            void this.stickerForwarder
+                .forwardSticker(this.sock, unwrapped.stickerMessage, chatId)
+                .catch((err) => {
+                    logger.error('Sticker forward error:', err?.message || err);
+                });
+        }
+
+        const messageText = getTextFromWAMessage(msg.message).trim();
+        const textForUrls = getTextForUrlScan(msg.message).trim();
+
+        if (messageText.startsWith('/')) {
+            await this.commandController.handleCommand(
+                this.sock,
+                chatId,
+                messageText,
+                senderJid,
+                msg
+            );
+            return;
+        }
+
+        if (textForUrls.length > 0) {
+            const igUrl = extractInstagramUrl(textForUrls);
+            if (igUrl && (await this.shouldAutoDownloadInsta(chatId))) {
+                await this.commandController.handleInsta(
+                    this.sock,
+                    chatId,
+                    [igUrl],
+                    msg,
+                    { requireCommandArgs: false }
+                );
+            }
+        }
+    }
+
+    /** DMs: always auto. Groups: only when `/instaon` was used in that group. */
+    async shouldAutoDownloadInsta(chatId) {
+        if (shouldAutoDetectInstaLink(chatId)) {
+            return true;
+        }
+        if (chatId?.endsWith('@g.us') && this.groupManager) {
+            return this.groupManager.isInstaAutoEnabled(chatId);
+        }
+        return false;
     }
 
     getSock() {

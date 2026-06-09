@@ -42,22 +42,18 @@ In Render dashboard, go to "Environment" tab and add:
 
 ```
 OWNER_NUMBERS=918830285258
+MONGODB_URI=mongodb+srv://username:password@cluster.example.mongodb.net/?appName=telegramUdemy
+MONGODB_DB_NAME=telegramUdemy
 STICKER_TARGET_GROUPS=917887499710-1621848242@g.us
 STICKER_PACK_NAME=Created By Sassy Bot 🤖
 STICKER_PACK_AUTHOR=
 CHECK_INTERVAL=180
 ```
 
-## Step 5: Add Persistent Disk (Important!)
+## Step 5: Configure MongoDB
 
-1. Go to "Disks" tab
-2. Click "Add Disk"
-3. Configure:
-   - **Name:** bot-data
-   - **Mount Path:** `/opt/render/project/src/auth_info_baileys`
-   - **Size:** 1 GB (free tier)
-
-This ensures your WhatsApp session persists across deployments.
+MongoDB stores posted course history, group settings, bot admins, and WhatsApp session data.
+No Render persistent disk is required.
 
 ## Step 6: Deploy
 
@@ -78,7 +74,7 @@ This ensures your WhatsApp session persists across deployments.
 - The QR code will appear in the logs
 - You have ~30 seconds to scan it
 - If you miss it, the bot will generate a new one
-- Once scanned, session is saved to disk
+- Once scanned, session is saved to MongoDB
 
 ### Keeping Bot Alive
 Render free tier sleeps after 15 minutes of inactivity. To keep it alive:
@@ -123,17 +119,17 @@ Render will automatically redeploy.
 **Bot not starting:**
 - Check logs for errors
 - Verify environment variables are set
-- Ensure disk is mounted correctly
+- Ensure `MONGODB_URI` is set correctly
 
 **QR code not appearing:**
-- Delete `auth_info_baileys` folder from disk
+- Clear the `auth_data` collection in MongoDB if you need a fresh login
 - Redeploy
 - New QR will appear
 
 **Bot disconnects:**
 - Check if WhatsApp session expired
 - Rescan QR code
-- Ensure disk is persistent
+- Ensure MongoDB is reachable from Render
 
 **Stickers not forwarding:**
 - Verify `STICKER_TARGET_GROUPS` is set correctly
@@ -148,9 +144,10 @@ If you prefer Docker:
 docker build -t whatsapp-bot .
 docker run -d \
   -e OWNER_NUMBERS=918830285258 \
+  -e MONGODB_URI="mongodb+srv://username:password@cluster.example.mongodb.net/?appName=telegramUdemy" \
+  -e MONGODB_DB_NAME=telegramUdemy \
   -e STICKER_TARGET_GROUPS=917887499710-1621848242@g.us \
   -e STICKER_PACK_NAME="Created By Sassy Bot 🤖" \
-  -v $(pwd)/auth_info_baileys:/app/auth_info_baileys \
   whatsapp-bot
 ```
 
@@ -160,7 +157,7 @@ For issues:
 1. Check logs first
 2. Verify environment variables
 3. Ensure WhatsApp session is active
-4. Check disk persistence
+4. Check MongoDB connectivity
 
 ## Features Enabled
 

@@ -3,6 +3,8 @@
  * Formats course data into WhatsApp messages
  */
 
+import { formatCompactCount, parseLooseCount } from './numberFormat.js';
+
 export function formatCourseMessage(course) {
     const title = course.name || 'Untitled';
     let description = course.description || '';
@@ -36,7 +38,7 @@ export function formatCourseMessage(course) {
     const price = parseFloat(course.price || 0);
     const sale = parseFloat(course.sale_price || 0);
     const rating = parseFloat(course.rating || 0);
-    const views = parseInt(course.views || 0);
+    const views = parseLooseCount(course.views);
     const lectures = parseInt(course.lectures || 0);
     const lang = course.language || '';
     const category = course.category || '';
@@ -88,7 +90,7 @@ export function formatCourseMessage(course) {
     }
     
     if (views) {
-        message += `  • Enrolled Students: ${views.toLocaleString()}\n`;
+        message += `  • Enrolled Students: ${formatCompactCount(views)}\n`;
     }
     
     if (lang) {

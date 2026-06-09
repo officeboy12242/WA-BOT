@@ -5,20 +5,20 @@
  */
 
 import { initAuthCreds, BufferJSON, proto } from '@whiskeysockets/baileys';
-import AuthDatabase from '../models/AuthDatabase.js';
 import { logger } from './logger.js';
 
 /**
  * Use database for auth state instead of files
  * This makes auth portable and works on Render without persistent disk
  */
-export async function useDatabaseAuthState() {
-    const authDB = new AuthDatabase();
-    authDB.init();
-
+export async function useDatabaseAuthState(authDB) {
     // Serialize/deserialize with BufferJSON to handle Buffers properly
-    const writeData = (data, key) => {
-        return authDB.set(key, JSON.stringify(data, BufferJSON.replacer));
+    const writeData = async (data, key) => {
+        try {
+            await authDB.set(key, JSON.stringify(data, BufferJSON.replacer));
+        } catch (error) {
+            logger.error(`Error writing ${key}:`, error.message);
+        }
     };
 
     const readData = (key) => {
@@ -41,37 +41,42 @@ export async function useDatabaseAuthState() {
         state: {
             creds,
             keys: {
-                get: (type, ids) => {
+                get: async (type, ids) => {
                     const data = {};
                     for (const id of ids) {
                         const key = `${type}-${id}`;
-                        const value = readData(key);
+                        let value = readData(key);
                         if (value) {
+                            if (type === 'app-state-sync-key') {
+                                value = proto.Message.AppStateSyncKeyData.fromObject(value);
+                            }
                             data[id] = value;
                         }
                     }
                     return data;
                 },
-                set: (data) => {
+                set: async (data) => {
+                    const writes = [];
                     for (const category in data) {
                         for (const id in data[category]) {
                             const key = `${category}-${id}`;
                             const value = data[category][id];
                             if (value) {
-                                writeData(value, key);
+                                writes.push(writeData(value, key));
                             } else {
-                                authDB.delete(key);
+                                writes.push(authDB.delete(key));
                             }
                         }
                     }
+                    await Promise.all(writes);
                 }
             }
         },
-        saveCreds: () => {
-            writeData(creds, 'creds');
+        saveCreds: async () => {
+            await writeData(creds, 'creds');
         },
-        clearAuth: () => {
-            authDB.clearAll();
+        clearAuth: async () => {
+            await authDB.clearAll();
             logger.info('🗑️ Cleared all auth data from database');
         },
         closeDB: () => {
