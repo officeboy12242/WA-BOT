@@ -96,7 +96,7 @@ class CourseController {
             }
 
             // Get all active groups
-            const activeGroups = this.groupManager.getActiveGroups();
+            const activeGroups = await this.groupManager.getActiveGroups();
 
             if (activeGroups.length === 0) {
                 logger.warn('⚠️ No active groups. Use /activate in a group to start posting.');
@@ -113,7 +113,7 @@ class CourseController {
             for (const group of activeGroups) {
                 try {
                     // Check if already posted to this specific group
-                    if (this.database.isPosted(cid, group.group_id)) {
+                    if (await this.database.isPosted(cid, group.group_id)) {
                         logger.info(`⏭️  Already posted to ${group.group_name}`);
                         continue;
                     }
@@ -121,7 +121,7 @@ class CourseController {
                     const success = await this.postCourseToGroup(sock, course, group.group_id);
                     if (success) {
                         // Mark as posted for this specific group
-                        this.database.markPosted(cid, group.group_id, name, url);
+                        await this.database.markPosted(cid, group.group_id, name, url);
                         successCount++;
                     }
                     // Small delay between group posts

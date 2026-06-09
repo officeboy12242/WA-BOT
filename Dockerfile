@@ -22,9 +22,6 @@ RUN npm ci --only=production
 # Copy application files
 COPY . .
 
-# Create directory for auth data
-RUN mkdir -p auth_info_baileys
-
 # Expose port (not really needed for WhatsApp bot but good practice)
 EXPOSE 3000
 

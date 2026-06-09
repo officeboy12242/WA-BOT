@@ -13,13 +13,13 @@ services:
         value: 180
       - key: OWNER_NUMBERS
         sync: false
+      - key: MONGODB_URI
+        sync: false
+      - key: MONGODB_DB_NAME
+        value: telegramUdemy
       - key: STICKER_TARGET_GROUPS
         sync: false
       - key: STICKER_PACK_NAME
         value: Created By Sassy Bot 🤖
       - key: STICKER_PACK_AUTHOR
         value: ""
-    disk:
-      name: bot-data
-      mountPath: /opt/render/project/src/auth_info_baileys
-      sizeGB: 1

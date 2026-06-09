@@ -4,60 +4,122 @@
  */
 
 import { config } from './src/config/config.js';
+import { closeMongo, connectMongo } from './src/db/mongo.js';
 import { logger } from './src/utils/logger.js';
 import { startHealthCheckServer } from './src/utils/healthCheck.js';
 import DatabaseModel from './src/models/Database.js';
+import AuthDatabase from './src/models/AuthDatabase.js';
 import CourseAPI from './src/models/CourseAPI.js';
 import GroupManager from './src/models/GroupManager.js';
 import CommandController from './src/controllers/CommandController.js';
 import CourseController from './src/controllers/CourseController.js';
+import NewsController from './src/controllers/NewsController.js';
+import NewsDatabase from './src/models/NewsDatabase.js';
+import InshortsScraper from './src/services/InshortsScraper.js';
 import WhatsAppService from './src/services/WhatsAppService.js';
 import LogManager from './src/services/LogManager.js';
 import StickerForwarder from './src/services/StickerForwarder.js';
+import { startNewsScheduler } from './src/utils/newsScheduler.js';
+import { startMorningScheduler } from './src/utils/morningScheduler.js';
+import MorningMessageDatabase from './src/models/MorningMessageDatabase.js';
+import MorningMessageScraper from './src/services/MorningMessageScraper.js';
+import MorningMessageController from './src/controllers/MorningMessageController.js';
 
 // Bot state
 const botState = {
     isPaused: false,
-    lastCheckTime: null
+    lastCheckTime: null,
+    lastNewsCheckTime: null,
+    lastNewsPostSlot: null,
+    lastMorningPostSlot: null,
 };
 
 // ─── Main Application ─────────────────────────────────────────────────────────
 class WhatsAppCourseBot {
     constructor() {
-        this.database = new DatabaseModel(config.DB_FILE);
-        this.groupManager = new GroupManager();
+        this.database = null;
+        this.authDatabase = null;
+        this.groupManager = null;
         this.courseAPI = new CourseAPI();
-        this.commandController = new CommandController(this.database, botState, this.groupManager);
-        this.courseController = new CourseController(this.database, this.courseAPI, config, this.groupManager);
-        
-        // Initialize sticker forwarder if target groups are configured
         this.stickerForwarder = null;
-        if (config.STICKER_TARGET_GROUPS.length > 0) {
-            this.stickerForwarder = new StickerForwarder(
-                config.STICKER_TARGET_GROUPS,
-                config.STICKER_PACK_NAME,
-                config.STICKER_PACK_AUTHOR
-            );
-            logger.info(`🎨 Sticker forwarding enabled for ${config.STICKER_TARGET_GROUPS.length} group(s)`);
-        }
-        
-        this.whatsappService = new WhatsAppService(this.commandController, this.stickerForwarder);
+        this.commandController = null;
+        this.courseController = null;
+        this.newsController = null;
+        this.whatsappService = null;
         this.logManager = new LogManager('bot.log', '917887499710', 600000, 14400000); // Check every 10 min, delete after 4 hours
         this.checkInterval = null;
+        this.newsScheduler = null;
+        this.morningScheduler = null;
+        this.morningDatabase = null;
     }
 
     async start() {
         try {
             logger.info('🚀 Starting WhatsApp Course Bot...');
             
+            const mongoDb = await connectMongo({
+                uri: config.MONGODB_URI,
+                dbName: config.MONGODB_DB_NAME,
+            });
+
             // Initialize databases
-            this.database.init();
-            this.groupManager.init();
+            this.database = new DatabaseModel(mongoDb);
+            this.newsDatabase = new NewsDatabase(mongoDb);
+            this.morningDatabase = new MorningMessageDatabase(mongoDb);
+            this.groupManager = new GroupManager(mongoDb);
+            this.authDatabase = new AuthDatabase(mongoDb);
+            await Promise.all([
+                this.database.init(),
+                this.newsDatabase.init(),
+                this.morningDatabase.init(),
+                this.groupManager.init(),
+                this.authDatabase.init(),
+            ]);
             
             // Set owner numbers from config
             this.groupManager.setOwnerNumbers(config.OWNER_NUMBERS);
+            this.groupManager.setModeratorNumbers(config.MODERATOR_NUMBERS);
             logger.info(`👑 Loaded ${config.OWNER_NUMBERS.length} owner(s) from .env`);
-            logger.info(`🔐 Group admins will be auto-detected`);
+            logger.info(`🛡️ Loaded ${config.MODERATOR_NUMBERS.length} moderator(s) from .env`);
+            logger.info(`🔐 WhatsApp group admins are auto-detected per group for staff & admin commands`);
+
+            const inshortsScraper = new InshortsScraper(this.newsDatabase);
+            this.newsController = new NewsController(
+                this.newsDatabase,
+                inshortsScraper,
+                config,
+                this.groupManager
+            );
+            this.commandController = new CommandController(
+                this.database,
+                botState,
+                this.groupManager,
+                this.newsController
+            );
+            this.courseController = new CourseController(this.database, this.courseAPI, config, this.groupManager);
+            const morningScraper = new MorningMessageScraper(this.morningDatabase);
+            this.morningController = new MorningMessageController(
+                this.morningDatabase,
+                morningScraper,
+                config
+            );
+
+            // Initialize sticker forwarder if target groups are configured
+            if (config.STICKER_TARGET_GROUPS.length > 0) {
+                this.stickerForwarder = new StickerForwarder(
+                    config.STICKER_TARGET_GROUPS,
+                    config.STICKER_PACK_NAME,
+                    config.STICKER_PACK_AUTHOR
+                );
+                logger.info(`🎨 Sticker forwarding enabled for ${config.STICKER_TARGET_GROUPS.length} group(s)`);
+            }
+            
+            this.whatsappService = new WhatsAppService(
+                this.commandController,
+                this.stickerForwarder,
+                this.authDatabase,
+                this.groupManager
+            );
             
             // Connect to WhatsApp
             await this.whatsappService.connect();
@@ -69,36 +131,58 @@ class WhatsAppCourseBot {
             this.logManager.setSocket(this.whatsappService.getSock());
             this.logManager.start();
             
-            // Start checking for courses
-            logger.info(`🤖 Bot is ready! Checking every ${config.CHECK_INTERVAL} seconds.`);
-            
-            // Initial check
-            await this.courseController.checkAndPostCourses(
-                this.whatsappService.getSock(), 
-                botState
+            const morningInfo = config.MORNING_MESSAGES_ENABLED && config.MORNING_MESSAGE_NUMBERS.length
+                ? ` Morning msgs ${config.MORNING_MESSAGE_TIME_START}–${config.MORNING_MESSAGE_TIME_END} random (${config.MORNING_TIMEZONE}) to ${config.MORNING_MESSAGE_NUMBERS.length} number(s).`
+                : '';
+            logger.info(
+                `🤖 Bot is ready! Courses every ${config.CHECK_INTERVAL}s. Tech news at ${config.NEWS_POST_TIMES.join(', ')} (${config.NEWS_TIMEZONE}).${morningInfo}`
             );
-            
-            // Set up interval
+
+            const sock = this.whatsappService.getSock();
+
+            await this.courseController.checkAndPostCourses(sock, botState);
+
+            this.newsScheduler = startNewsScheduler({
+                getSock: () => this.whatsappService.getSock(),
+                botState,
+                newsController: this.newsController,
+                config,
+            });
+
+            this.morningScheduler = startMorningScheduler({
+                getSock: () => this.whatsappService.getSock(),
+                botState,
+                morningController: this.morningController,
+                config,
+            });
+
             this.checkInterval = setInterval(async () => {
                 try {
                     await this.courseController.checkAndPostCourses(
-                        this.whatsappService.getSock(), 
+                        this.whatsappService.getSock(),
                         botState
                     );
                 } catch (error) {
                     logger.error('Error in course check interval:', error.message);
                 }
             }, config.CHECK_INTERVAL * 1000);
+
         } catch (error) {
             logger.error('Error starting bot:', error.message);
             throw error;
         }
     }
 
-    shutdown() {
+    async shutdown() {
         logger.info('👋 Shutting down...');
         if (this.checkInterval) {
             clearInterval(this.checkInterval);
+        }
+        if (this.newsScheduler) {
+            this.newsScheduler.stop();
+        }
+        if (this.morningScheduler) {
+            this.morningScheduler.stop();
         }
         if (this.logManager) {
             this.logManager.stop();
@@ -106,6 +190,19 @@ class WhatsAppCourseBot {
         if (this.database) {
             this.database.close();
         }
+        if (this.newsDatabase) {
+            this.newsDatabase.close();
+        }
+        if (this.morningDatabase) {
+            this.morningDatabase.close();
+        }
+        if (this.groupManager) {
+            this.groupManager.close();
+        }
+        if (this.authDatabase) {
+            this.authDatabase.close();
+        }
+        await closeMongo();
         process.exit(0);
     }
 }
@@ -118,8 +215,12 @@ const PORT = process.env.PORT || 3000;
 startHealthCheckServer(PORT);
 
 // Handle graceful shutdown
-process.on('SIGINT', () => bot.shutdown());
-process.on('SIGTERM', () => bot.shutdown());
+process.on('SIGINT', () => {
+    void bot.shutdown();
+});
+process.on('SIGTERM', () => {
+    void bot.shutdown();
+});
 
 // Start the bot
 bot.start().catch(err => {

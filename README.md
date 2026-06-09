@@ -30,8 +30,9 @@ OWNER_NUMBERS=918830285258,917887499710
 # Course Check Interval (seconds)
 CHECK_INTERVAL=180
 
-# Database File
-DB_FILE=posted_courses.db
+# MongoDB storage (required)
+MONGODB_URI=mongodb+srv://username:password@cluster.example.mongodb.net/?appName=telegramUdemy
+MONGODB_DB_NAME=telegramUdemy
 ```
 
 ## Usage
@@ -43,6 +44,7 @@ npm start
 ```
 
 On first run, scan the QR code with WhatsApp.
+WhatsApp auth/session data is stored in MongoDB, so no local auth disk is required.
 
 ## Commands
 

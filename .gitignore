@@ -1,31 +1,49 @@
 # Dependencies
 node_modules/
 
-# Environment variables
+# Environment & secrets (never commit)
 .env
+.env.*
+!.env.example
 
-# Database (except auth database which we want to deploy)
-posted_courses.db
-posted_courses.db-journal
+# Local databases & runtime data
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
 
-# WhatsApp authentication (file-based - no longer used)
+# WhatsApp session (legacy file-based auth)
 auth_info_baileys/
-
-# Note: whatsapp_auth.db is NOT ignored - it will be deployed to Render
 
 # Logs
 *.log
+logs/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+pnpm-debug.log*
 
 # OS
 .DS_Store
 Thumbs.db
+desktop.ini
 
-# IDE
+# IDE / editor
 .vscode/
 .idea/
+.cursor/
 *.swp
 *.swo
 *~
+
+# Test / temp scripts
+test-*.mjs
+fix-*.mjs
+
+# Build / coverage
+dist/
+coverage/
+.nyc_output/
+
+# Optional npm cache
+.npm

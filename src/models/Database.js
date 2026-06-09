@@ -3,97 +3,100 @@
  * Handles all database operations for posted courses
  */
 
-import Database from 'better-sqlite3';
 import { logger } from '../utils/logger.js';
 
 class DatabaseModel {
-    constructor(dbFile = 'posted_courses.db') {
-        this.dbFile = dbFile;
-        this.db = null;
+    constructor(mongoDb) {
+        this.mongoDb = mongoDb;
+        this.collection = null;
     }
 
-    init() {
-        this.db = new Database(this.dbFile);
-        this.db.exec(`
-            CREATE TABLE IF NOT EXISTS posted_courses (
-                course_id TEXT,
-                group_id TEXT,
-                name TEXT,
-                url TEXT,
-                posted_at TEXT DEFAULT (datetime('now')),
-                PRIMARY KEY (course_id, group_id)
-            )
-        `);
-        logger.info('✅ SQLite DB ready: ' + this.dbFile);
+    async init() {
+        this.collection = this.mongoDb.collection('posted_courses');
+        await this.collection.createIndex(
+            { course_id: 1, group_id: 1 },
+            { unique: true, name: 'posted_course_per_group' }
+        );
+        logger.info('Mongo posted course store ready');
     }
 
-    isPosted(courseId, groupId) {
-        const stmt = this.db.prepare('SELECT 1 FROM posted_courses WHERE course_id = ? AND group_id = ?');
-        const row = stmt.get(String(courseId), groupId);
-        return row !== undefined;
+    async isPosted(courseId, groupId) {
+        const row = await this.collection.findOne(
+            { course_id: String(courseId), group_id: groupId },
+            { projection: { _id: 1 } }
+        );
+        return Boolean(row);
     }
 
-    markPosted(courseId, groupId, name, url) {
-        const stmt = this.db.prepare('INSERT OR IGNORE INTO posted_courses (course_id, group_id, name, url) VALUES (?, ?, ?, ?)');
-        stmt.run(String(courseId), groupId, name, url);
+    async markPosted(courseId, groupId, name, url) {
+        await this.collection.updateOne(
+            { course_id: String(courseId), group_id: groupId },
+            {
+                $setOnInsert: {
+                    course_id: String(courseId),
+                    group_id: groupId,
+                    name,
+                    url,
+                    posted_at: new Date(),
+                },
+            },
+            { upsert: true }
+        );
     }
 
-    getTotalPosted(groupId = null) {
-        if (groupId) {
-            const stmt = this.db.prepare('SELECT COUNT(*) as count FROM posted_courses WHERE group_id = ?');
-            const row = stmt.get(groupId);
-            return row ? row.count : 0;
-        }
-        const stmt = this.db.prepare('SELECT COUNT(*) as count FROM posted_courses');
-        const row = stmt.get();
-        return row ? row.count : 0;
+    async getTotalPosted(groupId = null) {
+        return this.collection.countDocuments(this.buildGroupFilter(groupId));
     }
 
-    getPostedStats(groupId = null) {
-        const whereClause = groupId ? 'WHERE group_id = ?' : '';
-        const params = groupId ? [groupId] : [];
-        
-        const total = this.db.prepare(`SELECT COUNT(*) as count FROM posted_courses ${whereClause}`).get(...params).count;
-        const today = this.db.prepare(`
-            SELECT COUNT(*) as count FROM posted_courses 
-            ${whereClause ? whereClause + ' AND' : 'WHERE'} DATE(posted_at) = DATE('now')
-        `).get(...params).count;
-        const thisWeek = this.db.prepare(`
-            SELECT COUNT(*) as count FROM posted_courses 
-            ${whereClause ? whereClause + ' AND' : 'WHERE'} DATE(posted_at) >= DATE('now', '-7 days')
-        `).get(...params).count;
-        const thisMonth = this.db.prepare(`
-            SELECT COUNT(*) as count FROM posted_courses 
-            ${whereClause ? whereClause + ' AND' : 'WHERE'} DATE(posted_at) >= DATE('now', 'start of month')
-        `).get(...params).count;
-        
+    async getPostedStats(groupId = null) {
+        const baseFilter = this.buildGroupFilter(groupId);
+        const now = new Date();
+        const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const weekStart = new Date(now);
+        weekStart.setDate(now.getDate() - 7);
+        const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+
+        const [total, today, thisWeek, thisMonth] = await Promise.all([
+            this.collection.countDocuments(baseFilter),
+            this.collection.countDocuments({
+                ...baseFilter,
+                posted_at: { $gte: todayStart },
+            }),
+            this.collection.countDocuments({
+                ...baseFilter,
+                posted_at: { $gte: weekStart },
+            }),
+            this.collection.countDocuments({
+                ...baseFilter,
+                posted_at: { $gte: monthStart },
+            }),
+        ]);
+
         return { total, today, thisWeek, thisMonth };
     }
 
-    clearAllPosted(groupId = null) {
-        if (groupId) {
-            const stmt = this.db.prepare('DELETE FROM posted_courses WHERE group_id = ?');
-            const result = stmt.run(groupId);
-            return result.changes;
-        }
-        const stmt = this.db.prepare('DELETE FROM posted_courses');
-        const result = stmt.run();
-        return result.changes;
+    async clearAllPosted(groupId = null) {
+        const result = await this.collection.deleteMany(this.buildGroupFilter(groupId));
+        return result.deletedCount || 0;
     }
 
-    getRecentCourses(limit = 5) {
-        const stmt = this.db.prepare(`
-            SELECT * FROM posted_courses 
-            ORDER BY posted_at DESC 
-            LIMIT ?
-        `);
-        return stmt.all(limit);
+    async getRecentCourses(limit = 5) {
+        return this.collection
+            .find({}, { projection: { _id: 0 } })
+            .sort({ posted_at: -1 })
+            .limit(limit)
+            .toArray();
+    }
+
+    buildGroupFilter(groupId) {
+        if (groupId) {
+            return { group_id: groupId };
+        }
+        return {};
     }
 
     close() {
-        if (this.db) {
-            this.db.close();
-        }
+        this.collection = null;
     }
 }
 
