@@ -287,7 +287,7 @@ export async function handleFacts(sock, chatId, quotedMessage) {
 
 export async function handleHelp(sock, chatId, senderJid, { groupManager, isOwnerFromJid }) {
     try {
-        const senderPhone = extractPhoneNumber(senderJid);
+        const isGroup = chatId?.endsWith('@g.us');
         const [isStaff, isPrivileged, canManageAdmins] = await Promise.all([
             groupManager.isStaffAsync(sock, chatId, senderJid),
             groupManager.isPrivilegedAsync(sock, chatId, senderJid),
@@ -295,12 +295,31 @@ export async function handleHelp(sock, chatId, senderJid, { groupManager, isOwne
         ]);
         const canSetWelcome = isPrivileged || canManageAdmins;
         const isOwner = await isOwnerFromJid(sock, chatId, senderJid);
+
+        let features = {};
+        let movieOnly = false;
+        if (isGroup) {
+            const [coursesActive, movieEnabled, trendingEnabled] = await Promise.all([
+                groupManager.isGroupActive(chatId),
+                groupManager.isMovieEnabled(chatId),
+                groupManager.isWeeklyTrendingEnabled(chatId),
+            ]);
+            features = {
+                courses: coursesActive,
+                movie: movieEnabled,
+                trending: trendingEnabled,
+            };
+            movieOnly = movieEnabled && !coursesActive;
+        }
+
         const response = formatHelpText({
             isStaff,
             isPrivileged,
             canManageAdmins,
             canSetWelcome,
             isOwner,
+            movieOnly,
+            features,
         });
         await sock.sendMessage(chatId, { text: response });
         logger.info(`📖 Help sent to ${chatId}`);

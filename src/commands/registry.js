@@ -57,11 +57,12 @@ export const COMMAND_REGISTRY = [
         help: 'Download Instagram post/reel; auto in DMs & groups with `/instaon`',
     },
     {
-        names: ['/movie', '/m'],
+        names: ['/movie', '/m', '/search', '/s'],
         key: 'movie',
         scope: 'any',
         role: 'anyone',
         help: 'Search & download movies (5/day free)',
+        category: 'movie',
     },
     {
         names: ['/news'],
@@ -183,11 +184,36 @@ export const COMMAND_REGISTRY = [
         help: 'List bot staff + WhatsApp group admins',
     },
     {
+        names: ['/movieon'],
+        key: 'movieon',
+        scope: 'group_only',
+        role: 'staff',
+        help: 'Enable movie search + daily recap in this group',
+        category: 'movie',
+    },
+    {
+        names: ['/movieoff'],
+        key: 'movieoff',
+        scope: 'group_only',
+        role: 'staff',
+        help: 'Disable movie features in this group',
+        category: 'movie',
+    },
+    {
+        names: ['/trending'],
+        key: 'trending',
+        scope: 'group_only',
+        role: 'staff',
+        help: 'Toggle weekly trending movies — `/trending on` or `/trending off`',
+        category: 'movie',
+    },
+    {
         names: ['/addpremium'],
         key: 'addpremium',
         scope: 'any',
         role: 'owner',
         help: 'Grant premium (unlimited movies) — phone, @tag, or reply',
+        category: 'movie',
     },
     {
         names: ['/removepremium', '/rmpremium'],
@@ -195,6 +221,7 @@ export const COMMAND_REGISTRY = [
         scope: 'any',
         role: 'owner',
         help: 'Revoke premium — phone, @tag, or reply',
+        category: 'movie',
     },
     {
         names: ['/premium'],
@@ -202,6 +229,7 @@ export const COMMAND_REGISTRY = [
         scope: 'any',
         role: 'owner',
         help: 'List all premium users',
+        category: 'movie',
     },
     {
         names: ['/addmod'],
@@ -260,71 +288,114 @@ export function findCommand(cmdFirstToken) {
  * @param {{ isStaff?: boolean, isPrivileged?: boolean, canManageAdmins?: boolean }} access
  * @returns {string}
  */
+function fmtCmd(def) {
+    return `• ${def.names.join(' / ')} — ${def.help}`;
+}
+
+/**
+ * @param {object} opts
+ * @param {boolean} opts.isStaff
+ * @param {boolean} opts.isPrivileged
+ * @param {boolean} opts.canManageAdmins
+ * @param {boolean} opts.canSetWelcome
+ * @param {boolean} opts.isOwner
+ * @param {boolean} opts.movieOnly - group has only movie features, not full activation
+ * @param {object}  opts.features  - { courses, insta, movie, trending, welcome }
+ */
 export function formatHelpText({
     isStaff = false,
     isPrivileged = false,
     canManageAdmins = false,
     canSetWelcome = false,
     isOwner = false,
+    movieOnly = false,
+    features = {},
 } = {}) {
-    const anyone = COMMAND_REGISTRY.filter((d) => d.role === 'anyone');
-    const staffOnly = COMMAND_REGISTRY.filter((d) => d.role === 'staff');
-    const adminOnly = COMMAND_REGISTRY.filter((d) => d.role === 'admins');
-    const adminManagers = COMMAND_REGISTRY.filter((d) => d.role === 'admin_managers');
-    const welcomeSetters = COMMAND_REGISTRY.filter((d) => d.role === 'welcome_setters');
-    const ownerOnly = COMMAND_REGISTRY.filter((d) => d.role === 'owner');
+    const movieEnabled = features.movie || movieOnly;
+
+    const all = COMMAND_REGISTRY;
+    const isMovieCmd = (d) => d.category === 'movie';
 
     let out = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
     out += '🤖 *BOT COMMANDS* 🤖\n';
     out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
-    out += '📌 *Everyone*\n\n';
 
-    for (const def of anyone) {
-        const label = def.names.join(' / ');
-        out += `• ${label} — ${def.help}\n`;
+    const anyoneGeneral = all.filter((d) => d.role === 'anyone' && !isMovieCmd(d));
+    const anyoneMovie = all.filter((d) => d.role === 'anyone' && isMovieCmd(d));
+
+    if (movieEnabled) {
+        out += '🎬 *Movie Search*\n\n';
+        for (const def of anyoneMovie) out += fmtCmd(def) + '\n';
+        out += '\n📝 *Search tips:*\n';
+        out += '`/movie Pushpa 2` · `/search Avengers` · `/m Animal`\n';
+        out += '📊 5 free/day · ⭐ Premium = unlimited\n\n';
+    }
+
+    out += '📌 *Everyone*\n\n';
+    for (const def of anyoneGeneral) out += fmtCmd(def) + '\n';
+
+    if (!movieEnabled && (isStaff || isOwner)) {
+        out += '\n🎬 *Movie search*\n\n';
+        for (const def of anyoneMovie) out += fmtCmd(def) + '\n';
     }
 
     if (isStaff) {
-        out += '\n👮 *Staff* (owners, moderators, bot admins, group admins)\n\n';
-        for (const def of staffOnly) {
-            const label = def.names.join(' / ');
-            out += `• ${label} — ${def.help}\n`;
+        const staffGeneral = all.filter((d) => d.role === 'staff' && !isMovieCmd(d));
+        const staffMovie = all.filter((d) => d.role === 'staff' && isMovieCmd(d));
+
+        if (staffGeneral.length) {
+            out += '\n👮 *Staff* (owners, moderators, bot admins, group admins)\n\n';
+            for (const def of staffGeneral) out += fmtCmd(def) + '\n';
+        }
+        if (staffMovie.length) {
+            out += '\n🎬 *Movie management* (staff)\n\n';
+            for (const def of staffMovie) out += fmtCmd(def) + '\n';
         }
     }
 
     if (canManageAdmins) {
-        out += '\n👑 *Admin managers* (owners, moderators, bot admins)\n\n';
-        for (const def of adminManagers) {
-            const label = def.names.join(' / ');
-            out += `• ${label} — ${def.help}\n`;
+        const adminMgr = all.filter((d) => d.role === 'admin_managers');
+        if (adminMgr.length) {
+            out += '\n👑 *Admin managers* (owners, moderators, bot admins)\n\n';
+            for (const def of adminMgr) out += fmtCmd(def) + '\n';
         }
     }
 
     if (canSetWelcome) {
-        out += '\n👋 *Welcome messages* (admins & admin managers)\n\n';
-        for (const def of welcomeSetters) {
-            const label = def.names.join(' / ');
-            out += `• ${label} — ${def.help}\n`;
+        const wc = all.filter((d) => d.role === 'welcome_setters');
+        if (wc.length) {
+            out += '\n👋 *Welcome messages* (admins & admin managers)\n\n';
+            for (const def of wc) out += fmtCmd(def) + '\n';
         }
     }
 
     if (isPrivileged) {
-        out += '\n🔧 *Admins* (owners, bot admins, or group admins in this chat)\n\n';
-        for (const def of adminOnly) {
-            const label = def.names.join(' / ');
-            out += `• ${label} — ${def.help}\n`;
+        const admCmds = all.filter((d) => d.role === 'admins');
+        if (admCmds.length) {
+            out += '\n🔧 *Admins* (owners, bot admins, or group admins in this chat)\n\n';
+            for (const def of admCmds) out += fmtCmd(def) + '\n';
         }
     }
 
     if (isOwner) {
-        out += '\n👑 *Owner only*\n\n';
-        for (const def of ownerOnly) {
-            const label = def.names.join(' / ');
-            out += `• ${label} — ${def.help}\n`;
+        const ownerGeneral = all.filter((d) => d.role === 'owner' && !isMovieCmd(d));
+        const ownerMovie = all.filter((d) => d.role === 'owner' && isMovieCmd(d));
+
+        if (ownerGeneral.length) {
+            out += '\n👑 *Owner only*\n\n';
+            for (const def of ownerGeneral) out += fmtCmd(def) + '\n';
+        }
+        if (ownerMovie.length) {
+            out += '\n👑⭐ *Owner — movie management*\n\n';
+            for (const def of ownerMovie) out += fmtCmd(def) + '\n';
         }
     }
 
     out += '\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-    out += '💡 Courses post on schedule; tech news at 10 AM & 10 PM IST where activated.';
+    if (movieOnly) {
+        out += '🎬 _Movie features enabled_ · 🍿 _`/movie <name>` to search_';
+    } else {
+        out += '💡 Courses post on schedule; tech news at 10 AM & 10 PM IST where activated.';
+    }
     return out;
 }

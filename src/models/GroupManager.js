@@ -497,6 +497,68 @@ class GroupManager {
         return { active, total };
     }
 
+    // ─── Movie & trending toggles ──────────────────────────────────────────────
+
+    async setMovieEnabled(groupId, groupName, enabled, setBy) {
+        await this.groups.updateOne(
+            { group_id: groupId },
+            {
+                $set: {
+                    group_name: groupName,
+                    movie_enabled: enabled,
+                    movie_set_by: setBy,
+                    movie_set_at: new Date(),
+                },
+                $setOnInsert: { group_id: groupId, is_active: false },
+            },
+            { upsert: true }
+        );
+    }
+
+    async isMovieEnabled(groupId) {
+        const row = await this.groups.findOne(
+            { group_id: groupId },
+            { projection: { movie_enabled: 1 } }
+        );
+        return row?.movie_enabled === true;
+    }
+
+    async getMovieEnabledGroups() {
+        return this.groups
+            .find({ movie_enabled: true }, { projection: { _id: 0 } })
+            .toArray();
+    }
+
+    async setWeeklyTrendingEnabled(groupId, groupName, enabled, setBy) {
+        await this.groups.updateOne(
+            { group_id: groupId },
+            {
+                $set: {
+                    group_name: groupName,
+                    weekly_trending: enabled,
+                    weekly_trending_by: setBy,
+                    weekly_trending_at: new Date(),
+                },
+                $setOnInsert: { group_id: groupId, is_active: false },
+            },
+            { upsert: true }
+        );
+    }
+
+    async isWeeklyTrendingEnabled(groupId) {
+        const row = await this.groups.findOne(
+            { group_id: groupId },
+            { projection: { weekly_trending: 1 } }
+        );
+        return row?.weekly_trending === true;
+    }
+
+    async getWeeklyTrendingGroups() {
+        return this.groups
+            .find({ weekly_trending: true }, { projection: { _id: 0 } })
+            .toArray();
+    }
+
     // ─── Welcome messages ─────────────────────────────────────────────────────
 
     async setWelcomeMessage(groupId, groupName, customMessage, setBy) {

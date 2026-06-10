@@ -140,11 +140,13 @@ export async function handleGroups(sock, chatId, senderJid, { groupManager }) {
     try {
         const senderPhone = extractPhoneNumber(senderJid);
 
-        const [activeGroups, instaAutoGroups, welcomeGroups, groupCount, memberCounts] =
+        const [activeGroups, instaAutoGroups, welcomeGroups, movieGroups, trendingGroups, groupCount, memberCounts] =
             await Promise.all([
                 groupManager.getActiveGroups(),
                 groupManager.getInstaAutoGroups(),
                 groupManager.getWelcomeEnabledGroups(),
+                groupManager.getMovieEnabledGroups(),
+                groupManager.getWeeklyTrendingGroups(),
                 groupManager.getGroupCount(),
                 groupManager.getParticipatingGroupMemberCounts(sock),
             ]);
@@ -154,6 +156,8 @@ export async function handleGroups(sock, chatId, senderJid, { groupManager }) {
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
         r += `📊 *Courses:* ${groupCount.active} active / ${groupCount.total} tracked\n`;
         r += `📸 *Insta auto:* ${instaAutoGroups.length} group(s)\n`;
+        r += `🎬 *Movie:* ${movieGroups.length} ON\n`;
+        r += `🔥 *Trending:* ${trendingGroups.length} ON\n`;
         r += `👋 *Welcome:* ${welcomeGroups.length} ON\n\n`;
 
         r += '🎓 *Auto courses — active groups*\n';
@@ -210,8 +214,23 @@ export async function handleGroups(sock, chatId, senderJid, { groupManager }) {
             });
         }
 
+        r += '🎬 *Movie ON — groups*\n';
+        r += '_(daily recap via `/movieon`)_\n\n';
+
+        if (!movieGroups.length) {
+            r += '📭 None yet. Use `/movieon` in a group.\n\n';
+        } else {
+            movieGroups.forEach((group, index) => {
+                const members = groupManager.formatMemberCount(memberCounts, group.group_id);
+                const trending = group.weekly_trending ? ' · 🔥 Trending ON' : '';
+                r += `${index + 1}. *${group.group_name}*\n`;
+                r += `   👥 Members: ${members}${trending}\n\n`;
+            });
+        }
+
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-        r += '💡 `/activate` `/deactivate` · `/instaon` `/instaoff` · `/setwc`';
+        r += '💡 `/activate` `/deactivate` · `/instaon` `/instaoff`\n';
+        r += '💡 `/movieon` `/movieoff` · `/trending on/off` · `/setwc`';
 
         await sock.sendMessage(chatId, { text: r });
         logger.info(`📋 Group list sent to ${senderPhone}`);
@@ -353,5 +372,131 @@ export async function handleGroupParticipantsUpdate(sock, update, { groupManager
         }
     } catch (error) {
         logger.error(`Welcome message error: ${error.message}`);
+    }
+}
+
+export async function handleMovieOn(sock, chatId, senderJid, { groupManager }) {
+    try {
+        const senderPhone = extractPhoneNumber(senderJid);
+        let groupName = 'Unknown Group';
+        try {
+            const meta = await sock.groupMetadata(chatId);
+            groupName = meta.subject;
+        } catch {}
+
+        await groupManager.setMovieEnabled(chatId, groupName, true, senderPhone);
+
+        let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        r += '✅ *MOVIE FEATURES ON* ✅\n';
+        r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+        r += `📢 *Group:* ${groupName}\n\n`;
+        r += '🎬 Movie search is now enabled here!\n';
+        r += '📊 Daily movie recap at *11:55 PM* IST\n\n';
+        r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        r += '💡 Use `/movie <name>` to search\n';
+        r += '💡 Use `/movieoff` to disable\n';
+        r += '💡 Use `/trending on` for weekly trending';
+        await sock.sendMessage(chatId, { text: r });
+        logger.info(`🎬 Movie enabled: ${groupName} (${chatId}) by ${senderPhone}`);
+    } catch (error) {
+        logger.error(`Error enabling movie: ${error.message}`);
+    }
+}
+
+export async function handleMovieOff(sock, chatId, senderJid, { groupManager }) {
+    try {
+        const senderPhone = extractPhoneNumber(senderJid);
+        const wasEnabled = await groupManager.isMovieEnabled(chatId);
+        if (!wasEnabled) {
+            await sock.sendMessage(chatId, {
+                text:
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\nℹ️ *MOVIE ALREADY OFF* ℹ️\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                    'Movie features are not enabled in this group.\nUse `/movieon` to enable.',
+            });
+            return;
+        }
+
+        let groupName = 'Unknown Group';
+        try {
+            const meta = await sock.groupMetadata(chatId);
+            groupName = meta.subject;
+        } catch {}
+
+        await groupManager.setMovieEnabled(chatId, groupName, false, senderPhone);
+        await sock.sendMessage(chatId, {
+            text:
+                '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🛑 *MOVIE FEATURES OFF* 🛑\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                `📢 *Group:* ${groupName}\n\n` +
+                'Movie search and daily recaps are disabled.\nUse `/movieon` to enable again.',
+        });
+        logger.info(`🎬 Movie disabled: ${chatId} by ${senderPhone}`);
+    } catch (error) {
+        logger.error(`Error disabling movie: ${error.message}`);
+    }
+}
+
+export async function handleTrending(sock, chatId, senderJid, args, { groupManager }) {
+    try {
+        const senderPhone = extractPhoneNumber(senderJid);
+        const action = (args[0] || '').toLowerCase();
+
+        let groupName = 'Unknown Group';
+        try {
+            const meta = await sock.groupMetadata(chatId);
+            groupName = meta.subject;
+        } catch {}
+
+        const currentlyOn = await groupManager.isWeeklyTrendingEnabled(chatId);
+
+        if (!action || action === 'status') {
+            await sock.sendMessage(chatId, {
+                text:
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🔥 *WEEKLY TRENDING* 🔥\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                    `📢 *Group:* ${groupName}\n` +
+                    `🔘 *Status:* ${currentlyOn ? '✅ ON' : '❌ OFF'}\n\n` +
+                    'Posts top 10 trending movies every *Sunday 12 PM* IST\n\n' +
+                    '*Commands:*\n' +
+                    '• `/trending on` — enable\n' +
+                    '• `/trending off` — disable\n\n' +
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+            });
+            return;
+        }
+
+        if (action === 'on') {
+            if (currentlyOn) {
+                await sock.sendMessage(chatId, { text: 'ℹ️ Weekly trending is already *ON* in this group.' });
+                return;
+            }
+            await groupManager.setWeeklyTrendingEnabled(chatId, groupName, true, senderPhone);
+            await sock.sendMessage(chatId, {
+                text:
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n✅ *WEEKLY TRENDING ON* ✅\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                    `📢 *Group:* ${groupName}\n\n` +
+                    '🔥 Top 10 trending movies will be posted every *Sunday 12 PM* IST\n\n' +
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
+                    '💡 Use `/trending off` to disable',
+            });
+            logger.info(`🔥 Trending enabled: ${groupName} (${chatId}) by ${senderPhone}`);
+        } else if (action === 'off') {
+            if (!currentlyOn) {
+                await sock.sendMessage(chatId, { text: 'ℹ️ Weekly trending is already *OFF* in this group.' });
+                return;
+            }
+            await groupManager.setWeeklyTrendingEnabled(chatId, groupName, false, senderPhone);
+            await sock.sendMessage(chatId, {
+                text:
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🛑 *WEEKLY TRENDING OFF* 🛑\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                    `📢 *Group:* ${groupName}\n\n` +
+                    'Weekly trending posts are disabled.\n\n' +
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
+                    '💡 Use `/trending on` to enable again',
+            });
+            logger.info(`🔥 Trending disabled: ${chatId} by ${senderPhone}`);
+        } else {
+            await sock.sendMessage(chatId, { text: '❌ Usage: `/trending on` or `/trending off`' });
+        }
+    } catch (error) {
+        logger.error(`Error handling trending toggle: ${error.message}`);
     }
 }
