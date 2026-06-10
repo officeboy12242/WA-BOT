@@ -232,6 +232,22 @@ export const COMMAND_REGISTRY = [
         category: 'movie',
     },
     {
+        names: ['/increaselimit', '/addlimit'],
+        key: 'increaselimit',
+        scope: 'any',
+        role: 'admins',
+        help: 'Add searches to user — `/increaselimit 5` or `/increaselimit 5 3d` (reply/@tag)',
+        category: 'movie',
+    },
+    {
+        names: ['/checklimit', '/mylimit'],
+        key: 'checklimit',
+        scope: 'any',
+        role: 'anyone',
+        help: 'Check movie search limit — yours or tag/reply (admins only)',
+        category: 'movie',
+    },
+    {
         names: ['/addmod'],
         key: 'addmod',
         scope: 'any',

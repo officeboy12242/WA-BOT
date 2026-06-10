@@ -38,6 +38,8 @@ import {
     handleAddAdmin,
     handleRemoveAdmin,
     handleAdmins,
+    handleIncreaseLimit,
+    handleCheckLimit,
 } from './handlers/adminHandlers.js';
 
 import {
@@ -57,12 +59,13 @@ import {
 } from './handlers/instaHandlers.js';
 
 class CommandController {
-    constructor(database, botState, groupManager, newsController = null, movieController = null) {
+    constructor(database, botState, groupManager, newsController = null, movieController = null, userManager = null) {
         this.database = database;
         this.botState = botState;
         this.groupManager = groupManager;
         this.newsController = newsController;
         this.movieController = movieController;
+        this.userManager = userManager;
         this.pendingClearConfirmations = new Map();
         this.botStartTime = Date.now();
 
@@ -99,6 +102,7 @@ class CommandController {
             groupManager: this.groupManager,
             newsController: this.newsController,
             movieController: this.movieController,
+            userManager: this.userManager,
             pendingClearConfirmations: this.pendingClearConfirmations,
             botStartTime: this.botStartTime,
             isOwnerFromJid: this._isOwnerFromJid,
@@ -158,6 +162,8 @@ class CommandController {
             case 'addadmin':    await handleAddAdmin(sock, chatId, senderJid, args, quotedMessage, ctx); break;
             case 'removeadmin': await handleRemoveAdmin(sock, chatId, senderJid, args, quotedMessage, ctx); break;
             case 'admins':      await handleAdmins(sock, chatId, senderJid, ctx); break;
+            case 'increaselimit': await handleIncreaseLimit(sock, chatId, senderJid, args, quotedMessage, ctx); break;
+            case 'checklimit': await handleCheckLimit(sock, chatId, senderJid, args, quotedMessage, ctx); break;
 
             /* ── Owner: premium / mod / channels ── */
             case 'addpremium':    await handleAddPremium(sock, chatId, senderJid, args, quotedMessage, ctx); break;
