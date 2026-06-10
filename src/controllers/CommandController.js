@@ -1352,7 +1352,35 @@ class CommandController {
         }
         const result = await this.groupManager.addPremiumUser(targetPhone, extractPhoneNumber(senderJid));
         if (result.ok) {
-            await sock.sendMessage(chatId, { text: `⭐ *Premium granted!*\n\n📱 ${result.phone_number}\n🎬 Unlimited movie searches activated!` });
+            const targetJid = `${result.phone_number}@s.whatsapp.net`;
+            const groupAnnounce = `┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n`
+                + `┃   ⭐ *PREMIUM UPGRADE!* ⭐    ┃\n`
+                + `┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n`
+                + `🎉 @${result.phone_number} has been upgraded to *Premium*!\n\n`
+                + `🎬 Unlimited movie searches unlocked\n`
+                + `🚀 No daily limits anymore\n`
+                + `─────────────────────────────\n`
+                + `_Upgraded by owner_ 👑`;
+            await sock.sendMessage(chatId, {
+                text: groupAnnounce,
+                mentions: [targetJid],
+            });
+
+            const dmText = `┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n`
+                + `┃  ⭐ *CONGRATULATIONS!* ⭐   ┃\n`
+                + `┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n`
+                + `🎉 You've been upgraded to *Premium Member*!\n\n`
+                + `✅ *What you get:*\n`
+                + `• 🎬 *Unlimited* movie searches (no daily limit)\n`
+                + `• ⚡ Priority access to all features\n`
+                + `• 🌟 Premium badge on your profile\n\n`
+                + `─────────────────────────────\n`
+                + `Try it now → \`/movie Avengers\`\n`
+                + `─────────────────────────────\n`
+                + `_Thank you for being awesome!_ 🤖⭐`;
+            try {
+                await sock.sendMessage(targetJid, { text: dmText });
+            } catch {}
         } else if (result.reason === 'already') {
             await sock.sendMessage(chatId, { text: `ℹ️ ${result.phone_number} is already a premium user.` });
         } else {
@@ -1373,7 +1401,23 @@ class CommandController {
         }
         const result = await this.groupManager.removePremiumUser(targetPhone);
         if (result.ok) {
-            await sock.sendMessage(chatId, { text: `⭐ *Premium revoked*\n\n📱 ${result.phone_number}\n🎬 Back to ${5} daily searches.` });
+            const targetJid = `${result.phone_number}@s.whatsapp.net`;
+            const groupMsg = `⭐ *Premium revoked* for @${result.phone_number}\n\n🎬 Back to 5 daily movie searches.`;
+            await sock.sendMessage(chatId, {
+                text: groupMsg,
+                mentions: [targetJid],
+            });
+
+            const dmText = `━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`
+                + `⭐ *Premium Status Update*\n`
+                + `━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`
+                + `Your premium membership has been removed.\n\n`
+                + `🎬 You now have *5 free searches/day*.\n`
+                + `💡 Contact the owner to renew!\n`
+                + `━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
+            try {
+                await sock.sendMessage(targetJid, { text: dmText });
+            } catch {}
         } else if (result.reason === 'not_found') {
             await sock.sendMessage(chatId, { text: `ℹ️ That user is not a premium member.` });
         } else {
@@ -1420,7 +1464,35 @@ class CommandController {
         }
         const result = await this.groupManager.addDynamicModerator(targetPhone, extractPhoneNumber(senderJid));
         if (result.ok) {
-            await sock.sendMessage(chatId, { text: `🛡️ *Moderator added!*\n\n📱 ${result.phone_number}\n✅ Can now use staff commands + unlimited movie searches.` });
+            const targetJid = `${result.phone_number}@s.whatsapp.net`;
+            const groupMsg = `┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n`
+                + `┃  🛡️ *NEW MODERATOR!* 🛡️     ┃\n`
+                + `┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n`
+                + `🎉 @${result.phone_number} is now a *Moderator*!\n\n`
+                + `✅ Staff commands unlocked\n`
+                + `🎬 Unlimited movie searches\n`
+                + `─────────────────────────────\n`
+                + `_Promoted by owner_ 👑`;
+            await sock.sendMessage(chatId, {
+                text: groupMsg,
+                mentions: [targetJid],
+            });
+
+            const dmText = `┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n`
+                + `┃  🛡️ *YOU'RE A MODERATOR!* 🛡️ ┃\n`
+                + `┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n`
+                + `🎉 You've been promoted to *Moderator*!\n\n`
+                + `✅ *Your new powers:*\n`
+                + `• 📋 Activate/deactivate groups\n`
+                + `• 📰 Post tech news to groups\n`
+                + `• 👥 Manage bot admins\n`
+                + `• 🎬 Unlimited movie searches\n`
+                + `• 📸 Toggle Instagram auto-download\n\n`
+                + `─────────────────────────────\n`
+                + `_Use /help to see all commands_ 🤖`;
+            try {
+                await sock.sendMessage(targetJid, { text: dmText });
+            } catch {}
         } else if (result.reason === 'already') {
             await sock.sendMessage(chatId, { text: `ℹ️ ${result.phone_number} is already a moderator.` });
         } else if (result.reason === 'owner') {
@@ -1443,7 +1515,23 @@ class CommandController {
         }
         const result = await this.groupManager.removeDynamicModerator(targetPhone);
         if (result.ok) {
-            await sock.sendMessage(chatId, { text: `🛡️ *Moderator removed*\n\n📱 ${result.phone_number}` });
+            const targetJid = `${result.phone_number}@s.whatsapp.net`;
+            const groupMsg = `🛡️ @${result.phone_number} has been removed as *Moderator*.`;
+            await sock.sendMessage(chatId, {
+                text: groupMsg,
+                mentions: [targetJid],
+            });
+
+            const dmText = `━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`
+                + `🛡️ *Moderator Status Update*\n`
+                + `━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`
+                + `Your moderator role has been removed.\n`
+                + `Staff commands are no longer available.\n\n`
+                + `💡 Contact the owner if this was a mistake.\n`
+                + `━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
+            try {
+                await sock.sendMessage(targetJid, { text: dmText });
+            } catch {}
         } else if (result.reason === 'not_found') {
             await sock.sendMessage(chatId, { text: `ℹ️ That user is not a dynamic moderator.\n\n_Note: .env moderators cannot be removed via command._` });
         } else {
