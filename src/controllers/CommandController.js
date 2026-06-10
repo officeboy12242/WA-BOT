@@ -8,10 +8,19 @@ import { fileTypeFromBuffer } from 'file-type';
 import { snapsave } from 'snapsave-media-downloader';
 import { checkCommandAccess } from '../commands/access.js';
 import { findCommand, formatHelpText } from '../commands/registry.js';
+import { config } from '../config/config.js';
 import { logger } from '../utils/logger.js';
 import { extractPhoneNumber } from '../utils/permissions.js';
 import { downloadMediaBuffer } from '../utils/downloadMediaBuffer.js';
 import { extractInstagramUrl, isSupportedInstagramUrl } from '../utils/instagramUrl.js';
+import { resolveTargetPhone } from '../utils/waMessage.js';
+import {
+    DEFAULT_HEADER_TEMPLATE,
+    formatWelcomeStatus,
+    normalizeCustomWelcomePart,
+    previewWelcomeMessage,
+    renderWelcomeMessage,
+} from '../utils/welcomeMessage.js';
 
 function formatInstaDownloadStatus(mediaList) {
     const images = mediaList.filter((m) => m.type === 'image').length;
@@ -104,7 +113,44 @@ class CommandController {
         this.groupManager = groupManager;
         this.newsController = newsController;
         this.pendingClearConfirmations = new Map();
-        this.botStartTime = Date.now(); // Track bot start time
+        this.botStartTime = Date.now();
+    }
+
+    /**
+     * Check if sender is owner - handles LID (Linked ID) resolution for privacy mode
+     */
+    async isOwnerFromJid(sock, chatId, senderJid) {
+        const directPhone = extractPhoneNumber(senderJid);
+        logger.info(`[OWNER-CHECK] senderJid=${senderJid}, directPhone=${directPhone}, owners=${this.groupManager.ownerNumbers}`);
+        
+        if (this.groupManager.isOwner(directPhone)) {
+            logger.info(`[OWNER-CHECK] Direct match: YES`);
+            return true;
+        }
+        
+        if (senderJid?.includes('@lid') && chatId?.endsWith('@g.us')) {
+            try {
+                const groupMeta = await sock.groupMetadata(chatId);
+                logger.info(`[OWNER-CHECK] LID detected, checking ${groupMeta.participants?.length} participants`);
+                
+                for (const p of groupMeta.participants || []) {
+                    logger.info(`[OWNER-CHECK] Participant: id=${p.id}, lid=${p.lid}`);
+                    if (p.lid === senderJid || p.id === senderJid) {
+                        const realPhone = extractPhoneNumber(p.id);
+                        logger.info(`[OWNER-CHECK] Found match! realPhone=${realPhone}`);
+                        if (this.groupManager.isOwner(realPhone)) {
+                            logger.info(`[OWNER-CHECK] LID resolved to owner: YES`);
+                            return true;
+                        }
+                    }
+                }
+            } catch (err) {
+                logger.error(`[OWNER-CHECK] Error resolving LID: ${err.message}`);
+            }
+        }
+        
+        logger.info(`[OWNER-CHECK] Result: NOT OWNER`);
+        return false;
     }
 
     /**
@@ -518,37 +564,211 @@ class CommandController {
         }
     }
 
+    async handleSetWelcome(sock, chatId, senderJid, fullCommand) {
+        try {
+            const senderPhone = extractPhoneNumber(senderJid);
+            const body = fullCommand.replace(/^\/setwc\s*/i, '').trim();
+
+            let groupName = 'this group';
+            try {
+                const groupMetadata = await sock.groupMetadata(chatId);
+                groupName = groupMetadata.subject || groupName;
+            } catch (err) {
+                logger.error(`Error fetching group metadata: ${err.message}`);
+            }
+
+            const current = await this.groupManager.getWelcomeConfig(chatId);
+            const isOn = Boolean(current);
+
+            if (!body || body.toLowerCase() === 'help' || body.toLowerCase() === 'status') {
+                let response = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+                response += '👋 *WELCOME MESSAGE* 👋\n';
+                response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+                response += `📢 *Group:* ${groupName}\n`;
+                response += `🔘 *Status:* ${formatWelcomeStatus(isOn)}\n\n`;
+                response += '*Default (always added):*\n';
+                response += `${DEFAULT_HEADER_TEMPLATE.split('{group}').join(groupName)}\n\n`;
+                response += '*Set your extra line:*\n';
+                response += '`/setwc this group is for stickers`\n\n';
+                response += '*Sends as:*\n';
+                response += `${previewWelcomeMessage('this group is for stickers', groupName)}\n\n`;
+                response += '*Commands:*\n';
+                response += '• `/setwc <your text>` — turn ON + set extra line\n';
+                response += '• `/setwc on` — turn ON (default header only)\n';
+                response += '• `/setwc off` — turn OFF\n';
+                response += '• `/setwc` — this status\n\n';
+
+                if (isOn) {
+                    const custom = current.welcome_message || '(default header only)';
+                    response += '*Your extra line:*\n';
+                    response += `${custom}\n\n`;
+                    response += '*Full preview now:*\n';
+                    response += `${previewWelcomeMessage(current.welcome_message || '', groupName)}\n\n`;
+                    if (current.welcome_set_at) {
+                        response += `_Updated ${new Date(current.welcome_set_at).toLocaleDateString()}_`;
+                    }
+                } else {
+                    response += '_Welcome is OFF in this group._';
+                }
+
+                await sock.sendMessage(chatId, { text: response });
+                return;
+            }
+
+            if (body.toLowerCase() === 'off') {
+                if (!isOn) {
+                    await sock.sendMessage(chatId, {
+                        text:
+                            '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
+                            'ℹ️ *WELCOME ALREADY OFF* ℹ️\n' +
+                            '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                            `📢 *Group:* ${groupName}\n` +
+                            `🔘 *Status:* ${formatWelcomeStatus(false)}\n\n` +
+                            'Use `/setwc your message` to enable welcome.',
+                    });
+                    return;
+                }
+
+                await this.groupManager.clearWelcomeMessage(chatId);
+                await sock.sendMessage(chatId, {
+                    text:
+                        '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
+                        '✅ *WELCOME OFF* ✅\n' +
+                        '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                        `📢 *Group:* ${groupName}\n` +
+                        `🔘 *Status:* ${formatWelcomeStatus(false)}\n\n` +
+                        'New members will not get a welcome message here.',
+                });
+                logger.info(`👋 Welcome disabled: ${chatId} by ${senderPhone}`);
+                return;
+            }
+
+            const customPart =
+                body.toLowerCase() === 'on' ? '' : normalizeCustomWelcomePart(body);
+
+            await this.groupManager.setWelcomeMessage(chatId, groupName, customPart, senderPhone);
+
+            const preview = previewWelcomeMessage(customPart, groupName);
+
+            let response = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+            response += '✅ *WELCOME ON* ✅\n';
+            response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+            response += `📢 *Group:* ${groupName}\n`;
+            response += `🔘 *Status:* ${formatWelcomeStatus(true)}\n\n`;
+            if (customPart) {
+                response += `*Your extra line:*\n${customPart}\n\n`;
+            }
+            response += '*New members will see:*\n';
+            response += `${preview}\n\n`;
+            response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+            response += '💡 `/setwc off` to disable · `/setwc` for status';
+
+            await sock.sendMessage(chatId, { text: response });
+            logger.info(`👋 Welcome set for ${groupName} (${chatId}) by ${senderPhone}`);
+        } catch (error) {
+            logger.error(`Error setting welcome message: ${error.message}`);
+            await sock.sendMessage(chatId, {
+                text: 'Could not save the welcome message. Try again.',
+            });
+        }
+    }
+
+    async handleGroupParticipantsUpdate(sock, update) {
+        try {
+            const { id: groupId, participants, action } = update;
+            if (action !== 'add' || !groupId?.endsWith('@g.us') || !participants?.length) {
+                return;
+            }
+
+            const config = await this.groupManager.getWelcomeConfig(groupId);
+            if (!config) {
+                return;
+            }
+
+            let groupName = config.group_name || 'this group';
+            try {
+                const meta = await this.groupManager.getGroupMetadataCached(sock, groupId);
+                groupName = meta.subject || groupName;
+            } catch (err) {
+                logger.warn(`Welcome: could not fetch group name for ${groupId}: ${err.message}`);
+            }
+
+            const botJid = sock.user?.id;
+            for (const memberJid of participants) {
+                if (!memberJid || memberJid === botJid) {
+                    continue;
+                }
+
+                const { text, mentions } = renderWelcomeMessage(
+                    config.welcome_message || '',
+                    groupName,
+                    memberJid
+                );
+
+                await sock.sendMessage(groupId, {
+                    text,
+                    mentions: mentions.length ? mentions : undefined,
+                });
+                logger.info(`👋 Welcome sent in ${groupName} to ${memberJid}`);
+
+                await new Promise((resolve) => setTimeout(resolve, 400));
+            }
+        } catch (error) {
+            logger.error(`Welcome message error: ${error.message}`);
+        }
+    }
+
     async handleGroups(sock, chatId, senderJid) {
         try {
             const senderPhone = extractPhoneNumber(senderJid);
 
-            const [activeGroups, instaAutoGroups, groupCount] = await Promise.all([
-                this.groupManager.getActiveGroups(),
-                this.groupManager.getInstaAutoGroups(),
-                this.groupManager.getGroupCount(),
-            ]);
+            const [activeGroups, instaAutoGroups, welcomeGroups, groupCount, memberCounts] =
+                await Promise.all([
+                    this.groupManager.getActiveGroups(),
+                    this.groupManager.getInstaAutoGroups(),
+                    this.groupManager.getWelcomeEnabledGroups(),
+                    this.groupManager.getGroupCount(),
+                    this.groupManager.getParticipatingGroupMemberCounts(sock),
+                ]);
 
             let response = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-            response += '📋 *ACTIVE GROUPS* 📋\n';
+            response += '📋 *GROUPS OVERVIEW* 📋\n';
             response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
-            response += `📊 *Total:* ${groupCount.active} active / ${groupCount.total} total\n\n`;
+            response += `📊 *Courses:* ${groupCount.active} active / ${groupCount.total} tracked\n`;
+            response += `📸 *Insta auto:* ${instaAutoGroups.length} group(s)\n`;
+            response += `👋 *Welcome:* ${welcomeGroups.length} ON\n\n`;
+
+            response += '🎓 *Auto courses — active groups*\n';
+            response += '_(courses + tech news via `/activate`)_\n\n';
 
             if (activeGroups.length === 0) {
-                response += '📭 No active groups yet.\n\n';
-                response += 'Use `/activate` in a group to start posting there.';
+                response += '📭 None yet. Use `/activate` in a group.\n\n';
             } else {
-                response += '*Active Groups:*\n\n';
                 activeGroups.forEach((group, index) => {
                     const activatedDate = new Date(group.activated_at).toLocaleDateString();
+                    const members = this.groupManager.formatMemberCount(
+                        memberCounts,
+                        group.group_id
+                    );
                     response += `${index + 1}. *${group.group_name}*\n`;
+                    response += `   👥 Members: ${members}\n`;
                     response += `   📅 Activated: ${activatedDate}\n\n`;
                 });
             }
 
-            if (instaAutoGroups.length > 0) {
-                response += '*Insta auto-download groups:*\n\n';
+            response += '📸 *Insta auto ON — groups*\n';
+            response += '_(auto-download Instagram links via `/instaon`)_\n\n';
+
+            if (instaAutoGroups.length === 0) {
+                response += '📭 None yet. Use `/instaon` in a group.\n\n';
+            } else {
                 instaAutoGroups.forEach((group, index) => {
+                    const members = this.groupManager.formatMemberCount(
+                        memberCounts,
+                        group.group_id
+                    );
                     response += `${index + 1}. *${group.group_name}*\n`;
+                    response += `   👥 Members: ${members}\n`;
                     if (group.insta_auto_at) {
                         response += `   📸 Since: ${new Date(group.insta_auto_at).toLocaleDateString()}\n`;
                     }
@@ -556,8 +776,34 @@ class CommandController {
                 });
             }
 
+            response += '👋 *Welcome ON — groups*\n';
+            response += '_(new member greeting via `/setwc`)_\n\n';
+
+            if (welcomeGroups.length === 0) {
+                response += '📭 None yet. Use `/setwc` in a group.\n\n';
+            } else {
+                welcomeGroups.forEach((group, index) => {
+                    const members = this.groupManager.formatMemberCount(
+                        memberCounts,
+                        group.group_id
+                    );
+                    const extra = group.welcome_message
+                        ? group.welcome_message.slice(0, 60) +
+                          (group.welcome_message.length > 60 ? '…' : '')
+                        : 'default header only';
+                    response += `${index + 1}. *${group.group_name}*\n`;
+                    response += `   🔘 Status: ${formatWelcomeStatus(true)}\n`;
+                    response += `   👥 Members: ${members}\n`;
+                    response += `   💬 Extra: ${extra}\n`;
+                    if (group.welcome_set_at) {
+                        response += `   📅 Since: ${new Date(group.welcome_set_at).toLocaleDateString()}\n`;
+                    }
+                    response += '\n';
+                });
+            }
+
             response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-            response += '💡 `/activate` `/deactivate` · `/instaon` `/instaoff`';
+            response += '💡 `/activate` `/deactivate` · `/instaon` `/instaoff` · `/setwc`';
 
             await sock.sendMessage(chatId, { text: response });
             logger.info(`📋 Group list sent to ${senderPhone}`);
@@ -566,32 +812,50 @@ class CommandController {
         }
     }
 
-    async handleAddAdmin(sock, chatId, senderJid, args) {
+    async handleAddAdmin(sock, chatId, senderJid, args, waMessage = null) {
         try {
             const senderPhone = extractPhoneNumber(senderJid);
 
-            // Extract phone number from command
-            const phoneNumber = args.join('').replace(/[^0-9]/g, '');
-            
+            const phoneNumber = await resolveTargetPhone(sock, chatId, args, waMessage, senderJid);
+
             if (!phoneNumber) {
                 let response = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
                 response += '❌ *INVALID FORMAT* ❌\n';
                 response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
-                response += '*Usage:* `/addadmin <phone_number>`\n\n';
-                response += '*Example:* `/addadmin 919876543210`';
-                
+                response += '*Usage:*\n';
+                response += '• `/addadmin 919876543210`\n';
+                response += '• Reply to a message: `/addadmin`\n';
+                response += '• Tag someone: `/addadmin @user`';
+
                 await sock.sendMessage(chatId, { text: response });
                 return;
             }
 
-            const added = await this.groupManager.addAdmin(phoneNumber);
-            if (!added) {
+            const result = await this.groupManager.addAdmin(phoneNumber);
+            if (!result.ok) {
+                const messages = {
+                    owner: 'That user is an owner (.env) and cannot be added as a bot admin.',
+                    moderator: 'That user is a moderator (.env) and cannot be added as a bot admin.',
+                    invalid: 'Could not read a valid phone number for that user.',
+                };
                 await sock.sendMessage(chatId, {
                     text:
                         '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
-                        'ℹ️ *ALREADY STAFF* ℹ️\n' +
+                        'ℹ️ *NOT ADDED* ℹ️\n' +
                         '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
-                        'That number is already an owner or moderator (.env), or could not be added.',
+                        (messages[result.reason] || 'Could not add that user as bot admin.'),
+                });
+                return;
+            }
+
+            if (result.reason === 'already') {
+                await sock.sendMessage(chatId, {
+                    text:
+                        '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
+                        'ℹ️ *ALREADY BOT ADMIN* ℹ️\n' +
+                        '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                        `📱 *Phone:* ${result.phone_number}\n\n` +
+                        'This user is already a bot admin.',
                 });
                 return;
             }
@@ -599,52 +863,63 @@ class CommandController {
             let response = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
             response += '✅ *ADMIN ADDED* ✅\n';
             response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
-            response += `📱 *Phone:* ${phoneNumber}\n\n`;
-            response += 'This user can now manage groups and settings.';
+            response += `📱 *Phone:* ${result.phone_number}\n\n`;
+            response += 'This user can now manage bot admins, groups, and settings.';
 
             await sock.sendMessage(chatId, { text: response });
-            logger.info(`➕ Admin added: ${phoneNumber} by ${senderPhone}`);
+            logger.info(`➕ Admin added: ${result.phone_number} by ${senderPhone}`);
         } catch (error) {
             logger.error(`Error adding admin: ${error.message}`);
         }
     }
 
-    async handleRemoveAdmin(sock, chatId, senderJid, args) {
+    async handleRemoveAdmin(sock, chatId, senderJid, args, waMessage = null) {
         try {
             const senderPhone = extractPhoneNumber(senderJid);
 
-            const phoneNumber = args.join('').replace(/[^0-9]/g, '');
-            
+            const phoneNumber = await resolveTargetPhone(sock, chatId, args, waMessage, senderJid);
+
             if (!phoneNumber) {
                 let response = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
                 response += '❌ *INVALID FORMAT* ❌\n';
                 response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
-                response += '*Usage:* `/removeadmin <phone_number>`\n\n';
-                response += '*Example:* `/removeadmin 919876543210`';
-                
+                response += '*Usage:*\n';
+                response += '• `/removeadmin 919876543210`\n';
+                response += '• Reply to a message: `/removeadmin`\n';
+                response += '• Tag someone: `/removeadmin @user`';
+
                 await sock.sendMessage(chatId, { text: response });
                 return;
             }
 
-            const success = await this.groupManager.removeAdmin(phoneNumber);
+            const result = await this.groupManager.removeAdmin(phoneNumber);
 
-            if (success) {
+            if (result.ok) {
                 let response = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
                 response += '✅ *ADMIN REMOVED* ✅\n';
                 response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
-                response += `📱 *Phone:* ${phoneNumber}\n\n`;
-                response += 'This user is no longer a bot admin.';
+                response += `📱 *Phone:* ${result.phone_number}\n\n`;
+                response += 'This user is no longer a bot admin.\n';
+                response += 'Use `/addadmin` to make them admin again.';
 
                 await sock.sendMessage(chatId, { text: response });
-                logger.info(`➖ Admin removed: ${phoneNumber} by ${senderPhone}`);
-            } else {
-                let response = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-                response += 'ℹ️ *NOT REMOVED* ℹ️\n';
-                response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
-                response += 'Not a bot admin, or number is an owner/moderator (.env).';
-                
-                await sock.sendMessage(chatId, { text: response });
+                logger.info(`➖ Admin removed: ${result.phone_number} by ${senderPhone}`);
+                return;
             }
+
+            const removeMessages = {
+                owner: 'Owners (.env) cannot be removed as bot admins.',
+                moderator: 'Moderators (.env) cannot be removed as bot admins.',
+                not_found: 'That user is not a bot admin.',
+                invalid: 'Could not read a valid phone number for that user.',
+            };
+            await sock.sendMessage(chatId, {
+                text:
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
+                    'ℹ️ *NOT REMOVED* ℹ️\n' +
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                    (removeMessages[result.reason] || 'Could not remove that bot admin.'),
+            });
         } catch (error) {
             logger.error(`Error removing admin: ${error.message}`);
         }
@@ -654,7 +929,10 @@ class CommandController {
         try {
             const senderPhone = extractPhoneNumber(senderJid);
 
-            const admins = await this.groupManager.getAllAdmins();
+            const [admins, waGroupAdmins] = await Promise.all([
+                this.groupManager.getAllAdmins(),
+                this.groupManager.fetchAllWhatsAppGroupAdmins(sock),
+            ]);
 
             let response = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
             response += '👥 *BOT STAFF* 👥\n';
@@ -662,7 +940,7 @@ class CommandController {
             response += `📊 *Total:* ${admins.length}\n\n`;
 
             if (admins.length === 0) {
-                response += '📭 No staff configured yet.';
+                response += '📭 No staff configured yet.\n\n';
             } else {
                 admins.forEach((admin, index) => {
                     const role = admin.role || 'Bot admin';
@@ -677,6 +955,26 @@ class CommandController {
             }
 
             response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+            response += `📱 *WHATSAPP GROUP ADMINS* (${waGroupAdmins.length})\n`;
+            response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+
+            if (!waGroupAdmins.length) {
+                response += '📭 No group admins found (or bot not in groups).\n\n';
+            } else {
+                waGroupAdmins.slice(0, 40).forEach((admin, index) => {
+                    const groupList = admin.groups.slice(0, 3).join(', ');
+                    const more =
+                        admin.groups.length > 3 ? ` +${admin.groups.length - 3} more` : '';
+                    response += `${index + 1}. ${admin.phone_number}\n`;
+                    response += `   🏷️ ${admin.role}\n`;
+                    response += `   👥 ${groupList}${more}\n\n`;
+                });
+                if (waGroupAdmins.length > 40) {
+                    response += `_…and ${waGroupAdmins.length - 40} more._\n\n`;
+                }
+            }
+
+            response += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
             response += '💡 Owners/moderators: `.env` · Bot admins: `/addadmin` `/removeadmin`';
 
             await sock.sendMessage(chatId, { text: response });
@@ -684,6 +982,162 @@ class CommandController {
         } catch (error) {
             logger.error(`Error sending admin list: ${error.message}`);
         }
+    }
+
+    async handleAddChannel(sock, chatId, args, senderJid) {
+        const senderPhone = extractPhoneNumber(senderJid);
+        const isOwner = await this.isOwnerFromJid(sock, chatId, senderJid);
+        
+        if (!isOwner) {
+            await sock.sendMessage(chatId, { text: '❌ Only owners can add sticker channels.' });
+            return;
+        }
+
+        if (!args.length) {
+            await sock.sendMessage(chatId, {
+                text: '📡 *Add Sticker Channel*\n\n' +
+                    'Usage: `/addchannel <channel-url-or-jid>`\n\n' +
+                    'Examples:\n' +
+                    '• `/addchannel https://whatsapp.com/channel/0029Va...`\n' +
+                    '• `/addchannel 120363399411386277@newsletter`',
+            });
+            return;
+        }
+
+        const input = args[0];
+        let channelJid = input;
+        let channelName = input;
+
+        if (input.includes('whatsapp.com/channel/') || !input.includes('@newsletter')) {
+            const code = input.replace(/^https?:\/\/(www\.)?whatsapp\.com\/channel\//i, '').split('/')[0];
+            try {
+                const meta = await sock.newsletterMetadata('invite', code);
+                channelJid = meta?.id || '';
+                channelName = meta?.name?.text || meta?.name || code;
+            } catch (err) {
+                await sock.sendMessage(chatId, { text: `❌ Could not resolve channel: ${err.message}` });
+                return;
+            }
+        }
+
+        if (!channelJid?.includes('@newsletter')) {
+            await sock.sendMessage(chatId, { text: '❌ Invalid channel. Provide a valid channel URL or JID.' });
+            return;
+        }
+
+        const result = await this.groupManager.addStickerChannel(channelJid, channelName, senderPhone);
+        if (result.ok) {
+            try {
+                await sock.subscribeNewsletterUpdates(channelJid);
+            } catch {}
+            await sock.sendMessage(chatId, {
+                text: `✅ *Channel Added*\n\n📡 ${channelName}\n🆔 ${channelJid}\n\n_Stickers from this channel will be forwarded._`,
+            });
+        } else {
+            await sock.sendMessage(chatId, { text: `❌ Failed: ${result.reason}` });
+        }
+    }
+
+    async handleRemoveChannel(sock, chatId, args, senderJid) {
+        const isOwner = await this.isOwnerFromJid(sock, chatId, senderJid);
+        
+        if (!isOwner) {
+            await sock.sendMessage(chatId, { text: '❌ Only owners can remove sticker channels.' });
+            return;
+        }
+
+        if (!args.length) {
+            const channels = await this.groupManager.getStickerChannels();
+            if (!channels.length) {
+                await sock.sendMessage(chatId, { text: '📭 No sticker channels configured.' });
+                return;
+            }
+            
+            let text = '📡 *Remove Sticker Channel*\n\nUsage: `/removechannel <number>`\n\n*Current channels:*\n\n';
+            channels.forEach((ch, i) => {
+                text += `${i + 1}. ${ch.channel_name || ch.channel_jid}\n`;
+            });
+            await sock.sendMessage(chatId, { text });
+            return;
+        }
+
+        const channels = await this.groupManager.getStickerChannels();
+        const input = args[0];
+        let targetJid = input;
+
+        const num = parseInt(input, 10);
+        if (!isNaN(num) && num >= 1 && num <= channels.length) {
+            targetJid = channels[num - 1].channel_jid;
+        } else if (!input.includes('@newsletter')) {
+            await sock.sendMessage(chatId, { text: '❌ Invalid. Use channel number from `/removechannel` list.' });
+            return;
+        }
+
+        const result = await this.groupManager.removeStickerChannel(targetJid);
+        if (result.ok) {
+            await sock.sendMessage(chatId, { text: `✅ Channel removed: ${targetJid}` });
+        } else {
+            await sock.sendMessage(chatId, { text: `❌ ${result.reason}` });
+        }
+    }
+
+    async handleChannels(sock, chatId, senderJid) {
+        const isOwner = await this.isOwnerFromJid(sock, chatId, senderJid);
+        
+        if (!isOwner) {
+            await sock.sendMessage(chatId, { text: '❌ Only owners can view sticker channels.' });
+            return;
+        }
+
+        const dbChannels = await this.groupManager.getStickerChannels();
+        const envChannelJids = config.STICKER_SOURCE_CHANNELS || [];
+        
+        let text = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        text += '📡 *STICKER SOURCE CHANNELS*\n';
+        text += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+
+        let idx = 0;
+        
+        if (envChannelJids.length) {
+            text += '🔧 *From .env:*\n';
+            for (const jid of envChannelJids) {
+                idx++;
+                let name = jid;
+                try {
+                    if (sock.newsletterMetadata) {
+                        const meta = await sock.newsletterMetadata('jid', jid);
+                        const rawName = meta?.name || meta?.thread_metadata?.name;
+                        name = typeof rawName === 'string' ? rawName : (rawName?.text || jid);
+                    }
+                } catch {}
+                text += `${idx}. ${name}\n`;
+                text += `   🆔 \`${jid}\`\n\n`;
+            }
+        }
+        
+        if (dbChannels.length) {
+            text += '💾 *From commands:*\n';
+            for (const ch of dbChannels) {
+                idx++;
+                const date = ch.added_at ? new Date(ch.added_at).toLocaleDateString() : '';
+                text += `${idx}. ${ch.channel_name || 'Unnamed'}\n`;
+                text += `   🆔 \`${ch.channel_jid}\`\n`;
+                if (date) text += `   📅 ${date}\n`;
+                text += '\n';
+            }
+        }
+
+        if (!envChannelJids.length && !dbChannels.length) {
+            text += '📭 No channels configured.\n\n';
+            text += '_Use `/addchannel` to add one._\n';
+        } else {
+            text += `📊 *Total:* ${idx} channel(s)\n`;
+        }
+
+        text += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        text += '💡 `/addchannel` `/removechannel`';
+        
+        await sock.sendMessage(chatId, { text });
     }
 
     async handleFacts(sock, chatId, quotedMessage) {
@@ -850,7 +1304,7 @@ class CommandController {
         }
     }
 
-    async handleNews(sock, chatId) {
+    async handleNews(sock, chatId, senderJid) {
         try {
             if (!this.newsController) {
                 await sock.sendMessage(chatId, {
@@ -858,8 +1312,37 @@ class CommandController {
                 });
                 return;
             }
-            await this.newsController.previewNews(sock, chatId);
-            logger.info(`News preview sent to ${chatId}`);
+
+            const articles = await this.newsController.fetchFreshArticles();
+            if (!articles.length) {
+                await sock.sendMessage(chatId, {
+                    text: '📭 No fresh tech news right now. Try again later.',
+                });
+                return;
+            }
+
+            const sent = await this.newsController.previewNews(sock, chatId, articles);
+            logger.info(`News preview (${sent} msg) sent to ${chatId}`);
+
+            const canPost = await this.groupManager.canManualPostNews(senderJid);
+            if (!canPost) {
+                return;
+            }
+
+            const { posted, groups } = await this.newsController.postNews(sock, articles);
+            if (groups === 0) {
+                await sock.sendMessage(chatId, {
+                    text: 'ℹ️ Preview only — no activated groups. Use `/activate` in a group first.',
+                });
+                return;
+            }
+
+            await sock.sendMessage(chatId, {
+                text:
+                    posted > 0
+                        ? `✅ Posted *${sent}* tech news message(s) to *${posted}* activated group(s).`
+                        : 'ℹ️ News was already posted to all activated groups.',
+            });
         } catch (error) {
             logger.error(`Error handling news command: ${error.message}`);
             await sock.sendMessage(chatId, {
@@ -870,11 +1353,21 @@ class CommandController {
 
     async handleHelp(sock, chatId, senderJid) {
         try {
-            const [isStaff, isPrivileged] = await Promise.all([
+            const senderPhone = extractPhoneNumber(senderJid);
+            const [isStaff, isPrivileged, canManageAdmins] = await Promise.all([
                 this.groupManager.isStaffAsync(sock, chatId, senderJid),
                 this.groupManager.isPrivilegedAsync(sock, chatId, senderJid),
+                this.groupManager.canManageBotAdminsAsync(senderJid),
             ]);
-            const response = formatHelpText({ isStaff, isPrivileged });
+            const canSetWelcome = isPrivileged || canManageAdmins;
+            const isOwner = this.groupManager.isOwner(senderPhone);
+            const response = formatHelpText({
+                isStaff,
+                isPrivileged,
+                canManageAdmins,
+                canSetWelcome,
+                isOwner,
+            });
             await sock.sendMessage(chatId, { text: response });
             logger.info(`📖 Help sent to ${chatId}`);
         } catch (error) {
@@ -939,17 +1432,29 @@ class CommandController {
             case 'instaoff':
                 await this.handleInstaOff(sock, chatId, senderJid);
                 break;
+            case 'setwc':
+                await this.handleSetWelcome(sock, chatId, senderJid, command.trim());
+                break;
             case 'groups':
                 await this.handleGroups(sock, chatId, senderJid);
                 break;
             case 'addadmin':
-                await this.handleAddAdmin(sock, chatId, senderJid, args);
+                await this.handleAddAdmin(sock, chatId, senderJid, args, quotedMessage);
                 break;
             case 'removeadmin':
-                await this.handleRemoveAdmin(sock, chatId, senderJid, args);
+                await this.handleRemoveAdmin(sock, chatId, senderJid, args, quotedMessage);
                 break;
             case 'admins':
                 await this.handleAdmins(sock, chatId, senderJid);
+                break;
+            case 'addchannel':
+                await this.handleAddChannel(sock, chatId, args, senderJid);
+                break;
+            case 'removechannel':
+                await this.handleRemoveChannel(sock, chatId, args, senderJid);
+                break;
+            case 'channels':
+                await this.handleChannels(sock, chatId, senderJid);
                 break;
             case 'help':
                 await this.handleHelp(sock, chatId, senderJid);
@@ -961,7 +1466,7 @@ class CommandController {
                 await this.handleInsta(sock, chatId, args, quotedMessage);
                 break;
             case 'news':
-                await this.handleNews(sock, chatId);
+                await this.handleNews(sock, chatId, senderJid);
                 break;
             default:
                 break;

@@ -4,7 +4,22 @@
  */
 
 import { logger } from '../utils/logger.js';
-import { extractPhoneNumber } from '../utils/permissions.js';
+import { extractPhoneNumber, normalizePhoneNumber } from '../utils/permissions.js';
+
+function participantToPhone(participant) {
+    if (!participant) {
+        return '';
+    }
+    const fromPn = extractPhoneNumber(participant.phoneNumber || participant.pn || '');
+    if (/^\d{10,15}$/.test(fromPn)) {
+        return fromPn;
+    }
+    const fromId = extractPhoneNumber(participant.id || '');
+    if (/^\d{10,15}$/.test(fromId)) {
+        return fromId;
+    }
+    return fromId || fromPn;
+}
 
 class GroupManager {
     constructor(mongoDb) {
@@ -13,6 +28,8 @@ class GroupManager {
         this.admins = null;
         this.ownerNumbers = [];
         this.moderatorNumbers = [];
+        /** @type {Map<string, { data: object, at: number }>} */
+        this.groupMetaCache = new Map();
     }
 
     async init() {
@@ -42,29 +59,162 @@ class GroupManager {
     }
 
     isOwner(phoneNumber) {
-        return this.ownerNumbers.includes(phoneNumber);
+        const normalized = normalizePhoneNumber(phoneNumber);
+        return this.ownerNumbers.some(
+            (owner) => normalizePhoneNumber(owner) === normalized
+        );
     }
 
     isModerator(phoneNumber) {
-        return this.moderatorNumbers.includes(phoneNumber);
+        const normalized = normalizePhoneNumber(phoneNumber);
+        return this.moderatorNumbers.some(
+            (mod) => normalizePhoneNumber(mod) === normalized
+        );
+    }
+
+    async findBotAdminRecord(phoneNumber) {
+        const normalized = normalizePhoneNumber(phoneNumber);
+        if (!normalized || !this.admins) {
+            return null;
+        }
+
+        const exact = await this.admins.findOne({ phone_number: normalized });
+        if (exact) {
+            return exact;
+        }
+
+        const suffix = new RegExp(`${normalized}$`);
+        return this.admins.findOne({ phone_number: { $regex: suffix } });
     }
 
     async isBotAdmin(phoneNumber) {
-        const row = await this.admins.findOne(
-            { phone_number: phoneNumber },
-            { projection: { _id: 1 } }
-        );
-        return Boolean(row);
+        return Boolean(await this.findBotAdminRecord(phoneNumber));
+    }
+
+    /** Owners, moderators, or DB bot admins — can add/remove other bot admins */
+    async canManageBotAdmins(senderJid) {
+        const phoneNumber = normalizePhoneNumber(extractPhoneNumber(senderJid));
+        if (!phoneNumber) {
+            return false;
+        }
+        if (this.isOwner(phoneNumber) || this.isModerator(phoneNumber)) {
+            return true;
+        }
+        return this.isBotAdmin(phoneNumber);
+    }
+
+    async canManageBotAdminsAsync(senderJid) {
+        return this.canManageBotAdmins(senderJid);
+    }
+
+    async getGroupMetadataCached(sock, groupId) {
+        const cached = this.groupMetaCache.get(groupId);
+        if (cached && Date.now() - cached.at < 60_000) {
+            return cached.data;
+        }
+        const data = await sock.groupMetadata(groupId);
+        this.groupMetaCache.set(groupId, { data, at: Date.now() });
+        return data;
+    }
+
+    /**
+     * Member counts for all groups the bot participates in (one WA fetch).
+     * @param {import('@whiskeysockets/baileys').WASocket} sock
+     * @returns {Promise<Map<string, number>>}
+     */
+    async getParticipatingGroupMemberCounts(sock) {
+        /** @type {Map<string, number>} */
+        const counts = new Map();
+        if (!sock?.groupFetchAllParticipating) {
+            return counts;
+        }
+        try {
+            const participating = await sock.groupFetchAllParticipating();
+            for (const [groupId, meta] of Object.entries(participating)) {
+                const size = meta.participants?.length ?? meta.size;
+                if (typeof size === 'number' && size >= 0) {
+                    counts.set(groupId, size);
+                }
+            }
+        } catch (error) {
+            logger.error(`Failed to fetch group member counts: ${error.message}`);
+        }
+        return counts;
+    }
+
+    formatMemberCount(memberCounts, groupId) {
+        const count = memberCounts.get(groupId);
+        return typeof count === 'number' ? String(count) : '—';
     }
 
     async isGroupAdmin(sock, groupId, phoneNumber) {
         try {
-            const groupMetadata = await sock.groupMetadata(groupId);
-            const participant = groupMetadata.participants.find(p => p.id.includes(phoneNumber));
-            return participant && (participant.admin === 'admin' || participant.admin === 'superadmin');
-        } catch (error) {
+            const groupMetadata = await this.getGroupMetadataCached(sock, groupId);
+            const normalized = normalizePhoneNumber(phoneNumber);
+            const participant = groupMetadata.participants.find((p) => {
+                const participantPhone = normalizePhoneNumber(participantToPhone(p));
+                return (
+                    participantPhone === normalized ||
+                    p.id.includes(normalized) ||
+                    p.id.includes(phoneNumber)
+                );
+            });
+            return Boolean(
+                participant &&
+                    (participant.admin === 'admin' || participant.admin === 'superadmin')
+            );
+        } catch {
             return false;
         }
+    }
+
+    /** Owners, moderators, or DB bot admins — can manually post /news to groups */
+    async canManualPostNews(senderJid) {
+        const phoneNumber = extractPhoneNumber(senderJid);
+        if (!phoneNumber) {
+            return false;
+        }
+        if (this.isOwner(phoneNumber) || this.isModerator(phoneNumber)) {
+            return true;
+        }
+        return this.isBotAdmin(phoneNumber);
+    }
+
+    /**
+     * Live WhatsApp group admins across all participating groups.
+     * @param {import('@whiskeysockets/baileys').WASocket} sock
+     */
+    async fetchAllWhatsAppGroupAdmins(sock) {
+        const byPhone = new Map();
+        if (!sock?.groupFetchAllParticipating) {
+            return [];
+        }
+        try {
+            const participating = await sock.groupFetchAllParticipating();
+            for (const meta of Object.values(participating)) {
+                for (const participant of meta.participants || []) {
+                    if (participant.admin !== 'admin' && participant.admin !== 'superadmin') {
+                        continue;
+                    }
+                    const phone = participantToPhone(participant);
+                    if (!phone) {
+                        continue;
+                    }
+                    const key = phone.replace(/\D/g, '');
+                    if (!byPhone.has(key)) {
+                        byPhone.set(key, {
+                            phone_number: key,
+                            role: participant.admin === 'superadmin' ? 'Super admin' : 'Group admin',
+                            groups: [],
+                        });
+                    }
+                    byPhone.get(key).groups.push(meta.subject || meta.id);
+                }
+            }
+        } catch (error) {
+            logger.error(`Failed to fetch WhatsApp group admins: ${error.message}`);
+        }
+        return [...byPhone.values()];
     }
 
     /**
@@ -134,28 +284,60 @@ class GroupManager {
     }
 
     async addAdmin(phoneNumber) {
-        if (this.isOwner(phoneNumber) || this.isModerator(phoneNumber)) {
-            return false;
+        const phone = normalizePhoneNumber(phoneNumber);
+        if (!phone || phone.length < 10) {
+            return { ok: false, reason: 'invalid' };
         }
-        await this.admins.updateOne(
-            { phone_number: phoneNumber },
-            {
-                $setOnInsert: {
-                    phone_number: phoneNumber,
-                    added_at: new Date(),
-                },
-            },
-            { upsert: true }
-        );
-        return true;
+        if (this.isOwner(phone)) {
+            return { ok: false, reason: 'owner' };
+        }
+        if (this.isModerator(phone)) {
+            return { ok: false, reason: 'moderator' };
+        }
+
+        const existing = await this.findBotAdminRecord(phone);
+        if (existing) {
+            return {
+                ok: true,
+                reason: 'already',
+                phone_number: normalizePhoneNumber(existing.phone_number) || phone,
+            };
+        }
+
+        await this.admins.insertOne({
+            phone_number: phone,
+            added_at: new Date(),
+        });
+        return { ok: true, reason: 'added', phone_number: phone };
     }
 
     async removeAdmin(phoneNumber) {
-        if (this.isOwner(phoneNumber) || this.isModerator(phoneNumber)) {
-            return false;
+        const phone = normalizePhoneNumber(phoneNumber);
+        if (!phone) {
+            return { ok: false, reason: 'invalid' };
         }
-        const result = await this.admins.deleteOne({ phone_number: phoneNumber });
-        return result.deletedCount > 0;
+        if (this.isOwner(phone)) {
+            return { ok: false, reason: 'owner' };
+        }
+        if (this.isModerator(phone)) {
+            return { ok: false, reason: 'moderator' };
+        }
+
+        const existing = await this.findBotAdminRecord(phone);
+        if (!existing) {
+            return { ok: false, reason: 'not_found' };
+        }
+
+        const storedPhone = existing.phone_number;
+        const result = await this.admins.deleteOne({ phone_number: storedPhone });
+        if (result.deletedCount > 0) {
+            return {
+                ok: true,
+                reason: 'removed',
+                phone_number: normalizePhoneNumber(storedPhone) || phone,
+            };
+        }
+        return { ok: false, reason: 'not_found' };
     }
 
     getAllModerators() {
@@ -295,11 +477,140 @@ class GroupManager {
         return { active, total };
     }
 
+    // ─── Welcome messages ─────────────────────────────────────────────────────
+
+    async setWelcomeMessage(groupId, groupName, customMessage, setBy) {
+        await this.groups.updateOne(
+            { group_id: groupId },
+            {
+                $set: {
+                    group_name: groupName,
+                    welcome_enabled: true,
+                    welcome_message: (customMessage || '').trim(),
+                    welcome_set_by: setBy,
+                    welcome_set_at: new Date(),
+                },
+                $setOnInsert: {
+                    group_id: groupId,
+                    is_active: false,
+                    insta_auto: false,
+                },
+            },
+            { upsert: true }
+        );
+        logger.info(`👋 Welcome message set for ${groupName} (${groupId}) by ${setBy}`);
+    }
+
+    async clearWelcomeMessage(groupId) {
+        const result = await this.groups.updateOne(
+            { group_id: groupId },
+            {
+                $set: { welcome_enabled: false },
+                $unset: {
+                    welcome_message: '',
+                    welcome_set_by: '',
+                    welcome_set_at: '',
+                },
+            }
+        );
+        logger.info(`👋 Welcome message cleared for ${groupId}`);
+        return result.matchedCount > 0;
+    }
+
+    async getWelcomeConfig(groupId) {
+        const row = await this.groups.findOne(
+            { group_id: groupId },
+            {
+                projection: {
+                    _id: 0,
+                    welcome_enabled: 1,
+                    welcome_message: 1,
+                    welcome_set_by: 1,
+                    welcome_set_at: 1,
+                    group_name: 1,
+                },
+            }
+        );
+        if (!row?.welcome_enabled) {
+            return null;
+        }
+        return row;
+    }
+
+    async isWelcomeEnabled(groupId) {
+        const row = await this.groups.findOne(
+            { group_id: groupId },
+            { projection: { welcome_enabled: 1 } }
+        );
+        return row?.welcome_enabled === true;
+    }
+
+    async getWelcomeEnabledGroups() {
+        return this.groups
+            .find({ welcome_enabled: true }, { projection: { _id: 0 } })
+            .sort({ welcome_set_at: -1 })
+            .toArray();
+    }
+
+    // ─── Sticker source channels ─────────────────────────────────────────────
+
+    async initChannels() {
+        this.channels = this.mongoDb.collection('sticker_channels');
+        await this.channels.createIndex(
+            { channel_jid: 1 },
+            { unique: true, name: 'channel_jid' }
+        );
+    }
+
+    async addStickerChannel(channelJid, channelName, addedBy) {
+        if (!channelJid?.includes('@newsletter')) {
+            return { ok: false, reason: 'Invalid channel JID' };
+        }
+        try {
+            await this.channels.updateOne(
+                { channel_jid: channelJid },
+                {
+                    $set: {
+                        channel_name: channelName || channelJid,
+                        added_by: addedBy,
+                        added_at: new Date(),
+                    },
+                    $setOnInsert: { channel_jid: channelJid },
+                },
+                { upsert: true }
+            );
+            logger.info(`📡 Channel added: ${channelName || channelJid} by ${addedBy}`);
+            return { ok: true, jid: channelJid, name: channelName };
+        } catch (error) {
+            return { ok: false, reason: error.message };
+        }
+    }
+
+    async removeStickerChannel(channelJid) {
+        const result = await this.channels.deleteOne({ channel_jid: channelJid });
+        if (result.deletedCount > 0) {
+            logger.info(`📡 Channel removed: ${channelJid}`);
+            return { ok: true };
+        }
+        return { ok: false, reason: 'Channel not found' };
+    }
+
+    async getStickerChannels() {
+        if (!this.channels) return [];
+        return this.channels.find({}).toArray();
+    }
+
+    async getStickerChannelJids() {
+        const channels = await this.getStickerChannels();
+        return channels.map(c => c.channel_jid);
+    }
+
     // ─── Utility ──────────────────────────────────────────────────────────────
 
     close() {
         this.groups = null;
         this.admins = null;
+        this.channels = null;
     }
 }
 

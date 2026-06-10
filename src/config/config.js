@@ -40,7 +40,12 @@ export const config = {
     ).trim(),
     MORNING_MESSAGE_TIME_END: (process.env.MORNING_MESSAGE_TIME_END || '10:30').trim(),
     MORNING_TIMEZONE: process.env.MORNING_TIMEZONE || 'Asia/Kolkata',
-    STICKER_TARGET_GROUPS: process.env.STICKER_TARGET_GROUPS ? process.env.STICKER_TARGET_GROUPS.split(',').map(g => g.trim()) : [],
+    STICKER_TARGET_GROUPS: process.env.STICKER_TARGET_GROUPS
+        ? process.env.STICKER_TARGET_GROUPS.split(',').map((g) => g.trim()).filter(Boolean)
+        : [],
+    STICKER_SOURCE_CHANNELS: process.env.STICKER_SOURCE_CHANNELS
+        ? process.env.STICKER_SOURCE_CHANNELS.split(',').map((c) => c.trim()).filter(Boolean)
+        : [],
     STICKER_PACK_NAME: process.env.STICKER_PACK_NAME?.trim() || 'Course Bot 🤖',
-    STICKER_PACK_AUTHOR: process.env.STICKER_PACK_AUTHOR?.trim() || ''
+    STICKER_PACK_AUTHOR: process.env.STICKER_PACK_AUTHOR?.trim() || '',
 };
