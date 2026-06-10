@@ -72,6 +72,11 @@ class GroupManager {
         );
     }
 
+    async isModeratorAsync(phoneNumber) {
+        if (this.isModerator(phoneNumber)) return true;
+        return this.isDynamicModerator(phoneNumber);
+    }
+
     async findBotAdminRecord(phoneNumber) {
         const normalized = normalizePhoneNumber(phoneNumber);
         if (!normalized || !this.admins) {
@@ -91,13 +96,16 @@ class GroupManager {
         return Boolean(await this.findBotAdminRecord(phoneNumber));
     }
 
-    /** Owners, moderators, or DB bot admins — can add/remove other bot admins */
+    /** Owners, moderators (env + dynamic), or DB bot admins — can add/remove other bot admins */
     async canManageBotAdmins(senderJid) {
         const phoneNumber = normalizePhoneNumber(extractPhoneNumber(senderJid));
         if (!phoneNumber) {
             return false;
         }
         if (this.isOwner(phoneNumber) || this.isModerator(phoneNumber)) {
+            return true;
+        }
+        if (await this.isDynamicModerator(phoneNumber)) {
             return true;
         }
         return this.isBotAdmin(phoneNumber);
@@ -168,13 +176,16 @@ class GroupManager {
         }
     }
 
-    /** Owners, moderators, or DB bot admins — can manually post /news to groups */
+    /** Owners, moderators (env + dynamic), or DB bot admins — can manually post /news */
     async canManualPostNews(senderJid) {
         const phoneNumber = extractPhoneNumber(senderJid);
         if (!phoneNumber) {
             return false;
         }
         if (this.isOwner(phoneNumber) || this.isModerator(phoneNumber)) {
+            return true;
+        }
+        if (await this.isDynamicModerator(phoneNumber)) {
             return true;
         }
         return this.isBotAdmin(phoneNumber);
@@ -234,12 +245,15 @@ class GroupManager {
         return false;
     }
 
-    /** Group staff: owners, moderators, DB admins, or WhatsApp group admin in that group */
+    /** Group staff: owners, moderators (env + dynamic), DB admins, or WhatsApp group admin */
     async isStaff(sock, chatId, phoneNumber) {
         if (this.isOwner(phoneNumber)) {
             return true;
         }
         if (this.isModerator(phoneNumber)) {
+            return true;
+        }
+        if (await this.isDynamicModerator(phoneNumber)) {
             return true;
         }
         if (await this.isBotAdmin(phoneNumber)) {
@@ -348,10 +362,10 @@ class GroupManager {
     }
 
     async getAllAdmins() {
-        const admins = await this.admins
-            .find({}, { projection: { _id: 0 } })
-            .sort({ added_at: 1 })
-            .toArray();
+        const [admins, dynamicMods] = await Promise.all([
+            this.admins.find({}, { projection: { _id: 0 } }).sort({ added_at: 1 }).toArray(),
+            this.getAllDynamicModerators(),
+        ]);
         const ownerRows = this.ownerNumbers.map((phone) => ({
             phone_number: phone,
             role: 'Owner',
@@ -362,14 +376,20 @@ class GroupManager {
             role: 'Moderator',
             added_at: 'Moderator (.env)',
         }));
+        const dynamicModRows = dynamicMods.map((mod) => ({
+            phone_number: mod.phone_number,
+            role: 'Moderator',
+            added_at: mod.added_at,
+        }));
         const seen = new Set([
             ...ownerRows.map((row) => row.phone_number),
             ...moderatorRows.map((row) => row.phone_number),
+            ...dynamicModRows.map((row) => row.phone_number),
         ]);
         const botAdminRows = admins
             .filter((admin) => !seen.has(admin.phone_number))
             .map((admin) => ({ ...admin, role: 'Bot admin' }));
-        return ownerRows.concat(moderatorRows, botAdminRows);
+        return ownerRows.concat(moderatorRows, dynamicModRows, botAdminRows);
     }
 
     // ─── Group Management ─────────────────────────────────────────────────────
@@ -552,6 +572,117 @@ class GroupManager {
             .toArray();
     }
 
+    // ─── Premium users ─────────────────────────────────────────────────────────
+
+    async initPremium() {
+        this.premiumUsers = this.mongoDb.collection('premium_users');
+        await this.premiumUsers.createIndex(
+            { phone_number: 1 },
+            { unique: true, name: 'premium_phone' }
+        );
+    }
+
+    async addPremiumUser(phoneNumber, addedBy) {
+        const phone = normalizePhoneNumber(phoneNumber);
+        if (!phone || phone.length < 10) {
+            return { ok: false, reason: 'invalid' };
+        }
+        const existing = await this.premiumUsers.findOne({ phone_number: phone });
+        if (existing) {
+            return { ok: false, reason: 'already', phone_number: phone };
+        }
+        await this.premiumUsers.insertOne({
+            phone_number: phone,
+            added_by: addedBy,
+            added_at: new Date(),
+        });
+        logger.info(`⭐ Premium user added: ${phone} by ${addedBy}`);
+        return { ok: true, reason: 'added', phone_number: phone };
+    }
+
+    async removePremiumUser(phoneNumber) {
+        const phone = normalizePhoneNumber(phoneNumber);
+        if (!phone) {
+            return { ok: false, reason: 'invalid' };
+        }
+        const result = await this.premiumUsers.deleteOne({ phone_number: phone });
+        if (result.deletedCount > 0) {
+            logger.info(`⭐ Premium user removed: ${phone}`);
+            return { ok: true, reason: 'removed', phone_number: phone };
+        }
+        return { ok: false, reason: 'not_found' };
+    }
+
+    async isPremiumUser(phoneNumber) {
+        const phone = normalizePhoneNumber(phoneNumber);
+        if (!phone) return false;
+        return Boolean(await this.premiumUsers?.findOne({ phone_number: phone }));
+    }
+
+    async getAllPremiumUsers() {
+        if (!this.premiumUsers) return [];
+        return this.premiumUsers.find({}, { projection: { _id: 0 } })
+            .sort({ added_at: -1 })
+            .toArray();
+    }
+
+    // ─── Dynamic moderators ──────────────────────────────────────────────────
+
+    async initDynamicModerators() {
+        this.dynamicModerators = this.mongoDb.collection('dynamic_moderators');
+        await this.dynamicModerators.createIndex(
+            { phone_number: 1 },
+            { unique: true, name: 'dynamic_mod_phone' }
+        );
+    }
+
+    async addDynamicModerator(phoneNumber, addedBy) {
+        const phone = normalizePhoneNumber(phoneNumber);
+        if (!phone || phone.length < 10) {
+            return { ok: false, reason: 'invalid' };
+        }
+        if (this.isOwner(phone)) {
+            return { ok: false, reason: 'owner' };
+        }
+        const existing = await this.dynamicModerators.findOne({ phone_number: phone });
+        if (existing) {
+            return { ok: false, reason: 'already', phone_number: phone };
+        }
+        await this.dynamicModerators.insertOne({
+            phone_number: phone,
+            added_by: addedBy,
+            added_at: new Date(),
+        });
+        logger.info(`🛡️ Dynamic moderator added: ${phone} by ${addedBy}`);
+        return { ok: true, reason: 'added', phone_number: phone };
+    }
+
+    async removeDynamicModerator(phoneNumber) {
+        const phone = normalizePhoneNumber(phoneNumber);
+        if (!phone) {
+            return { ok: false, reason: 'invalid' };
+        }
+        const result = await this.dynamicModerators.deleteOne({ phone_number: phone });
+        if (result.deletedCount > 0) {
+            logger.info(`🛡️ Dynamic moderator removed: ${phone}`);
+            return { ok: true, reason: 'removed', phone_number: phone };
+        }
+        return { ok: false, reason: 'not_found' };
+    }
+
+    async isDynamicModerator(phoneNumber) {
+        const phone = normalizePhoneNumber(phoneNumber);
+        if (!phone) return false;
+        return Boolean(await this.dynamicModerators?.findOne({ phone_number: phone }));
+    }
+
+    async getAllDynamicModerators() {
+        if (!this.dynamicModerators) return [];
+        return this.dynamicModerators.find({}, { projection: { _id: 0 } })
+            .sort({ added_at: -1 })
+            .toArray();
+    }
+
     // ─── Sticker source channels ─────────────────────────────────────────────
 
     async initChannels() {
@@ -611,6 +742,8 @@ class GroupManager {
         this.groups = null;
         this.admins = null;
         this.channels = null;
+        this.premiumUsers = null;
+        this.dynamicModerators = null;
     }
 }
 
