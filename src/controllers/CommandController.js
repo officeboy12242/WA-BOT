@@ -29,6 +29,9 @@ import {
     handleGroups,
     handleSetWelcome,
     handleGroupParticipantsUpdate as _handleGroupParticipantsUpdate,
+    handleMovieOn,
+    handleMovieOff,
+    handleTrending,
 } from './handlers/groupHandlers.js';
 
 import {
@@ -147,6 +150,9 @@ class CommandController {
             case 'instaoff':   await handleInstaOff(sock, chatId, senderJid, ctx); break;
             case 'groups':     await handleGroups(sock, chatId, senderJid, ctx); break;
             case 'setwc':      await handleSetWelcome(sock, chatId, senderJid, command.trim(), ctx); break;
+            case 'movieon':    await handleMovieOn(sock, chatId, senderJid, ctx); break;
+            case 'movieoff':   await handleMovieOff(sock, chatId, senderJid, ctx); break;
+            case 'trending':   await handleTrending(sock, chatId, senderJid, args, ctx); break;
 
             /* ── Admin management ── */
             case 'addadmin':    await handleAddAdmin(sock, chatId, senderJid, args, quotedMessage, ctx); break;

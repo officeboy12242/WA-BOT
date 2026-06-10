@@ -9,6 +9,7 @@ import { fileURLToPath } from 'url';
 import axios from 'axios';
 import { logger } from '../utils/logger.js';
 import { extractPhoneNumber, isGroupMessage } from '../utils/permissions.js';
+import { config } from '../config/config.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const QR_IMAGE_PATH = resolve(__dirname, '../../assets/payment_qr.jpg');
@@ -16,7 +17,103 @@ const QR_IMAGE_PATH = resolve(__dirname, '../../assets/payment_qr.jpg');
 const MOVIE_API = 'https://pronoob-drive.vercel.app/?name=';
 const DAILY_LIMIT = 5;
 const AUTO_DELETE_MS = 5 * 60 * 60 * 1000; // 5 hours
+const KEEP_ALIVE_INTERVAL_MS = 4 * 60 * 1000; // ping every 4 minutes
+const SUMMARY_HOUR = 23;
+const SUMMARY_MINUTE = 55;
+const WEEKLY_DAY = 0; // Sunday
+const WEEKLY_HOUR = 12;
+const WEEKLY_MINUTE = 0;
 const PAYMENT_CONTACT = '917887499710';
+
+const MOVIE_EMOJIS = ['🎬', '🍿', '🎥', '📽️', '🎞️', '🎭', '🌟', '⭐', '🔥', '💎'];
+
+function formatDailySummary(stats) {
+    const { totalSearches, uniqueUsers, topMovies, movieOfTheDay, date } = stats;
+
+    let text = '';
+    text += '┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n';
+    text += '┃  📊 *DAILY MOVIE RECAP* 📊  ┃\n';
+    text += '┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n';
+    text += `📅 *${date}*\n`;
+    text += '─────────────────────────────\n\n';
+
+    text += `🔍 *Total Searches:* ${totalSearches}\n`;
+    text += `👥 *Users Who Searched:* ${uniqueUsers}\n\n`;
+
+    if (movieOfTheDay) {
+        text += '🏆 *MOVIE OF THE DAY*\n';
+        text += `   ${MOVIE_EMOJIS[Math.floor(Math.random() * MOVIE_EMOJIS.length)]} *${movieOfTheDay.query}* — searched ${movieOfTheDay.count} time(s)\n\n`;
+    }
+
+    if (topMovies.length) {
+        text += '🔥 *TOP 5 SEARCHED*\n';
+        topMovies.forEach((m, i) => {
+            const medal = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣'][i] || `${i + 1}.`;
+            text += `   ${medal} _${m.query}_ — ${m.count} search(es)\n`;
+        });
+        text += '\n';
+    }
+
+    text += '─────────────────────────────\n';
+
+    if (totalSearches === 0) {
+        text += '📭 _No one searched today… bots need love too!_ 🥲\n';
+    } else if (totalSearches < 5) {
+        text += '🌱 _Quiet day at the movies! Search more tomorrow_ 🍿\n';
+    } else if (totalSearches < 20) {
+        text += '🔥 _Decent day! The popcorn was popping_ 🍿\n';
+    } else {
+        text += '🚀 _Blockbuster day! You all went full cinema mode_ 🎉\n';
+    }
+
+    text += '─────────────────────────────\n';
+    text += '💡 _Try `/movie <name>` to search_ 🎬';
+
+    return text;
+}
+
+function formatWeeklyTrending(movies, weekLabel, source) {
+    let text = '';
+    text += '┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n';
+    text += '┃ 🔥 *WEEKLY TRENDING MOVIES* 🔥┃\n';
+    text += '┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n';
+    text += `📅 *${weekLabel}*\n`;
+    text += '─────────────────────────────\n\n';
+
+    if (!movies.length) {
+        text += '📭 _Nothing trending this week!_\n';
+        text += '_Be the first → `/movie <name>`_ 🍿\n';
+    } else if (source === 'tmdb') {
+        text += '🌍 *Trending worldwide right now:*\n\n';
+        const medals = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
+        movies.forEach((m, i) => {
+            const badge = medals[i] || `${i + 1}.`;
+            const year = m.year ? ` (${m.year})` : '';
+            const rating = m.rating ? ` ⭐ ${m.rating}` : '';
+            text += `${badge} *${m.title}*${year}${rating}\n`;
+            if (m.plot) text += `     _${m.plot}_\n`;
+            text += '\n';
+        });
+    } else {
+        text += '🎬 *Most searched this week:*\n\n';
+        const medals = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
+        movies.forEach((m, i) => {
+            const badge = medals[i] || `${i + 1}.`;
+            const bar = '🟩'.repeat(Math.min(m.count, 10));
+            text += `${badge} *${m.title}*\n`;
+            text += `     ${bar} (${m.count})\n\n`;
+        });
+    }
+
+    text += '─────────────────────────────\n';
+    if (source === 'tmdb' && movies.length) {
+        text += '✅ _Already in Sassy\'s database — just search!_\n';
+    }
+    text += '🍿 _Try any movie → `/movie <name>`_\n';
+    text += '⭐ _Go Premium for unlimited searches!_';
+
+    return text;
+}
 
 const SEARCH_DIALOGUES = [
     // Bollywood classics
@@ -223,7 +320,269 @@ class MovieController {
             { user_id: 1, date: 1 },
             { unique: true, name: 'user_daily_limit' }
         );
+
+        this.searchLog = this.mongoDb.collection('movie_search_log');
+        await this.searchLog.createIndex({ date: 1, chat_id: 1 }, { name: 'search_log_date_chat' });
+        await this.searchLog.createIndex(
+            { date: 1, chat_id: 1, query_lower: 1 },
+            { name: 'search_log_query' }
+        );
+
+        this._startKeepAlive();
+        this._scheduleDailySummary();
+        this._scheduleWeeklyTrending();
         logger.info('Movie search controller ready');
+    }
+
+    _startKeepAlive() {
+        const ping = async () => {
+            try {
+                await axios.get(MOVIE_API + 'ping', { timeout: 10000 });
+                logger.info('🏓 Movie API keep-alive ping OK');
+            } catch {
+                logger.warn('🏓 Movie API keep-alive ping failed (will retry)');
+            }
+        };
+        ping();
+        this._keepAliveTimer = setInterval(ping, KEEP_ALIVE_INTERVAL_MS);
+    }
+
+    stopKeepAlive() {
+        if (this._keepAliveTimer) {
+            clearInterval(this._keepAliveTimer);
+            this._keepAliveTimer = null;
+        }
+    }
+
+    async logSearch(userId, query, resultCount, chatId) {
+        try {
+            await this.searchLog.insertOne({
+                user_id: userId,
+                query: query.slice(0, 100),
+                query_lower: query.toLowerCase().slice(0, 100),
+                result_count: resultCount,
+                chat_id: chatId,
+                date: this.getTodayDateStr(),
+                created_at: new Date(),
+            });
+        } catch (err) {
+            logger.warn(`Failed to log movie search: ${err.message}`);
+        }
+    }
+
+    async getDailySummaryStats(dateStr, chatId) {
+        const matchFilter = { date: dateStr };
+        if (chatId) matchFilter.chat_id = chatId;
+
+        const pipeline = [
+            { $match: matchFilter },
+            { $group: {
+                _id: '$query_lower',
+                query: { $first: '$query' },
+                count: { $sum: 1 },
+                users: { $addToSet: '$user_id' },
+            }},
+            { $sort: { count: -1 } },
+        ];
+        const grouped = await this.searchLog.aggregate(pipeline).toArray();
+
+        const totalSearches = grouped.reduce((sum, g) => sum + g.count, 0);
+        const allUsers = new Set();
+        grouped.forEach((g) => g.users.forEach((u) => allUsers.add(u)));
+
+        const topMovies = grouped.slice(0, 5).map((g) => ({
+            query: g.query,
+            count: g.count,
+        }));
+        const movieOfTheDay = topMovies[0] || null;
+
+        const dateFormatted = new Date(dateStr + 'T00:00:00+05:30').toLocaleDateString('en-IN', {
+            weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
+        });
+
+        return { totalSearches, uniqueUsers: allUsers.size, topMovies, movieOfTheDay, date: dateFormatted };
+    }
+
+    _scheduleDailySummary() {
+        const scheduleNext = () => {
+            const now = new Date();
+            const ist = new Date(now.getTime() + (5.5 * 60 * 60 * 1000));
+            const target = new Date(ist);
+            target.setHours(SUMMARY_HOUR, SUMMARY_MINUTE, 0, 0);
+            if (target <= ist) target.setDate(target.getDate() + 1);
+
+            const delayMs = target.getTime() - ist.getTime();
+            const label = target.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })
+                + ` ${SUMMARY_HOUR}:${String(SUMMARY_MINUTE).padStart(2, '0')}`;
+            logger.info(`🎬 Next movie summary scheduled at ${label} IST (in ${Math.round(delayMs / 60000)}m)`);
+
+            this._summaryTimer = setTimeout(async () => {
+                await this._postDailySummary();
+                scheduleNext();
+            }, delayMs);
+        };
+        scheduleNext();
+    }
+
+    async _postDailySummary() {
+        try {
+            if (!this._sock) {
+                logger.warn('Movie summary: no socket available, skipping');
+                return;
+            }
+
+            const dateStr = this.getTodayDateStr();
+            const movieGroups = await this.groupManager.getMovieEnabledGroups();
+            if (!movieGroups.length) {
+                logger.info('Movie summary: no movie-enabled groups, skipping');
+                return;
+            }
+
+            let sent = 0;
+            for (const group of movieGroups) {
+                try {
+                    const stats = await this.getDailySummaryStats(dateStr, group.group_id);
+                    if (stats.totalSearches === 0) continue;
+                    const text = formatDailySummary(stats);
+                    await this._sock.sendMessage(group.group_id, { text });
+                    sent++;
+                    await new Promise((r) => setTimeout(r, 500));
+                } catch (err) {
+                    logger.warn(`Movie summary failed for ${group.group_id}: ${err.message}`);
+                }
+            }
+            logger.info(`🎬 Daily movie summary posted to ${sent} group(s) (${movieGroups.length} enabled)`);
+        } catch (err) {
+            logger.error(`Movie daily summary error: ${err.message}`);
+        }
+    }
+
+    setSock(sock) {
+        this._sock = sock;
+    }
+
+    _getWeekDateRange() {
+        const now = new Date();
+        const ist = new Date(now.getTime() + (5.5 * 60 * 60 * 1000));
+        const end = new Date(ist);
+        end.setHours(23, 59, 59, 999);
+        const start = new Date(ist);
+        start.setDate(start.getDate() - 6);
+        start.setHours(0, 0, 0, 0);
+
+        const fmt = (d) => d.toISOString().split('T')[0];
+        const label = (d) => d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+        return {
+            startDate: fmt(start),
+            endDate: fmt(end),
+            weekLabel: `${label(start)} – ${label(end)}`,
+        };
+    }
+
+    async _fetchTmdbTrending(limit = 10) {
+        const key = config.TMDB_API_KEY;
+        if (!key) return null;
+
+        try {
+            const { data } = await axios.get(
+                'https://api.themoviedb.org/3/trending/movie/week',
+                { params: { api_key: key, language: 'en-US' }, timeout: 10000 }
+            );
+            const results = (data?.results || []).slice(0, limit);
+            return results.map((m) => ({
+                title: m.title || m.original_title,
+                year: m.release_date?.split('-')[0] || '',
+                rating: m.vote_average ? m.vote_average.toFixed(1) : '',
+                plot: m.overview ? m.overview.slice(0, 120) + (m.overview.length > 120 ? '…' : '') : '',
+            }));
+        } catch (err) {
+            logger.warn(`TMDB trending fetch failed: ${err.message}`);
+            return null;
+        }
+    }
+
+    async _getSearchBasedTrending(limit = 10) {
+        const { startDate, endDate } = this._getWeekDateRange();
+        const pipeline = [
+            { $match: { date: { $gte: startDate, $lte: endDate }, result_count: { $gt: 0 } } },
+            { $group: {
+                _id: '$query_lower',
+                query: { $first: '$query' },
+                count: { $sum: 1 },
+            }},
+            { $sort: { count: -1 } },
+            { $limit: limit },
+        ];
+        const results = await this.searchLog.aggregate(pipeline).toArray();
+        return results.map((r) => ({ title: r.query, count: r.count }));
+    }
+
+    async getWeeklyTrending(limit = 10) {
+        const { weekLabel } = this._getWeekDateRange();
+
+        const tmdb = await this._fetchTmdbTrending(limit);
+        if (tmdb?.length) {
+            return { movies: tmdb, weekLabel, source: 'tmdb' };
+        }
+
+        const searched = await this._getSearchBasedTrending(limit);
+        return { movies: searched, weekLabel, source: 'search' };
+    }
+
+    _scheduleWeeklyTrending() {
+        const scheduleNext = () => {
+            const now = new Date();
+            const ist = new Date(now.getTime() + (5.5 * 60 * 60 * 1000));
+            const target = new Date(ist);
+
+            const daysUntil = (WEEKLY_DAY - ist.getDay() + 7) % 7 || 7;
+            target.setDate(target.getDate() + daysUntil);
+            target.setHours(WEEKLY_HOUR, WEEKLY_MINUTE, 0, 0);
+
+            if (target <= ist) target.setDate(target.getDate() + 7);
+
+            const delayMs = target.getTime() - ist.getTime();
+            const label = target.toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'short' });
+            logger.info(`🔥 Weekly trending scheduled for ${label} ${WEEKLY_HOUR}:${String(WEEKLY_MINUTE).padStart(2, '0')} IST (in ${Math.round(delayMs / 3600000)}h)`);
+
+            this._weeklyTimer = setTimeout(async () => {
+                await this._postWeeklyTrending();
+                scheduleNext();
+            }, delayMs);
+        };
+        scheduleNext();
+    }
+
+    async _postWeeklyTrending() {
+        try {
+            if (!this._sock) {
+                logger.warn('Weekly trending: no socket available, skipping');
+                return;
+            }
+
+            const trendingGroups = await this.groupManager.getWeeklyTrendingGroups();
+            if (!trendingGroups.length) {
+                logger.info('Weekly trending: no groups with trending enabled, skipping');
+                return;
+            }
+
+            const { movies, weekLabel, source } = await this.getWeeklyTrending(10);
+            const text = formatWeeklyTrending(movies, weekLabel, source);
+
+            let sent = 0;
+            for (const group of trendingGroups) {
+                try {
+                    await this._sock.sendMessage(group.group_id, { text });
+                    sent++;
+                    await new Promise((r) => setTimeout(r, 500));
+                } catch (err) {
+                    logger.warn(`Weekly trending failed for ${group.group_id}: ${err.message}`);
+                }
+            }
+            logger.info(`🔥 Weekly trending posted to ${sent}/${trendingGroups.length} group(s)`);
+        } catch (err) {
+            logger.error(`Weekly trending error: ${err.message}`);
+        }
     }
 
     getTodayDateStr() {
@@ -333,10 +692,12 @@ class MovieController {
                 const noSent = await sock.sendMessage(chatId, { text: noResult });
                 this.scheduleDelete(sock, chatId, noSent.key);
                 if (!unlimited) await this.incrementSearchCount(userId);
+                void this.logSearch(userId, query, 0, chatId);
                 return;
             }
 
             if (!unlimited) await this.incrementSearchCount(userId);
+            void this.logSearch(userId, query, results.length, chatId);
 
             const resultText = formatMovieResults(query, results);
             const footer = unlimited

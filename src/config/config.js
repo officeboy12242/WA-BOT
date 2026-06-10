@@ -48,4 +48,5 @@ export const config = {
         : [],
     STICKER_PACK_NAME: process.env.STICKER_PACK_NAME?.trim() || 'Course Bot 🤖',
     STICKER_PACK_AUTHOR: process.env.STICKER_PACK_AUTHOR?.trim() || '',
+    TMDB_API_KEY: process.env.TMDB_API_KEY?.trim() || '',
 };
