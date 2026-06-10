@@ -107,11 +107,12 @@ async function sendDownloadedMedia(sock, chatId, buffer, sendOpts, index, total)
 }
 
 class CommandController {
-    constructor(database, botState, groupManager, newsController = null) {
+    constructor(database, botState, groupManager, newsController = null, movieController = null) {
         this.database = database;
         this.botState = botState;
         this.groupManager = groupManager;
         this.newsController = newsController;
+        this.movieController = movieController;
         this.pendingClearConfirmations = new Map();
         this.botStartTime = Date.now();
     }
@@ -121,35 +122,22 @@ class CommandController {
      */
     async isOwnerFromJid(sock, chatId, senderJid) {
         const directPhone = extractPhoneNumber(senderJid);
-        logger.info(`[OWNER-CHECK] senderJid=${senderJid}, directPhone=${directPhone}, owners=${this.groupManager.ownerNumbers}`);
-        
         if (this.groupManager.isOwner(directPhone)) {
-            logger.info(`[OWNER-CHECK] Direct match: YES`);
             return true;
         }
         
         if (senderJid?.includes('@lid') && chatId?.endsWith('@g.us')) {
             try {
                 const groupMeta = await sock.groupMetadata(chatId);
-                logger.info(`[OWNER-CHECK] LID detected, checking ${groupMeta.participants?.length} participants`);
-                
                 for (const p of groupMeta.participants || []) {
-                    logger.info(`[OWNER-CHECK] Participant: id=${p.id}, lid=${p.lid}`);
                     if (p.lid === senderJid || p.id === senderJid) {
                         const realPhone = extractPhoneNumber(p.id);
-                        logger.info(`[OWNER-CHECK] Found match! realPhone=${realPhone}`);
-                        if (this.groupManager.isOwner(realPhone)) {
-                            logger.info(`[OWNER-CHECK] LID resolved to owner: YES`);
-                            return true;
-                        }
+                        if (this.groupManager.isOwner(realPhone)) return true;
                     }
                 }
-            } catch (err) {
-                logger.error(`[OWNER-CHECK] Error resolving LID: ${err.message}`);
-            }
+            } catch {}
         }
         
-        logger.info(`[OWNER-CHECK] Result: NOT OWNER`);
         return false;
     }
 
@@ -1351,6 +1339,14 @@ class CommandController {
         }
     }
 
+    async handleMovie(sock, chatId, senderJid, args) {
+        if (!this.movieController) {
+            await sock.sendMessage(chatId, { text: '⚠️ Movie search is not available.' });
+            return;
+        }
+        await this.movieController.handleMovieSearch(sock, chatId, senderJid, args);
+    }
+
     async handleHelp(sock, chatId, senderJid) {
         try {
             const senderPhone = extractPhoneNumber(senderJid);
@@ -1464,6 +1460,9 @@ class CommandController {
                 break;
             case 'insta':
                 await this.handleInsta(sock, chatId, args, quotedMessage);
+                break;
+            case 'movie':
+                await this.handleMovie(sock, chatId, senderJid, args);
                 break;
             case 'news':
                 await this.handleNews(sock, chatId, senderJid);

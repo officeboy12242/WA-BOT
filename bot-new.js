@@ -25,6 +25,7 @@ import { startMorningScheduler } from './src/utils/morningScheduler.js';
 import MorningMessageDatabase from './src/models/MorningMessageDatabase.js';
 import MorningMessageScraper from './src/services/MorningMessageScraper.js';
 import MorningMessageController from './src/controllers/MorningMessageController.js';
+import MovieController from './src/controllers/MovieController.js';
 
 // Bot state
 const botState = {
@@ -93,11 +94,15 @@ class WhatsAppCourseBot {
                 config,
                 this.groupManager
             );
+            this.movieController = new MovieController(mongoDb);
+            await this.movieController.init();
+
             this.commandController = new CommandController(
                 this.database,
                 botState,
                 this.groupManager,
-                this.newsController
+                this.newsController,
+                this.movieController
             );
             this.courseController = new CourseController(this.database, this.courseAPI, config, this.groupManager);
             const morningScraper = new MorningMessageScraper(this.morningDatabase);

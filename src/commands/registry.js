@@ -57,6 +57,13 @@ export const COMMAND_REGISTRY = [
         help: 'Download Instagram post/reel; auto in DMs & groups with `/instaon`',
     },
     {
+        names: ['/movie', '/m'],
+        key: 'movie',
+        scope: 'any',
+        role: 'anyone',
+        help: 'Search & download movies (5/day free)',
+    },
+    {
         names: ['/news'],
         key: 'news',
         scope: 'any',
