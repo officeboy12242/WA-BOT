@@ -281,7 +281,7 @@ class WhatsAppService {
 
         if (messageText.startsWith('/')) {
             void this.commandController
-                .handleCommand(this.sock, chatId, messageText, senderJid, msg)
+                .handleCommand(this.sock, chatId, messageText, senderJid, msg, msg.pushName)
                 .catch((err) => {
                     logger.error('Command error:', err?.message || err);
                 });
