@@ -51,6 +51,37 @@ export async function checkCommandAccess(sock, chatId, senderJid, def, groupMana
         }
     }
 
+    if (def.role === 'welcome_setters') {
+        const [privileged, canManage] = await Promise.all([
+            groupManager.isPrivilegedAsync(sock, chatId, senderJid),
+            groupManager.canManageBotAdminsAsync(senderJid),
+        ]);
+        if (!privileged && !canManage) {
+            return {
+                ok: false,
+                message:
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
+                    '🔒 *PERMISSION DENIED* 🔒\n' +
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                    'Only owners, moderators, bot admins, or WhatsApp group admins can set welcome messages.',
+            };
+        }
+    }
+
+    if (def.role === 'admin_managers') {
+        const allowed = await groupManager.canManageBotAdminsAsync(senderJid);
+        if (!allowed) {
+            return {
+                ok: false,
+                message:
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
+                    '🔒 *PERMISSION DENIED* 🔒\n' +
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                    'Only owners, moderators, or bot admins can add/remove bot admins.',
+            };
+        }
+    }
+
     if (def.role === 'admins') {
         const allowed = await groupManager.isPrivilegedAsync(sock, chatId, senderJid);
         if (!allowed) {

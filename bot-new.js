@@ -19,6 +19,7 @@ import InshortsScraper from './src/services/InshortsScraper.js';
 import WhatsAppService from './src/services/WhatsAppService.js';
 import LogManager from './src/services/LogManager.js';
 import StickerForwarder from './src/services/StickerForwarder.js';
+import ChannelStickerPoller from './src/services/ChannelStickerPoller.js';
 import { startNewsScheduler } from './src/utils/newsScheduler.js';
 import { startMorningScheduler } from './src/utils/morningScheduler.js';
 import MorningMessageDatabase from './src/models/MorningMessageDatabase.js';
@@ -42,6 +43,7 @@ class WhatsAppCourseBot {
         this.groupManager = null;
         this.courseAPI = new CourseAPI();
         this.stickerForwarder = null;
+        this.channelStickerPoller = null;
         this.commandController = null;
         this.courseController = null;
         this.newsController = null;
@@ -75,6 +77,7 @@ class WhatsAppCourseBot {
                 this.groupManager.init(),
                 this.authDatabase.init(),
             ]);
+            await this.groupManager.initChannels();
             
             // Set owner numbers from config
             this.groupManager.setOwnerNumbers(config.OWNER_NUMBERS);
@@ -109,16 +112,25 @@ class WhatsAppCourseBot {
                 this.stickerForwarder = new StickerForwarder(
                     config.STICKER_TARGET_GROUPS,
                     config.STICKER_PACK_NAME,
-                    config.STICKER_PACK_AUTHOR
+                    config.STICKER_PACK_AUTHOR,
+                    config.STICKER_SOURCE_CHANNELS
                 );
-                logger.info(`🎨 Sticker forwarding enabled for ${config.STICKER_TARGET_GROUPS.length} group(s)`);
+                this.channelStickerPoller = new ChannelStickerPoller(this.stickerForwarder);
+                const channelNote = config.STICKER_SOURCE_CHANNELS.length
+                    ? `${config.STICKER_SOURCE_CHANNELS.length} channel(s)`
+                    : 'all joined channels';
+                logger.info(
+                    `🎨 Sticker forwarding → ${config.STICKER_TARGET_GROUPS.length} group(s) | sources: groups + ${channelNote}`
+                );
             }
             
             this.whatsappService = new WhatsAppService(
                 this.commandController,
                 this.stickerForwarder,
                 this.authDatabase,
-                this.groupManager
+                this.groupManager,
+                config.STICKER_SOURCE_CHANNELS,
+                this.channelStickerPoller
             );
             
             // Connect to WhatsApp

@@ -10,8 +10,22 @@
  */
 export function extractPhoneNumber(jid) {
     if (!jid) return '';
-    // Extract number before @ symbol
-    return jid.split('@')[0];
+    // Extract number before @ symbol, also handle :0 suffix in newer WhatsApp
+    const beforeAt = jid.split('@')[0];
+    // Remove :0 or :XX device suffix if present
+    return beforeAt.split(':')[0];
+}
+
+/**
+ * Digits-only phone for DB lookups and comparisons.
+ * @param {string} value
+ * @returns {string}
+ */
+export function normalizePhoneNumber(value) {
+    if (!value) {
+        return '';
+    }
+    return String(value).replace(/\D/g, '');
 }
 
 /**

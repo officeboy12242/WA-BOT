@@ -1,97 +1,136 @@
 /**
  * Sticker Forwarder Service
- * Forwards stickers from any group to specified target groups
+ * Forwards stickers from groups and joined channels to target groups.
  */
 
-import { downloadContentFromMessage } from '@whiskeysockets/baileys';
 import { Sticker } from 'wa-sticker-formatter';
 import { logger } from '../utils/logger.js';
+import { downloadStickerBuffer } from '../utils/stickerDownload.js';
+import { extractStickerFromMessage, isNewsletterChat } from '../utils/stickerExtract.js';
 
 class StickerForwarder {
-    constructor(targetGroups, packName, packAuthor) {
+    /**
+     * @param {string[]} targetGroups
+     * @param {string} packName
+     * @param {string} packAuthor
+     * @param {string[]} [sourceChannels] empty = all joined @newsletter channels
+     */
+    constructor(targetGroups, packName, packAuthor, sourceChannels = []) {
         this.targetGroups = targetGroups || [];
+        this.sourceChannels = sourceChannels || [];
+        this.resolvedChannelNames = new Map();
         this.packName = packName || 'Course Bot 🤖';
         this.packAuthor = packAuthor;
-        
-        // Statistics
+
         this.countSent = 0;
         this.countReceived = 0;
         this.countErrors = 0;
         this.countDuplicates = 0;
-        
-        // Track recent stickers with timestamp to prevent duplicate forwards within 5 seconds
-        this.recentStickers = new Map(); // Map<checksum, timestamp>
+        this.countFromChannels = 0;
+
+        this.recentStickers = new Map();
     }
 
-    async forwardSticker(sock, stickerMessage, fromGroup) {
+    setSourceChannels(jids, nameByJid = new Map()) {
+        this.sourceChannels = jids || [];
+        this.resolvedChannelNames = nameByJid;
+    }
+
+    shouldForwardFrom(chatId) {
+        if (!chatId || this.targetGroups.includes(chatId)) {
+            return false;
+        }
+
+        if (isNewsletterChat(chatId)) {
+            if (!this.sourceChannels.length) {
+                return true;
+            }
+            return this.sourceChannels.includes(chatId);
+        }
+
+        if (chatId.endsWith('@g.us')) {
+            return true;
+        }
+
+        return false;
+    }
+
+    async forwardSticker(sock, waMessage, fromChat) {
         try {
-            // Don't forward stickers from target groups (avoid loop)
-            if (this.targetGroups.includes(fromGroup)) {
-                logger.info(`⏭️  Skipping - sticker from target group (avoiding loop)`);
+            if (!this.shouldForwardFrom(fromChat)) {
                 return false;
             }
 
-            // Get unique identifier for this message
-            const messageId = stickerMessage.fileSha256
-                ? Buffer.from(stickerMessage.fileSha256).toString('hex')
-                : null;
+            const stickerPayload = extractStickerFromMessage(waMessage?.message);
+            const messageId =
+                (stickerPayload?.fileSha256
+                    ? Buffer.from(stickerPayload.fileSha256).toString('hex')
+                    : null) || waMessage?.key?.id || null;
 
-            // Check if we already processed this exact message (prevents duplicate events)
             if (messageId && this.recentStickers.has(messageId)) {
                 this.countDuplicates++;
                 return false;
             }
 
             this.countReceived++;
+            const isChannel = isNewsletterChat(fromChat);
+            if (isChannel) {
+                this.countFromChannels++;
+                logger.info(`📥 Downloading channel sticker from ${fromChat}...`);
+            }
 
-            // Download sticker
-            const stream = await downloadContentFromMessage(stickerMessage, 'sticker');
-            const buffer = await this.streamToBuffer(stream);
+            const buffer = await downloadStickerBuffer(sock, waMessage);
 
-            // Create sticker with metadata
-            const sticker = new Sticker(buffer, {
-                pack: this.packName,
-                author: this.packAuthor,
-                type: 'default',
-                quality: 50
-            });
+            let stickerBuffer = buffer;
+            try {
+                const sticker = new Sticker(buffer, {
+                    pack: this.packName,
+                    author: this.packAuthor,
+                    type: 'default',
+                    quality: 50,
+                });
+                stickerBuffer = await sticker.toBuffer();
+            } catch (formatError) {
+                logger.warn(
+                    `Sticker re-pack failed, sending original bytes: ${formatError.message}`
+                );
+            }
 
-            const stickerBuffer = await sticker.toBuffer();
-
-            // Forward to all target groups
-            let successCount = 0;
-            for (const targetGroup of this.targetGroups) {
-                try {
-                    await sock.sendMessage(
+            const results = await Promise.allSettled(
+                this.targetGroups.map((targetGroup) =>
+                    sock.sendMessage(
                         targetGroup,
                         { sticker: stickerBuffer },
                         {
-                            ephemeralExpiration: 86400, // 1 day
-                            mediaUploadTimeoutMs: 60000 // 1 minute timeout
+                            ephemeralExpiration: 86400,
+                            mediaUploadTimeoutMs: 60000,
                         }
-                    );
-                    successCount++;
-                } catch (err) {
-                    logger.error(`❌ Failed to send to ${targetGroup}: ${err.message}`);
+                    )
+                )
+            );
+
+            const successCount = results.filter((r) => r.status === 'fulfilled').length;
+            for (const result of results) {
+                if (result.status === 'rejected') {
+                    logger.error(`❌ Failed to send sticker: ${result.reason?.message || result.reason}`);
                 }
             }
 
             if (successCount > 0) {
                 this.countSent++;
-                // Mark this message as processed
                 if (messageId) {
                     this.recentStickers.set(messageId, Date.now());
-                    
-                    // Clean up old entries (keep only last 100)
                     if (this.recentStickers.size > 100) {
                         const firstKey = this.recentStickers.keys().next().value;
                         this.recentStickers.delete(firstKey);
                     }
                 }
-                
+
+                const sourceLabel = isNewsletterChat(fromChat) ? 'channel' : 'group';
                 logger.info(
-                    `✅ Sticker forwarded to ${successCount}/${this.targetGroups.length} groups | ` +
-                    `Sent: ${this.countSent}, In: ${this.countReceived}, Err: ${this.countErrors}, Dup: ${this.countDuplicates}`
+                    `✅ Sticker from ${sourceLabel} ${fromChat} → ${successCount}/${this.targetGroups.length} groups | ` +
+                        `Sent: ${this.countSent}, In: ${this.countReceived}, Channels: ${this.countFromChannels}, ` +
+                        `Err: ${this.countErrors}, Dup: ${this.countDuplicates}`
                 );
                 return true;
             }
@@ -104,26 +143,20 @@ class StickerForwarder {
         }
     }
 
-    async streamToBuffer(stream) {
-        const chunks = [];
-        for await (const chunk of stream) {
-            chunks.push(chunk);
-        }
-        return Buffer.concat(chunks);
-    }
-
     getStats() {
         return {
             sent: this.countSent,
             received: this.countReceived,
+            fromChannels: this.countFromChannels,
             errors: this.countErrors,
-            duplicates: this.countDuplicates
+            duplicates: this.countDuplicates,
         };
     }
 
     resetStats() {
         this.countSent = 0;
         this.countReceived = 0;
+        this.countFromChannels = 0;
         this.countErrors = 0;
         this.countDuplicates = 0;
         logger.info('📊 Sticker stats reset');

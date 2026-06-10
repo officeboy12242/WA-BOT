@@ -3,11 +3,10 @@
  * Handles WhatsApp connection and event management
  */
 
-import makeWASocket, { 
-    DisconnectReason, 
+import makeWASocket, {
+    DisconnectReason,
     fetchLatestBaileysVersion,
     makeCacheableSignalKeyStore,
-    normalizeMessageContent
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
@@ -16,6 +15,9 @@ import { logger } from '../utils/logger.js';
 import { useDatabaseAuthState } from '../utils/databaseAuthState.js';
 import { extractInstagramUrl } from '../utils/instagramUrl.js';
 import { getMessageSenderJid, getTextForUrlScan, getTextFromWAMessage } from '../utils/waMessage.js';
+import { resolveChannelSourceEntries } from '../utils/channelResolve.js';
+import { extractStickerFromMessage, isNewsletterChat } from '../utils/stickerExtract.js';
+
 
 /** Non-group chats where auto Instagram download is allowed (includes @lid privacy chats). */
 function shouldAutoDetectInstaLink(chatId) {
@@ -35,13 +37,22 @@ function shouldAutoDetectInstaLink(chatId) {
 }
 
 class WhatsAppService {
-    constructor(commandController, stickerForwarder = null, authDatabase, groupManager = null) {
+    constructor(
+        commandController,
+        stickerForwarder = null,
+        authDatabase,
+        groupManager = null,
+        stickerSourceChannelEntries = [],
+        channelStickerPoller = null
+    ) {
         this.sock = null;
         this.isReady = false;
         this.commandController = commandController;
         this.stickerForwarder = stickerForwarder;
         this.authDatabase = authDatabase;
         this.groupManager = groupManager;
+        this.stickerSourceChannelEntries = stickerSourceChannelEntries;
+        this.channelStickerPoller = channelStickerPoller;
     }
 
     async connect() {
@@ -98,9 +109,10 @@ class WhatsAppService {
                 try {
                     const chats = await this.sock.groupFetchAllParticipating();
                     logger.info('\n📋 Available Groups:');
-                    Object.values(chats).forEach(chat => {
+                    Object.values(chats).forEach((chat) => {
                         logger.info(`  - ${chat.subject}: ${chat.id}`);
                     });
+                    await this.resolveStickerSourceChannels();
                 } catch (err) {
                     logger.error('Error fetching groups:', err.message);
                 }
@@ -109,6 +121,33 @@ class WhatsAppService {
 
         this.sock.ev.on('creds.update', () => {
             void saveCreds();
+        });
+
+        this.sock.ev.on('group-participants.update', (update) => {
+            void this.commandController
+                .handleGroupParticipantsUpdate(this.sock, update)
+                .catch((err) => {
+                    logger.error('Welcome message error:', err?.message || err);
+                });
+        });
+
+        this.sock.ev.on('messages.update', (updates) => {
+            if (!this.stickerForwarder) return;
+            
+            for (const update of updates) {
+                const chatId = update.key?.remoteJid;
+                const messageId = update.key?.id;
+                
+                if (!isNewsletterChat(chatId) || !update.update?.message) continue;
+                if (!extractStickerFromMessage(update.update.message)) continue;
+                if (!this.stickerForwarder.shouldForwardFrom(chatId)) continue;
+                if (this.channelStickerPoller?.isSeen(chatId, messageId)) continue;
+                
+                this.channelStickerPoller?.rememberId(chatId, messageId);
+                void this.stickerForwarder
+                    .forwardSticker(this.sock, { key: update.key, message: update.update.message }, chatId)
+                    .catch(() => {});
+            }
         });
 
         // Handle each message concurrently so one slow command does not block others.
@@ -124,54 +163,139 @@ class WhatsAppService {
         });
     }
 
+    async resolveStickerSourceChannels() {
+        if (!this.stickerForwarder) {
+            return;
+        }
+
+        const envEntries = this.stickerSourceChannelEntries;
+        const dbChannels = this.groupManager ? await this.groupManager.getStickerChannelJids() : [];
+        
+        const allJids = new Set();
+        const nameByJid = new Map();
+
+        const { jids: envJids, resolved } = await resolveChannelSourceEntries(this.sock, envEntries);
+        for (const row of resolved) {
+            allJids.add(row.jid);
+            nameByJid.set(row.jid, row.name);
+        }
+
+        for (const jid of dbChannels) {
+            allJids.add(jid);
+        }
+
+        const jids = [...allJids];
+        
+        if (!jids.length) {
+            logger.info('📢 No sticker channels configured (use /addchannel or .env)');
+            if (this.channelStickerPoller) {
+                this.channelStickerPoller.setChannels([]);
+                this.channelStickerPoller.start(this.sock);
+            }
+            return;
+        }
+
+        this.stickerForwarder.setSourceChannels(jids, nameByJid);
+
+        for (const jid of jids) {
+            if (typeof this.sock.subscribeNewsletterUpdates === 'function') {
+                try {
+                    await this.sock.subscribeNewsletterUpdates(jid);
+                } catch {}
+            }
+        }
+        
+        logger.info(`📡 Channel sticker forwarding active (${jids.length} channel(s))`);
+
+        if (this.channelStickerPoller) {
+            this.channelStickerPoller.setChannels(jids);
+            this.channelStickerPoller.start(this.sock);
+        }
+    }
+
     async processIncomingMessage(msg) {
-        if (!msg?.message || msg.key.fromMe) {
+        if (!msg?.message) {
             return;
         }
 
         const chatId = msg.key.remoteJid;
-        const senderJid = getMessageSenderJid(msg.key);
+        const messageId = msg.key?.id;
         if (!chatId) {
             return;
         }
-        if (chatId.endsWith('@g.us') && !senderJid) {
-            logger.warn('Group message with no sender participant; ignoring');
+
+        const isChannel = isNewsletterChat(chatId);
+        const stickerPayload = extractStickerFromMessage(msg.message);
+
+        if (stickerPayload && this.stickerForwarder) {
+            const allowChannelSticker = isChannel && this.stickerForwarder.shouldForwardFrom(chatId);
+            const allowGroupSticker = !msg.key.fromMe && !isChannel;
+
+            if (allowChannelSticker) {
+                if (this.channelStickerPoller?.isSeen(chatId, messageId)) {
+                    return;
+                }
+                
+                const hasKey = stickerPayload.mediaKey && 
+                    (Buffer.isBuffer(stickerPayload.mediaKey) ? stickerPayload.mediaKey.length > 0 : 
+                     stickerPayload.mediaKey instanceof Uint8Array ? stickerPayload.mediaKey.length > 0 : true);
+                
+                if (!hasKey) {
+                    this.channelStickerPoller?.rememberId(chatId, messageId);
+                    void this.stickerForwarder
+                        .forwardSticker(this.sock, msg, chatId)
+                        .catch((err) => {
+                            logger.warn(`Channel sticker failed: ${err?.message || err}`);
+                        });
+                    return;
+                }
+                
+                this.channelStickerPoller?.rememberId(chatId, messageId);
+                logger.info(`📡 Channel sticker received: ${chatId} (${messageId})`);
+                void this.stickerForwarder
+                    .forwardSticker(this.sock, msg, chatId)
+                    .catch((err) => {
+                        logger.error('Channel sticker forward error:', err?.message || err);
+                    });
+            } else if (allowGroupSticker) {
+                void this.stickerForwarder
+                    .forwardSticker(this.sock, msg, chatId)
+                    .catch((err) => {
+                        logger.error('Sticker forward error:', err?.message || err);
+                    });
+            }
+        }
+
+        if (msg.key.fromMe || isChannel) {
             return;
         }
 
-        const unwrapped = normalizeMessageContent(msg.message) || msg.message;
-        if (unwrapped.stickerMessage && this.stickerForwarder) {
-            void this.stickerForwarder
-                .forwardSticker(this.sock, unwrapped.stickerMessage, chatId)
-                .catch((err) => {
-                    logger.error('Sticker forward error:', err?.message || err);
-                });
+        const senderJid = getMessageSenderJid(msg.key);
+        if (chatId.endsWith('@g.us') && !senderJid) {
+            logger.warn('Group message with no sender participant; ignoring');
+            return;
         }
 
         const messageText = getTextFromWAMessage(msg.message).trim();
         const textForUrls = getTextForUrlScan(msg.message).trim();
 
         if (messageText.startsWith('/')) {
-            await this.commandController.handleCommand(
-                this.sock,
-                chatId,
-                messageText,
-                senderJid,
-                msg
-            );
+            void this.commandController
+                .handleCommand(this.sock, chatId, messageText, senderJid, msg)
+                .catch((err) => {
+                    logger.error('Command error:', err?.message || err);
+                });
             return;
         }
 
         if (textForUrls.length > 0) {
             const igUrl = extractInstagramUrl(textForUrls);
             if (igUrl && (await this.shouldAutoDownloadInsta(chatId))) {
-                await this.commandController.handleInsta(
-                    this.sock,
-                    chatId,
-                    [igUrl],
-                    msg,
-                    { requireCommandArgs: false }
-                );
+                void this.commandController
+                    .handleInsta(this.sock, chatId, [igUrl], msg, { requireCommandArgs: false })
+                    .catch((err) => {
+                        logger.error('Insta auto-download error:', err?.message || err);
+                    });
             }
         }
     }

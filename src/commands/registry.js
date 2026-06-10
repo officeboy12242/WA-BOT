@@ -9,11 +9,13 @@
  * role:
  *   - anyone       → any member / any DM user
  *   - staff        → owners, moderators (.env), DB admins, or WhatsApp group admins
- *   - admins       → owners, bot admins, or WhatsApp group admins in that group (auto-detected)
+ *   - admins           → owners, bot admins, or WhatsApp group admins in that group (auto-detected)
+ *   - admin_managers   → owners, moderators, or bot admins (manage /addadmin /removeadmin)
+ *   - welcome_setters  → admins or admin_managers (set group welcome messages)
  */
 
 /** @typedef {'any' | 'group_only' | 'dm_only'} ChatScope */
-/** @typedef {'anyone' | 'staff' | 'admins'} Role */
+/** @typedef {'anyone' | 'staff' | 'admins' | 'admin_managers' | 'welcome_setters' | 'owner'} Role */
 
 /**
  * @typedef {object} CommandDefinition
@@ -59,7 +61,7 @@ export const COMMAND_REGISTRY = [
         key: 'news',
         scope: 'any',
         role: 'anyone',
-        help: 'Preview latest Inshorts tech news digest',
+        help: 'Preview 10 tech news items; staff post to activated groups',
     },
     {
         names: ['/posted'],
@@ -104,11 +106,18 @@ export const COMMAND_REGISTRY = [
         help: 'Stop auto Instagram download in this group',
     },
     {
+        names: ['/setwc'],
+        key: 'setwc',
+        scope: 'group_only',
+        role: 'welcome_setters',
+        help: 'Set welcome extra line; default header auto-added',
+    },
+    {
         names: ['/groups'],
         key: 'groups',
         scope: 'any',
         role: 'admins',
-        help: 'List groups where courses are posted',
+        help: 'List courses-active & insta-auto groups with member counts',
     },
     {
         names: ['/pause'],
@@ -149,22 +158,43 @@ export const COMMAND_REGISTRY = [
         names: ['/addadmin'],
         key: 'addadmin',
         scope: 'any',
-        role: 'admins',
-        help: 'Add a bot admin by phone number',
+        role: 'admin_managers',
+        help: 'Add bot admin (phone, @tag, or reply)',
     },
     {
         names: ['/removeadmin'],
         key: 'removeadmin',
         scope: 'any',
-        role: 'admins',
-        help: 'Remove a bot admin',
+        role: 'admin_managers',
+        help: 'Remove bot admin (phone, @tag, or reply)',
     },
     {
         names: ['/admins'],
         key: 'admins',
         scope: 'any',
         role: 'admins',
-        help: 'List bot admins',
+        help: 'List bot staff + WhatsApp group admins',
+    },
+    {
+        names: ['/addchannel'],
+        key: 'addchannel',
+        scope: 'any',
+        role: 'owner',
+        help: 'Add sticker source channel (owner only)',
+    },
+    {
+        names: ['/removechannel', '/rmchannel'],
+        key: 'removechannel',
+        scope: 'any',
+        role: 'owner',
+        help: 'Remove sticker source channel (owner only)',
+    },
+    {
+        names: ['/channels'],
+        key: 'channels',
+        scope: 'any',
+        role: 'owner',
+        help: 'List sticker source channels (owner only)',
     },
 ];
 
@@ -185,13 +215,22 @@ export function findCommand(cmdFirstToken) {
 }
 
 /**
- * @param {{ isStaff?: boolean, isPrivileged?: boolean }} access
+ * @param {{ isStaff?: boolean, isPrivileged?: boolean, canManageAdmins?: boolean }} access
  * @returns {string}
  */
-export function formatHelpText({ isStaff = false, isPrivileged = false } = {}) {
+export function formatHelpText({
+    isStaff = false,
+    isPrivileged = false,
+    canManageAdmins = false,
+    canSetWelcome = false,
+    isOwner = false,
+} = {}) {
     const anyone = COMMAND_REGISTRY.filter((d) => d.role === 'anyone');
     const staffOnly = COMMAND_REGISTRY.filter((d) => d.role === 'staff');
     const adminOnly = COMMAND_REGISTRY.filter((d) => d.role === 'admins');
+    const adminManagers = COMMAND_REGISTRY.filter((d) => d.role === 'admin_managers');
+    const welcomeSetters = COMMAND_REGISTRY.filter((d) => d.role === 'welcome_setters');
+    const ownerOnly = COMMAND_REGISTRY.filter((d) => d.role === 'owner');
 
     let out = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
     out += '🤖 *BOT COMMANDS* 🤖\n';
@@ -211,9 +250,33 @@ export function formatHelpText({ isStaff = false, isPrivileged = false } = {}) {
         }
     }
 
+    if (canManageAdmins) {
+        out += '\n👑 *Admin managers* (owners, moderators, bot admins)\n\n';
+        for (const def of adminManagers) {
+            const label = def.names.join(' / ');
+            out += `• ${label} — ${def.help}\n`;
+        }
+    }
+
+    if (canSetWelcome) {
+        out += '\n👋 *Welcome messages* (admins & admin managers)\n\n';
+        for (const def of welcomeSetters) {
+            const label = def.names.join(' / ');
+            out += `• ${label} — ${def.help}\n`;
+        }
+    }
+
     if (isPrivileged) {
         out += '\n🔧 *Admins* (owners, bot admins, or group admins in this chat)\n\n';
         for (const def of adminOnly) {
+            const label = def.names.join(' / ');
+            out += `• ${label} — ${def.help}\n`;
+        }
+    }
+
+    if (isOwner) {
+        out += '\n👑 *Owner only*\n\n';
+        for (const def of ownerOnly) {
             const label = def.names.join(' / ');
             out += `• ${label} — ${def.help}\n`;
         }

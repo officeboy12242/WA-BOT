@@ -4,7 +4,13 @@
  */
 
 import { logger } from '../utils/logger.js';
-import { formatNewsPost } from '../utils/newsFormatter.js';
+import { formatNewsArticleMessages } from '../utils/newsFormatter.js';
+
+const MESSAGE_DELAY_MS = 400;
+
+function delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 class NewsController {
     constructor(newsDatabase, scraper, config, groupManager) {
@@ -14,10 +20,48 @@ class NewsController {
         this.groupManager = groupManager;
     }
 
-    async postNewsToGroup(sock, text, groupId, articleTitles) {
+    async fetchFreshArticles() {
+        await this.scraper.scrapeAndQueue();
+        return this.scraper.getFreshArticlesForPosting(this.config.NEWS_MIN_ARTICLES);
+    }
+
+    async sendArticleMessages(sock, chatId, articles, { markPosted = false } = {}) {
+        const messages = formatNewsArticleMessages(articles, this.config.NEWS_MIN_ARTICLES);
+        if (!messages.length) {
+            return 0;
+        }
+
+        for (let i = 0; i < messages.length; i++) {
+            await sock.sendMessage(chatId, { text: messages[i] });
+            if (i < messages.length - 1) {
+                await delay(MESSAGE_DELAY_MS);
+            }
+        }
+
+        if (markPosted) {
+            await this.newsDatabase.markNewsPosted(
+                articles.map((a) => a.title),
+                chatId
+            );
+        }
+
+        return messages.length;
+    }
+
+    async postNewsToGroup(sock, articles, groupId) {
+        const unposted = [];
+        for (const article of articles) {
+            if (!(await this.newsDatabase.isNewsPosted(article.title, groupId))) {
+                unposted.push(article);
+            }
+        }
+
+        if (!unposted.length) {
+            return false;
+        }
+
         try {
-            await sock.sendMessage(groupId, { text });
-            await this.newsDatabase.markNewsPosted(articleTitles, groupId);
+            await this.sendArticleMessages(sock, groupId, unposted, { markPosted: true });
             return true;
         } catch (error) {
             logger.error(`Error posting news to ${groupId}: ${error.message}`);
@@ -28,50 +72,41 @@ class NewsController {
     async postNews(sock, articles) {
         if (!sock) {
             logger.error('WhatsApp socket not available for news');
-            return;
+            return { posted: 0, groups: 0 };
         }
 
         if (!articles.length) {
-            return;
+            return { posted: 0, groups: 0 };
         }
 
         const activeGroups = await this.groupManager.getActiveGroups();
         if (!activeGroups.length) {
             logger.warn('No active groups for tech news. Use /activate in a group.');
-            return;
+            return { posted: 0, groups: 0 };
         }
 
-        logger.info(`Posting tech news (${articles.length} articles) to ${activeGroups.length} group(s)...`);
+        logger.info(
+            `Posting tech news (${articles.length} articles, up to ${this.config.NEWS_MIN_ARTICLES} messages) to ${activeGroups.length} group(s)...`
+        );
 
-        let successCount = 0;
-        for (const group of activeGroups) {
-            const unposted = [];
-            for (const article of articles) {
-                if (!(await this.newsDatabase.isNewsPosted(article.title, group.group_id))) {
-                    unposted.push(article);
+        const results = await Promise.all(
+            activeGroups.map(async (group) => {
+                const ok = await this.postNewsToGroup(sock, articles, group.group_id);
+                if (ok) {
+                    logger.info(`Tech news posted to ${group.group_name}`);
+                } else {
+                    logger.info(`News skipped or already posted to ${group.group_name}`);
                 }
-            }
+                return ok;
+            })
+        );
 
-            if (!unposted.length) {
-                logger.info(`News already posted to ${group.group_name}`);
-                continue;
-            }
-
-            const groupText = formatNewsPost(unposted);
-            if (!groupText) {
-                continue;
-            }
-            const groupTitles = unposted.map((a) => a.title);
-            const ok = await this.postNewsToGroup(sock, groupText, group.group_id, groupTitles);
-            if (ok) {
-                successCount++;
-            }
-            await new Promise((resolve) => setTimeout(resolve, 1500));
-        }
-
+        const successCount = results.filter(Boolean).length;
         if (successCount > 0) {
             logger.info(`Tech news posted to ${successCount} group(s)`);
         }
+
+        return { posted: successCount, groups: activeGroups.length };
     }
 
     async checkAndPostNews(sock, botState) {
@@ -89,10 +124,7 @@ class NewsController {
         botState.lastNewsCheckTime = Date.now();
 
         try {
-            await this.scraper.scrapeAndQueue();
-            const articles = await this.scraper.getFreshArticlesForPosting(
-                this.config.NEWS_MIN_ARTICLES
-            );
+            const articles = await this.fetchFreshArticles();
 
             if (articles.length) {
                 logger.info(`${articles.length} tech article(s) to post.`);
@@ -109,7 +141,6 @@ class NewsController {
         } catch (error) {
             logger.error(`Error in news check: ${error.message}`);
         }
-
     }
 
     async scrapeAndQueueOnly() {
@@ -124,21 +155,15 @@ class NewsController {
         }
     }
 
-    async previewNews(sock, chatId) {
-        const articles = await this.scraper.getFreshArticlesForPosting(
-            this.config.NEWS_MIN_ARTICLES
-        );
+    async previewNews(sock, chatId, articles) {
         if (!articles.length) {
             await sock.sendMessage(chatId, {
                 text: '📭 No fresh tech news right now. Try again later.',
             });
-            return;
+            return 0;
         }
 
-        const text = formatNewsPost(articles);
-        if (text) {
-            await sock.sendMessage(chatId, { text });
-        }
+        return this.sendArticleMessages(sock, chatId, articles, { markPosted: false });
     }
 }
 

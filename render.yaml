@@ -19,6 +19,8 @@ services:
         value: telegramUdemy
       - key: STICKER_TARGET_GROUPS
         sync: false
+      - key: STICKER_SOURCE_CHANNELS
+        sync: false
       - key: STICKER_PACK_NAME
         value: Created By Sassy Bot 🤖
       - key: STICKER_PACK_AUTHOR
