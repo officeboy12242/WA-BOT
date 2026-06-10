@@ -26,6 +26,7 @@ import MorningMessageDatabase from './src/models/MorningMessageDatabase.js';
 import MorningMessageScraper from './src/services/MorningMessageScraper.js';
 import MorningMessageController from './src/controllers/MorningMessageController.js';
 import MovieController from './src/controllers/MovieController.js';
+import UserManager from './src/models/UserManager.js';
 
 // Bot state
 const botState = {
@@ -42,6 +43,7 @@ class WhatsAppCourseBot {
         this.database = null;
         this.authDatabase = null;
         this.groupManager = null;
+        this.userManager = null;
         this.courseAPI = new CourseAPI();
         this.stickerForwarder = null;
         this.channelStickerPoller = null;
@@ -70,6 +72,7 @@ class WhatsAppCourseBot {
             this.newsDatabase = new NewsDatabase(mongoDb);
             this.morningDatabase = new MorningMessageDatabase(mongoDb);
             this.groupManager = new GroupManager(mongoDb);
+            this.userManager = new UserManager(mongoDb);
             this.authDatabase = new AuthDatabase(mongoDb);
             await Promise.all([
                 this.database.init(),
@@ -104,7 +107,8 @@ class WhatsAppCourseBot {
                 botState,
                 this.groupManager,
                 this.newsController,
-                this.movieController
+                this.movieController,
+                this.userManager
             );
             this.courseController = new CourseController(this.database, this.courseAPI, config, this.groupManager);
             const morningScraper = new MorningMessageScraper(this.morningDatabase);
@@ -137,7 +141,8 @@ class WhatsAppCourseBot {
                 this.authDatabase,
                 this.groupManager,
                 config.STICKER_SOURCE_CHANNELS,
-                this.channelStickerPoller
+                this.channelStickerPoller,
+                this.userManager
             );
             
             // Connect to WhatsApp

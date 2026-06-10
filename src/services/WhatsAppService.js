@@ -43,7 +43,8 @@ class WhatsAppService {
         authDatabase,
         groupManager = null,
         stickerSourceChannelEntries = [],
-        channelStickerPoller = null
+        channelStickerPoller = null,
+        userManager = null
     ) {
         this.sock = null;
         this.isReady = false;
@@ -53,6 +54,7 @@ class WhatsAppService {
         this.groupManager = groupManager;
         this.stickerSourceChannelEntries = stickerSourceChannelEntries;
         this.channelStickerPoller = channelStickerPoller;
+        this.userManager = userManager;
     }
 
     async connect() {
@@ -274,6 +276,11 @@ class WhatsAppService {
         if (chatId.endsWith('@g.us') && !senderJid) {
             logger.warn('Group message with no sender participant; ignoring');
             return;
+        }
+
+        // Store user information (JID -> pushName mapping) for later retrieval
+        if (senderJid && msg.pushName && this.userManager) {
+            void this.userManager.updateUser(senderJid, msg.pushName).catch(() => {});
         }
 
         const messageText = getTextFromWAMessage(msg.message).trim();

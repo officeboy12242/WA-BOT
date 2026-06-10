@@ -121,6 +121,21 @@ export function getQuotedParticipantJid(waMessage) {
 }
 
 /**
+ * Get pushName from quoted message
+ * @param {import('@whiskeysockets/baileys').proto.IWebMessageInfo | null | undefined} waMessage
+ * @returns {string}
+ */
+export function getQuotedPushName(waMessage) {
+    const ctx = getContextInfo(waMessage?.message);
+    // Try different possible locations for the quoted sender's name
+    return ctx?.pushName || 
+           ctx?.quotedMessage?.pushName || 
+           ctx?.pushname || 
+           ctx?.quotedMessage?.pushname ||
+           '';
+}
+
+/**
  * @param {import('@whiskeysockets/baileys').proto.IWebMessageInfo | null | undefined} waMessage
  * @returns {string[]}
  */

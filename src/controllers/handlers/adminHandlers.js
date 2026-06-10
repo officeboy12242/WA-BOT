@@ -1,10 +1,10 @@
 /**
- * Admin handlers: addadmin, removeadmin, admins
+ * Admin handlers: addadmin, removeadmin, admins, increaselimit, checklimit
  */
 
 import { logger } from '../../utils/logger.js';
 import { extractPhoneNumber } from '../../utils/permissions.js';
-import { resolveTargetPhone } from '../../utils/waMessage.js';
+import { resolveTargetPhone, getQuotedParticipantJid } from '../../utils/waMessage.js';
 
 export async function handleAddAdmin(sock, chatId, senderJid, args, waMessage, { groupManager }) {
     try {
@@ -152,5 +152,209 @@ export async function handleAdmins(sock, chatId, senderJid, { groupManager }) {
         logger.info(`👥 Staff list sent to ${senderPhone}`);
     } catch (error) {
         logger.error(`Error sending admin list: ${error.message}`);
+    }
+}
+
+export async function handleIncreaseLimit(sock, chatId, senderJid, args, waMessage, { movieController, userManager }) {
+    try {
+        if (!movieController) {
+            await sock.sendMessage(chatId, { text: '⚠️ Movie controller not available.' });
+            return;
+        }
+
+        const amount = parseInt(args[0], 10);
+        if (!amount || amount < 1 || amount > 100) {
+            await sock.sendMessage(chatId, {
+                text:
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
+                    '❌ *INVALID FORMAT* ❌\n' +
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                    '*Usage:*\n' +
+                    '• Reply: `/increaselimit 5`\n' +
+                    '• With days: `/increaselimit 5 3d`\n' +
+                    '• Tag: `/increaselimit 5 @user`\n' +
+                    '• Phone: `/increaselimit 5 919876543210`\n\n' +
+                    '💡 _Amount: 1-100 | Days: 1-30 (default: 1)_',
+            });
+            return;
+        }
+
+        // Parse days parameter (e.g., "3d", "7d")
+        let days = 1;
+        let remainingArgs = args.slice(1);
+        
+        if (remainingArgs.length > 0) {
+            const dayMatch = remainingArgs[0].match(/^(\d+)d$/i);
+            if (dayMatch) {
+                days = Math.max(1, Math.min(30, parseInt(dayMatch[1], 10)));
+                remainingArgs = remainingArgs.slice(1);
+            }
+        }
+
+        const targetPhone = await resolveTargetPhone(sock, chatId, remainingArgs, waMessage, senderJid);
+
+        if (!targetPhone) {
+            await sock.sendMessage(chatId, {
+                text:
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
+                    '❌ *USER NOT FOUND* ❌\n' +
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                    'Reply to a message or provide @mention/phone number.',
+            });
+            return;
+        }
+
+        // Get target user's name from stored user data
+        let targetName = targetPhone;
+        
+        if (userManager) {
+            try {
+                // Get the quoted JID to look up user by their actual JID
+                const quotedJid = getQuotedParticipantJid(waMessage);
+                
+                // Try multiple possible JIDs (LID and standard formats)
+                const possibleJids = [];
+                if (quotedJid) {
+                    possibleJids.push(quotedJid);
+                }
+                // Also try constructing JIDs from phone number
+                possibleJids.push(`${targetPhone}@s.whatsapp.net`);
+                possibleJids.push(`${targetPhone}@lid`);
+                
+                // Try to find stored username for any of these JIDs
+                const storedName = await userManager.resolveUserName(possibleJids);
+                if (storedName) {
+                    targetName = storedName;
+                    logger.info(`✓ Retrieved stored name for ${targetPhone}: ${storedName}`);
+                }
+            } catch (err) {
+                logger.warn(`Failed to get stored user name: ${err.message}`);
+            }
+        }
+
+        const result = await movieController.adjustSearchCount(targetPhone, amount, days);
+        const senderPhone = extractPhoneNumber(senderJid);
+
+        const duration = days === 1 ? '_Resets at midnight IST_' : `_Valid for ${days} day(s)_`;
+
+        await sock.sendMessage(chatId, {
+            text:
+                '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
+                '✅ *LIMIT INCREASED* ✅\n' +
+                '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                `👤 *User:* ${targetName}\n` +
+                `📱 ${targetPhone}\n` +
+                `➕ *Added:* ${amount} search(es)\n` +
+                `📅 *Duration:* ${days} day(s)\n\n` +
+                `📊 *Before:* ${result.previousRemaining}/5 remaining\n` +
+                `📊 *After:* ${result.newRemaining}/5 remaining\n\n` +
+                duration,
+        });
+
+        logger.info(`🎬 Limit increased: ${targetPhone} +${amount} for ${days}d by ${senderPhone}`);
+    } catch (error) {
+        logger.error(`Error increasing limit: ${error.message}`);
+        await sock.sendMessage(chatId, { text: '⚠️ Failed to increase limit. Try again.' });
+    }
+}
+
+export async function handleCheckLimit(sock, chatId, senderJid, args, waMessage, { movieController, groupManager, userManager }) {
+    try {
+        if (!movieController) {
+            await sock.sendMessage(chatId, { text: '⚠️ Movie controller not available.' });
+            return;
+        }
+
+        const senderPhone = extractPhoneNumber(senderJid);
+        const isAdmin = await groupManager.isPrivilegedAsync(sock, chatId, senderJid);
+
+        // Try to get target user (admins can check others, users check self)
+        let targetPhone = senderPhone;
+        let targetName = 'You';
+        let checkingSelf = true;
+
+        // If admin and has args/mentions/reply, check that user
+        if (isAdmin && (args.length > 0 || waMessage)) {
+            const resolvedPhone = await resolveTargetPhone(sock, chatId, args, waMessage, senderJid);
+            if (resolvedPhone && resolvedPhone !== senderPhone) {
+                targetPhone = resolvedPhone;
+                checkingSelf = false;
+
+                // Get target user's name from stored user data
+                if (userManager) {
+                    try {
+                        // Get the quoted JID to look up user by their actual JID
+                        const quotedJid = getQuotedParticipantJid(waMessage);
+                        
+                        // Try multiple possible JIDs (LID and standard formats)
+                        const possibleJids = [];
+                        if (quotedJid) {
+                            possibleJids.push(quotedJid);
+                        }
+                        // Also try constructing JIDs from phone number
+                        possibleJids.push(`${targetPhone}@s.whatsapp.net`);
+                        possibleJids.push(`${targetPhone}@lid`);
+                        
+                        // Try to find stored username for any of these JIDs
+                        const storedName = await userManager.resolveUserName(possibleJids);
+                        if (storedName) {
+                            targetName = storedName;
+                            logger.info(`✓ Retrieved stored name for ${targetPhone}: ${storedName}`);
+                        } else {
+                            targetName = targetPhone;
+                        }
+                    } catch (err) {
+                        logger.warn(`Failed to get stored user name: ${err.message}`);
+                        targetName = targetPhone;
+                    }
+                } else {
+                    targetName = targetPhone;
+                }
+            }
+        }
+
+        // Get limit info
+        const isUnlimited = await movieController.isUnlimitedUser(targetPhone);
+        const used = isUnlimited ? 0 : await movieController.getUserSearchCount(targetPhone);
+        const remaining = Math.max(0, 5 - used);
+
+        let statusIcon = '✅';
+        let statusText = 'Active';
+        if (!isUnlimited && used >= 5) {
+            statusIcon = '⛔';
+            statusText = 'Limit Reached';
+        } else if (!isUnlimited && remaining <= 2) {
+            statusIcon = '⚠️';
+            statusText = 'Running Low';
+        }
+
+        let text = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        text += `${statusIcon} *MOVIE SEARCH LIMIT* ${statusIcon}\n`;
+        text += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+
+        if (!checkingSelf) {
+            text += `👤 *User:* ${targetName}\n`;
+            text += `📱 ${targetPhone}\n\n`;
+        }
+
+        if (isUnlimited) {
+            text += '⭐ *Status:* Unlimited Access\n';
+            text += '🎬 *Type:* Premium/Staff\n\n';
+            text += '💡 _No daily limits apply_';
+        } else {
+            text += `📊 *Status:* ${statusText}\n`;
+            text += `🔍 *Used Today:* ${used}/5\n`;
+            text += `✨ *Remaining:* ${remaining}/5\n\n`;
+            text += '⏰ _Resets at midnight IST_\n';
+            text += '⭐ _Go Premium for unlimited searches_';
+        }
+
+        text += '\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━';
+
+        await sock.sendMessage(chatId, { text });
+        logger.info(`🎬 Limit checked: ${targetPhone} by ${senderPhone}`);
+    } catch (error) {
+        logger.error(`Error checking limit: ${error.message}`);
+        await sock.sendMessage(chatId, { text: '⚠️ Failed to check limit. Try again.' });
     }
 }

@@ -607,11 +607,46 @@ class MovieController {
         );
     }
 
+    async adjustSearchCount(userId, amount, days = 1) {
+        const today = this.getTodayDateStr();
+        const currentCount = await this.getUserSearchCount(userId);
+        const newCount = Math.max(0, currentCount - amount);
+        
+        // Update today's count
+        await this.searchLimits.updateOne(
+            { user_id: userId, date: today },
+            { $set: { count: newCount }, $setOnInsert: { user_id: userId, date: today } },
+            { upsert: true }
+        );
+        
+        // Pre-set future days with negative count (extra searches)
+        for (let i = 1; i < days; i++) {
+            const futureDate = new Date(today + 'T00:00:00+05:30');
+            futureDate.setDate(futureDate.getDate() + i);
+            const futureDateStr = futureDate.toISOString().split('T')[0];
+            
+            await this.searchLimits.updateOne(
+                { user_id: userId, date: futureDateStr },
+                { $set: { count: -amount }, $setOnInsert: { user_id: userId, date: futureDateStr } },
+                { upsert: true }
+            );
+        }
+        
+        return {
+            previousUsed: currentCount,
+            newUsed: newCount,
+            previousRemaining: Math.max(0, DAILY_LIMIT - currentCount),
+            newRemaining: Math.max(0, DAILY_LIMIT - newCount),
+            days,
+        };
+    }
+
     async isUnlimitedUser(phoneNumber) {
         if (!this.groupManager) return false;
         if (this.groupManager.isOwner(phoneNumber)) return true;
         if (this.groupManager.isModerator(phoneNumber)) return true;
         if (await this.groupManager.isDynamicModerator(phoneNumber)) return true;
+        if (await this.groupManager.isBotAdmin(phoneNumber)) return true;
         if (await this.groupManager.isPremiumUser(phoneNumber)) return true;
         return false;
     }
@@ -649,6 +684,24 @@ class MovieController {
         this.scheduledDeletes.push(timer);
     }
 
+    async _resolvePhoneNumber(sock, chatId, senderJid) {
+        const direct = extractPhoneNumber(senderJid);
+        if (direct && !senderJid?.includes('@lid')) return direct;
+
+        if (senderJid?.includes('@lid') && chatId?.endsWith('@g.us')) {
+            try {
+                const meta = await sock.groupMetadata(chatId);
+                for (const p of meta.participants || []) {
+                    if (p.lid === senderJid || p.id === senderJid) {
+                        const real = extractPhoneNumber(p.id);
+                        if (real) return real;
+                    }
+                }
+            } catch {}
+        }
+        return direct || senderJid;
+    }
+
     async handleMovieSearch(sock, chatId, senderJid, args, pushName = '') {
         const query = args.join(' ').trim();
         if (!query) {
@@ -668,7 +721,7 @@ class MovieController {
             return;
         }
 
-        const userId = extractPhoneNumber(senderJid) || senderJid;
+        const userId = await this._resolvePhoneNumber(sock, chatId, senderJid);
         const unlimited = await this.isUnlimitedUser(userId);
         const currentCount = unlimited ? 0 : await this.getUserSearchCount(userId);
 
