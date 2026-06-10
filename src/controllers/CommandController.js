@@ -113,7 +113,7 @@ class CommandController {
         await _handleInsta(sock, chatId, args, quotedMessage, options);
     }
 
-    async handleCommand(sock, chatId, command, senderJid, quotedMessage = null) {
+    async handleCommand(sock, chatId, command, senderJid, quotedMessage = null, pushName = '') {
         const parts = command.trim().split(/\s+/);
         const cmd = parts[0].toLowerCase();
         const args = parts.slice(1);
@@ -176,7 +176,7 @@ class CommandController {
                 if (!this.movieController) {
                     await sock.sendMessage(chatId, { text: '⚠️ Movie search is not available.' });
                 } else {
-                    await this.movieController.handleMovieSearch(sock, chatId, senderJid, args);
+                    await this.movieController.handleMovieSearch(sock, chatId, senderJid, args, pushName);
                 }
                 break;
 

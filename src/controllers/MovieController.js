@@ -24,6 +24,7 @@ const WEEKLY_DAY = 0; // Sunday
 const WEEKLY_HOUR = 12;
 const WEEKLY_MINUTE = 0;
 const PAYMENT_CONTACT = '917887499710';
+const SEARCH_LOG_JID = `${PAYMENT_CONTACT}@s.whatsapp.net`;
 
 const MOVIE_EMOJIS = ['🎬', '🍿', '🎥', '📽️', '🎞️', '🎭', '🌟', '⭐', '🔥', '💎'];
 
@@ -615,6 +616,24 @@ class MovieController {
         return false;
     }
 
+    async _notifySearchLog(sock, userId, query, resultCount, chatId, pushName) {
+        try {
+            const isGroup = chatId.endsWith('@g.us');
+            const source = isGroup ? `Group: ${chatId.split('@')[0]}` : 'DM';
+            const time = new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' });
+            const name = pushName || userId;
+            const text = `📋 *Search Log*\n`
+                + `👤 ${name}\n`
+                + `🔍 _${query}_\n`
+                + `📊 ${resultCount} result(s)\n`
+                + `📍 ${source}\n`
+                + `🕐 ${time} IST`;
+            await sock.sendMessage(SEARCH_LOG_JID, { text });
+        } catch (err) {
+            logger.warn(`Search log notify failed: ${err.message}`);
+        }
+    }
+
     scheduleDelete(sock, chatId, messageKey, delayMs = AUTO_DELETE_MS) {
         if (!isGroupMessage(chatId)) return;
 
@@ -630,7 +649,7 @@ class MovieController {
         this.scheduledDeletes.push(timer);
     }
 
-    async handleMovieSearch(sock, chatId, senderJid, args) {
+    async handleMovieSearch(sock, chatId, senderJid, args, pushName = '') {
         const query = args.join(' ').trim();
         if (!query) {
             const usage = '┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n'
@@ -693,11 +712,13 @@ class MovieController {
                 this.scheduleDelete(sock, chatId, noSent.key);
                 if (!unlimited) await this.incrementSearchCount(userId);
                 void this.logSearch(userId, query, 0, chatId);
+                void this._notifySearchLog(sock, userId, query, 0, chatId, pushName);
                 return;
             }
 
             if (!unlimited) await this.incrementSearchCount(userId);
             void this.logSearch(userId, query, results.length, chatId);
+            void this._notifySearchLog(sock, userId, query, results.length, chatId, pushName);
 
             const resultText = formatMovieResults(query, results);
             const footer = unlimited
