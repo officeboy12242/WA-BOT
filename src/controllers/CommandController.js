@@ -1339,6 +1339,118 @@ class CommandController {
         }
     }
 
+    async handleAddPremium(sock, chatId, senderJid, args, quotedMessage) {
+        const isOwner = await this.isOwnerFromJid(sock, chatId, senderJid);
+        if (!isOwner) {
+            await sock.sendMessage(chatId, { text: '❌ Only owners can manage premium users.' });
+            return;
+        }
+        const targetPhone = await resolveTargetPhone(sock, chatId, args, quotedMessage, senderJid);
+        if (!targetPhone) {
+            await sock.sendMessage(chatId, { text: '❌ Specify a phone number, @tag someone, or reply to their message.\n\n_Example: `/addpremium 919876543210`_' });
+            return;
+        }
+        const result = await this.groupManager.addPremiumUser(targetPhone, extractPhoneNumber(senderJid));
+        if (result.ok) {
+            await sock.sendMessage(chatId, { text: `⭐ *Premium granted!*\n\n📱 ${result.phone_number}\n🎬 Unlimited movie searches activated!` });
+        } else if (result.reason === 'already') {
+            await sock.sendMessage(chatId, { text: `ℹ️ ${result.phone_number} is already a premium user.` });
+        } else {
+            await sock.sendMessage(chatId, { text: `❌ Invalid phone number.` });
+        }
+    }
+
+    async handleRemovePremium(sock, chatId, senderJid, args, quotedMessage) {
+        const isOwner = await this.isOwnerFromJid(sock, chatId, senderJid);
+        if (!isOwner) {
+            await sock.sendMessage(chatId, { text: '❌ Only owners can manage premium users.' });
+            return;
+        }
+        const targetPhone = await resolveTargetPhone(sock, chatId, args, quotedMessage, senderJid);
+        if (!targetPhone) {
+            await sock.sendMessage(chatId, { text: '❌ Specify a phone number, @tag someone, or reply to their message.\n\n_Example: `/removepremium 919876543210`_' });
+            return;
+        }
+        const result = await this.groupManager.removePremiumUser(targetPhone);
+        if (result.ok) {
+            await sock.sendMessage(chatId, { text: `⭐ *Premium revoked*\n\n📱 ${result.phone_number}\n🎬 Back to ${5} daily searches.` });
+        } else if (result.reason === 'not_found') {
+            await sock.sendMessage(chatId, { text: `ℹ️ That user is not a premium member.` });
+        } else {
+            await sock.sendMessage(chatId, { text: `❌ Invalid phone number.` });
+        }
+    }
+
+    async handleListPremium(sock, chatId, senderJid) {
+        const isOwner = await this.isOwnerFromJid(sock, chatId, senderJid);
+        if (!isOwner) {
+            await sock.sendMessage(chatId, { text: '❌ Only owners can view premium users.' });
+            return;
+        }
+        const users = await this.groupManager.getAllPremiumUsers();
+        let text = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        text += '⭐ *PREMIUM USERS*\n';
+        text += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+        if (!users.length) {
+            text += '📭 No premium users yet.\n\n_Use `/addpremium` to add one._';
+        } else {
+            text += `📊 *Total:* ${users.length}\n\n`;
+            users.forEach((u, i) => {
+                const date = u.added_at ? new Date(u.added_at).toLocaleDateString() : '';
+                text += `${i + 1}. 📱 ${u.phone_number}\n`;
+                if (date) text += `   📅 ${date}\n`;
+                text += '\n';
+            });
+        }
+        text += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        text += '💡 `/addpremium` `/removepremium`';
+        await sock.sendMessage(chatId, { text });
+    }
+
+    async handleAddMod(sock, chatId, senderJid, args, quotedMessage) {
+        const isOwner = await this.isOwnerFromJid(sock, chatId, senderJid);
+        if (!isOwner) {
+            await sock.sendMessage(chatId, { text: '❌ Only owners can manage moderators.' });
+            return;
+        }
+        const targetPhone = await resolveTargetPhone(sock, chatId, args, quotedMessage, senderJid);
+        if (!targetPhone) {
+            await sock.sendMessage(chatId, { text: '❌ Specify a phone number, @tag someone, or reply to their message.\n\n_Example: `/addmod 919876543210`_' });
+            return;
+        }
+        const result = await this.groupManager.addDynamicModerator(targetPhone, extractPhoneNumber(senderJid));
+        if (result.ok) {
+            await sock.sendMessage(chatId, { text: `🛡️ *Moderator added!*\n\n📱 ${result.phone_number}\n✅ Can now use staff commands + unlimited movie searches.` });
+        } else if (result.reason === 'already') {
+            await sock.sendMessage(chatId, { text: `ℹ️ ${result.phone_number} is already a moderator.` });
+        } else if (result.reason === 'owner') {
+            await sock.sendMessage(chatId, { text: `ℹ️ That user is already an owner.` });
+        } else {
+            await sock.sendMessage(chatId, { text: `❌ Invalid phone number.` });
+        }
+    }
+
+    async handleRemoveMod(sock, chatId, senderJid, args, quotedMessage) {
+        const isOwner = await this.isOwnerFromJid(sock, chatId, senderJid);
+        if (!isOwner) {
+            await sock.sendMessage(chatId, { text: '❌ Only owners can manage moderators.' });
+            return;
+        }
+        const targetPhone = await resolveTargetPhone(sock, chatId, args, quotedMessage, senderJid);
+        if (!targetPhone) {
+            await sock.sendMessage(chatId, { text: '❌ Specify a phone number, @tag someone, or reply to their message.\n\n_Example: `/removemod 919876543210`_' });
+            return;
+        }
+        const result = await this.groupManager.removeDynamicModerator(targetPhone);
+        if (result.ok) {
+            await sock.sendMessage(chatId, { text: `🛡️ *Moderator removed*\n\n📱 ${result.phone_number}` });
+        } else if (result.reason === 'not_found') {
+            await sock.sendMessage(chatId, { text: `ℹ️ That user is not a dynamic moderator.\n\n_Note: .env moderators cannot be removed via command._` });
+        } else {
+            await sock.sendMessage(chatId, { text: `❌ Invalid phone number.` });
+        }
+    }
+
     async handleMovie(sock, chatId, senderJid, args) {
         if (!this.movieController) {
             await sock.sendMessage(chatId, { text: '⚠️ Movie search is not available.' });
@@ -1442,6 +1554,21 @@ class CommandController {
                 break;
             case 'admins':
                 await this.handleAdmins(sock, chatId, senderJid);
+                break;
+            case 'addpremium':
+                await this.handleAddPremium(sock, chatId, senderJid, args, quotedMessage);
+                break;
+            case 'removepremium':
+                await this.handleRemovePremium(sock, chatId, senderJid, args, quotedMessage);
+                break;
+            case 'premium':
+                await this.handleListPremium(sock, chatId, senderJid);
+                break;
+            case 'addmod':
+                await this.handleAddMod(sock, chatId, senderJid, args, quotedMessage);
+                break;
+            case 'removemod':
+                await this.handleRemoveMod(sock, chatId, senderJid, args, quotedMessage);
                 break;
             case 'addchannel':
                 await this.handleAddChannel(sock, chatId, args, senderJid);

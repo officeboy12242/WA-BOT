@@ -79,6 +79,8 @@ class WhatsAppCourseBot {
                 this.authDatabase.init(),
             ]);
             await this.groupManager.initChannels();
+            await this.groupManager.initPremium();
+            await this.groupManager.initDynamicModerators();
             
             // Set owner numbers from config
             this.groupManager.setOwnerNumbers(config.OWNER_NUMBERS);
@@ -94,7 +96,7 @@ class WhatsAppCourseBot {
                 config,
                 this.groupManager
             );
-            this.movieController = new MovieController(mongoDb);
+            this.movieController = new MovieController(mongoDb, this.groupManager);
             await this.movieController.init();
 
             this.commandController = new CommandController(

@@ -108,8 +108,9 @@ function formatLimitReached(remaining) {
 }
 
 class MovieController {
-    constructor(mongoDb) {
+    constructor(mongoDb, groupManager) {
         this.mongoDb = mongoDb;
+        this.groupManager = groupManager;
         this.searchLimits = null;
         this.scheduledDeletes = [];
     }
@@ -142,6 +143,15 @@ class MovieController {
             { $inc: { count: 1 }, $setOnInsert: { user_id: userId, date: today } },
             { upsert: true }
         );
+    }
+
+    async isUnlimitedUser(phoneNumber) {
+        if (!this.groupManager) return false;
+        if (this.groupManager.isOwner(phoneNumber)) return true;
+        if (this.groupManager.isModerator(phoneNumber)) return true;
+        if (await this.groupManager.isDynamicModerator(phoneNumber)) return true;
+        if (await this.groupManager.isPremiumUser(phoneNumber)) return true;
+        return false;
     }
 
     scheduleDelete(sock, chatId, messageKey, delayMs = AUTO_DELETE_MS) {
@@ -179,9 +189,10 @@ class MovieController {
         }
 
         const userId = extractPhoneNumber(senderJid) || senderJid;
-        const currentCount = await this.getUserSearchCount(userId);
+        const unlimited = await this.isUnlimitedUser(userId);
+        const currentCount = unlimited ? 0 : await this.getUserSearchCount(userId);
 
-        if (currentCount >= DAILY_LIMIT) {
+        if (!unlimited && currentCount >= DAILY_LIMIT) {
             const limitMsg = formatLimitReached();
             const sent = await sock.sendMessage(chatId, { text: limitMsg });
             this.scheduleDelete(sock, chatId, sent.key);
@@ -201,7 +212,7 @@ class MovieController {
         }
 
         const dialogue = getRandomDialogue(SEARCH_DIALOGUES);
-        const remaining = DAILY_LIMIT - currentCount - 1;
+        const remaining = unlimited ? '∞' : (DAILY_LIMIT - currentCount - 1);
         const searchingMsg = await sock.sendMessage(chatId, { text: dialogue });
 
         try {
@@ -219,14 +230,16 @@ class MovieController {
                 const noResult = getRandomDialogue(NO_RESULTS_DIALOGUES);
                 const noSent = await sock.sendMessage(chatId, { text: noResult });
                 this.scheduleDelete(sock, chatId, noSent.key);
-                await this.incrementSearchCount(userId);
+                if (!unlimited) await this.incrementSearchCount(userId);
                 return;
             }
 
-            await this.incrementSearchCount(userId);
+            if (!unlimited) await this.incrementSearchCount(userId);
 
             const resultText = formatMovieResults(query, results);
-            const footer = `\n\n🔢 _Searches left today: *${remaining}* / ${DAILY_LIMIT}_`;
+            const footer = unlimited
+                ? '\n\n⭐ _Unlimited searches (Premium/Staff)_'
+                : `\n\n🔢 _Searches left today: *${remaining}* / ${DAILY_LIMIT}_`;
             const sent = await sock.sendMessage(chatId, { text: resultText + footer });
 
             this.scheduleDelete(sock, chatId, sent.key);
