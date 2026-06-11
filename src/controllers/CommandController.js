@@ -167,7 +167,7 @@ class CommandController {
             case 'removeadmin': await handleRemoveAdmin(sock, chatId, senderJid, args, quotedMessage, ctx); break;
             case 'admins':      await handleAdmins(sock, chatId, senderJid, ctx); break;
             case 'increaselimit': await handleIncreaseLimit(sock, chatId, senderJid, args, quotedMessage, ctx); break;
-            case 'checklimit': await handleCheckLimit(sock, chatId, senderJid, args, quotedMessage, ctx); break;
+            case 'checklimit': await handleCheckLimit(sock, chatId, senderJid, args, quotedMessage, pushName, ctx); break;
 
             /* ── Owner: premium / mod / channels ── */
             case 'addpremium':    await handleAddPremium(sock, chatId, senderJid, args, quotedMessage, ctx); break;

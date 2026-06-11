@@ -255,15 +255,13 @@ function cleanTitle(raw) {
     return raw.replace(/^\*+|\*+$/g, '').trim();
 }
 
-function formatMovieResults(query, results, pushName = '', userPhone = '') {
+function formatMovieResults(query, results, pushName = '') {
     const maxResults = 15;
     const items = results.slice(0, maxResults);
 
     let text = '';
-    if (pushName || userPhone) {
-        const greetPhone = userPhone ? `@${userPhone}` : '';
-        const greetName = pushName ? `*${pushName}*` : greetPhone;
-        text += `🎉 Hey ${greetPhone || greetName}! Here are your results 🍿\n\n`;
+    if (pushName) {
+        text += `🎉 Hey *${pushName}*! Here are your results 🍿\n\n`;
     }
     text += '┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n';
     text += '┃  🎬 *MOVIE SEARCH RESULTS*  ┃\n';
@@ -779,13 +777,13 @@ class MovieController {
             void this.logSearch(userId, query, results.length, chatId);
             void this._notifySearchLog(sock, userId, query, results.length, chatId, pushName);
 
-            const resultText = formatMovieResults(query, results, pushName, userId);
+            const resultText = formatMovieResults(query, results, pushName);
             const footer = unlimited
                 ? '\n\n⭐ _Unlimited searches (Premium/Staff)_'
                 : `\n\n🔢 _Searches left today: *${remaining}* / ${DAILY_LIMIT}_`;
             const sent = await sock.sendMessage(chatId, {
                 text: resultText + footer,
-                mentions: [`${userId}@s.whatsapp.net`],
+                mentions: [senderJid],
             });
 
             this.scheduleDelete(sock, chatId, sent.key);

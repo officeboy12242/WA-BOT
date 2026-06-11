@@ -258,7 +258,7 @@ export async function handleIncreaseLimit(sock, chatId, senderJid, args, waMessa
     }
 }
 
-export async function handleCheckLimit(sock, chatId, senderJid, args, waMessage, { movieController, groupManager, userManager }) {
+export async function handleCheckLimit(sock, chatId, senderJid, args, waMessage, pushName = '', { movieController, groupManager, userManager }) {
     try {
         if (!movieController) {
             await sock.sendMessage(chatId, { text: '⚠️ Movie controller not available.' });
@@ -270,7 +270,7 @@ export async function handleCheckLimit(sock, chatId, senderJid, args, waMessage,
 
         // Try to get target user (admins can check others, users check self)
         let targetPhone = senderPhone;
-        let targetName = 'You';
+        let targetName = pushName || 'You';
         let checkingSelf = true;
         let targetJid = senderJid;
 
@@ -363,12 +363,13 @@ export async function handleCheckLimit(sock, chatId, senderJid, args, waMessage,
         text += `${statusIcon} *MOVIE SEARCH LIMIT* ${statusIcon}\n`;
         text += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
 
-        // Tag user if checking someone else's limit
-        const mentionJid = `${targetPhone}@s.whatsapp.net`;
+        // Use actual targetJid for mentions (handles LID users correctly)
+        const mentionJid = targetJid || `${targetPhone}@s.whatsapp.net`;
         if (!checkingSelf && isAdmin) {
-            text += `📍 @${targetPhone}\n`;
+            text += `📍 *${targetName}*\n`;
         } else if (checkingSelf) {
-            text += `👋 Hey @${targetPhone}!\n`;
+            const selfName = targetName !== 'You' ? `*${targetName}*` : 'you';
+            text += `👋 Hey ${selfName}!\n`;
         }
 
         if (!checkingSelf) {
