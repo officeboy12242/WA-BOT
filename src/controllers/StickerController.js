@@ -3,7 +3,7 @@
  * Handles sticker creation, conversion, and metadata management
  */
 
-import { downloadMediaMessage } from '@whiskeysockets/baileys';
+import { downloadMediaMessage, downloadContentFromMessage } from '@whiskeysockets/baileys';
 import WSF from 'wa-sticker-formatter';
 import ffmpeg from 'fluent-ffmpeg';
 import fs from 'fs';
@@ -214,8 +214,11 @@ class StickerController {
                     }, { quoted: quotedMsg });
 
                 } catch (wsError) {
-                    logger.error('Sticker creation error:', wsError?.message || wsError);
+                    logger.error('Sticker creation error:', JSON.stringify(wsError));
+                    logger.error('Sticker creation error type:', typeof wsError);
+                    logger.error('Sticker creation error message:', wsError?.message);
                     logger.error('Sticker creation error stack:', wsError?.stack);
+                    logger.error('Sticker creation error string:', String(wsError));
                     await sock.sendMessage(chatId, {
                         text: '❌ Failed to create sticker.'
                     });
@@ -268,13 +271,14 @@ class StickerController {
                 }
             }
 
-            // Download sticker
-            const targetMessage = {
-                ...waMessage,
-                message: quotedMsg
-            };
+            // Download sticker using stream approach (same as reference repo)
+            const stickerMessage = quotedMsg.stickerMessage;
+            const stream = await downloadContentFromMessage(stickerMessage, 'sticker');
+            let buffer = Buffer.from([]);
+            for await (const chunk of stream) {
+                buffer = Buffer.concat([buffer, chunk]);
+            }
             
-            const buffer = await downloadMediaMessage(targetMessage, 'buffer', {});
             if (!buffer || buffer.length === 0) {
                 await sock.sendMessage(chatId, {
                     text: '❌ Failed to download sticker.'
@@ -299,8 +303,11 @@ class StickerController {
                     sticker: Buffer.from(stickerBuffer)
                 }, { quoted: waMessage });
             } catch (error) {
-                logger.error('Error setting metadata:', error?.message || error);
+                logger.error('Error setting metadata type:', typeof error);
+                logger.error('Error setting metadata:', JSON.stringify(error));
+                logger.error('Error setting metadata message:', error?.message);
                 logger.error('Error setting metadata stack:', error?.stack);
+                logger.error('Error setting metadata string:', String(error));
                 logger.error('Sticker path:', stickerPath);
                 logger.error('Pack name:', packName);
                 logger.error('Author name:', authorName);
@@ -340,8 +347,14 @@ class StickerController {
                 return;
             }
 
-            // Download sticker
-            const buffer = await downloadMediaMessage(targetMessage, 'buffer', {});
+            // Download sticker using stream approach
+            const stickerMessage = targetMessage.message.stickerMessage;
+            const stream = await downloadContentFromMessage(stickerMessage, 'sticker');
+            let buffer = Buffer.from([]);
+            for await (const chunk of stream) {
+                buffer = Buffer.concat([buffer, chunk]);
+            }
+            
             if (!buffer || buffer.length === 0) {
                 await sock.sendMessage(chatId, {
                     text: '❌ Failed to download sticker.'
