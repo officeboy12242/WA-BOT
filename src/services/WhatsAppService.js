@@ -291,6 +291,7 @@ class WhatsAppService {
                 .handleCommand(this.sock, chatId, messageText, senderJid, msg, msg.pushName)
                 .catch((err) => {
                     logger.error('Command error:', err?.message || err);
+                    logger.error('Command error stack:', err?.stack);
                 });
             return;
         }
