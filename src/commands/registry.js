@@ -65,6 +65,27 @@ export const COMMAND_REGISTRY = [
         category: 'movie',
     },
     {
+        names: ['/sticker', '/stk'],
+        key: 'sticker',
+        scope: 'any',
+        role: 'anyone',
+        help: 'Create sticker from image/video (reply with options: pack, author, crop, nometadata)',
+    },
+    {
+        names: ['/steal'],
+        key: 'steal',
+        scope: 'any',
+        role: 'anyone',
+        help: 'Change sticker metadata (reply to sticker)',
+    },
+    {
+        names: ['/toimg', '/image'],
+        key: 'toimg',
+        scope: 'any',
+        role: 'anyone',
+        help: 'Convert sticker to image (reply to sticker)',
+    },
+    {
         names: ['/news'],
         key: 'news',
         scope: 'any',

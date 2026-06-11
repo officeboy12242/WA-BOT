@@ -27,6 +27,7 @@ import MorningMessageScraper from './src/services/MorningMessageScraper.js';
 import MorningMessageController from './src/controllers/MorningMessageController.js';
 import MovieController from './src/controllers/MovieController.js';
 import UserManager from './src/models/UserManager.js';
+import StickerController from './src/controllers/StickerController.js';
 
 // Bot state
 const botState = {
@@ -56,6 +57,7 @@ class WhatsAppCourseBot {
         this.newsScheduler = null;
         this.morningScheduler = null;
         this.morningDatabase = null;
+        this.stickerController = null;
     }
 
     async start() {
@@ -101,6 +103,8 @@ class WhatsAppCourseBot {
             );
             this.movieController = new MovieController(mongoDb, this.groupManager);
             await this.movieController.init();
+            
+            this.stickerController = new StickerController(config);
 
             this.commandController = new CommandController(
                 this.database,
@@ -108,7 +112,8 @@ class WhatsAppCourseBot {
                 this.groupManager,
                 this.newsController,
                 this.movieController,
-                this.userManager
+                this.userManager,
+                this.stickerController
             );
             this.courseController = new CourseController(this.database, this.courseAPI, config, this.groupManager);
             const morningScraper = new MorningMessageScraper(this.morningDatabase);
