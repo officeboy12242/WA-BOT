@@ -834,6 +834,7 @@ class MovieController {
                             + `⚠️ Your *${bonusAmount} bonus search(es)* expire tomorrow!\n\n`
                             + `Use them today or you'll lose them. ⏳`;
                         
+                        if (!this.sock) return;
                         await this.sock.sendMessage(`${userId}@s.whatsapp.net`, { text: dmText });
                     } catch (err) {
                         logger.warn(`Failed to send expiry alert to ${userId}: ${err.message}`);
