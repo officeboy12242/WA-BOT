@@ -128,6 +128,8 @@ class CommandController {
         const def = findCommand(cmd);
         if (!def) return;
 
+        logger.info(`📝 Command received: ${def.key} from ${senderJid} in ${chatId}`);
+
         const access = await checkCommandAccess(sock, chatId, senderJid, def, this.groupManager);
         if (!access.ok) {
             await sock.sendMessage(chatId, { text: access.message });
@@ -193,21 +195,36 @@ class CommandController {
                 if (!this.stickerController) {
                     await sock.sendMessage(chatId, { text: '⚠️ Sticker functionality is not available.' });
                 } else {
-                    await this.stickerController.handleSticker(sock, chatId, quotedMessage, args, messageText);
+                    try {
+                        await this.stickerController.handleSticker(sock, chatId, quotedMessage, args, command);
+                    } catch (err) {
+                        logger.error('Sticker command error:', err);
+                        await sock.sendMessage(chatId, { text: '⚠️ Failed to process sticker command.' });
+                    }
                 }
                 break;
             case 'steal':
                 if (!this.stickerController) {
                     await sock.sendMessage(chatId, { text: '⚠️ Sticker functionality is not available.' });
                 } else {
-                    await this.stickerController.handleSteal(sock, chatId, quotedMessage, args, messageText);
+                    try {
+                        await this.stickerController.handleSteal(sock, chatId, quotedMessage, args, command);
+                    } catch (err) {
+                        logger.error('Steal command error:', err);
+                        await sock.sendMessage(chatId, { text: '⚠️ Failed to process steal command.' });
+                    }
                 }
                 break;
             case 'toimg':
                 if (!this.stickerController) {
                     await sock.sendMessage(chatId, { text: '⚠️ Sticker functionality is not available.' });
                 } else {
-                    await this.stickerController.handleToImage(sock, chatId, quotedMessage);
+                    try {
+                        await this.stickerController.handleToImage(sock, chatId, quotedMessage);
+                    } catch (err) {
+                        logger.error('ToImage command error:', err);
+                        await sock.sendMessage(chatId, { text: '⚠️ Failed to convert sticker to image.' });
+                    }
                 }
                 break;
 
