@@ -199,18 +199,23 @@ class StickerController {
                     }
 
                     // Add metadata if not disabled
+                    let finalStickerBuffer;
                     if (!noMetadata) {
-                        await WSF.setMetadata(packName, authorName, stickerPath);
+                        finalStickerBuffer = await WSF.setMetadata(packName, authorName, stickerPath);
+                        // WSF.setMetadata returns a buffer, use it directly
+                    } else {
+                        // If no metadata, just read the file
+                        finalStickerBuffer = fs.readFileSync(stickerPath);
                     }
 
                     // Send sticker
-                    const stickerBuffer = fs.readFileSync(stickerPath);
                     await sock.sendMessage(chatId, {
-                        sticker: stickerBuffer
+                        sticker: Buffer.from(finalStickerBuffer)
                     }, { quoted: quotedMsg });
 
                 } catch (wsError) {
-                    logger.error('Sticker creation error:', wsError);
+                    logger.error('Sticker creation error:', wsError?.message || wsError);
+                    logger.error('Sticker creation error stack:', wsError?.stack);
                     await sock.sendMessage(chatId, {
                         text: '❌ Failed to create sticker.'
                     });
@@ -234,8 +239,11 @@ class StickerController {
      */
     async handleSteal(sock, chatId, waMessage, args, textContent) {
         try {
+            logger.info('handleSteal called');
             // Check if replying to sticker
             const quotedMsg = waMessage.message.extendedTextMessage?.contextInfo?.quotedMessage;
+            logger.info(`quotedMsg exists: ${!!quotedMsg}, stickerMessage: ${!!quotedMsg?.stickerMessage}`);
+            
             if (!quotedMsg || !quotedMsg.stickerMessage) {
                 await sock.sendMessage(chatId, {
                     text: '❌ Please reply to a sticker.'
@@ -291,7 +299,11 @@ class StickerController {
                     sticker: Buffer.from(stickerBuffer)
                 }, { quoted: waMessage });
             } catch (error) {
-                logger.error('Error setting metadata:', error);
+                logger.error('Error setting metadata:', error?.message || error);
+                logger.error('Error setting metadata stack:', error?.stack);
+                logger.error('Sticker path:', stickerPath);
+                logger.error('Pack name:', packName);
+                logger.error('Author name:', authorName);
                 await sock.sendMessage(chatId, {
                     text: '❌ Failed to modify sticker metadata.'
                 });
