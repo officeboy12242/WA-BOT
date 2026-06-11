@@ -136,6 +136,7 @@ function formatUpcomingMovies(movies, dateRange) {
         movies.forEach((m, i) => {
             text += `*${i + 1}.* 🎥 *${m.title}*\n`;
             text += `   📅 ${m.releaseDate} | 🎭 ${m.genres}\n`;
+            if (m.cast) text += `   👥 *Cast:* ${m.cast}\n`;
             if (m.plot) text += `   📝 _${m.plot}_\n`;
             text += '\n';
         });
@@ -160,6 +161,7 @@ function formatGenreMovies(genre, movies) {
         movies.forEach((m, i) => {
             const rating = m.rating ? ` ⭐ ${m.rating}` : '';
             text += `*${i + 1}.* 🎥 *${m.title}* (${m.year})${rating}\n`;
+            if (m.cast) text += `   👥 *Cast:* ${m.cast}\n`;
             if (m.plot) text += `   📝 _${m.plot}_\n`;
             text += '\n';
         });
@@ -999,12 +1001,13 @@ class MovieController {
                 { params: { api_key: key, language: 'en-US', region: 'IN' }, timeout: 10000 }
             );
             const genreMap = await this._getGenreMap();
-            const results = (data?.results || []).slice(0, limit);
+            const results = await this._enrichTmdbMovies((data?.results || []).slice(0, limit));
             return results.map((m) => ({
                 title: m.title || m.original_title,
                 releaseDate: m.release_date ? new Date(m.release_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : 'TBA',
                 genres: (m.genre_ids || []).map(id => genreMap[id] || '').filter(Boolean).join(', ') || 'N/A',
-                plot: m.overview ? m.overview.slice(0, 100) + (m.overview.length > 100 ? '…' : '') : '',
+                cast: m.cast || '',
+                plot: m.overview || '',
             }));
         } catch (err) {
             logger.warn(`TMDB upcoming fetch failed: ${err.message}`);
@@ -1033,17 +1036,58 @@ class MovieController {
                     timeout: 10000,
                 }
             );
-            const results = (data?.results || []).slice(0, limit);
+            const results = await this._enrichTmdbMovies((data?.results || []).slice(0, limit));
             return results.map((m) => ({
                 title: m.title || m.original_title,
                 year: m.release_date?.split('-')[0] || '',
                 rating: m.vote_average ? m.vote_average.toFixed(1) : '',
-                plot: m.overview ? m.overview.slice(0, 100) + (m.overview.length > 100 ? '…' : '') : '',
+                cast: m.cast || '',
+                plot: m.overview || '',
             }));
         } catch (err) {
             logger.warn(`TMDB genre fetch failed: ${err.message}`);
             return null;
         }
+    }
+
+    async _enrichTmdbMovies(movies = []) {
+        const key = config.TMDB_API_KEY;
+        if (!key || !movies.length) return movies;
+
+        const enriched = await Promise.all(movies.map(async (movie) => {
+            if (!movie?.id) return movie;
+
+            try {
+                const { data } = await axios.get(
+                    `https://api.themoviedb.org/3/movie/${movie.id}`,
+                    {
+                        params: {
+                            api_key: key,
+                            language: 'en-US',
+                            append_to_response: 'credits',
+                        },
+                        timeout: 10000,
+                    }
+                );
+
+                const cast = (data?.credits?.cast || [])
+                    .slice(0, 5)
+                    .map((actor) => actor.name)
+                    .filter(Boolean)
+                    .join(', ');
+
+                return {
+                    ...movie,
+                    overview: data?.overview || movie.overview || '',
+                    cast,
+                };
+            } catch (err) {
+                logger.warn(`TMDB details fetch failed for ${movie.title || movie.id}: ${err.message}`);
+                return movie;
+            }
+        }));
+
+        return enriched;
     }
 
     async _getGenreMap() {
