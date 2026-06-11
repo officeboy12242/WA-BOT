@@ -65,6 +65,22 @@ export const COMMAND_REGISTRY = [
         category: 'movie',
     },
     {
+        names: ['/upcoming'],
+        key: 'upcoming',
+        scope: 'any',
+        role: 'anyone',
+        help: 'Upcoming movies releasing soon (from TMDB)',
+        category: 'movie',
+    },
+    {
+        names: ['/genre', '/recommend'],
+        key: 'genre',
+        scope: 'any',
+        role: 'anyone',
+        help: 'Top movies by genre (action, horror, comedy, etc)',
+        category: 'movie',
+    },
+    {
         names: ['/sticker', '/stk'],
         key: 'sticker',
         scope: 'any',

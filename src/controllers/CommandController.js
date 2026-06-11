@@ -189,6 +189,20 @@ class CommandController {
                     await this.movieController.handleMovieSearch(sock, chatId, senderJid, args, pushName, quotedMessage);
                 }
                 break;
+            case 'upcoming':
+                if (!this.movieController) {
+                    await sock.sendMessage(chatId, { text: '⚠️ Movie features not available.' });
+                } else {
+                    await this.movieController.handleUpcoming(sock, chatId, senderJid, quotedMessage);
+                }
+                break;
+            case 'genre':
+                if (!this.movieController) {
+                    await sock.sendMessage(chatId, { text: '⚠️ Movie features not available.' });
+                } else {
+                    await this.movieController.handleGenre(sock, chatId, senderJid, args, quotedMessage);
+                }
+                break;
 
             /* ── Sticker Commands ── */
             case 'sticker':
