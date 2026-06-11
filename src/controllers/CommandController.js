@@ -149,7 +149,7 @@ class CommandController {
             case 'resume':   await handleResume(sock, chatId, ctx); break;
             case 'status':   await handleStatus(sock, chatId, ctx); break;
             case 'facts':    await handleFacts(sock, chatId, quotedMessage); break;
-            case 'help':     await handleHelp(sock, chatId, senderJid, ctx); break;
+            case 'help':     await handleHelp(sock, chatId, senderJid, quotedMessage, ctx); break;
 
             /* ── Group management ── */
             case 'activate':   await handleActivate(sock, chatId, senderJid, ctx); break;
@@ -186,7 +186,7 @@ class CommandController {
                 if (!this.movieController) {
                     await sock.sendMessage(chatId, { text: '⚠️ Movie search is not available.' });
                 } else {
-                    await this.movieController.handleMovieSearch(sock, chatId, senderJid, args, pushName);
+                    await this.movieController.handleMovieSearch(sock, chatId, senderJid, args, pushName, quotedMessage);
                 }
                 break;
 

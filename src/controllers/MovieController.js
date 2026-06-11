@@ -706,7 +706,7 @@ class MovieController {
         return direct || senderJid;
     }
 
-    async handleMovieSearch(sock, chatId, senderJid, args, pushName = '') {
+    async handleMovieSearch(sock, chatId, senderJid, args, pushName = '', originalMsg = null) {
         const query = args.join(' ').trim();
         if (!query) {
             const usage = '┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n'
@@ -784,7 +784,7 @@ class MovieController {
             const sent = await sock.sendMessage(chatId, {
                 text: resultText + footer,
                 mentions: [senderJid],
-            });
+            }, { quoted: originalMsg || undefined });
 
             this.scheduleDelete(sock, chatId, sent.key);
 
