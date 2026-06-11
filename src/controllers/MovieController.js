@@ -840,3 +840,5 @@ class MovieController {
         setInterval(checkAlerts, 60 * 60 * 1000); // Check hourly
     }
 }
+
+export default MovieController;
