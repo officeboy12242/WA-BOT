@@ -386,13 +386,11 @@ export async function handleCheckLimit(sock, chatId, senderJid, args, waMessage,
             text += `📋 *Used Today:* ${used}/5\n`;
             text += `✨ *Remaining Today:* ${remaining}/5\n\n`;
 
-            // Show added limits if any
+            // Show added limits if any — show total bonus/day and how many days are left
             if (addedLimitDetails.length > 0) {
-                text += '🎁 *Bonus Searches:*\n';
-                for (const detail of addedLimitDetails) {
-                    text += `  • +${detail.bonus} searches on ${detail.date} (${detail.daysRemaining}d remaining)\n`;
-                }
-                text += '\n';
+                const bonusPerDay = addedLimitDetails[0].bonus;
+                const daysLeft = addedLimitDetails.length;
+                text += `🎁 *Bonus Searches:* +${bonusPerDay}/day · ${daysLeft} day(s) remaining\n\n`;
             }
 
             text += '⏰ _Resets daily at 12:00 AM IST_\n';
@@ -416,10 +414,9 @@ export async function handleCheckLimit(sock, chatId, senderJid, args, waMessage,
                     dmText += `✨ Remaining: ${remaining}/5\n\n`;
                     
                     if (addedLimitDetails.length > 0) {
-                        dmText += '🎁 Bonus Searches:\n';
-                        for (const detail of addedLimitDetails) {
-                            dmText += `  • +${detail.bonus} on ${detail.date}\n`;
-                        }
+                        const bonusPerDay = addedLimitDetails[0].bonus;
+                        const daysLeft = addedLimitDetails.length;
+                        dmText += `🎁 Bonus: +${bonusPerDay}/day · ${daysLeft} day(s) remaining\n`;
                     }
                 }
                 
