@@ -285,7 +285,7 @@ export async function handleFacts(sock, chatId, quotedMessage) {
     }
 }
 
-export async function handleHelp(sock, chatId, senderJid, { groupManager, isOwnerFromJid }) {
+export async function handleHelp(sock, chatId, senderJid, originalMsg, { groupManager, isOwnerFromJid }) {
     try {
         const isGroup = chatId?.endsWith('@g.us');
         const [isStaff, isPrivileged, canManageAdmins] = await Promise.all([
@@ -321,7 +321,7 @@ export async function handleHelp(sock, chatId, senderJid, { groupManager, isOwne
             movieOnly,
             features,
         });
-        await sock.sendMessage(chatId, { text: response });
+        await sock.sendMessage(chatId, { text: response }, { quoted: originalMsg || undefined });
         logger.info(`📖 Help sent to ${chatId}`);
     } catch (error) {
         logger.error(`Error sending help: ${error.message}`);

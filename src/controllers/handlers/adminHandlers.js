@@ -249,7 +249,7 @@ export async function handleIncreaseLimit(sock, chatId, senderJid, args, waMessa
                 `📊 *Before:* ${result.previousRemaining}/5 remaining\n` +
                 `📊 *After:* ${result.newRemaining}/5 remaining\n\n` +
                 duration,
-        });
+        }, { quoted: waMessage || undefined });
 
         logger.info(`🎬 Limit increased: ${targetPhone} +${amount} for ${days}d by ${senderPhone}`);
     } catch (error) {
@@ -400,8 +400,8 @@ export async function handleCheckLimit(sock, chatId, senderJid, args, waMessage,
 
         text += '\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━';
 
-        // Send with mention so @phone renders as actual name tag
-        await sock.sendMessage(chatId, { text, mentions: [mentionJid] });
+        // Send with mention and quote user's command message
+        await sock.sendMessage(chatId, { text, mentions: [mentionJid] }, { quoted: waMessage || undefined });
 
         // If admin checked another user, also send DM to that user
         if (!checkingSelf && isAdmin && targetJid !== senderJid) {
