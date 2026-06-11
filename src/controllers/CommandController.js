@@ -59,13 +59,14 @@ import {
 } from './handlers/instaHandlers.js';
 
 class CommandController {
-    constructor(database, botState, groupManager, newsController = null, movieController = null, userManager = null) {
+    constructor(database, botState, groupManager, newsController = null, movieController = null, userManager = null, stickerController = null) {
         this.database = database;
         this.botState = botState;
         this.groupManager = groupManager;
         this.newsController = newsController;
         this.movieController = movieController;
         this.userManager = userManager;
+        this.stickerController = stickerController;
         this.pendingClearConfirmations = new Map();
         this.botStartTime = Date.now();
 
@@ -103,6 +104,7 @@ class CommandController {
             newsController: this.newsController,
             movieController: this.movieController,
             userManager: this.userManager,
+            stickerController: this.stickerController,
             pendingClearConfirmations: this.pendingClearConfirmations,
             botStartTime: this.botStartTime,
             isOwnerFromJid: this._isOwnerFromJid,
@@ -183,6 +185,29 @@ class CommandController {
                     await sock.sendMessage(chatId, { text: '⚠️ Movie search is not available.' });
                 } else {
                     await this.movieController.handleMovieSearch(sock, chatId, senderJid, args, pushName);
+                }
+                break;
+
+            /* ── Sticker Commands ── */
+            case 'sticker':
+                if (!this.stickerController) {
+                    await sock.sendMessage(chatId, { text: '⚠️ Sticker functionality is not available.' });
+                } else {
+                    await this.stickerController.handleSticker(sock, chatId, quotedMessage, args, messageText);
+                }
+                break;
+            case 'steal':
+                if (!this.stickerController) {
+                    await sock.sendMessage(chatId, { text: '⚠️ Sticker functionality is not available.' });
+                } else {
+                    await this.stickerController.handleSteal(sock, chatId, quotedMessage, args, messageText);
+                }
+                break;
+            case 'toimg':
+                if (!this.stickerController) {
+                    await sock.sendMessage(chatId, { text: '⚠️ Sticker functionality is not available.' });
+                } else {
+                    await this.stickerController.handleToImage(sock, chatId, quotedMessage);
                 }
                 break;
 
