@@ -22,6 +22,14 @@ export function startHealthCheckServer(port = 3000) {
         }
     });
 
+    server.on('error', (err) => {
+        if (err.code === 'EADDRINUSE') {
+            logger.warn(`⚠️ Port ${port} already in use — health check server skipped`);
+        } else {
+            logger.error(`Health check server error: ${err.message}`);
+        }
+    });
+
     server.listen(port, () => {
         logger.info(`🏥 Health check server running on port ${port}`);
     });
