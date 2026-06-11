@@ -161,7 +161,7 @@ class StickerController {
                     '-vf', "crop=w='min(min(iw,ih),500)':h='min(min(iw,ih),500)',scale=500:500,setsar=1,fps=15",
                     '-loop', '0',
                     '-ss', '00:00:00.0',
-                    '-t', '00:00:10.0',
+                    '-t', '00:00:09.0',
                     '-preset', 'default',
                     '-an',
                     '-vsync', '0',
@@ -169,13 +169,7 @@ class StickerController {
                 ]
                 : [
                     '-vcodec', 'libwebp',
-                    '-vf', "scale='min(220,iw)':min'(220,ih)':force_original_aspect_ratio=decrease,fps=15, pad=220:220:-1:-1:color=white@0.0, split [a][b]; [a] palettegen=reserve_transparent=on:transparency_color=ffffff [p]; [b][p] paletteuse",
-                    '-loop', '0',
-                    '-ss', '00:00:00.0',
-                    '-t', '00:00:10.0',
-                    '-preset', 'default',
-                    '-an',
-                    '-vsync', '0'
+                    '-vf', "scale='min(220,iw)':min'(220,ih)':force_original_aspect_ratio=decrease,fps=15, pad=220:220:-1:-1:color=white@0.0, split [a][b]; [a] palettegen=reserve_transparent=on:transparency_color=ffffff [p]; [b][p] paletteuse"
                 ];
 
             const ffmpegProcess = ffmpeg(mediaPath)
@@ -194,35 +188,42 @@ class StickerController {
 
             ffmpegProcess.on('end', async () => {
                 try {
+                    // Verify output file was created
                     if (!fs.existsSync(stickerPath)) {
                         throw new Error('Output sticker file not created');
                     }
 
-                    // Add metadata if not disabled
-                    let finalStickerBuffer;
+                    // Add metadata if not disabled (modifies file in place)
                     if (!noMetadata) {
-                        finalStickerBuffer = await WSF.setMetadata(packName, authorName, stickerPath);
-                        // WSF.setMetadata returns a buffer, use it directly
-                    } else {
-                        // If no metadata, just read the file
-                        finalStickerBuffer = fs.readFileSync(stickerPath);
+                        await WSF.setMetadata(packName, authorName, stickerPath);
                     }
 
-                    // Send sticker
+                    // Send sticker using file path (Baileys reads it)
                     await sock.sendMessage(chatId, {
-                        sticker: Buffer.from(finalStickerBuffer)
+                        sticker: fs.readFileSync(stickerPath)
                     }, { quoted: quotedMsg });
 
                 } catch (wsError) {
-                    logger.error('Sticker creation error:', JSON.stringify(wsError));
-                    logger.error('Sticker creation error type:', typeof wsError);
-                    logger.error('Sticker creation error message:', wsError?.message);
-                    logger.error('Sticker creation error stack:', wsError?.stack);
-                    logger.error('Sticker creation error string:', String(wsError));
-                    await sock.sendMessage(chatId, {
-                        text: '❌ Failed to create sticker.'
-                    });
+                    logger.error('Sticker creation error:', wsError?.message || wsError);
+                    logger.error('Sticker creation error details:', JSON.stringify(wsError, Object.getOwnPropertyNames(wsError)));
+                    
+                    // Fallback: try sending without metadata
+                    try {
+                        if (fs.existsSync(stickerPath)) {
+                            await sock.sendMessage(chatId, {
+                                sticker: fs.readFileSync(stickerPath)
+                            }, { quoted: quotedMsg });
+                        } else {
+                            throw new Error('No sticker file to send');
+                        }
+                    } catch (fallbackError) {
+                        logger.error('Fallback error:', fallbackError?.message || fallbackError);
+                        await sock.sendMessage(chatId, {
+                            text: '❌ Failed to create sticker.'
+                        });
+                    }
                 } finally {
+                    // Ensure cleanup happens
                     this._safeUnlink(mediaPath);
                     this._safeUnlink(stickerPath);
                 }
@@ -290,27 +291,18 @@ class StickerController {
             await writeFile(stickerPath, buffer);
 
             try {
-                // Add metadata
-                let stickerBuffer;
-                if (noMetadata) {
-                    stickerBuffer = await WSF.setMetadata(undefined, undefined, stickerPath);
-                } else {
-                    stickerBuffer = await WSF.setMetadata(packName, authorName, stickerPath);
-                }
+                // Add metadata (modifies file in place)
+                const stickerBuffer = noMetadata
+                    ? await WSF.setMetadata(undefined, undefined, stickerPath)
+                    : await WSF.setMetadata(packName, authorName, stickerPath);
 
-                // Send sticker
+                // Send sticker using buffer
                 await sock.sendMessage(chatId, {
                     sticker: Buffer.from(stickerBuffer)
                 }, { quoted: waMessage });
             } catch (error) {
-                logger.error('Error setting metadata type:', typeof error);
-                logger.error('Error setting metadata:', JSON.stringify(error));
-                logger.error('Error setting metadata message:', error?.message);
-                logger.error('Error setting metadata stack:', error?.stack);
-                logger.error('Error setting metadata string:', String(error));
-                logger.error('Sticker path:', stickerPath);
-                logger.error('Pack name:', packName);
-                logger.error('Author name:', authorName);
+                logger.error('Error setting metadata:', error?.message || error);
+                logger.error('Error details:', JSON.stringify(error, Object.getOwnPropertyNames(error)));
                 await sock.sendMessage(chatId, {
                     text: '❌ Failed to modify sticker metadata.'
                 });
@@ -383,6 +375,10 @@ class StickerController {
 
             ffmpegProcess.on('end', async () => {
                 try {
+                    if (!fs.existsSync(imagePath)) {
+                        throw new Error('Output image file not created');
+                    }
+
                     const imageBuffer = fs.readFileSync(imagePath);
                     await sock.sendMessage(chatId, {
                         image: imageBuffer,
@@ -390,7 +386,7 @@ class StickerController {
                         mimetype: 'image/png'
                     }, { quoted: waMessage });
                 } catch (error) {
-                    logger.error('Image send error:', error);
+                    logger.error('Image send error:', error?.message || error);
                     await sock.sendMessage(chatId, {
                         text: '❌ Failed to send image.'
                     });
