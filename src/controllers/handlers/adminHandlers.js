@@ -364,8 +364,11 @@ export async function handleCheckLimit(sock, chatId, senderJid, args, waMessage,
         text += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
 
         // Tag user if checking someone else's limit
+        const mentionJid = `${targetPhone}@s.whatsapp.net`;
         if (!checkingSelf && isAdmin) {
-            text += `📍 *@${targetPhone}*\n`;
+            text += `📍 @${targetPhone}\n`;
+        } else if (checkingSelf) {
+            text += `👋 Hey @${targetPhone}!\n`;
         }
 
         if (!checkingSelf) {
@@ -398,8 +401,8 @@ export async function handleCheckLimit(sock, chatId, senderJid, args, waMessage,
 
         text += '\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━';
 
-        // Send in group/DM
-        await sock.sendMessage(chatId, { text });
+        // Send with mention so @phone renders as actual name tag
+        await sock.sendMessage(chatId, { text, mentions: [mentionJid] });
 
         // If admin checked another user, also send DM to that user
         if (!checkingSelf && isAdmin && targetJid !== senderJid) {
