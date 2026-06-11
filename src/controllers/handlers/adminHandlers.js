@@ -272,6 +272,7 @@ export async function handleCheckLimit(sock, chatId, senderJid, args, waMessage,
         let targetPhone = senderPhone;
         let targetName = 'You';
         let checkingSelf = true;
+        let targetJid = senderJid;
 
         // If admin and has args/mentions/reply, check that user
         if (isAdmin && (args.length > 0 || waMessage)) {
@@ -290,6 +291,7 @@ export async function handleCheckLimit(sock, chatId, senderJid, args, waMessage,
                         const possibleJids = [];
                         if (quotedJid) {
                             possibleJids.push(quotedJid);
+                            targetJid = quotedJid;
                         }
                         // Also try constructing JIDs from phone number
                         possibleJids.push(`${targetPhone}@s.whatsapp.net`);
@@ -318,6 +320,35 @@ export async function handleCheckLimit(sock, chatId, senderJid, args, waMessage,
         const used = isUnlimited ? 0 : await movieController.getUserSearchCount(targetPhone);
         const remaining = Math.max(0, 5 - used);
 
+        // Get added limits (future dates with negative counts)
+        let addedLimitDetails = [];
+        if (!isUnlimited) {
+            try {
+                const today = new Date().toISOString().split('T')[0];
+                const limits = await movieController.searchLimits.find({ user_id: targetPhone }).toArray();
+                
+                // Get all future dates with bonus searches
+                for (let i = 1; i <= 30; i++) {
+                    const futureDate = new Date(today + 'T00:00:00+05:30');
+                    futureDate.setDate(futureDate.getDate() + i);
+                    const futureDateStr = futureDate.toISOString().split('T')[0];
+                    
+                    const limitEntry = limits.find(l => l.date === futureDateStr);
+                    if (limitEntry && limitEntry.count < 0) {
+                        const bonus = -limitEntry.count;
+                        const daysRemaining = i;
+                        addedLimitDetails.push({
+                            date: futureDateStr,
+                            bonus,
+                            daysRemaining
+                        });
+                    }
+                }
+            } catch (err) {
+                logger.warn(`Failed to get added limits: ${err.message}`);
+            }
+        }
+
         let statusIcon = '✅';
         let statusText = 'Active';
         if (!isUnlimited && used >= 5) {
@@ -332,6 +363,11 @@ export async function handleCheckLimit(sock, chatId, senderJid, args, waMessage,
         text += `${statusIcon} *MOVIE SEARCH LIMIT* ${statusIcon}\n`;
         text += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
 
+        // Tag user if checking someone else's limit
+        if (!checkingSelf && isAdmin) {
+            text += `📍 *@${targetPhone}*\n`;
+        }
+
         if (!checkingSelf) {
             text += `👤 *User:* ${targetName}\n`;
             text += `📱 ${targetPhone}\n\n`;
@@ -343,15 +379,53 @@ export async function handleCheckLimit(sock, chatId, senderJid, args, waMessage,
             text += '💡 _No daily limits apply_';
         } else {
             text += `📊 *Status:* ${statusText}\n`;
-            text += `🔍 *Used Today:* ${used}/5\n`;
-            text += `✨ *Remaining:* ${remaining}/5\n\n`;
-            text += '⏰ _Resets at midnight IST_\n';
-            text += '⭐ _Go Premium for unlimited searches_';
+            text += `🔍 *Daily Limit:* 5 searches\n`;
+            text += `📋 *Used Today:* ${used}/5\n`;
+            text += `✨ *Remaining Today:* ${remaining}/5\n\n`;
+
+            // Show added limits if any
+            if (addedLimitDetails.length > 0) {
+                text += '🎁 *Bonus Searches:*\n';
+                for (const detail of addedLimitDetails) {
+                    text += `  • +${detail.bonus} searches on ${detail.date} (${detail.daysRemaining}d remaining)\n`;
+                }
+                text += '\n';
+            }
+
+            text += '⏰ _Resets daily at 12:00 AM IST_\n';
+            text += '⭐ _Upgrade to Premium for unlimited_';
         }
 
         text += '\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━';
 
+        // Send in group/DM
         await sock.sendMessage(chatId, { text });
+
+        // If admin checked another user, also send DM to that user
+        if (!checkingSelf && isAdmin && targetJid !== senderJid) {
+            try {
+                let dmText = '📊 *Your Movie Search Limit*\n\n';
+                if (isUnlimited) {
+                    dmText += '⭐ You have unlimited searches!';
+                } else {
+                    dmText += `🔍 Daily Limit: 5 searches\n`;
+                    dmText += `📋 Used Today: ${used}/5\n`;
+                    dmText += `✨ Remaining: ${remaining}/5\n\n`;
+                    
+                    if (addedLimitDetails.length > 0) {
+                        dmText += '🎁 Bonus Searches:\n';
+                        for (const detail of addedLimitDetails) {
+                            dmText += `  • +${detail.bonus} on ${detail.date}\n`;
+                        }
+                    }
+                }
+                
+                await sock.sendMessage(`${targetPhone}@s.whatsapp.net`, { text: dmText });
+            } catch (err) {
+                logger.warn(`Failed to send DM limit info: ${err.message}`);
+            }
+        }
+
         logger.info(`🎬 Limit checked: ${targetPhone} by ${senderPhone}`);
     } catch (error) {
         logger.error(`Error checking limit: ${error.message}`);

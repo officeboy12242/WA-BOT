@@ -332,6 +332,7 @@ class MovieController {
         this._startKeepAlive();
         this._scheduleDailySummary();
         this._scheduleWeeklyTrending();
+        this._scheduleExpireLimitAlerts();
         logger.info('Movie search controller ready');
     }
 
@@ -800,6 +801,42 @@ class MovieController {
             logger.error(`Movie search error for "${query}": ${err.message}`);
         }
     }
-}
 
-export default MovieController;
+    _scheduleExpireLimitAlerts() {
+        // Check for bonus limits expiring tomorrow, every hour at :00
+        const checkAlerts = async () => {
+            try {
+                const now = new Date();
+                const tomorrowStart = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+                tomorrowStart.setHours(0, 0, 0, 0);
+                const tomorrowStr = tomorrowStart.toISOString().split('T')[0];
+
+                // Find all records with negative count (bonus searches) expiring tomorrow
+                const expiringLimits = await this.searchLimits.find({ count: { $lt: 0 }, date: tomorrowStr }).toArray();
+                
+                if (!expiringLimits.length) return;
+
+                for (const limit of expiringLimits) {
+                    const userId = limit.user_id;
+                    const bonusAmount = -limit.count;
+                    
+                    try {
+                        // Send to group if possible, DM as fallback
+                        const dmText = `⏰ *Bonus Search Expiring Soon*\n\n`
+                            + `⚠️ Your *${bonusAmount} bonus search(es)* expire tomorrow!\n\n`
+                            + `Use them today or you'll lose them. ⏳`;
+                        
+                        await this.sock.sendMessage(`${userId}@s.whatsapp.net`, { text: dmText });
+                    } catch (err) {
+                        logger.warn(`Failed to send expiry alert to ${userId}: ${err.message}`);
+                    }
+                }
+            } catch (err) {
+                logger.error(`Error checking expire limits: ${err.message}`);
+            }
+        };
+
+        checkAlerts();
+        setInterval(checkAlerts, 60 * 60 * 1000); // Check hourly
+    }
+}
