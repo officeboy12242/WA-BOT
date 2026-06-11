@@ -116,6 +116,61 @@ function formatWeeklyTrending(movies, weekLabel, source) {
     return text;
 }
 
+const TMDB_GENRES = {
+    action: 28, adventure: 12, animation: 16, comedy: 35, crime: 80,
+    documentary: 99, drama: 18, family: 10751, fantasy: 14, history: 36,
+    horror: 27, music: 10402, mystery: 9648, romance: 10749, scifi: 878,
+    'sci-fi': 878, thriller: 53, war: 10752, western: 37,
+};
+
+function formatUpcomingMovies(movies, dateRange) {
+    let text = '╔════════════════════════════════╗\n';
+    text += '║  🎬 UPCOMING MOVIES 🎬       ║\n';
+    text += '╚════════════════════════════════╝\n\n';
+    text += `📅 *${dateRange}*\n`;
+    text += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+
+    if (!movies.length) {
+        text += '📭 _No upcoming releases found for this period._\n';
+    } else {
+        movies.forEach((m, i) => {
+            text += `*${i + 1}.* 🎥 *${m.title}*\n`;
+            text += `   📅 ${m.releaseDate} | 🎭 ${m.genres}\n`;
+            if (m.plot) text += `   📝 _${m.plot}_\n`;
+            text += '\n';
+        });
+    }
+
+    text += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+    text += '🍿 _Use `/movie <name>` to search & download!_';
+    return text;
+}
+
+function formatGenreMovies(genre, movies) {
+    const genreTitle = genre.charAt(0).toUpperCase() + genre.slice(1);
+    let text = '╔════════════════════════════════╗\n';
+    text += `║  🎭 TOP ${genreTitle.toUpperCase()} MOVIES 🎭     ║\n`;
+    text += '╚════════════════════════════════╝\n\n';
+    text += `🔥 *Popular ${genreTitle} Movies Right Now:*\n`;
+    text += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+
+    if (!movies.length) {
+        text += '📭 _No movies found for this genre._\n';
+    } else {
+        movies.forEach((m, i) => {
+            const rating = m.rating ? ` ⭐ ${m.rating}` : '';
+            text += `*${i + 1}.* 🎥 *${m.title}* (${m.year})${rating}\n`;
+            if (m.plot) text += `   📝 _${m.plot}_\n`;
+            text += '\n';
+        });
+    }
+
+    text += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+    text += `🎭 _Available genres: action, comedy, horror, thriller, romance, drama, scifi, adventure, animation, mystery_\n`;
+    text += '🍿 _Use `/movie <name>` to search & download!_';
+    return text;
+}
+
 const SEARCH_DIALOGUES = [
     // Bollywood classics
     "🎬 _\"Ek baar jo maine commitment kar di, uske baad toh main khud ki bhi nahi sunta...\"_ — Searching! 🔍",
@@ -335,6 +390,7 @@ class MovieController {
         this._startKeepAlive();
         this._scheduleDailySummary();
         this._scheduleWeeklyTrending();
+        this._scheduleWeeklyUpcoming();
         this._scheduleExpireLimitAlerts();
         logger.info('Movie search controller ready');
     }
@@ -590,6 +646,74 @@ class MovieController {
         }
     }
 
+    _scheduleWeeklyUpcoming() {
+        const UPCOMING_DAY = 1; // Monday
+        const UPCOMING_HOUR = 10;
+        const UPCOMING_MINUTE = 0;
+
+        const scheduleNext = () => {
+            const now = new Date();
+            const ist = new Date(now.getTime() + (5.5 * 60 * 60 * 1000));
+            const target = new Date(ist);
+
+            const daysUntil = (UPCOMING_DAY - ist.getDay() + 7) % 7 || 7;
+            target.setDate(target.getDate() + daysUntil);
+            target.setHours(UPCOMING_HOUR, UPCOMING_MINUTE, 0, 0);
+
+            if (target <= ist) target.setDate(target.getDate() + 7);
+
+            const delayMs = target.getTime() - ist.getTime();
+            const label = target.toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'short' });
+            logger.info(`🎬 Weekly upcoming scheduled for ${label} ${UPCOMING_HOUR}:${String(UPCOMING_MINUTE).padStart(2, '0')} IST (in ${Math.round(delayMs / 3600000)}h)`);
+
+            this._upcomingTimer = setTimeout(async () => {
+                await this._postWeeklyUpcoming();
+                scheduleNext();
+            }, delayMs);
+        };
+        scheduleNext();
+    }
+
+    async _postWeeklyUpcoming() {
+        try {
+            if (!this._sock) {
+                logger.warn('Weekly upcoming: no socket available, skipping');
+                return;
+            }
+
+            const movieGroups = await this.groupManager.getMovieEnabledGroups();
+            if (!movieGroups.length) {
+                logger.info('Weekly upcoming: no movie-enabled groups, skipping');
+                return;
+            }
+
+            const movies = await this._fetchUpcoming(8);
+            if (!movies?.length) {
+                logger.info('Weekly upcoming: no upcoming movies found, skipping');
+                return;
+            }
+
+            const now = new Date();
+            const twoWeeks = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
+            const dateRange = `${now.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })} - ${twoWeeks.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}`;
+            const text = formatUpcomingMovies(movies, dateRange);
+
+            let sent = 0;
+            for (const group of movieGroups) {
+                try {
+                    await this._sock.sendMessage(group.group_id, { text });
+                    sent++;
+                    await new Promise((r) => setTimeout(r, 500));
+                } catch (err) {
+                    logger.warn(`Weekly upcoming failed for ${group.group_id}: ${err.message}`);
+                }
+            }
+            logger.info(`🎬 Weekly upcoming posted to ${sent}/${movieGroups.length} group(s)`);
+        } catch (err) {
+            logger.error(`Weekly upcoming error: ${err.message}`);
+        }
+    }
+
     getTodayDateStr() {
         const now = new Date();
         const ist = new Date(now.getTime() + (5.5 * 60 * 60 * 1000));
@@ -805,6 +929,141 @@ class MovieController {
             this.scheduleDelete(sock, chatId, errSent.key);
 
             logger.error(`Movie search error for "${query}": ${err.message}`);
+        }
+    }
+
+    async handleUpcoming(sock, chatId, senderJid, originalMsg = null) {
+        try {
+            const movies = await this._fetchUpcoming(10);
+            if (!movies) {
+                await sock.sendMessage(chatId, { text: '⚠️ Could not fetch upcoming movies. TMDB API may be unavailable.' }, { quoted: originalMsg || undefined });
+                return;
+            }
+
+            const now = new Date();
+            const twoWeeks = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
+            const dateRange = `${now.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })} - ${twoWeeks.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}`;
+
+            const text = formatUpcomingMovies(movies, dateRange);
+            await sock.sendMessage(chatId, { text }, { quoted: originalMsg || undefined });
+            logger.info(`🎬 Upcoming movies sent to ${chatId}`);
+        } catch (err) {
+            logger.error(`Upcoming movies error: ${err.message}`);
+            await sock.sendMessage(chatId, { text: '⚠️ Failed to fetch upcoming movies.' }, { quoted: originalMsg || undefined });
+        }
+    }
+
+    async handleGenre(sock, chatId, senderJid, args, originalMsg = null) {
+        const genreName = (args[0] || '').toLowerCase();
+
+        if (!genreName || !TMDB_GENRES[genreName]) {
+            const available = Object.keys(TMDB_GENRES).filter(g => g !== 'sci-fi').join(', ');
+            await sock.sendMessage(chatId, {
+                text: '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'
+                    + '🎭 *GENRE RECOMMENDATIONS*\n'
+                    + '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n'
+                    + '*Usage:* `/genre <name>`\n\n'
+                    + '*Available genres:*\n'
+                    + `${available}\n\n`
+                    + '*Examples:*\n'
+                    + '• `/genre action`\n'
+                    + '• `/recommend horror`\n'
+                    + '• `/genre comedy`',
+            }, { quoted: originalMsg || undefined });
+            return;
+        }
+
+        try {
+            const movies = await this._fetchGenreMovies(genreName, 10);
+            if (!movies) {
+                await sock.sendMessage(chatId, { text: '⚠️ Could not fetch genre movies. TMDB API may be unavailable.' }, { quoted: originalMsg || undefined });
+                return;
+            }
+
+            const text = formatGenreMovies(genreName, movies);
+            await sock.sendMessage(chatId, { text }, { quoted: originalMsg || undefined });
+            logger.info(`🎭 Genre "${genreName}" sent to ${chatId}`);
+        } catch (err) {
+            logger.error(`Genre movies error: ${err.message}`);
+            await sock.sendMessage(chatId, { text: '⚠️ Failed to fetch genre movies.' }, { quoted: originalMsg || undefined });
+        }
+    }
+
+    async _fetchUpcoming(limit = 10) {
+        const key = config.TMDB_API_KEY;
+        if (!key) return null;
+
+        try {
+            const { data } = await axios.get(
+                'https://api.themoviedb.org/3/movie/upcoming',
+                { params: { api_key: key, language: 'en-US', region: 'IN' }, timeout: 10000 }
+            );
+            const genreMap = await this._getGenreMap();
+            const results = (data?.results || []).slice(0, limit);
+            return results.map((m) => ({
+                title: m.title || m.original_title,
+                releaseDate: m.release_date ? new Date(m.release_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : 'TBA',
+                genres: (m.genre_ids || []).map(id => genreMap[id] || '').filter(Boolean).join(', ') || 'N/A',
+                plot: m.overview ? m.overview.slice(0, 100) + (m.overview.length > 100 ? '…' : '') : '',
+            }));
+        } catch (err) {
+            logger.warn(`TMDB upcoming fetch failed: ${err.message}`);
+            return null;
+        }
+    }
+
+    async _fetchGenreMovies(genreName, limit = 10) {
+        const key = config.TMDB_API_KEY;
+        if (!key) return null;
+
+        const genreId = TMDB_GENRES[genreName];
+        if (!genreId) return null;
+
+        try {
+            const { data } = await axios.get(
+                'https://api.themoviedb.org/3/discover/movie',
+                {
+                    params: {
+                        api_key: key,
+                        language: 'en-US',
+                        sort_by: 'popularity.desc',
+                        with_genres: genreId,
+                        'vote_count.gte': 50,
+                    },
+                    timeout: 10000,
+                }
+            );
+            const results = (data?.results || []).slice(0, limit);
+            return results.map((m) => ({
+                title: m.title || m.original_title,
+                year: m.release_date?.split('-')[0] || '',
+                rating: m.vote_average ? m.vote_average.toFixed(1) : '',
+                plot: m.overview ? m.overview.slice(0, 100) + (m.overview.length > 100 ? '…' : '') : '',
+            }));
+        } catch (err) {
+            logger.warn(`TMDB genre fetch failed: ${err.message}`);
+            return null;
+        }
+    }
+
+    async _getGenreMap() {
+        if (this._genreCache) return this._genreCache;
+        const key = config.TMDB_API_KEY;
+        if (!key) return {};
+
+        try {
+            const { data } = await axios.get(
+                'https://api.themoviedb.org/3/genre/movie/list',
+                { params: { api_key: key, language: 'en-US' }, timeout: 10000 }
+            );
+            this._genreCache = {};
+            for (const g of (data?.genres || [])) {
+                this._genreCache[g.id] = g.name;
+            }
+            return this._genreCache;
+        } catch (err) {
+            logger.warn(`TMDB genre list fetch failed: ${err.message}`);
+            return {};
         }
     }
 
