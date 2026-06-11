@@ -326,7 +326,9 @@ export function findCommand(cmdFirstToken) {
  * @returns {string}
  */
 function fmtCmd(def) {
-    return `• ${def.names.join(' / ')} — ${def.help}`;
+    const primaryCmd = `\`${def.names[0]}\``;
+    const aliases = def.names.length > 1 ? ` _(${def.names.slice(1).join(', ')})_` : '';
+    return `  • ${primaryCmd}${aliases}\n    ↳ ${def.help}`;
 }
 
 /**
@@ -353,86 +355,138 @@ export function formatHelpText({
     const all = COMMAND_REGISTRY;
     const isMovieCmd = (d) => d.category === 'movie';
 
-    let out = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-    out += '🤖 *BOT COMMANDS* 🤖\n';
-    out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+    let out = '╔════════════════════════════════╗\n';
+    out += '║   🤖 BOT COMMAND GUIDE 🤖   ║\n';
+    out += '╚════════════════════════════════╝\n\n';
 
+    // ─── GENERAL SECTION ───
     const anyoneGeneral = all.filter((d) => d.role === 'anyone' && !isMovieCmd(d));
+    if (anyoneGeneral.length) {
+        out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        out += '📱 *GENERAL COMMANDS*\n';
+        out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        out += '_Everyone can use:_\n\n';
+        for (const def of anyoneGeneral) out += fmtCmd(def) + '\n';
+        out += '\n';
+    }
+
+    // ─── MEDIA SECTION ───
+    const mediaCommands = all.filter(d => ['insta', 'toimg'].some(k => d.key.includes(k)) && d.role === 'anyone');
+    if (mediaCommands.length) {
+        out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        out += '🎨 *MEDIA TOOLS*\n';
+        out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        out += '_Download & create content:_\n\n';
+        for (const def of mediaCommands) out += fmtCmd(def) + '\n';
+        out += '\n';
+    }
+
+    // ─── STICKER SECTION ───
+    const stickerCommands = all.filter(d => ['sticker', 'steal'].includes(d.key) && d.role === 'anyone');
+    if (stickerCommands.length) {
+        out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        out += '🎭 *STICKER CREATOR*\n';
+        out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        out += '_Create & modify stickers:_\n\n';
+        for (const def of stickerCommands) out += fmtCmd(def) + '\n';
+        out += '\n';
+    }
+
+    // ─── MOVIE SECTION ───
     const anyoneMovie = all.filter((d) => d.role === 'anyone' && isMovieCmd(d));
-
-    if (movieEnabled) {
-        out += '🎬 *Movie Search*\n\n';
+    if (movieEnabled && anyoneMovie.length) {
+        out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        out += '🎬 *MOVIE SEARCH*\n';
+        out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        out += '_Search for movies & shows:_\n\n';
         for (const def of anyoneMovie) out += fmtCmd(def) + '\n';
-        out += '\n📝 *Search tips:*\n';
-        out += '`/movie Pushpa 2` · `/search Avengers` · `/m Animal`\n';
-        out += '📊 5 free/day · ⭐ Premium = unlimited\n\n';
+        out += '\n📊 *Daily Limit:* 5 free searches\n';
+        out += '⭐ *Premium:* Unlimited searches\n';
+        out += '💡 *Tip:* `/movie Pushpa 2` · `/search Avengers` · `/m Animal`\n\n';
     }
 
-    out += '📌 *Everyone*\n\n';
-    for (const def of anyoneGeneral) out += fmtCmd(def) + '\n';
-
-    if (!movieEnabled && (isStaff || isOwner)) {
-        out += '\n🎬 *Movie search*\n\n';
-        for (const def of anyoneMovie) out += fmtCmd(def) + '\n';
-    }
-
+    // ─── GROUP SETTINGS (Staff) ───
     if (isStaff) {
-        const staffGeneral = all.filter((d) => d.role === 'staff' && !isMovieCmd(d));
-        const staffMovie = all.filter((d) => d.role === 'staff' && isMovieCmd(d));
-
-        if (staffGeneral.length) {
-            out += '\n👮 *Staff* (owners, moderators, bot admins, group admins)\n\n';
-            for (const def of staffGeneral) out += fmtCmd(def) + '\n';
-        }
-        if (staffMovie.length) {
-            out += '\n🎬 *Movie management* (staff)\n\n';
-            for (const def of staffMovie) out += fmtCmd(def) + '\n';
+        const staffCommands = all.filter((d) => d.role === 'staff' && !isMovieCmd(d));
+        if (staffCommands.length) {
+            out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+            out += '👮 *GROUP SETTINGS* (Staff)\n';
+            out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+            out += '_Owners, admins, moderators:_\n\n';
+            for (const def of staffCommands) out += fmtCmd(def) + '\n';
+            out += '\n';
         }
     }
 
+    // ─── ADMIN TOOLS (Privileged) ───
+    if (isPrivileged) {
+        const adminCmds = all.filter((d) => d.role === 'admins');
+        if (adminCmds.length) {
+            out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+            out += '🔧 *ADMIN TOOLS*\n';
+            out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+            out += '_Manage bot & group:_\n\n';
+            for (const def of adminCmds) out += fmtCmd(def) + '\n';
+            out += '\n';
+        }
+    }
+
+    // ─── ADMIN MANAGERS ───
     if (canManageAdmins) {
         const adminMgr = all.filter((d) => d.role === 'admin_managers');
         if (adminMgr.length) {
-            out += '\n👑 *Admin managers* (owners, moderators, bot admins)\n\n';
+            out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+            out += '👑 *BOT ADMIN MANAGER*\n';
+            out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+            out += '_Manage who is a bot admin:_\n\n';
             for (const def of adminMgr) out += fmtCmd(def) + '\n';
+            out += '\n';
         }
     }
 
+    // ─── WELCOME MESSAGES ───
     if (canSetWelcome) {
         const wc = all.filter((d) => d.role === 'welcome_setters');
         if (wc.length) {
-            out += '\n👋 *Welcome messages* (admins & admin managers)\n\n';
+            out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+            out += '👋 *WELCOME MESSAGES*\n';
+            out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+            out += '_Set group welcome text:_\n\n';
             for (const def of wc) out += fmtCmd(def) + '\n';
+            out += '\n';
         }
     }
 
-    if (isPrivileged) {
-        const admCmds = all.filter((d) => d.role === 'admins');
-        if (admCmds.length) {
-            out += '\n🔧 *Admins* (owners, bot admins, or group admins in this chat)\n\n';
-            for (const def of admCmds) out += fmtCmd(def) + '\n';
-        }
-    }
-
+    // ─── OWNER SECTION ───
     if (isOwner) {
         const ownerGeneral = all.filter((d) => d.role === 'owner' && !isMovieCmd(d));
         const ownerMovie = all.filter((d) => d.role === 'owner' && isMovieCmd(d));
 
         if (ownerGeneral.length) {
-            out += '\n👑 *Owner only*\n\n';
+            out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+            out += '👑 *OWNER ONLY COMMANDS*\n';
+            out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
             for (const def of ownerGeneral) out += fmtCmd(def) + '\n';
+            out += '\n';
         }
+
         if (ownerMovie.length) {
-            out += '\n👑⭐ *Owner — movie management*\n\n';
+            out += '👑⭐ *OWNER — MOVIE MANAGEMENT*\n\n';
             for (const def of ownerMovie) out += fmtCmd(def) + '\n';
+            out += '\n';
         }
     }
 
-    out += '\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+    // ─── FOOTER ───
+    out += '╔════════════════════════════════╗\n';
     if (movieOnly) {
-        out += '🎬 _Movie features enabled_ · 🍿 _`/movie <name>` to search_';
+        out += '║ 🎬 MOVIE FEATURES ENABLED 🎬 ║\n';
+        out += '║ 🍿 Use /movie to search 🍿  ║\n';
     } else {
-        out += '💡 Courses post on schedule; tech news at 10 AM & 10 PM IST where activated.';
+        out += '║  📚 COURSES & 📰 NEWS ACTIVE   ║\n';
+        out += '║   Posts at 10 AM & 10 PM IST   ║\n';
     }
+    out += '╚════════════════════════════════╝\n';
+
     return out;
 }
