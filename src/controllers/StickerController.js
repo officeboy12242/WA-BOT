@@ -204,8 +204,10 @@ class StickerController {
                     }, { quoted: quotedMsg });
 
                 } catch (wsError) {
-                    logger.error('Sticker creation error:', wsError?.message || wsError);
-                    logger.error('Sticker creation error details:', JSON.stringify(wsError, Object.getOwnPropertyNames(wsError)));
+                    const errorMsg = wsError instanceof Error ? wsError.message : String(wsError);
+                    const errorStack = wsError instanceof Error ? wsError.stack : '';
+                    logger.error('Sticker creation error:', errorMsg);
+                    logger.error('Sticker creation error stack:', errorStack);
                     
                     // Fallback: try sending without metadata
                     try {
@@ -213,11 +215,13 @@ class StickerController {
                             await sock.sendMessage(chatId, {
                                 sticker: fs.readFileSync(stickerPath)
                             }, { quoted: quotedMsg });
+                            logger.info('✓ Sticker sent successfully (fallback without metadata)');
                         } else {
                             throw new Error('No sticker file to send');
                         }
                     } catch (fallbackError) {
-                        logger.error('Fallback error:', fallbackError?.message || fallbackError);
+                        const fbErrorMsg = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+                        logger.error('Fallback error:', fbErrorMsg);
                         await sock.sendMessage(chatId, {
                             text: '❌ Failed to create sticker.'
                         });
@@ -292,20 +296,34 @@ class StickerController {
 
             try {
                 // Add metadata (modifies file in place)
-                const stickerBuffer = noMetadata
-                    ? await WSF.setMetadata(undefined, undefined, stickerPath)
-                    : await WSF.setMetadata(packName, authorName, stickerPath);
+                await WSF.setMetadata(packName, authorName, stickerPath);
 
-                // Send sticker using buffer
+                // Send sticker using file buffer
+                const finalBuffer = fs.readFileSync(stickerPath);
                 await sock.sendMessage(chatId, {
-                    sticker: Buffer.from(stickerBuffer)
+                    sticker: finalBuffer
                 }, { quoted: waMessage });
+                logger.info('✓ Sticker metadata updated successfully');
             } catch (error) {
-                logger.error('Error setting metadata:', error?.message || error);
-                logger.error('Error details:', JSON.stringify(error, Object.getOwnPropertyNames(error)));
-                await sock.sendMessage(chatId, {
-                    text: '❌ Failed to modify sticker metadata.'
-                });
+                const errorMsg = error instanceof Error ? error.message : String(error);
+                const errorStack = error instanceof Error ? error.stack : '';
+                logger.error('Error setting metadata:', errorMsg);
+                logger.error('Error setting metadata stack:', errorStack);
+                
+                // Fallback: send without metadata
+                try {
+                    const fallbackBuffer = fs.readFileSync(stickerPath);
+                    await sock.sendMessage(chatId, {
+                        sticker: fallbackBuffer
+                    }, { quoted: waMessage });
+                    logger.info('✓ Sticker sent successfully (fallback without metadata)');
+                } catch (fbError) {
+                    const fbMsg = fbError instanceof Error ? fbError.message : String(fbError);
+                    logger.error('Fallback steal error:', fbMsg);
+                    await sock.sendMessage(chatId, {
+                        text: '❌ Failed to modify sticker metadata.'
+                    });
+                }
             } finally {
                 this._safeUnlink(stickerPath);
             }
