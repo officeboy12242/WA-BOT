@@ -558,6 +558,13 @@ class StickerController {
                     .run();
             });
 
+            // Apply default pack/author metadata
+            try {
+                await WSF.setMetadata(this.defaultPack, this.defaultAuthor, outputPath);
+            } catch (metaErr) {
+                logger.warn(`RGB sticker metadata failed: ${metaErr.message}`);
+            }
+
             const buffer = fs.readFileSync(outputPath);
             try { await sock.sendMessage(chatId, { delete: processingMsg.key }); } catch {}
             await sock.sendMessage(chatId, { sticker: buffer }, { quoted: originalMsg || undefined });
