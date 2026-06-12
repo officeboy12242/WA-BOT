@@ -241,6 +241,18 @@ class CommandController {
                     }
                 }
                 break;
+            case 'rgb':
+                if (!this.stickerController) {
+                    await sock.sendMessage(chatId, { text: '⚠️ Sticker functionality is not available.' });
+                } else {
+                    try {
+                        await this.stickerController.handleRgbSticker(sock, chatId, args, quotedMessage);
+                    } catch (err) {
+                        logger.error('RGB sticker error:', err);
+                        await sock.sendMessage(chatId, { text: '⚠️ Failed to generate RGB sticker.' });
+                    }
+                }
+                break;
 
             default: break;
         }
