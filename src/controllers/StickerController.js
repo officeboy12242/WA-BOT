@@ -487,10 +487,9 @@ class StickerController {
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
 
-                // No glow — clean solid color fill
+                // No glow
                 ctx.shadowColor = 'transparent';
                 ctx.shadowBlur = 0;
-                ctx.fillStyle = color;
 
                 // Word-wrap if needed
                 const maxWidth = SIZE - 40;
@@ -510,9 +509,19 @@ class StickerController {
 
                 const lineH = fontSize * 1.35;
                 const startY = SIZE / 2 - ((lines.length - 1) * lineH) / 2;
+
+                // Step 1: draw text in white first (emoji renders in its natural color)
+                ctx.fillStyle = 'white';
                 for (let j = 0; j < lines.length; j++) {
                     ctx.fillText(lines[j], SIZE / 2, startY + j * lineH);
                 }
+
+                // Step 2: overlay the RGB color over ALL drawn pixels (including emoji)
+                // source-atop only paints where pixels already exist → keeps transparency
+                ctx.globalCompositeOperation = 'source-atop';
+                ctx.fillStyle = color;
+                ctx.fillRect(0, 0, SIZE, SIZE);
+                ctx.globalCompositeOperation = 'source-over'; // reset
 
                 const framePath = this._generateTempFileName('_rgb.png');
                 fs.writeFileSync(framePath, canvas.toBuffer('image/png'));
