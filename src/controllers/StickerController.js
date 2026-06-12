@@ -453,12 +453,15 @@ class StickerController {
         let concatFile = null;
 
         try {
-            const { createCanvas, GlobalFonts } = await import('@napi-rs/canvas');
-
-            // Load system fonts once so emojis render correctly
-            try { GlobalFonts.loadSystemFonts(); } catch {}
-
+            const { createCanvas } = await import('@napi-rs/canvas');
             const SIZE = 512;
+
+            // Force text-presentation mode on all emoji so fillStyle color works
+            // (color bitmap emoji ignore fillStyle; text-mode emoji obey it fully)
+            const displayText = text.replace(
+                /(\p{Emoji_Presentation}|\p{Extended_Pictographic})/gu,
+                (m) => m + '\uFE0E',
+            );
 
             const COLORS = [
                 '#FF0000', '#FF4500', '#FF8C00', '#FFD700',
@@ -476,24 +479,24 @@ class StickerController {
 
                 const color = COLORS[i];
 
-                // Dynamic font size based on text length
+                // Dynamic font size based on original text length
                 let fontSize = text.length <= 6 ? 120
                     : text.length <= 10 ? 90
                     : text.length <= 16 ? 72
                     : 54;
 
-                // Use emoji-capable fonts
-                ctx.font = `bold ${fontSize}px "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif`;
+                ctx.font = `bold ${fontSize}px sans-serif`;
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
-
-                // No glow
                 ctx.shadowColor = 'transparent';
                 ctx.shadowBlur = 0;
 
-                // Word-wrap if needed
+                // fillStyle works on monochrome text-mode emoji
+                ctx.fillStyle = color;
+
+                // Word-wrap
                 const maxWidth = SIZE - 40;
-                const words = text.split(' ');
+                const words = displayText.split(' ');
                 const lines = [];
                 let cur = '';
                 for (const word of words) {
@@ -509,19 +512,9 @@ class StickerController {
 
                 const lineH = fontSize * 1.35;
                 const startY = SIZE / 2 - ((lines.length - 1) * lineH) / 2;
-
-                // Step 1: draw text in white first (emoji renders in its natural color)
-                ctx.fillStyle = 'white';
                 for (let j = 0; j < lines.length; j++) {
                     ctx.fillText(lines[j], SIZE / 2, startY + j * lineH);
                 }
-
-                // Step 2: overlay the RGB color over ALL drawn pixels (including emoji)
-                // source-atop only paints where pixels already exist → keeps transparency
-                ctx.globalCompositeOperation = 'source-atop';
-                ctx.fillStyle = color;
-                ctx.fillRect(0, 0, SIZE, SIZE);
-                ctx.globalCompositeOperation = 'source-over'; // reset
 
                 const framePath = this._generateTempFileName('_rgb.png');
                 fs.writeFileSync(framePath, canvas.toBuffer('image/png'));
