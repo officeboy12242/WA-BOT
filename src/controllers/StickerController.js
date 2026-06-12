@@ -447,12 +447,10 @@ class StickerController {
                     + '*Examples:*\n'
                     + '• `/rgb Sassy Bot 🔥`\n'
                     + '• `/rgb GG EZ`\n\n'
-                    + '💡 _Max 25 characters_',
+                    + '💡 _Reply to any message with `/rgb` to convert it!_',
             }, { quoted: originalMsg || undefined });
             return;
         }
-
-        if (text.length > 25) text = text.slice(0, 25);
 
         const processingMsg = await sock.sendMessage(chatId, {
             text: '🎨 _Generating RGB sticker..._',
@@ -486,11 +484,14 @@ class StickerController {
 
                 const color = COLORS[i];
 
-                // Dynamic font size based on text length
-                let fontSize = text.length <= 6 ? 120
-                    : text.length <= 10 ? 90
-                    : text.length <= 16 ? 72
-                    : 54;
+                // Dynamic font size based on text length — no hard cap
+                let fontSize = text.length <= 4 ? 130
+                    : text.length <= 6 ? 110
+                    : text.length <= 10 ? 88
+                    : text.length <= 16 ? 70
+                    : text.length <= 25 ? 54
+                    : text.length <= 40 ? 42
+                    : 32;
 
                 // Use emoji-capable fonts
                 ctx.font = `bold ${fontSize}px "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif`;
