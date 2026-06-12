@@ -33,8 +33,8 @@ ffmpeg.setFfmpegPath(ffmpegPath);
 
 class StickerController {
     constructor(config = {}) {
-        this.defaultPack = config.STICKER_PACK_NAME || 'Sassy Bot';
-        this.defaultAuthor = config.STICKER_PACK_AUTHOR || 'Sassy';
+        this.defaultPack = config.STICKER_PACK_NAME || '';
+        this.defaultAuthor = config.STICKER_PACK_AUTHOR || '';
         this.tempDir = path.join(os.tmpdir(), 'whatsapp-bot-stickers');
         this._ensureTempDir();
     }
