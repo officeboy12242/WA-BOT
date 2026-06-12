@@ -19,7 +19,7 @@ class StickerForwarder {
         this.targetGroups = targetGroups || [];
         this.sourceChannels = sourceChannels || [];
         this.resolvedChannelNames = new Map();
-        this.packName = packName || 'Course Bot 🤖';
+        this.packName = packName || '';
         this.packAuthor = packAuthor;
 
         this.countSent = 0;
