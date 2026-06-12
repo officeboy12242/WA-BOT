@@ -453,7 +453,11 @@ class StickerController {
         let concatFile = null;
 
         try {
-            const { createCanvas } = await import('@napi-rs/canvas');
+            const { createCanvas, GlobalFonts } = await import('@napi-rs/canvas');
+
+            // Load system fonts once so emojis render correctly
+            try { GlobalFonts.loadSystemFonts(); } catch {}
+
             const SIZE = 512;
 
             const COLORS = [
@@ -467,24 +471,25 @@ class StickerController {
                 const canvas = createCanvas(SIZE, SIZE);
                 const ctx = canvas.getContext('2d');
 
-                // Transparent background — clear canvas
+                // Transparent background
                 ctx.clearRect(0, 0, SIZE, SIZE);
 
                 const color = COLORS[i];
 
-                // Dynamic font size
+                // Dynamic font size based on text length
                 let fontSize = text.length <= 6 ? 120
                     : text.length <= 10 ? 90
                     : text.length <= 16 ? 72
                     : 54;
 
-                ctx.font = `bold ${fontSize}px sans-serif`;
+                // Use emoji-capable fonts
+                ctx.font = `bold ${fontSize}px "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif`;
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
 
-                // Glow effect (draw multiple times with blur)
-                ctx.shadowColor = color;
-                ctx.shadowBlur = 24;
+                // No glow — clean solid color fill
+                ctx.shadowColor = 'transparent';
+                ctx.shadowBlur = 0;
                 ctx.fillStyle = color;
 
                 // Word-wrap if needed
