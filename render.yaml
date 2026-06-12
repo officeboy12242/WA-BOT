@@ -4,7 +4,10 @@ services:
     env: node
     region: singapore
     plan: free
-    buildCommand: npm install
+    buildCommand: |
+      apt-get update && apt-get install -y fonts-dejavu-core fonts-liberation fontconfig || true
+      fc-cache -f || true
+      npm install
     startCommand: npm start
     envVars:
       - key: NODE_ENV

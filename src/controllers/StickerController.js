@@ -457,8 +457,10 @@ class StickerController {
         try {
             const { createCanvas, GlobalFonts } = await import('@napi-rs/canvas');
 
-            // Load system fonts once so emojis render correctly
-            try { GlobalFonts.loadSystemFonts(); } catch {}
+            // Load system fonts for text/emoji rendering
+            try { GlobalFonts.loadSystemFonts(); } catch (e) {
+                logger.warn(`Could not load system fonts: ${e.message}`);
+            }
 
             const SIZE = 512;
 
@@ -467,6 +469,18 @@ class StickerController {
                 '#00FF00', '#00FFCD', '#00FFFF', '#0080FF',
                 '#8B00FF', '#FF00FF', '#FF1493', '#FF6347',
             ];
+
+            // Font stack: Windows → macOS → Linux → generic fallback
+            const fontFamily = [
+                'Segoe UI Emoji',      // Windows
+                'Apple Color Emoji',   // macOS
+                'Noto Color Emoji',    // Linux (if installed)
+                'Noto Sans',           // Linux common
+                'DejaVu Sans',         // Linux fallback
+                'Liberation Sans',     // Linux fallback
+                'Arial',               // Windows/macOS
+                'sans-serif'           // Ultimate fallback
+            ].join(', ');
 
             // Draw each frame
             for (let i = 0; i < COLORS.length; i++) {
@@ -487,8 +501,8 @@ class StickerController {
                     : text.length <= 40 ? 42
                     : 32;
 
-                // Use emoji-capable fonts
-                ctx.font = `bold ${fontSize}px "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif`;
+                // Use cross-platform font stack
+                ctx.font = `bold ${fontSize}px ${fontFamily}`;
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
 
