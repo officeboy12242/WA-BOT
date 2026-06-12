@@ -5,7 +5,7 @@
 
 import { downloadMediaMessage, downloadContentFromMessage } from '@whiskeysockets/baileys';
 import { getTextFromWAMessage } from '../utils/waMessage.js';
-import WSF from 'wa-sticker-formatter';
+import WSF, { Exif as StickerExif } from 'wa-sticker-formatter';
 import ffmpeg from 'fluent-ffmpeg';
 import fs from 'fs';
 import { writeFile } from 'fs/promises';
@@ -194,15 +194,18 @@ class StickerController {
                         throw new Error('Output sticker file not created');
                     }
 
-                    // Add metadata if not disabled (modifies file in place)
+                    // Read sticker buffer and optionally inject metadata via Exif
+                    let stickerBuffer = fs.readFileSync(stickerPath);
                     if (!noMetadata) {
-                        await WSF.setMetadata(packName, authorName, stickerPath);
+                        try {
+                            const exif = new StickerExif({ pack: packName, author: authorName });
+                            stickerBuffer = await exif.add(stickerBuffer);
+                        } catch (metaErr) {
+                            logger.warn(`Sticker metadata injection failed: ${metaErr.message}`);
+                        }
                     }
 
-                    // Send sticker using file path (Baileys reads it)
-                    await sock.sendMessage(chatId, {
-                        sticker: fs.readFileSync(stickerPath)
-                    }, { quoted: quotedMsg });
+                    await sock.sendMessage(chatId, { sticker: stickerBuffer }, { quoted: quotedMsg });
 
                 } catch (wsError) {
                     const errorMsg = wsError instanceof Error ? wsError.message : String(wsError);
@@ -296,35 +299,25 @@ class StickerController {
             await writeFile(stickerPath, buffer);
 
             try {
-                // Add metadata (modifies file in place)
-                await WSF.setMetadata(packName, authorName, stickerPath);
+                // Read buffer and inject metadata via Exif
+                let finalBuffer = fs.readFileSync(stickerPath);
+                if (!noMetadata) {
+                    try {
+                        const exif = new StickerExif({ pack: packName, author: authorName });
+                        finalBuffer = await exif.add(finalBuffer);
+                    } catch (metaErr) {
+                        logger.warn(`Steal metadata injection failed: ${metaErr.message}`);
+                    }
+                }
 
-                // Send sticker using file buffer
-                const finalBuffer = fs.readFileSync(stickerPath);
-                await sock.sendMessage(chatId, {
-                    sticker: finalBuffer
-                }, { quoted: waMessage });
+                await sock.sendMessage(chatId, { sticker: finalBuffer }, { quoted: waMessage });
                 logger.info('✓ Sticker metadata updated successfully');
             } catch (error) {
                 const errorMsg = error instanceof Error ? error.message : String(error);
-                const errorStack = error instanceof Error ? error.stack : '';
-                logger.error('Error setting metadata:', errorMsg);
-                logger.error('Error setting metadata stack:', errorStack);
-                
-                // Fallback: send without metadata
-                try {
-                    const fallbackBuffer = fs.readFileSync(stickerPath);
-                    await sock.sendMessage(chatId, {
-                        sticker: fallbackBuffer
-                    }, { quoted: waMessage });
-                    logger.info('✓ Sticker sent successfully (fallback without metadata)');
-                } catch (fbError) {
-                    const fbMsg = fbError instanceof Error ? fbError.message : String(fbError);
-                    logger.error('Fallback steal error:', fbMsg);
-                    await sock.sendMessage(chatId, {
-                        text: '❌ Failed to modify sticker metadata.'
-                    });
-                }
+                logger.error('Error in steal handler:', errorMsg);
+                await sock.sendMessage(chatId, {
+                    text: '❌ Failed to modify sticker metadata.'
+                });
             } finally {
                 this._safeUnlink(stickerPath);
             }
@@ -559,14 +552,14 @@ class StickerController {
                     .run();
             });
 
-            // Apply default pack/author metadata
+            // Read WebP buffer and inject metadata via Exif
+            let buffer = fs.readFileSync(outputPath);
             try {
-                await WSF.setMetadata(this.defaultPack, this.defaultAuthor, outputPath);
+                const exif = new StickerExif({ pack: this.defaultPack, author: this.defaultAuthor });
+                buffer = await exif.add(buffer);
             } catch (metaErr) {
-                logger.warn(`RGB sticker metadata failed: ${metaErr.message}`);
+                logger.warn(`RGB sticker metadata injection failed: ${metaErr.message}`);
             }
-
-            const buffer = fs.readFileSync(outputPath);
             try { await sock.sendMessage(chatId, { delete: processingMsg.key }); } catch {}
             await sock.sendMessage(chatId, { sticker: buffer }, { quoted: originalMsg || undefined });
             logger.info(`🌈 RGB sticker created for "${text}" in ${chatId}`);
