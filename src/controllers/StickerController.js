@@ -14,6 +14,12 @@ import { logger } from '../utils/logger.js';
 import crypto from 'crypto';
 import path from 'path';
 import os from 'os';
+import { fileURLToPath } from 'url';
+
+// Get directory path for bundled assets
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const BUNDLED_FONT_PATH = path.resolve(__dirname, '../../fonts/Roboto-Bold.ttf');
 
 // Configure FFmpeg path
 let ffmpegPath = process.env.FFMPEG_PATH;
@@ -457,9 +463,22 @@ class StickerController {
         try {
             const { createCanvas, GlobalFonts } = await import('@napi-rs/canvas');
 
-            // Load system fonts for text/emoji rendering
-            try { GlobalFonts.loadSystemFonts(); } catch (e) {
-                logger.warn(`Could not load system fonts: ${e.message}`);
+            // Register bundled font for cross-platform compatibility
+            let fontFamily = 'sans-serif';
+            try {
+                if (fs.existsSync(BUNDLED_FONT_PATH)) {
+                    GlobalFonts.registerFromPath(BUNDLED_FONT_PATH, 'RobotoBold');
+                    fontFamily = 'RobotoBold';
+                    logger.info('RGB sticker using bundled Roboto font');
+                } else {
+                    // Fallback to system fonts
+                    GlobalFonts.loadSystemFonts();
+                    fontFamily = 'Arial, DejaVu Sans, Liberation Sans, sans-serif';
+                    logger.warn('Bundled font not found, using system fonts');
+                }
+            } catch (e) {
+                logger.warn(`Font loading failed: ${e.message}, using fallback`);
+                fontFamily = 'sans-serif';
             }
 
             const SIZE = 512;
@@ -469,18 +488,6 @@ class StickerController {
                 '#00FF00', '#00FFCD', '#00FFFF', '#0080FF',
                 '#8B00FF', '#FF00FF', '#FF1493', '#FF6347',
             ];
-
-            // Font stack: Windows → macOS → Linux → generic fallback
-            const fontFamily = [
-                'Segoe UI Emoji',      // Windows
-                'Apple Color Emoji',   // macOS
-                'Noto Color Emoji',    // Linux (if installed)
-                'Noto Sans',           // Linux common
-                'DejaVu Sans',         // Linux fallback
-                'Liberation Sans',     // Linux fallback
-                'Arial',               // Windows/macOS
-                'sans-serif'           // Ultimate fallback
-            ].join(', ');
 
             // Draw each frame
             for (let i = 0; i < COLORS.length; i++) {
@@ -501,8 +508,8 @@ class StickerController {
                     : text.length <= 40 ? 42
                     : 32;
 
-                // Use cross-platform font stack
-                ctx.font = `bold ${fontSize}px ${fontFamily}`;
+                // Use registered font
+                ctx.font = `${fontSize}px ${fontFamily}`;
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
 
