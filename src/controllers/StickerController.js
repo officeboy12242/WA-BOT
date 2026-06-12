@@ -4,6 +4,7 @@
  */
 
 import { downloadMediaMessage, downloadContentFromMessage } from '@whiskeysockets/baileys';
+import { getTextFromWAMessage } from '../utils/waMessage.js';
 import WSF from 'wa-sticker-formatter';
 import ffmpeg from 'fluent-ffmpeg';
 import fs from 'fs';
@@ -427,14 +428,23 @@ class StickerController {
     async handleRgbSticker(sock, chatId, args, originalMsg = null) {
         let text = args.join(' ').replace(/^["']|["']$/g, '').trim();
 
+        // If no args, try to get text from the replied/quoted message
+        if (!text && originalMsg) {
+            const quotedMsg = originalMsg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+            if (quotedMsg) {
+                text = getTextFromWAMessage(quotedMsg).trim();
+            }
+        }
+
         if (!text) {
             await sock.sendMessage(chatId, {
                 text: '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'
                     + '🌈 *RGB STICKER MAKER*\n'
                     + '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n'
-                    + '*Usage:* `/rgb <your text>`\n\n'
+                    + '*Usage:*\n'
+                    + '• `/rgb Hello World` — type your text\n'
+                    + '• Reply to any message with `/rgb` — uses that message\'s text\n\n'
                     + '*Examples:*\n'
-                    + '• `/rgb Hello World`\n'
                     + '• `/rgb Sassy Bot 🔥`\n'
                     + '• `/rgb GG EZ`\n\n'
                     + '💡 _Max 25 characters_',
@@ -453,15 +463,12 @@ class StickerController {
         let concatFile = null;
 
         try {
-            const { createCanvas } = await import('@napi-rs/canvas');
-            const SIZE = 512;
+            const { createCanvas, GlobalFonts } = await import('@napi-rs/canvas');
 
-            // Force text-presentation mode on all emoji so fillStyle color works
-            // (color bitmap emoji ignore fillStyle; text-mode emoji obey it fully)
-            const displayText = text.replace(
-                /(\p{Emoji_Presentation}|\p{Extended_Pictographic})/gu,
-                (m) => m + '\uFE0E',
-            );
+            // Load system fonts once so emojis render correctly
+            try { GlobalFonts.loadSystemFonts(); } catch {}
+
+            const SIZE = 512;
 
             const COLORS = [
                 '#FF0000', '#FF4500', '#FF8C00', '#FFD700',
@@ -479,24 +486,25 @@ class StickerController {
 
                 const color = COLORS[i];
 
-                // Dynamic font size based on original text length
+                // Dynamic font size based on text length
                 let fontSize = text.length <= 6 ? 120
                     : text.length <= 10 ? 90
                     : text.length <= 16 ? 72
                     : 54;
 
-                ctx.font = `bold ${fontSize}px sans-serif`;
+                // Use emoji-capable fonts
+                ctx.font = `bold ${fontSize}px "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif`;
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
+
+                // No glow — clean solid color fill
                 ctx.shadowColor = 'transparent';
                 ctx.shadowBlur = 0;
-
-                // fillStyle works on monochrome text-mode emoji
                 ctx.fillStyle = color;
 
-                // Word-wrap
+                // Word-wrap if needed
                 const maxWidth = SIZE - 40;
-                const words = displayText.split(' ');
+                const words = text.split(' ');
                 const lines = [];
                 let cur = '';
                 for (const word of words) {
