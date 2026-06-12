@@ -5,7 +5,8 @@
 
 import { downloadMediaMessage, downloadContentFromMessage } from '@whiskeysockets/baileys';
 import { getTextFromWAMessage } from '../utils/waMessage.js';
-import WSF, { Exif as StickerExif } from 'wa-sticker-formatter';
+import WSF from 'wa-sticker-formatter';
+const { Exif: StickerExif } = WSF;
 import ffmpeg from 'fluent-ffmpeg';
 import fs from 'fs';
 import { writeFile } from 'fs/promises';
