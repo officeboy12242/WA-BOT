@@ -467,9 +467,8 @@ class StickerController {
                 const canvas = createCanvas(SIZE, SIZE);
                 const ctx = canvas.getContext('2d');
 
-                // Dark background
-                ctx.fillStyle = '#111111';
-                ctx.fillRect(0, 0, SIZE, SIZE);
+                // Transparent background — clear canvas
+                ctx.clearRect(0, 0, SIZE, SIZE);
 
                 const color = COLORS[i];
 
@@ -534,6 +533,7 @@ class StickerController {
                         '-vf', 'scale=512:512',
                         '-loop', '0',
                         '-preset', 'default',
+                        '-pix_fmt', 'yuva420p',
                         '-an',
                         '-vsync', '0',
                     ])
