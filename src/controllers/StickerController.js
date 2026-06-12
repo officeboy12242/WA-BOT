@@ -420,6 +420,146 @@ class StickerController {
             });
         }
     }
+
+    /**
+     * Generate animated RGB/rainbow text sticker
+     */
+    async handleRgbSticker(sock, chatId, args, originalMsg = null) {
+        let text = args.join(' ').replace(/^["']|["']$/g, '').trim();
+
+        if (!text) {
+            await sock.sendMessage(chatId, {
+                text: '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'
+                    + '🌈 *RGB STICKER MAKER*\n'
+                    + '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n'
+                    + '*Usage:* `/rgb <your text>`\n\n'
+                    + '*Examples:*\n'
+                    + '• `/rgb Hello World`\n'
+                    + '• `/rgb Sassy Bot 🔥`\n'
+                    + '• `/rgb GG EZ`\n\n'
+                    + '💡 _Max 25 characters_',
+            }, { quoted: originalMsg || undefined });
+            return;
+        }
+
+        if (text.length > 25) text = text.slice(0, 25);
+
+        const processingMsg = await sock.sendMessage(chatId, {
+            text: '🎨 _Generating RGB sticker..._',
+        }, { quoted: originalMsg || undefined });
+
+        const frameFiles = [];
+        let outputPath = null;
+        let concatFile = null;
+
+        try {
+            const { createCanvas } = await import('@napi-rs/canvas');
+            const SIZE = 512;
+
+            const COLORS = [
+                '#FF0000', '#FF4500', '#FF8C00', '#FFD700',
+                '#00FF00', '#00FFCD', '#00FFFF', '#0080FF',
+                '#8B00FF', '#FF00FF', '#FF1493', '#FF6347',
+            ];
+
+            // Draw each frame
+            for (let i = 0; i < COLORS.length; i++) {
+                const canvas = createCanvas(SIZE, SIZE);
+                const ctx = canvas.getContext('2d');
+
+                // Dark background
+                ctx.fillStyle = '#111111';
+                ctx.fillRect(0, 0, SIZE, SIZE);
+
+                const color = COLORS[i];
+
+                // Dynamic font size
+                let fontSize = text.length <= 6 ? 120
+                    : text.length <= 10 ? 90
+                    : text.length <= 16 ? 72
+                    : 54;
+
+                ctx.font = `bold ${fontSize}px sans-serif`;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+
+                // Glow effect (draw multiple times with blur)
+                ctx.shadowColor = color;
+                ctx.shadowBlur = 24;
+                ctx.fillStyle = color;
+
+                // Word-wrap if needed
+                const maxWidth = SIZE - 40;
+                const words = text.split(' ');
+                const lines = [];
+                let cur = '';
+                for (const word of words) {
+                    const test = cur ? `${cur} ${word}` : word;
+                    if (ctx.measureText(test).width > maxWidth && cur) {
+                        lines.push(cur);
+                        cur = word;
+                    } else {
+                        cur = test;
+                    }
+                }
+                lines.push(cur);
+
+                const lineH = fontSize * 1.35;
+                const startY = SIZE / 2 - ((lines.length - 1) * lineH) / 2;
+                for (let j = 0; j < lines.length; j++) {
+                    ctx.fillText(lines[j], SIZE / 2, startY + j * lineH);
+                }
+
+                const framePath = this._generateTempFileName('_rgb.png');
+                fs.writeFileSync(framePath, canvas.toBuffer('image/png'));
+                frameFiles.push(framePath);
+            }
+
+            // Write ffmpeg concat list (each frame shown for 0.1s → ~10fps)
+            concatFile = this._generateTempFileName('.txt');
+            const concatContent = frameFiles
+                .map(f => `file '${f.replace(/\\/g, '/')}'\nduration 0.10`)
+                .join('\n');
+            fs.writeFileSync(concatFile, concatContent);
+
+            outputPath = this._generateTempFileName('.webp');
+
+            // Combine frames → animated WebP
+            await new Promise((resolve, reject) => {
+                ffmpeg()
+                    .input(concatFile)
+                    .inputOptions(['-f', 'concat', '-safe', '0'])
+                    .outputOptions([
+                        '-vcodec', 'libwebp',
+                        '-vf', 'scale=512:512',
+                        '-loop', '0',
+                        '-preset', 'default',
+                        '-an',
+                        '-vsync', '0',
+                    ])
+                    .output(outputPath)
+                    .on('end', resolve)
+                    .on('error', reject)
+                    .run();
+            });
+
+            const buffer = fs.readFileSync(outputPath);
+            try { await sock.sendMessage(chatId, { delete: processingMsg.key }); } catch {}
+            await sock.sendMessage(chatId, { sticker: buffer }, { quoted: originalMsg || undefined });
+            logger.info(`🌈 RGB sticker created for "${text}" in ${chatId}`);
+
+        } catch (err) {
+            logger.error('RGB sticker error:', err?.message || err);
+            try { await sock.sendMessage(chatId, { delete: processingMsg.key }); } catch {}
+            await sock.sendMessage(chatId, {
+                text: '❌ Failed to generate RGB sticker. Try again!',
+            }, { quoted: originalMsg || undefined });
+        } finally {
+            frameFiles.forEach(f => this._safeUnlink(f));
+            if (outputPath) this._safeUnlink(outputPath);
+            if (concatFile) this._safeUnlink(concatFile);
+        }
+    }
 }
 
 export default StickerController;

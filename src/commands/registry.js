@@ -102,6 +102,13 @@ export const COMMAND_REGISTRY = [
         help: 'Convert sticker to image (reply to sticker)',
     },
     {
+        names: ['/rgb'],
+        key: 'rgb',
+        scope: 'any',
+        role: 'anyone',
+        help: 'Animated rainbow/RGB text sticker — `/rgb Your Text`',
+    },
+    {
         names: ['/news'],
         key: 'news',
         scope: 'any',
