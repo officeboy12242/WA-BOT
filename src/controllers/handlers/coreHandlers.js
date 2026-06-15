@@ -62,7 +62,8 @@ export async function handlePing(sock, chatId, { botState, botStartTime }) {
         const cpuBar = createProgressBar(parseFloat(stats.cpuUsage));
         const memBar = createProgressBar(parseFloat(stats.memUsage));
 
-        let r = `⚡ *SASSY BOT TERMINAL* v2.0
+        let r = `        ⚡ *SASSY BOT TERMINAL* v2.0
+        ════════════════════════
 
 *$ system --status*
 > ${statusEmoji} Status: *${statusText}*
