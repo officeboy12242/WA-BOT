@@ -62,28 +62,23 @@ export async function handlePing(sock, chatId, { botState, botStartTime }) {
         const cpuBar = createProgressBar(parseFloat(stats.cpuUsage));
         const memBar = createProgressBar(parseFloat(stats.memUsage));
 
-        let r = `\`\`\`
-┌──────────────────────────────────┐
-│  ⚡ SASSY BOT TERMINAL v2.0      │
-│  ════════════════════════════    │
-│                                  │
-│  $ system --status               │
-│  > ${statusEmoji} Status: ${statusText}              │
-│  > ⏱️ Uptime: ${uptimeFormatted.padEnd(17)}│
-│                                  │
-│  $ monitor --resources           │
-│  > CPU  [${cpuBar}] ${stats.cpuUsage.padStart(5)}%  │
-│  > MEM  [${memBar}] ${stats.memUsage.padStart(5)}%  │
-│  > PROC: ${stats.processMemMB} MB | CORES: ${stats.cores}      │
-│                                  │
-│  $ info --system                 │
-│  > OS: ${(stats.platform + '/' + stats.arch).padEnd(22)}│
-│  > NODE: ${process.version.padEnd(21)}│
-│  > TIME: ${currentTime.padEnd(21)}│
-│                                  │
-│  ✓ PONG! All systems operational │
-└──────────────────────────────────┘
-\`\`\``;
+        let r = `⚡ *SASSY BOT TERMINAL* v2.0
+
+*$ system --status*
+> ${statusEmoji} Status: *${statusText}*
+> ⏱️ Uptime: *${uptimeFormatted}*
+
+*$ monitor --resources*
+> CPU  [${cpuBar}] ${stats.cpuUsage}%
+> MEM  [${memBar}] ${stats.memUsage}%
+> PROC: ${stats.processMemMB} MB | CORES: ${stats.cores}
+
+*$ info --system*
+> 🖥️ OS: ${stats.platform}/${stats.arch}
+> 📗 NODE: ${process.version}
+> ⏰ TIME: ${currentTime}
+
+✅ *PONG!* All systems operational 🚀`;
 
         await sock.sendMessage(chatId, { text: r });
         logger.info(`🏓 Ping response sent to ${chatId}`);
