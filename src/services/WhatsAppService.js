@@ -262,7 +262,9 @@ class WhatsAppService {
 
         // Handle each message concurrently so one slow command does not block others.
         this.sock.ev.on('messages.upsert', ({ messages, type }) => {
-            if (type && type !== 'notify' && type !== 'append') {
+            // ONLY process 'notify' type - these are new real-time messages
+            // Skip 'append' (history sync) and other types that cause "Waiting for message"
+            if (type !== 'notify') {
                 return;
             }
             for (const msg of messages) {
@@ -330,31 +332,64 @@ class WhatsAppService {
 
         const chatId = msg.key.remoteJid;
         const messageId = msg.key?.id;
-        if (!chatId) {
+        if (!chatId || !messageId) {
             return;
+        }
+
+        // Skip broadcast and status messages
+        if (chatId === 'status@broadcast' || chatId.endsWith('@broadcast')) {
+            return;
+        }
+
+        // Skip system/stub messages (joins, leaves, subject changes, etc.)
+        if (msg.messageStubType !== undefined && msg.messageStubType !== null) {
+            return;
+        }
+
+        // Skip old messages (more than 60 seconds old) to avoid processing history
+        const messageTimestamp = msg.messageTimestamp;
+        if (messageTimestamp) {
+            const msgTime = typeof messageTimestamp === 'number' 
+                ? messageTimestamp * 1000 
+                : Number(messageTimestamp) * 1000;
+            const now = Date.now();
+            const age = now - msgTime;
+            if (age > 60000) { // Skip messages older than 60 seconds
+                return;
+            }
         }
 
         // Skip protocol/system messages that cause "Waiting for this message"
         const msgContent = msg.message;
-        const protocolTypes = [
+        const protocolOnlyTypes = [
             'protocolMessage',
             'senderKeyDistributionMessage', 
-            'messageContextInfo',
             'reactionMessage',
             'pollUpdateMessage',
+            'pollCreationMessage',
+            'encReactionMessage',
+            'editedMessage',
+            'keepInChatMessage',
+            'ptvMessage',
         ];
         
-        // Check if message only contains protocol data (no actual content)
+        // Check if message only contains protocol data (no actual user content)
         const msgKeys = Object.keys(msgContent);
-        const hasOnlyProtocol = msgKeys.every(key => 
-            protocolTypes.includes(key) || key === 'messageContextInfo'
-        );
-        if (hasOnlyProtocol && !msgContent.stickerMessage) {
-            return;
-        }
+        const contentTypes = [
+            'conversation', 'extendedTextMessage', 'imageMessage', 
+            'videoMessage', 'audioMessage', 'documentMessage',
+            'stickerMessage', 'contactMessage', 'locationMessage',
+            'liveLocationMessage', 'templateMessage', 'buttonsMessage',
+            'listMessage', 'viewOnceMessage', 'viewOnceMessageV2',
+        ];
         
-        // Skip system/stub messages
-        if (msg.messageStubType) {
+        const hasActualContent = msgKeys.some(key => contentTypes.includes(key));
+        const hasOnlyProtocol = msgKeys.every(key => 
+            protocolOnlyTypes.includes(key) || key === 'messageContextInfo'
+        );
+        
+        // Skip if no actual content and not a sticker
+        if (!hasActualContent && hasOnlyProtocol) {
             return;
         }
 
