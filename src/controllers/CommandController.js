@@ -4,7 +4,7 @@
  */
 
 import { checkCommandAccess } from '../commands/access.js';
-import { findCommand } from '../commands/registry.js';
+import { findCommand, findSimilarCommands } from '../commands/registry.js';
 import { logger } from '../utils/logger.js';
 import { extractPhoneNumber } from '../utils/permissions.js';
 
@@ -126,7 +126,17 @@ class CommandController {
         if (!cmd) return;
 
         const def = findCommand(cmd);
-        if (!def) return;
+        if (!def) {
+            // Show suggestions for unknown commands
+            const suggestions = findSimilarCommands(cmd);
+            if (suggestions.length > 0) {
+                const suggestionText = suggestions.map(s => `  • \`${s}\``).join('\n');
+                await sock.sendMessage(chatId, {
+                    text: `❓ Unknown command: \`${cmd}\`\n\n💡 *Did you mean:*\n${suggestionText}\n\n_Type \`/help\` for all commands_`
+                });
+            }
+            return;
+        }
 
         logger.info(`📝 Command received: ${def.key} from ${senderJid} in ${chatId}`);
 
