@@ -7,6 +7,7 @@ import os from 'os';
 import { logger } from '../../utils/logger.js';
 import { extractPhoneNumber } from '../../utils/permissions.js';
 import { formatHelpText } from '../../commands/registry.js';
+import { sendAndDelete } from '../../utils/autoDelete.js';
 
 function formatUptime(milliseconds) {
     const seconds = Math.floor(milliseconds / 1000);
@@ -79,9 +80,11 @@ export async function handlePing(sock, chatId, { botState, botStartTime }) {
 > 📗 NODE: ${process.version}
 > ⏰ TIME: ${currentTime}
 
-✅ *PONG!* All systems operational 🚀`;
+✅ *PONG!* All systems operational 🚀
 
-        await sock.sendMessage(chatId, { text: r });
+_⏰ Auto-deletes in 5 hours_`;
+
+        await sendAndDelete(sock, chatId, { text: r });
         logger.info(`🏓 Ping response sent to ${chatId}`);
     } catch (error) {
         logger.error(`Error handling ping command: ${error.message}`);
@@ -101,9 +104,10 @@ export async function handlePosted(sock, chatId, { database }) {
         r += `📈 *This Month:* ${stats.thisMonth} courses\n\n`;
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
         r += '✨ Keep learning and growing! ✨\n\n';
-        r += '💡 Stats shown for this group only';
+        r += '💡 Stats shown for this group only\n';
+        r += '_⏰ Auto-deletes in 5 hours_';
 
-        await sock.sendMessage(chatId, { text: r });
+        await sendAndDelete(sock, chatId, { text: r });
         logger.info(`📊 Stats sent to ${chatId}`);
     } catch (error) {
         logger.error(`Error sending stats: ${error.message}`);
@@ -277,8 +281,9 @@ export async function handleStatus(sock, chatId, { database, botState }) {
         r += botState.isPaused
             ? '💡 Use `/resume` to start posting'
             : '💡 Use `/pause` to stop posting';
+        r += '\n_⏰ Auto-deletes in 5 hours_';
 
-        await sock.sendMessage(chatId, { text: r });
+        await sendAndDelete(sock, chatId, { text: r });
         logger.info(`📊 Status sent to ${chatId}`);
     } catch (error) {
         logger.error(`Error sending status: ${error.message}`);
@@ -298,9 +303,10 @@ export async function handleFacts(sock, chatId, quotedMessage) {
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
         r += `📌 ${fact}\n\n`;
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-        r += '_Did you know? Drop another `/facts` for more!_ 🧠✨';
+        r += '_Did you know? Drop another `/facts` for more!_ 🧠✨\n';
+        r += '_⏰ Auto-deletes in 5 hours_';
 
-        await sock.sendMessage(chatId, { text: r }, sendOpts);
+        await sendAndDelete(sock, chatId, { text: r }, sendOpts);
         logger.info(`🎭 Fact sent to ${chatId}`);
     } catch (error) {
         logger.error(`Error fetching fact: ${error.message}`);
@@ -343,7 +349,7 @@ export async function handleHelp(sock, chatId, senderJid, originalMsg, { groupMa
             movieOnly = movieEnabled && !coursesActive;
         }
 
-        const response = formatHelpText({
+        let response = formatHelpText({
             isStaff,
             isPrivileged,
             canManageAdmins,
@@ -352,7 +358,8 @@ export async function handleHelp(sock, chatId, senderJid, originalMsg, { groupMa
             movieOnly,
             features,
         });
-        await sock.sendMessage(chatId, { text: response }, { quoted: originalMsg || undefined });
+        response += '\n\n_⏰ Auto-deletes in 5 hours_';
+        await sendAndDelete(sock, chatId, { text: response }, { quoted: originalMsg || undefined });
         logger.info(`📖 Help sent to ${chatId}`);
     } catch (error) {
         logger.error(`Error sending help: ${error.message}`);

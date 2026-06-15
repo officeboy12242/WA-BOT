@@ -6,6 +6,7 @@
 import { checkCommandAccess } from '../commands/access.js';
 import { findCommand, findSimilarCommands } from '../commands/registry.js';
 import { logger } from '../utils/logger.js';
+import { sendAndDelete } from '../utils/autoDelete.js';
 import { extractPhoneNumber } from '../utils/permissions.js';
 
 import {
@@ -131,8 +132,8 @@ class CommandController {
             const suggestions = findSimilarCommands(cmd);
             if (suggestions.length > 0) {
                 const suggestionText = suggestions.map(s => `  • \`${s}\``).join('\n');
-                await sock.sendMessage(chatId, {
-                    text: `❓ Unknown command: \`${cmd}\`\n\n💡 *Did you mean:*\n${suggestionText}\n\n_Type \`/help\` for all commands_`
+                await sendAndDelete(sock, chatId, {
+                    text: `❓ Unknown command: \`${cmd}\`\n\n💡 *Did you mean:*\n${suggestionText}\n\n_Type \`/help\` for all commands_\n_⏰ Auto-deletes in 5 hours_`
                 });
             }
             return;
