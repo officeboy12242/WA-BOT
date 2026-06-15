@@ -17,6 +17,8 @@ import { extractInstagramUrl } from '../utils/instagramUrl.js';
 import { getMessageSenderJid, getTextForUrlScan, getTextFromWAMessage } from '../utils/waMessage.js';
 import { resolveChannelSourceEntries } from '../utils/channelResolve.js';
 import { extractStickerFromMessage, isNewsletterChat } from '../utils/stickerExtract.js';
+import { config } from '../config/config.js';
+import os from 'os';
 
 
 /** Non-group chats where auto Instagram download is allowed (includes @lid privacy chats). */
@@ -96,6 +98,51 @@ class WhatsAppService {
             }
         }, 10 * 60 * 1000);
     }
+    
+    /**
+     * Send startup notification to log number
+     */
+    async _sendStartupNotification() {
+        const logNumber = config.BOT_LOG_NUMBER;
+        if (!logNumber || !this.sock) return;
+        
+        try {
+            const logJid = `${logNumber}@s.whatsapp.net`;
+            const phoneNumber = this.sock?.user?.id?.split(':')[0] || 'Unknown';
+            const now = new Date();
+            const timeIST = now.toLocaleString('en-IN', { 
+                timeZone: 'Asia/Kolkata',
+                dateStyle: 'medium',
+                timeStyle: 'medium'
+            });
+            
+            // Get system info
+            const uptime = process.uptime();
+            const memUsage = process.memoryUsage();
+            const memMB = Math.round(memUsage.heapUsed / 1024 / 1024);
+            const platform = `${os.platform()} ${os.arch()}`;
+            const nodeVersion = process.version;
+            
+            const text = `╔════════════════════════════╗
+║  🤖 *BOT STARTED*  ✅       ║
+╚════════════════════════════╝
+
+📱 *Phone:* ${phoneNumber}
+🕐 *Time:* ${timeIST}
+💻 *Platform:* ${platform}
+📦 *Node:* ${nodeVersion}
+🧠 *Memory:* ${memMB} MB
+
+━━━━━━━━━━━━━━━━━━━━━━━━
+✨ _Bot deployed & ready!_
+🚀 _All systems operational_`;
+
+            await this.sock.sendMessage(logJid, { text });
+            logger.info(`📤 Startup notification sent to ${logNumber}`);
+        } catch (err) {
+            logger.warn(`Failed to send startup notification: ${err.message}`);
+        }
+    }
 
     async connect() {
         // Use database auth instead of file-based auth
@@ -173,6 +220,9 @@ class WhatsAppService {
                         logger.info(`  - ${chat.subject}: ${chat.id}`);
                     });
                     await this.resolveStickerSourceChannels();
+                    
+                    // Send startup notification
+                    await this._sendStartupNotification();
                 } catch (err) {
                     logger.error('Error fetching groups:', err.message);
                 }
