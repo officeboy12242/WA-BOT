@@ -58,10 +58,43 @@ class WhatsAppService {
         this.userManager = userManager;
         this.adminPanel = adminPanel;
         
+        // Message deduplication to prevent double processing
+        this._processedMessages = new Set();
+        this._messageCleanupInterval = null;
+        
         // Give admin panel access to auth database for clearing
         if (this.adminPanel && this.authDatabase) {
             this.adminPanel.setAuthDatabase(this.authDatabase);
         }
+    }
+    
+    /**
+     * Check if message was already processed (prevents duplicate execution)
+     */
+    _isMessageProcessed(messageId) {
+        if (!messageId) return false;
+        if (this._processedMessages.has(messageId)) {
+            return true;
+        }
+        this._processedMessages.add(messageId);
+        return false;
+    }
+    
+    /**
+     * Start cleanup interval to prevent memory leak from stored message IDs
+     */
+    _startMessageCleanup() {
+        if (this._messageCleanupInterval) return;
+        
+        // Clear old message IDs every 10 minutes
+        this._messageCleanupInterval = setInterval(() => {
+            if (this._processedMessages.size > 5000) {
+                // Keep only the last 1000 messages
+                const arr = [...this._processedMessages];
+                this._processedMessages = new Set(arr.slice(-1000));
+                logger.debug(`Message dedup cache trimmed: ${arr.length} → ${this._processedMessages.size}`);
+            }
+        }, 10 * 60 * 1000);
     }
 
     async connect() {
@@ -124,6 +157,7 @@ class WhatsAppService {
             } else if (connection === 'open') {
                 logger.info('✅ Connected to WhatsApp!');
                 this.isReady = true;
+                this._startMessageCleanup();
                 
                 // Update admin panel with connected status
                 if (this.adminPanel) {
@@ -247,6 +281,11 @@ class WhatsAppService {
         const chatId = msg.key.remoteJid;
         const messageId = msg.key?.id;
         if (!chatId) {
+            return;
+        }
+
+        // Deduplication: skip if this message was already processed
+        if (this._isMessageProcessed(messageId)) {
             return;
         }
 
