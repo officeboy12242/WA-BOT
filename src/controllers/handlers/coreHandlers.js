@@ -3,6 +3,7 @@
  */
 
 import axios from 'axios';
+import os from 'os';
 import { logger } from '../../utils/logger.js';
 import { extractPhoneNumber } from '../../utils/permissions.js';
 import { formatHelpText } from '../../commands/registry.js';
@@ -19,36 +20,62 @@ function formatUptime(milliseconds) {
     return `${seconds}s`;
 }
 
+function getSystemStats() {
+    const cpus = os.cpus();
+    const totalMem = os.totalmem();
+    const freeMem = os.freemem();
+    const usedMem = totalMem - freeMem;
+    
+    let totalIdle = 0, totalTick = 0;
+    for (const cpu of cpus) {
+        for (const type in cpu.times) totalTick += cpu.times[type];
+        totalIdle += cpu.times.idle;
+    }
+    const cpuUsage = ((1 - totalIdle / totalTick) * 100).toFixed(1);
+    const memUsage = ((usedMem / totalMem) * 100).toFixed(1);
+    const processMemMB = Math.round(process.memoryUsage().rss / 1024 / 1024);
+    
+    return { cpuUsage, memUsage, processMemMB, cores: cpus.length, platform: os.platform(), arch: os.arch() };
+}
+
 export async function handlePing(sock, chatId, { botState, botStartTime }) {
     try {
         const uptime = Date.now() - botStartTime;
         const uptimeFormatted = formatUptime(uptime);
-        const currentTime = new Date().toLocaleString('en-US', {
-            timeZone: 'Asia/Kolkata',
-            dateStyle: 'full',
-            timeStyle: 'long',
-        });
-        const startTime = new Date(botStartTime).toLocaleString('en-US', {
+        const stats = getSystemStats();
+        const statusEmoji = botState.isPaused ? '🟡' : '🟢';
+        const statusText = botState.isPaused ? 'PAUSED' : 'ONLINE';
+        
+        const currentTime = new Date().toLocaleString('en-IN', {
             timeZone: 'Asia/Kolkata',
             dateStyle: 'medium',
             timeStyle: 'short',
         });
 
-        const memUsage = process.memoryUsage();
-        const memUsedMB = (memUsage.heapUsed / 1024 / 1024).toFixed(2);
-        const memTotalMB = (memUsage.heapTotal / 1024 / 1024).toFixed(2);
-
-        let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-        r += '🏓 *PONG!* 🏓\n';
-        r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
-        r += '✅ *Bot is alive and running!*\n\n';
-        r += `⏰ *Current Time:*\n   ${currentTime}\n\n`;
-        r += `🚀 *Started At:*\n   ${startTime}\n\n`;
-        r += `⏱️ *Uptime:* ${uptimeFormatted}\n\n`;
-        r += `💾 *Memory Usage:* ${memUsedMB}MB / ${memTotalMB}MB\n\n`;
-        r += `📡 *Status:* ${botState.isPaused ? '⏸️ Paused' : '▶️ Active'}\n\n`;
-        r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-        r += '💚 All systems operational!';
+        let r = `\`\`\`
+╔═══════════════════════════════════╗
+║                                   ║
+║   ███████╗ █████╗ ███████╗███████╗║
+║   ██╔════╝██╔══██╗██╔════╝██╔════╝║
+║   ███████╗███████║███████╗███████╗║
+║   ╚════██║██╔══██║╚════██║╚════██║║
+║   ███████║██║  ██║███████║███████║║
+║   ╚══════╝╚═╝  ╚═╝╚══════╝╚══════╝║
+║            🤖 BOT                 ║
+╠═══════════════════════════════════╣
+║  STATUS   │ ${statusEmoji} ${statusText.padEnd(18)}║
+║  UPTIME   │ ⏱️ ${uptimeFormatted.padEnd(17)}║
+║  CPU      │ 💻 ${(stats.cpuUsage + '%').padEnd(17)}║
+║  MEMORY   │ 🧠 ${(stats.memUsage + '%').padEnd(17)}║
+║  PROCESS  │ 📦 ${(stats.processMemMB + ' MB').padEnd(17)}║
+║  CORES    │ ⚙️ ${String(stats.cores).padEnd(17)}║
+║  PLATFORM │ 🖥️ ${(stats.platform + ' ' + stats.arch).padEnd(17)}║
+║  NODE     │ 📗 ${process.version.padEnd(17)}║
+╠═══════════════════════════════════╣
+║  🏓 PONG! All systems GO!         ║
+║  ⏰ ${currentTime.padEnd(28)}║
+╚═══════════════════════════════════╝
+\`\`\``;
 
         await sock.sendMessage(chatId, { text: r });
         logger.info(`🏓 Ping response sent to ${chatId}`);
