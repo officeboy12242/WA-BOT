@@ -1,13 +1,14 @@
 /**
  * Sticker Forwarder Service
  * Forwards stickers from groups and joined channels to target groups.
- * Uses a queue to ensure no stickers are skipped when they arrive rapidly.
+ * Uses BullMQ/Redis queue for reliability (falls back to in-memory if Redis unavailable)
  */
 
 import { Sticker } from 'wa-sticker-formatter';
 import { logger } from '../utils/logger.js';
 import { downloadStickerBuffer } from '../utils/stickerDownload.js';
 import { extractStickerFromMessage, isNewsletterChat } from '../utils/stickerExtract.js';
+import queueService from './QueueService.js';
 
 class StickerForwarder {
     /**
@@ -31,11 +32,28 @@ class StickerForwarder {
         this.countQueued = 0;
 
         this.recentStickers = new Map();
+        this.sock = null;
+        this.queueInitialized = false;
+    }
+
+    /**
+     * Initialize BullMQ queue for sticker processing
+     */
+    async initializeQueue(sock) {
+        this.sock = sock;
         
-        // Queue system to prevent skipping stickers
-        this.queue = [];
-        this.isProcessing = false;
-        this.maxQueueSize = 50; // Prevent memory issues
+        if (this.queueInitialized) return;
+
+        // Create sticker queue with processor
+        queueService.createQueue('sticker-forward', async (job) => {
+            await this._processSticker(job.data);
+        }, {
+            concurrency: 1,
+            limiter: { max: 3, duration: 1000 }, // Max 3 stickers per second
+        });
+
+        this.queueInitialized = true;
+        logger.info('📦 Sticker forwarding queue initialized');
     }
 
     setSourceChannels(jids, nameByJid = new Map()) {
@@ -64,12 +82,15 @@ class StickerForwarder {
 
     /**
      * Add sticker to queue for processing (public method)
-     * This ensures no stickers are skipped even when they arrive rapidly
+     * Uses BullMQ for reliable processing with retries
      */
     async forwardSticker(sock, waMessage, fromChat) {
         if (!this.shouldForwardFrom(fromChat)) {
             return false;
         }
+
+        // Store sock reference for the processor
+        if (!this.sock) this.sock = sock;
 
         const stickerPayload = extractStickerFromMessage(waMessage?.message);
         const messageId =
@@ -92,65 +113,51 @@ class StickerForwarder {
             }
         }
 
-        // Check queue size limit
-        if (this.queue.length >= this.maxQueueSize) {
-            logger.warn(`⚠️ Sticker queue full (${this.maxQueueSize}), dropping oldest`);
-            this.queue.shift();
-        }
+        // Store waMessage data for queue (can't serialize sock)
+        const jobData = {
+            messageId,
+            fromChat,
+            waMessageKey: waMessage?.key,
+            waMessageContent: waMessage?.message,
+            isChannel: isNewsletterChat(fromChat),
+        };
 
-        // Add to queue
-        this.queue.push({ sock, waMessage, fromChat, messageId });
-        this.countQueued++;
-        
-        const isChannel = isNewsletterChat(fromChat);
-        logger.info(`📥 Sticker queued from ${isChannel ? 'channel' : 'group'} | Queue: ${this.queue.length}`);
-
-        // Start processing if not already running
-        this._processQueue();
-        
-        return true;
-    }
-
-    /**
-     * Process queue one at a time to prevent race conditions
-     */
-    async _processQueue() {
-        if (this.isProcessing || this.queue.length === 0) {
-            return;
-        }
-
-        this.isProcessing = true;
-
-        while (this.queue.length > 0) {
-            const item = this.queue.shift();
-            try {
-                await this._processSticker(item);
-            } catch (error) {
-                this.countErrors++;
-                logger.error(`❌ Queue sticker error: ${error.message}`);
-            }
+        try {
+            // Add to BullMQ queue
+            await queueService.addJob('sticker-forward', jobData, {
+                attempts: 3,
+                backoff: { type: 'exponential', delay: 2000 },
+            });
             
-            // Small delay between processing to avoid rate limits
-            if (this.queue.length > 0) {
-                await new Promise(r => setTimeout(r, 500));
-            }
+            this.countQueued++;
+            const stats = await queueService.getStats('sticker-forward');
+            logger.info(`📥 Sticker queued from ${jobData.isChannel ? 'channel' : 'group'} | Queue: ${stats?.waiting || 0} waiting`);
+            
+            return true;
+        } catch (err) {
+            logger.error(`❌ Failed to queue sticker: ${err.message}`);
+            return false;
         }
-
-        this.isProcessing = false;
     }
 
     /**
-     * Actually process and forward a single sticker
+     * Actually process and forward a single sticker (called by queue processor)
      */
-    async _processSticker({ sock, waMessage, fromChat, messageId }) {
+    async _processSticker({ fromChat, waMessageKey, waMessageContent, isChannel, messageId }) {
+        if (!this.sock) {
+            throw new Error('Socket not initialized');
+        }
+
         this.countReceived++;
-        const isChannel = isNewsletterChat(fromChat);
         
         if (isChannel) {
             this.countFromChannels++;
         }
 
-        const buffer = await downloadStickerBuffer(sock, waMessage);
+        // Reconstruct waMessage for download
+        const waMessage = { key: waMessageKey, message: waMessageContent };
+        
+        const buffer = await downloadStickerBuffer(this.sock, waMessage);
         if (!buffer) {
             throw new Error('Failed to download sticker buffer');
         }
@@ -170,7 +177,7 @@ class StickerForwarder {
 
         const results = await Promise.allSettled(
             this.targetGroups.map((targetGroup) =>
-                sock.sendMessage(
+                this.sock.sendMessage(
                     targetGroup,
                     { sticker: stickerBuffer },
                     {
@@ -191,24 +198,27 @@ class StickerForwarder {
         if (successCount > 0) {
             this.countSent++;
             const sourceLabel = isChannel ? 'channel' : 'group';
+            const stats = await queueService.getStats('sticker-forward');
             logger.info(
                 `✅ Sticker from ${sourceLabel} → ${successCount}/${this.targetGroups.length} groups | ` +
-                    `Sent: ${this.countSent}, Queued: ${this.countQueued}, Queue: ${this.queue.length}, ` +
+                    `Sent: ${this.countSent}, Queued: ${this.countQueued}, Waiting: ${stats?.waiting || 0}, ` +
                     `Channels: ${this.countFromChannels}, Err: ${this.countErrors}`
             );
         }
     }
 
-    getStats() {
+    async getStats() {
+        const queueStats = await queueService.getStats('sticker-forward');
         return {
             sent: this.countSent,
             received: this.countReceived,
             queued: this.countQueued,
-            queueLength: this.queue.length,
+            waiting: queueStats?.waiting || 0,
+            active: queueStats?.active || 0,
             fromChannels: this.countFromChannels,
             errors: this.countErrors,
             duplicates: this.countDuplicates,
-            isProcessing: this.isProcessing,
+            redisEnabled: queueStats?.redis || false,
         };
     }
 

@@ -1,53 +1,102 @@
 /**
  * Auto-Delete Utility
  * Schedules bot messages for automatic deletion after a specified time
+ * Uses BullMQ for persistence (survives bot restarts) or falls back to in-memory
  */
 
 import { logger } from './logger.js';
+import queueService from '../services/QueueService.js';
 
 const AUTO_DELETE_MS = 5 * 60 * 60 * 1000; // 5 hours default
 const scheduledDeletes = [];
 
+let sock = null;
+let deleteQueueInitialized = false;
+
 /**
- * Schedule a message for deletion
- * @param {object} sock - WhatsApp socket
- * @param {string} chatId - Chat ID
- * @param {object} messageKey - Message key from sent message
- * @param {number} delayMs - Delay in milliseconds (default 5 hours)
+ * Initialize the delete queue (call once after sock is ready)
  */
-export function scheduleAutoDelete(sock, chatId, messageKey, delayMs = AUTO_DELETE_MS) {
-    if (!sock || !chatId || !messageKey) return;
+export async function initializeDeleteQueue(socketInstance) {
+    sock = socketInstance;
     
-    const timer = setTimeout(async () => {
+    if (deleteQueueInitialized) return;
+
+    // Create delete queue with processor
+    queueService.createQueue('message-delete', async (job) => {
+        const { chatId, messageKey } = job.data;
+        if (!sock) {
+            throw new Error('Socket not available for deletion');
+        }
         try {
             await sock.sendMessage(chatId, { delete: messageKey });
             logger.info(`🗑️ Auto-deleted message in ${chatId}`);
         } catch (err) {
-            // Silently fail - message might already be deleted or chat unavailable
+            // Don't retry - message might already be deleted
+            logger.debug(`Delete skipped (may already be deleted): ${err.message}`);
         }
-    }, delayMs);
+    }, {
+        concurrency: 2,
+        limiter: { max: 5, duration: 1000 },
+    });
 
-    scheduledDeletes.push(timer);
+    deleteQueueInitialized = true;
+    logger.info('📦 Auto-delete queue initialized');
+}
+
+/**
+ * Schedule a message for deletion
+ * @param {object} sockInstance - WhatsApp socket (used for fallback)
+ * @param {string} chatId - Chat ID
+ * @param {object} messageKey - Message key from sent message
+ * @param {number} delayMs - Delay in milliseconds (default 5 hours)
+ */
+export async function scheduleAutoDelete(sockInstance, chatId, messageKey, delayMs = AUTO_DELETE_MS) {
+    if (!chatId || !messageKey) return;
     
-    // Cleanup old timers periodically
-    if (scheduledDeletes.length > 1000) {
-        scheduledDeletes.splice(0, 500);
+    // Update sock reference
+    if (sockInstance) sock = sockInstance;
+
+    try {
+        // Use BullMQ delayed job for persistence
+        await queueService.addJob('message-delete', { chatId, messageKey }, {
+            delay: delayMs,
+            attempts: 1, // Don't retry deletions
+            removeOnComplete: true,
+            removeOnFail: true,
+        });
+    } catch (err) {
+        // Fallback to in-memory timer
+        const timer = setTimeout(async () => {
+            try {
+                if (sock) {
+                    await sock.sendMessage(chatId, { delete: messageKey });
+                    logger.info(`🗑️ Auto-deleted message in ${chatId}`);
+                }
+            } catch (e) {
+                // Silently fail
+            }
+        }, delayMs);
+        scheduledDeletes.push(timer);
+        
+        if (scheduledDeletes.length > 1000) {
+            scheduledDeletes.splice(0, 500);
+        }
     }
 }
 
 /**
  * Helper to send a message and schedule it for auto-deletion
- * @param {object} sock - WhatsApp socket
+ * @param {object} sockInstance - WhatsApp socket
  * @param {string} chatId - Chat ID
  * @param {object} content - Message content
  * @param {object} options - Send options (quoted, etc)
  * @param {number} deleteAfterMs - Delete after this many ms (default 5 hours)
  * @returns {Promise<object>} - Sent message info
  */
-export async function sendAndDelete(sock, chatId, content, options = {}, deleteAfterMs = AUTO_DELETE_MS) {
-    const sent = await sock.sendMessage(chatId, content, options);
+export async function sendAndDelete(sockInstance, chatId, content, options = {}, deleteAfterMs = AUTO_DELETE_MS) {
+    const sent = await sockInstance.sendMessage(chatId, content, options);
     if (sent?.key) {
-        scheduleAutoDelete(sock, chatId, sent.key, deleteAfterMs);
+        await scheduleAutoDelete(sockInstance, chatId, sent.key, deleteAfterMs);
     }
     return sent;
 }
@@ -60,7 +109,7 @@ export function clearAllScheduledDeletes() {
         clearTimeout(timer);
     }
     scheduledDeletes.length = 0;
-    logger.info('🗑️ Cleared all scheduled auto-deletes');
+    logger.info('🗑️ Cleared all in-memory scheduled auto-deletes');
 }
 
 export const AUTO_DELETE_5_HOURS = AUTO_DELETE_MS;
