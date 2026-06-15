@@ -64,6 +64,9 @@ class WhatsAppService {
         this._processedMessages = new Set();
         this._messageCleanupInterval = null;
         
+        // Startup notification flag - only send once per session
+        this._startupNotificationSent = false;
+        
         // Give admin panel access to auth database for clearing
         if (this.adminPanel && this.authDatabase) {
             this.adminPanel.setAuthDatabase(this.authDatabase);
@@ -100,11 +103,19 @@ class WhatsAppService {
     }
     
     /**
-     * Send startup notification to log number
+     * Send startup notification to log number (only once per session)
      */
     async _sendStartupNotification() {
+        // Only send once per bot session
+        if (this._startupNotificationSent) {
+            return;
+        }
+        
         const logNumber = config.BOT_LOG_NUMBER;
         if (!logNumber || !this.sock) return;
+        
+        // Mark as sent immediately to prevent duplicates
+        this._startupNotificationSent = true;
         
         try {
             const logJid = `${logNumber}@s.whatsapp.net`;
@@ -117,7 +128,6 @@ class WhatsAppService {
             });
             
             // Get system info
-            const uptime = process.uptime();
             const memUsage = process.memoryUsage();
             const memMB = Math.round(memUsage.heapUsed / 1024 / 1024);
             const platform = `${os.platform()} ${os.arch()}`;
@@ -141,6 +151,8 @@ class WhatsAppService {
             logger.info(`📤 Startup notification sent to ${logNumber}`);
         } catch (err) {
             logger.warn(`Failed to send startup notification: ${err.message}`);
+            // Reset flag on failure so it can retry next reconnection
+            this._startupNotificationSent = false;
         }
     }
 
