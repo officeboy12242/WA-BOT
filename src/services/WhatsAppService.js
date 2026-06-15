@@ -44,7 +44,8 @@ class WhatsAppService {
         groupManager = null,
         stickerSourceChannelEntries = [],
         channelStickerPoller = null,
-        userManager = null
+        userManager = null,
+        adminPanel = null
     ) {
         this.sock = null;
         this.isReady = false;
@@ -55,6 +56,12 @@ class WhatsAppService {
         this.stickerSourceChannelEntries = stickerSourceChannelEntries;
         this.channelStickerPoller = channelStickerPoller;
         this.userManager = userManager;
+        this.adminPanel = adminPanel;
+        
+        // Give admin panel access to auth database for clearing
+        if (this.adminPanel && this.authDatabase) {
+            this.adminPanel.setAuthDatabase(this.authDatabase);
+        }
     }
 
     async connect() {
@@ -84,10 +91,21 @@ class WhatsAppService {
             if (qr) {
                 logger.info('📱 Scan this QR code with WhatsApp:');
                 qrcode.generate(qr, { small: true });
+                
+                // Update admin panel with QR code
+                if (this.adminPanel) {
+                    this.adminPanel.updateQR(qr, qr);
+                }
             }
 
             if (connection === 'close') {
                 this.isReady = false;
+                
+                // Update admin panel
+                if (this.adminPanel) {
+                    this.adminPanel.setDisconnected();
+                }
+                
                 const shouldReconnect = (lastDisconnect?.error instanceof Boom)
                     ? lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut
                     : true;
@@ -106,6 +124,12 @@ class WhatsAppService {
             } else if (connection === 'open') {
                 logger.info('✅ Connected to WhatsApp!');
                 this.isReady = true;
+                
+                // Update admin panel with connected status
+                if (this.adminPanel) {
+                    const phoneNumber = this.sock?.user?.id?.split(':')[0] || 'Unknown';
+                    this.adminPanel.setConnected(phoneNumber);
+                }
                 
                 // Log available chats to help user find chat ID
                 try {
