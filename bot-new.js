@@ -7,8 +7,6 @@ import { config } from './src/config/config.js';
 import { closeMongo, connectMongo } from './src/db/mongo.js';
 import { logger } from './src/utils/logger.js';
 import AdminPanel from './src/utils/adminPanel.js';
-import queueService from './src/services/QueueService.js';
-import { initializeDeleteQueue } from './src/utils/autoDelete.js';
 import DatabaseModel from './src/models/Database.js';
 import AuthDatabase from './src/models/AuthDatabase.js';
 import CourseAPI from './src/models/CourseAPI.js';
@@ -126,9 +124,6 @@ class WhatsAppCourseBot {
                 config
             );
 
-            // Initialize Redis/BullMQ queue service
-            await queueService.initialize();
-
             // Initialize sticker forwarder if target groups are configured
             if (config.STICKER_TARGET_GROUPS.length > 0) {
                 this.stickerForwarder = new StickerForwarder(
@@ -168,15 +163,8 @@ class WhatsAppCourseBot {
             // Wait for connection to be ready
             await this.whatsappService.waitForReady();
             
-            // Initialize queues with socket
-            const sock = this.whatsappService.getSock();
-            if (this.stickerForwarder) {
-                await this.stickerForwarder.initializeQueue(sock);
-            }
-            await initializeDeleteQueue(sock);
-            
             // Start log manager
-            this.logManager.setSocket(sock);
+            this.logManager.setSocket(this.whatsappService.getSock());
             this.logManager.start();
             
             const morningInfo = config.MORNING_MESSAGES_ENABLED && config.MORNING_MESSAGE_NUMBERS.length
@@ -251,8 +239,6 @@ class WhatsAppCourseBot {
         if (this.authDatabase) {
             this.authDatabase.close();
         }
-        // Shutdown queue service (closes Redis connections)
-        await queueService.shutdown();
         await closeMongo();
         process.exit(0);
     }
