@@ -10,6 +10,7 @@ import axios from 'axios';
 import { logger } from '../utils/logger.js';
 import { extractPhoneNumber, isGroupMessage } from '../utils/permissions.js';
 import { config } from '../config/config.js';
+import { atozService } from '../services/AtoZService.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const QR_IMAGE_PATH = resolve(__dirname, '../../assets/payment_qr.jpg');
@@ -312,7 +313,7 @@ function cleanTitle(raw) {
     return raw.replace(/^\*+|\*+$/g, '').trim();
 }
 
-function formatMovieResults(query, results, pushName = '') {
+function formatMovieResults(query, results, pushName = '', sources = []) {
     const maxResults = 15;
     const items = results.slice(0, maxResults);
 
@@ -325,11 +326,15 @@ function formatMovieResults(query, results, pushName = '') {
     text += '┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n';
     text += `🔍 *Query:* _"${query}"_\n`;
     text += `📊 *Found:* ${results.length} result(s)${results.length > maxResults ? ` (showing top ${maxResults})` : ''}\n`;
+    if (sources.length > 0) {
+        text += `🌐 *Sources:* ${sources.join(', ')}\n`;
+    }
     text += '─────────────────────────────\n\n';
 
     items.forEach((item, idx) => {
         const title = cleanTitle(item.title);
-        text += `*${idx + 1}.* 🎥 ${title}\n`;
+        const sourceTag = item.source ? ` [${item.source}]` : '';
+        text += `*${idx + 1}.* 🎥 ${title}${sourceTag}\n`;
 
         if (item.links?.length) {
             item.links.forEach((link) => {
@@ -340,7 +345,7 @@ function formatMovieResults(query, results, pushName = '') {
     });
 
     text += '─────────────────────────────\n';
-    text += '💡 _Click any link to download_\n';
+    text += '💡 _Click link to download/watch_\n';
     text += '⚠️ _Use VPN if links are blocked_\n';
     text += '─────────────────────────────\n';
     text += `🤖 _Powered by Sassy Bot_ ⚡\n`;
@@ -889,11 +894,30 @@ class MovieController {
         const searchingMsg = await sock.sendMessage(chatId, { text: dialogue });
 
         try {
-            const response = await axios.get(`${MOVIE_API}${encodeURIComponent(query)}`, {
-                timeout: 15000,
-            });
+            // Search both sources in parallel
+            const [primaryResponse, atozResults] = await Promise.allSettled([
+                axios.get(`${MOVIE_API}${encodeURIComponent(query)}`, { timeout: 15000 }),
+                atozService.searchMovies(query, 3),
+            ]);
 
-            const results = response.data?.data?.data;
+            // Combine results from both sources
+            let results = [];
+            const sources = [];
+
+            // Add primary API results
+            if (primaryResponse.status === 'fulfilled') {
+                const primaryData = primaryResponse.value?.data?.data?.data || [];
+                if (primaryData.length > 0) {
+                    results.push(...primaryData.map(item => ({ ...item, source: 'Drive' })));
+                    sources.push('Drive');
+                }
+            }
+
+            // Add AtoZ results
+            if (atozResults.status === 'fulfilled' && atozResults.value?.length > 0) {
+                results.push(...atozResults.value);
+                sources.push('AtoZ');
+            }
 
             try {
                 await sock.sendMessage(chatId, { delete: searchingMsg.key });
@@ -913,7 +937,7 @@ class MovieController {
             void this.logSearch(userId, query, results.length, chatId);
             void this._notifySearchLog(sock, userId, query, results.length, chatId, pushName);
 
-            const resultText = formatMovieResults(query, results, pushName);
+            const resultText = formatMovieResults(query, results, pushName, sources);
             const footer = unlimited
                 ? '\n\n⭐ _Unlimited searches (Premium/Staff)_'
                 : `\n\n🔢 _Searches left today: *${remaining}* / ${DAILY_LIMIT}_`;
@@ -924,7 +948,7 @@ class MovieController {
 
             this.scheduleDelete(sock, chatId, sent.key);
 
-            logger.info(`🎬 Movie search "${query}" by ${userId} → ${results.length} results (${remaining} left)`);
+            logger.info(`🎬 Movie search "${query}" by ${userId} → ${results.length} results from [${sources.join(', ')}] (${remaining} left)`);
         } catch (err) {
             try {
                 await sock.sendMessage(chatId, { delete: searchingMsg.key });
