@@ -784,14 +784,24 @@ class MovieController {
     async _notifySearchLog(sock, userId, query, resultCount, chatId, pushName) {
         try {
             const isGroup = chatId.endsWith('@g.us');
-            const source = isGroup ? `Group: ${chatId.split('@')[0]}` : 'DM';
+            let source = 'DM';
+            
+            if (isGroup) {
+                try {
+                    const groupMeta = await sock.groupMetadata(chatId);
+                    source = `📍 ${groupMeta.subject || 'Unknown Group'}`;
+                } catch {
+                    source = `📍 Group (${chatId.split('@')[0]})`;
+                }
+            }
+            
             const time = new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' });
             const name = pushName || userId;
             const text = `📋 *Search Log*\n`
                 + `👤 ${name}\n`
                 + `🔍 _${query}_\n`
                 + `📊 ${resultCount} result(s)\n`
-                + `📍 ${source}\n`
+                + `${source}\n`
                 + `🕐 ${time} IST`;
             await sock.sendMessage(SEARCH_LOG_JID, { text });
         } catch (err) {
