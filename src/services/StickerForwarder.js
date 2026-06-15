@@ -130,9 +130,9 @@ class StickerForwarder {
                 logger.error(`❌ Queue sticker error: ${error.message}`);
             }
             
-            // Small delay between processing to avoid rate limits
+            // Delay between processing to avoid rate limits and allow downloads
             if (this.queue.length > 0) {
-                await new Promise(r => setTimeout(r, 500));
+                await new Promise(r => setTimeout(r, 1000));
             }
         }
 
