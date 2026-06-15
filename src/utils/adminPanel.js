@@ -16,12 +16,17 @@ class AdminPanel {
         this.connectionStatus = 'disconnected';
         this.connectedPhone = null;
         this.authDatabase = null;
+        this.whatsappService = null;
         this.adminToken = process.env.ADMIN_TOKEN || 'sassy123';
         this.lastActivity = new Date();
     }
 
     setAuthDatabase(authDB) {
         this.authDatabase = authDB;
+    }
+
+    setWhatsAppService(waService) {
+        this.whatsappService = waService;
     }
 
     updateQR(qr, qrText = null) {
@@ -286,8 +291,8 @@ class AdminPanel {
                 const res = await fetch('/api/clear-auth?token=' + token, { method: 'POST' });
                 const data = await res.json();
                 if (data.success) {
-                    showAlert('✅ Session cleared! Refreshing...', 'success');
-                    setTimeout(() => window.location.reload(), 2000);
+                    showAlert('✅ Session cleared! QR code will appear in a few seconds...', 'success');
+                    setTimeout(() => window.location.reload(), 3000);
                 } else {
                     showAlert('❌ ' + (data.error || 'Failed to clear session'), 'error');
                 }
@@ -369,8 +374,28 @@ class AdminPanel {
                         await this.authDatabase.clearAll();
                         this.setDisconnected();
                         logger.info('🗑️ Auth cleared via admin panel');
+                        
+                        // Trigger reconnect to get new QR code
+                        if (this.whatsappService) {
+                            logger.info('🔄 Triggering reconnect for new QR code...');
+                            // Close existing socket and reconnect
+                            try {
+                                if (this.whatsappService.sock) {
+                                    this.whatsappService.sock.end();
+                                }
+                            } catch (e) {
+                                // Ignore close errors
+                            }
+                            // Small delay then reconnect
+                            setTimeout(() => {
+                                this.whatsappService.connect().catch(err => {
+                                    logger.error('Reconnect error:', err.message);
+                                });
+                            }, 1000);
+                        }
+                        
                         res.writeHead(200, { 'Content-Type': 'application/json' });
-                        res.end(JSON.stringify({ success: true, message: 'Auth cleared. Restart bot for new QR.' }));
+                        res.end(JSON.stringify({ success: true, message: 'Auth cleared. New QR code will appear shortly.' }));
                     } else {
                         res.writeHead(500, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ success: false, error: 'Auth database not available' }));

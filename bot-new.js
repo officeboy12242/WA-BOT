@@ -152,6 +152,11 @@ class WhatsAppCourseBot {
                 this.adminPanel
             );
             
+            // Give admin panel access to WhatsApp service for reconnect
+            if (this.adminPanel) {
+                this.adminPanel.setWhatsAppService(this.whatsappService);
+            }
+            
             // Connect to WhatsApp
             await this.whatsappService.connect();
             
