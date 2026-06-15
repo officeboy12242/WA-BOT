@@ -120,7 +120,7 @@ class CommandController {
         await _handleInsta(sock, chatId, args, quotedMessage, options);
     }
 
-    async handleCommand(sock, chatId, command, senderJid, quotedMessage = null, pushName = '') {
+    async handleCommand(sock, chatId, command, senderJid, originalMsg = null, pushName = '') {
         const parts = command.trim().split(/\s+/);
         const cmd = parts[0].toLowerCase();
         const args = parts.slice(1);
@@ -134,7 +134,7 @@ class CommandController {
                 const suggestionText = suggestions.map(s => `  • \`${s}\``).join('\n');
                 await sendAndDelete(sock, chatId, {
                     text: `❓ Unknown command: \`${cmd}\`\n\n💡 *Did you mean:*\n${suggestionText}\n\n_Type \`/help\` for all commands_\n_⏰ Auto-deletes in 5 hours_`
-                });
+                }, { quoted: originalMsg });
             }
             return;
         }
@@ -143,11 +143,11 @@ class CommandController {
 
         const access = await checkCommandAccess(sock, chatId, senderJid, def, this.groupManager);
         if (!access.ok) {
-            await sock.sendMessage(chatId, { text: access.message });
+            await sock.sendMessage(chatId, { text: access.message }, { quoted: originalMsg });
             return;
         }
 
-        const ctx = this._ctx();
+        const ctx = { ...this._ctx(), originalMsg };
 
         switch (def.key) {
             /* ── Core ── */
@@ -159,8 +159,8 @@ class CommandController {
             case 'pause':    await handlePause(sock, chatId, ctx); break;
             case 'resume':   await handleResume(sock, chatId, ctx); break;
             case 'status':   await handleStatus(sock, chatId, ctx); break;
-            case 'facts':    await handleFacts(sock, chatId, quotedMessage); break;
-            case 'help':     await handleHelp(sock, chatId, senderJid, quotedMessage, ctx); break;
+            case 'facts':    await handleFacts(sock, chatId, ctx); break;
+            case 'help':     await handleHelp(sock, chatId, senderJid, ctx); break;
 
             /* ── Group management ── */
             case 'activate':   await handleActivate(sock, chatId, senderJid, ctx); break;
@@ -174,93 +174,93 @@ class CommandController {
             case 'trending':   await handleTrending(sock, chatId, senderJid, args, ctx); break;
 
             /* ── Admin management ── */
-            case 'addadmin':    await handleAddAdmin(sock, chatId, senderJid, args, quotedMessage, ctx); break;
-            case 'removeadmin': await handleRemoveAdmin(sock, chatId, senderJid, args, quotedMessage, ctx); break;
+            case 'addadmin':    await handleAddAdmin(sock, chatId, senderJid, args, ctx); break;
+            case 'removeadmin': await handleRemoveAdmin(sock, chatId, senderJid, args, ctx); break;
             case 'admins':      await handleAdmins(sock, chatId, senderJid, ctx); break;
-            case 'increaselimit': await handleIncreaseLimit(sock, chatId, senderJid, args, quotedMessage, ctx); break;
-            case 'checklimit': await handleCheckLimit(sock, chatId, senderJid, args, quotedMessage, pushName, ctx); break;
+            case 'increaselimit': await handleIncreaseLimit(sock, chatId, senderJid, args, ctx); break;
+            case 'checklimit': await handleCheckLimit(sock, chatId, senderJid, args, pushName, ctx); break;
 
             /* ── Owner: premium / mod / channels ── */
-            case 'addpremium':    await handleAddPremium(sock, chatId, senderJid, args, quotedMessage, ctx); break;
-            case 'removepremium': await handleRemovePremium(sock, chatId, senderJid, args, quotedMessage, ctx); break;
+            case 'addpremium':    await handleAddPremium(sock, chatId, senderJid, args, ctx); break;
+            case 'removepremium': await handleRemovePremium(sock, chatId, senderJid, args, ctx); break;
             case 'premium':       await handleListPremium(sock, chatId, senderJid, ctx); break;
-            case 'addmod':        await handleAddMod(sock, chatId, senderJid, args, quotedMessage, ctx); break;
-            case 'removemod':     await handleRemoveMod(sock, chatId, senderJid, args, quotedMessage, ctx); break;
+            case 'addmod':        await handleAddMod(sock, chatId, senderJid, args, ctx); break;
+            case 'removemod':     await handleRemoveMod(sock, chatId, senderJid, args, ctx); break;
             case 'addchannel':    await handleAddChannel(sock, chatId, args, senderJid, ctx); break;
             case 'removechannel': await handleRemoveChannel(sock, chatId, args, senderJid, ctx); break;
             case 'channels':      await handleChannels(sock, chatId, senderJid, ctx); break;
 
             /* ── Instagram / News / Movie ── */
-            case 'insta': await _handleInsta(sock, chatId, args, quotedMessage); break;
+            case 'insta': await _handleInsta(sock, chatId, args, originalMsg); break;
             case 'news':  await handleNews(sock, chatId, senderJid, ctx); break;
             case 'movie':
                 if (!this.movieController) {
-                    await sock.sendMessage(chatId, { text: '⚠️ Movie search is not available.' });
+                    await sock.sendMessage(chatId, { text: '⚠️ Movie search is not available.' }, { quoted: originalMsg });
                 } else {
-                    await this.movieController.handleMovieSearch(sock, chatId, senderJid, args, pushName, quotedMessage);
+                    await this.movieController.handleMovieSearch(sock, chatId, senderJid, args, pushName, originalMsg);
                 }
                 break;
             case 'upcoming':
                 if (!this.movieController) {
-                    await sock.sendMessage(chatId, { text: '⚠️ Movie features not available.' });
+                    await sock.sendMessage(chatId, { text: '⚠️ Movie features not available.' }, { quoted: originalMsg });
                 } else {
-                    await this.movieController.handleUpcoming(sock, chatId, senderJid, quotedMessage);
+                    await this.movieController.handleUpcoming(sock, chatId, senderJid, originalMsg);
                 }
                 break;
             case 'genre':
                 if (!this.movieController) {
-                    await sock.sendMessage(chatId, { text: '⚠️ Movie features not available.' });
+                    await sock.sendMessage(chatId, { text: '⚠️ Movie features not available.' }, { quoted: originalMsg });
                 } else {
-                    await this.movieController.handleGenre(sock, chatId, senderJid, args, quotedMessage);
+                    await this.movieController.handleGenre(sock, chatId, senderJid, args, originalMsg);
                 }
                 break;
 
             /* ── Sticker Commands ── */
             case 'sticker':
                 if (!this.stickerController) {
-                    await sock.sendMessage(chatId, { text: '⚠️ Sticker functionality is not available.' });
+                    await sock.sendMessage(chatId, { text: '⚠️ Sticker functionality is not available.' }, { quoted: originalMsg });
                 } else {
                     try {
-                        await this.stickerController.handleSticker(sock, chatId, quotedMessage, args, command);
+                        await this.stickerController.handleSticker(sock, chatId, originalMsg, args, command);
                     } catch (err) {
                         logger.error('Sticker command error:', err);
-                        await sock.sendMessage(chatId, { text: '⚠️ Failed to process sticker command.' });
+                        await sock.sendMessage(chatId, { text: '⚠️ Failed to process sticker command.' }, { quoted: originalMsg });
                     }
                 }
                 break;
             case 'steal':
                 if (!this.stickerController) {
-                    await sock.sendMessage(chatId, { text: '⚠️ Sticker functionality is not available.' });
+                    await sock.sendMessage(chatId, { text: '⚠️ Sticker functionality is not available.' }, { quoted: originalMsg });
                 } else {
                     try {
-                        await this.stickerController.handleSteal(sock, chatId, quotedMessage, args, command);
+                        await this.stickerController.handleSteal(sock, chatId, originalMsg, args, command);
                     } catch (err) {
                         logger.error('Steal command error:', err);
-                        await sock.sendMessage(chatId, { text: '⚠️ Failed to process steal command.' });
+                        await sock.sendMessage(chatId, { text: '⚠️ Failed to process steal command.' }, { quoted: originalMsg });
                     }
                 }
                 break;
             case 'toimg':
                 if (!this.stickerController) {
-                    await sock.sendMessage(chatId, { text: '⚠️ Sticker functionality is not available.' });
+                    await sock.sendMessage(chatId, { text: '⚠️ Sticker functionality is not available.' }, { quoted: originalMsg });
                 } else {
                     try {
-                        await this.stickerController.handleToImage(sock, chatId, quotedMessage);
+                        await this.stickerController.handleToImage(sock, chatId, originalMsg);
                     } catch (err) {
                         logger.error('ToImage command error:', err);
-                        await sock.sendMessage(chatId, { text: '⚠️ Failed to convert sticker to image.' });
+                        await sock.sendMessage(chatId, { text: '⚠️ Failed to convert sticker to image.' }, { quoted: originalMsg });
                     }
                 }
                 break;
             case 'rgb':
                 if (!this.stickerController) {
-                    await sock.sendMessage(chatId, { text: '⚠️ Sticker functionality is not available.' });
+                    await sock.sendMessage(chatId, { text: '⚠️ Sticker functionality is not available.' }, { quoted: originalMsg });
                 } else {
                     try {
-                        await this.stickerController.handleRgbSticker(sock, chatId, args, quotedMessage);
+                        await this.stickerController.handleRgbSticker(sock, chatId, args, originalMsg);
                     } catch (err) {
                         logger.error('RGB sticker error:', err);
-                        await sock.sendMessage(chatId, { text: '⚠️ Failed to generate RGB sticker.' });
+                        await sock.sendMessage(chatId, { text: '⚠️ Failed to generate RGB sticker.' }, { quoted: originalMsg });
                     }
                 }
                 break;

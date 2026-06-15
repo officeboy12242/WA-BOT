@@ -46,7 +46,7 @@ function createProgressBar(percent, length = 10) {
     return bar;
 }
 
-export async function handlePing(sock, chatId, { botState, botStartTime }) {
+export async function handlePing(sock, chatId, { botState, botStartTime, originalMsg }) {
     try {
         const uptime = Date.now() - botStartTime;
         const uptimeFormatted = formatUptime(uptime);
@@ -84,14 +84,14 @@ export async function handlePing(sock, chatId, { botState, botStartTime }) {
 
 _⏰ Auto-deletes in 5 hours_`;
 
-        await sendAndDelete(sock, chatId, { text: r });
+        await sendAndDelete(sock, chatId, { text: r }, { quoted: originalMsg });
         logger.info(`🏓 Ping response sent to ${chatId}`);
     } catch (error) {
         logger.error(`Error handling ping command: ${error.message}`);
     }
 }
 
-export async function handlePosted(sock, chatId, { database }) {
+export async function handlePosted(sock, chatId, { database, originalMsg }) {
     try {
         const stats = await database.getPostedStats(chatId);
 
@@ -107,14 +107,14 @@ export async function handlePosted(sock, chatId, { database }) {
         r += '💡 Stats shown for this group only\n';
         r += '_⏰ Auto-deletes in 5 hours_';
 
-        await sendAndDelete(sock, chatId, { text: r });
+        await sendAndDelete(sock, chatId, { text: r }, { quoted: originalMsg });
         logger.info(`📊 Stats sent to ${chatId}`);
     } catch (error) {
         logger.error(`Error sending stats: ${error.message}`);
     }
 }
 
-export async function handleClear(sock, chatId, { database, pendingClearConfirmations }) {
+export async function handleClear(sock, chatId, { database, pendingClearConfirmations, originalMsg }) {
     try {
         const totalCourses = await database.getTotalPosted(chatId);
 
@@ -123,7 +123,7 @@ export async function handleClear(sock, chatId, { database, pendingClearConfirma
                 text:
                     '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n📭 *DATABASE EMPTY* 📭\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
                     'There are no courses in the database for this group.',
-            });
+            }, { quoted: originalMsg });
             return;
         }
 
@@ -146,21 +146,21 @@ export async function handleClear(sock, chatId, { database, pendingClearConfirma
         r += "⏱️ This confirmation expires in 30 seconds\n";
         r += "💡 Only this group's data will be cleared";
 
-        await sock.sendMessage(chatId, { text: r });
+        await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
         logger.info(`⚠️ Clear confirmation requested for ${chatId} (${totalCourses} courses)`);
     } catch (error) {
         logger.error(`Error handling clear command: ${error.message}`);
     }
 }
 
-export async function handleConfirm(sock, chatId, { database, pendingClearConfirmations }) {
+export async function handleConfirm(sock, chatId, { database, pendingClearConfirmations, originalMsg }) {
     try {
         if (!pendingClearConfirmations.has(chatId)) {
             await sock.sendMessage(chatId, {
                 text:
                     '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n❌ *NO PENDING CONFIRMATION* ❌\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
                     'There is no pending clear operation.\n\nUse `/clear` first to initiate deletion.',
-            });
+            }, { quoted: originalMsg });
             return;
         }
 
@@ -175,21 +175,21 @@ export async function handleConfirm(sock, chatId, { database, pendingClearConfir
         r += '💡 These courses will be posted again on next check!\n';
         r += '💡 Other groups are not affected';
 
-        await sock.sendMessage(chatId, { text: r });
+        await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
         logger.info(`🗑️ Database cleared for group ${chatId}: ${deletedCount} courses deleted`);
     } catch (error) {
         logger.error(`Error confirming clear: ${error.message}`);
     }
 }
 
-export async function handleCancel(sock, chatId, { pendingClearConfirmations }) {
+export async function handleCancel(sock, chatId, { pendingClearConfirmations, originalMsg }) {
     try {
         if (!pendingClearConfirmations.has(chatId)) {
             await sock.sendMessage(chatId, {
                 text:
                     '━━━━━━━━━━━━━━━━━━━━━━━━━━━\nℹ️ *NO PENDING OPERATION* ℹ️\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
                     'There is nothing to cancel.',
-            });
+            }, { quoted: originalMsg });
             return;
         }
 
@@ -199,21 +199,21 @@ export async function handleCancel(sock, chatId, { pendingClearConfirmations }) 
             text:
                 '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n✅ *OPERATION CANCELLED* ✅\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
                 'Clear operation has been cancelled.\nNo courses were deleted.',
-        });
+        }, { quoted: originalMsg });
         logger.info(`❌ Clear operation cancelled by ${chatId}`);
     } catch (error) {
         logger.error(`Error cancelling clear: ${error.message}`);
     }
 }
 
-export async function handlePause(sock, chatId, { botState }) {
+export async function handlePause(sock, chatId, { botState, originalMsg }) {
     try {
         if (botState.isPaused) {
             await sock.sendMessage(chatId, {
                 text:
                     '━━━━━━━━━━━━━━━━━━━━━━━━━━━\nℹ️ *ALREADY PAUSED* ℹ️\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
                     'Bot is already paused.\nUse `/resume` to continue posting.',
-            });
+            }, { quoted: originalMsg });
             return;
         }
 
@@ -227,21 +227,21 @@ export async function handlePause(sock, chatId, { botState }) {
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
         r += '💡 Use `/resume` to continue posting';
 
-        await sock.sendMessage(chatId, { text: r });
+        await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
         logger.info(`⏸️ Bot paused by ${chatId}`);
     } catch (error) {
         logger.error(`Error pausing bot: ${error.message}`);
     }
 }
 
-export async function handleResume(sock, chatId, { botState }) {
+export async function handleResume(sock, chatId, { botState, originalMsg }) {
     try {
         if (!botState.isPaused) {
             await sock.sendMessage(chatId, {
                 text:
                     '━━━━━━━━━━━━━━━━━━━━━━━━━━━\nℹ️ *ALREADY RUNNING* ℹ️\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
                     'Bot is already running.\nUse `/pause` to stop posting.',
-            });
+            }, { quoted: originalMsg });
             return;
         }
 
@@ -255,14 +255,14 @@ export async function handleResume(sock, chatId, { botState }) {
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
         r += '💡 Use `/pause` to stop posting';
 
-        await sock.sendMessage(chatId, { text: r });
+        await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
         logger.info(`▶️ Bot resumed by ${chatId}`);
     } catch (error) {
         logger.error(`Error resuming bot: ${error.message}`);
     }
 }
 
-export async function handleStatus(sock, chatId, { database, botState }) {
+export async function handleStatus(sock, chatId, { database, botState, originalMsg }) {
     try {
         const stats = await database.getPostedStats();
         const status = botState.isPaused ? '⏸️ PAUSED' : '▶️ RUNNING';
@@ -283,20 +283,19 @@ export async function handleStatus(sock, chatId, { database, botState }) {
             : '💡 Use `/pause` to stop posting';
         r += '\n_⏰ Auto-deletes in 5 hours_';
 
-        await sendAndDelete(sock, chatId, { text: r });
+        await sendAndDelete(sock, chatId, { text: r }, { quoted: originalMsg });
         logger.info(`📊 Status sent to ${chatId}`);
     } catch (error) {
         logger.error(`Error sending status: ${error.message}`);
     }
 }
 
-export async function handleFacts(sock, chatId, quotedMessage) {
+export async function handleFacts(sock, chatId, { originalMsg }) {
     try {
         const { data } = await axios.get('https://uselessfacts.jsph.pl/random.json?language=en', {
             timeout: 15000,
         });
         const fact = data?.text?.trim() || 'No fact returned.';
-        const sendOpts = quotedMessage ? { quoted: quotedMessage } : {};
 
         let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
         r += '🎭 *✨ Random fact ✨* 🎭\n';
@@ -306,23 +305,22 @@ export async function handleFacts(sock, chatId, quotedMessage) {
         r += '_Did you know? Drop another `/facts` for more!_ 🧠✨\n';
         r += '_⏰ Auto-deletes in 5 hours_';
 
-        await sendAndDelete(sock, chatId, { text: r }, sendOpts);
+        await sendAndDelete(sock, chatId, { text: r }, { quoted: originalMsg });
         logger.info(`🎭 Fact sent to ${chatId}`);
     } catch (error) {
         logger.error(`Error fetching fact: ${error.message}`);
-        const sendOpts = quotedMessage ? { quoted: quotedMessage } : {};
         await sock.sendMessage(
             chatId,
             {
                 text:
                     '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n😅 *Oops!* Could not fetch a fact right now.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\nTry again in a moment.',
             },
-            sendOpts
+            { quoted: originalMsg }
         );
     }
 }
 
-export async function handleHelp(sock, chatId, senderJid, originalMsg, { groupManager, isOwnerFromJid }) {
+export async function handleHelp(sock, chatId, senderJid, { groupManager, isOwnerFromJid, originalMsg }) {
     try {
         const isGroup = chatId?.endsWith('@g.us');
         const [isStaff, isPrivileged, canManageAdmins] = await Promise.all([

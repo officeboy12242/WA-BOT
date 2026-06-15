@@ -12,7 +12,7 @@ import {
     renderWelcomeMessage,
 } from '../../utils/welcomeMessage.js';
 
-export async function handleActivate(sock, chatId, senderJid, { groupManager }) {
+export async function handleActivate(sock, chatId, senderJid, { groupManager, originalMsg }) {
     try {
         const senderPhone = extractPhoneNumber(senderJid);
         let groupName = 'Unknown Group';
@@ -35,14 +35,14 @@ export async function handleActivate(sock, chatId, senderJid, { groupManager }) 
         r += '💡 Use `/instaon` for auto Instagram downloads\n';
         r += '💡 Use `/deactivate` to stop receiving updates';
 
-        await sock.sendMessage(chatId, { text: r });
+        await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
         logger.info(`✅ Group activated: ${groupName} (${chatId}) by ${senderPhone}`);
     } catch (error) {
         logger.error(`Error activating group: ${error.message}`);
     }
 }
 
-export async function handleDeactivate(sock, chatId, senderJid, { groupManager }) {
+export async function handleDeactivate(sock, chatId, senderJid, { groupManager, originalMsg }) {
     try {
         const senderPhone = extractPhoneNumber(senderJid);
         const success = await groupManager.deactivateGroup(chatId);
@@ -54,21 +54,21 @@ export async function handleDeactivate(sock, chatId, senderJid, { groupManager }
             r += '📢 This group will no longer receive course or tech news updates.\n\n';
             r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
             r += '💡 Use `/activate` to start receiving updates again';
-            await sock.sendMessage(chatId, { text: r });
+            await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
             logger.info(`🛑 Group deactivated: ${chatId} by ${senderPhone}`);
         } else {
             await sock.sendMessage(chatId, {
                 text:
                     '━━━━━━━━━━━━━━━━━━━━━━━━━━━\nℹ️ *NOT ACTIVATED* ℹ️\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
                     'This group is not activated.',
-            });
+            }, { quoted: originalMsg });
         }
     } catch (error) {
         logger.error(`Error deactivating group: ${error.message}`);
     }
 }
 
-export async function handleInstaOn(sock, chatId, senderJid, { groupManager }) {
+export async function handleInstaOn(sock, chatId, senderJid, { groupManager, originalMsg }) {
     try {
         const senderPhone = extractPhoneNumber(senderJid);
         let groupName = 'Unknown Group';
@@ -90,14 +90,14 @@ export async function handleInstaOn(sock, chatId, senderJid, { groupManager }) {
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
         r += '💡 Use `/instaoff` to turn this off';
 
-        await sock.sendMessage(chatId, { text: r });
+        await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
         logger.info(`📸 Insta auto enabled: ${groupName} (${chatId}) by ${senderPhone}`);
     } catch (error) {
         logger.error(`Error enabling insta auto: ${error.message}`);
     }
 }
 
-export async function handleInstaOff(sock, chatId, senderJid, { groupManager }) {
+export async function handleInstaOff(sock, chatId, senderJid, { groupManager, originalMsg }) {
     try {
         const senderPhone = extractPhoneNumber(senderJid);
         const wasEnabled = await groupManager.isInstaAutoEnabled(chatId);
@@ -106,7 +106,7 @@ export async function handleInstaOff(sock, chatId, senderJid, { groupManager }) 
                 text:
                     '━━━━━━━━━━━━━━━━━━━━━━━━━━━\nℹ️ *INSTA AUTO OFF* ℹ️\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
                     'Auto Instagram download is not enabled in this group.\n\nUse `/instaon` to enable it.',
-            });
+            }, { quoted: originalMsg });
             return;
         }
 
@@ -129,7 +129,7 @@ export async function handleInstaOff(sock, chatId, senderJid, { groupManager }) 
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
         r += '💡 Use `/instaon` to enable again';
 
-        await sock.sendMessage(chatId, { text: r });
+        await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
         logger.info(`📸 Insta auto disabled: ${chatId} by ${senderPhone}`);
     } catch (error) {
         logger.error(`Error disabling insta auto: ${error.message}`);
