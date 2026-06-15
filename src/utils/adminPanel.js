@@ -4,8 +4,103 @@
  */
 
 import http from 'http';
+import os from 'os';
 import { URL } from 'url';
 import { logger } from './logger.js';
+
+/**
+ * Get comprehensive system metrics
+ */
+function getSystemMetrics() {
+    const cpus = os.cpus();
+    const totalMem = os.totalmem();
+    const freeMem = os.freemem();
+    const usedMem = totalMem - freeMem;
+    
+    // Calculate CPU usage (average across all cores)
+    let totalIdle = 0;
+    let totalTick = 0;
+    for (const cpu of cpus) {
+        for (const type in cpu.times) {
+            totalTick += cpu.times[type];
+        }
+        totalIdle += cpu.times.idle;
+    }
+    const cpuUsagePercent = ((1 - totalIdle / totalTick) * 100).toFixed(1);
+    
+    // Process memory
+    const processMemory = process.memoryUsage();
+    
+    // Uptime formatting
+    const uptimeSecs = process.uptime();
+    const days = Math.floor(uptimeSecs / 86400);
+    const hours = Math.floor((uptimeSecs % 86400) / 3600);
+    const mins = Math.floor((uptimeSecs % 3600) / 60);
+    const secs = Math.floor(uptimeSecs % 60);
+    const uptimeFormatted = days > 0 
+        ? `${days}d ${hours}h ${mins}m ${secs}s`
+        : hours > 0 
+        ? `${hours}h ${mins}m ${secs}s`
+        : `${mins}m ${secs}s`;
+
+    return {
+        // OS Information
+        os: {
+            platform: os.platform(),
+            type: os.type(),
+            release: os.release(),
+            arch: os.arch(),
+            hostname: os.hostname(),
+        },
+        
+        // CPU Information
+        cpu: {
+            model: cpus[0]?.model || 'Unknown',
+            cores: cpus.length,
+            speed_mhz: cpus[0]?.speed || 0,
+            usage_percent: parseFloat(cpuUsagePercent),
+        },
+        
+        // System Memory
+        memory: {
+            total_mb: Math.round(totalMem / 1024 / 1024),
+            used_mb: Math.round(usedMem / 1024 / 1024),
+            free_mb: Math.round(freeMem / 1024 / 1024),
+            usage_percent: parseFloat(((usedMem / totalMem) * 100).toFixed(1)),
+        },
+        
+        // Process Memory
+        process_memory: {
+            rss_mb: Math.round(processMemory.rss / 1024 / 1024),
+            heap_total_mb: Math.round(processMemory.heapTotal / 1024 / 1024),
+            heap_used_mb: Math.round(processMemory.heapUsed / 1024 / 1024),
+            external_mb: Math.round(processMemory.external / 1024 / 1024),
+        },
+        
+        // Uptime
+        uptime: {
+            seconds: Math.floor(uptimeSecs),
+            formatted: uptimeFormatted,
+        },
+        
+        // Load Average (Unix only, returns [0,0,0] on Windows)
+        load_average: os.loadavg().map(l => parseFloat(l.toFixed(2))),
+        
+        // Node.js Info
+        node: {
+            version: process.version,
+            pid: process.pid,
+        },
+        
+        // Network Interfaces (first non-internal IPv4)
+        network: Object.entries(os.networkInterfaces())
+            .flatMap(([name, interfaces]) => 
+                (interfaces || [])
+                    .filter(i => i.family === 'IPv4' && !i.internal)
+                    .map(i => ({ interface: name, address: i.address }))
+            ).slice(0, 2),
+    };
+}
 
 class AdminPanel {
     constructor(port = 3000) {
@@ -257,10 +352,33 @@ class AdminPanel {
             <p>Processing...</p>
         </div>
 
+        <div class="status-card">
+            <h3 style="margin-bottom: 15px;">📊 System Metrics</h3>
+            <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; font-size: 0.9em;">
+                <div style="background: rgba(255,255,255,0.05); padding: 12px; border-radius: 8px;">
+                    <div style="color: #888; font-size: 0.8em;">CPU Usage</div>
+                    <div style="font-size: 1.3em; color: #4CAF50;">${(() => { const m = getSystemMetrics(); return m.cpu.usage_percent; })()}%</div>
+                </div>
+                <div style="background: rgba(255,255,255,0.05); padding: 12px; border-radius: 8px;">
+                    <div style="color: #888; font-size: 0.8em;">Memory Usage</div>
+                    <div style="font-size: 1.3em; color: #2196F3;">${(() => { const m = getSystemMetrics(); return m.memory.usage_percent; })()}%</div>
+                </div>
+                <div style="background: rgba(255,255,255,0.05); padding: 12px; border-radius: 8px;">
+                    <div style="color: #888; font-size: 0.8em;">Process Memory</div>
+                    <div style="font-size: 1.3em; color: #FF9800;">${(() => { const m = getSystemMetrics(); return m.process_memory.rss_mb; })()} MB</div>
+                </div>
+                <div style="background: rgba(255,255,255,0.05); padding: 12px; border-radius: 8px;">
+                    <div style="color: #888; font-size: 0.8em;">Uptime</div>
+                    <div style="font-size: 1.3em; color: #9C27B0;">${(() => { const m = getSystemMetrics(); return m.uptime.formatted; })()}</div>
+                </div>
+            </div>
+        </div>
+
         <div class="info-card">
+            <p>🖥️ Platform: ${os.platform()} (${os.arch()}) | Node ${process.version}</p>
             <p>🕐 Last Activity: ${this.lastActivity.toLocaleString()}</p>
-            <p>⏱️ Uptime: ${Math.floor(process.uptime() / 60)} minutes</p>
             <p>💡 Tip: Clear session if you see "Bad MAC" errors</p>
+            <p>📡 Endpoints: <code>/health</code> <code>/ping</code> <code>/metrics</code></p>
         </div>
     </div>
 
@@ -314,16 +432,41 @@ class AdminPanel {
             const url = new URL(req.url, `http://localhost:${this.port}`);
             const pathname = url.pathname;
 
-            // Health check (no auth required)
+            // Health check (no auth required) - detailed system metrics for Koyeb/Render
             if (pathname === '/health' || pathname === '/') {
+                const metrics = getSystemMetrics();
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({
                     status: 'ok',
-                    uptime: process.uptime(),
-                    timestamp: new Date().toISOString(),
                     service: 'WhatsApp Course Bot',
-                    connection: this.connectionStatus
-                }));
+                    timestamp: new Date().toISOString(),
+                    
+                    // Bot Status
+                    bot: {
+                        connection: this.connectionStatus,
+                        phone: this.connectedPhone || null,
+                        has_qr: !!this.qrCode,
+                    },
+                    
+                    // System Metrics
+                    system: metrics,
+                    
+                    // Quick Summary
+                    summary: {
+                        cpu_usage: `${metrics.cpu.usage_percent}%`,
+                        memory_usage: `${metrics.memory.usage_percent}%`,
+                        process_memory: `${metrics.process_memory.rss_mb} MB`,
+                        uptime: metrics.uptime.formatted,
+                        platform: `${metrics.os.platform} (${metrics.os.arch})`,
+                    }
+                }, null, 2));
+                return;
+            }
+            
+            // Simple ping endpoint (minimal response for keep-alive)
+            if (pathname === '/ping') {
+                res.writeHead(200, { 'Content-Type': 'text/plain' });
+                res.end('pong');
                 return;
             }
 
@@ -344,6 +487,19 @@ class AdminPanel {
                 return;
             }
 
+            // API: Get detailed metrics (for monitoring dashboards)
+            if (pathname === '/api/metrics' || pathname === '/metrics') {
+                const metrics = getSystemMetrics();
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                    timestamp: new Date().toISOString(),
+                    bot_status: this.connectionStatus,
+                    bot_phone: this.connectedPhone,
+                    ...metrics
+                }, null, 2));
+                return;
+            }
+
             // API: Get status
             if (pathname === '/api/status') {
                 if (!this._verifyToken(req)) {
@@ -351,12 +507,14 @@ class AdminPanel {
                     res.end(JSON.stringify({ error: 'Unauthorized' }));
                     return;
                 }
+                const metrics = getSystemMetrics();
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({
                     status: this.connectionStatus,
                     phone: this.connectedPhone,
                     hasQR: !!this.qrCode,
-                    uptime: process.uptime()
+                    uptime: process.uptime(),
+                    system: metrics.summary || {}
                 }));
                 return;
             }
