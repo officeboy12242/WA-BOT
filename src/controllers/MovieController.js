@@ -314,44 +314,71 @@ function cleanTitle(raw) {
 }
 
 function formatMovieResults(query, results, pushName = '', sources = []) {
-    const maxResults = 15;
-    const items = results.slice(0, maxResults);
-
-    let text = '';
-    if (pushName) {
-        text += `🎉 Hey *${pushName}*! Here are your results 🍿\n\n`;
-    }
-    text += '┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n';
-    text += '┃  🎬 *MOVIE SEARCH RESULTS*  ┃\n';
-    text += '┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n';
-    text += `🔍 *Query:* _"${query}"_\n`;
-    text += `📊 *Found:* ${results.length} result(s)${results.length > maxResults ? ` (showing top ${maxResults})` : ''}\n`;
-    if (sources.length > 0) {
-        text += `🌐 *Sources:* ${sources.join(', ')}\n`;
-    }
-    text += '─────────────────────────────\n\n';
-
-    items.forEach((item, idx) => {
-        const title = cleanTitle(item.title);
-        const sourceTag = item.source ? ` [${item.source}]` : '';
-        text += `*${idx + 1}.* 🎥 ${title}${sourceTag}\n`;
-
-        if (item.links?.length) {
-            item.links.forEach((link) => {
-                text += `     📦 ${link.size}  →  ${link.url}\n`;
-            });
+    const RESULTS_PER_MESSAGE = 5;
+    const messages = [];
+    const totalResults = results.length;
+    const totalPages = Math.ceil(totalResults / RESULTS_PER_MESSAGE);
+    
+    for (let page = 0; page < totalPages; page++) {
+        const startIdx = page * RESULTS_PER_MESSAGE;
+        const endIdx = Math.min(startIdx + RESULTS_PER_MESSAGE, totalResults);
+        const pageItems = results.slice(startIdx, endIdx);
+        
+        let text = '';
+        
+        // Header only on first message
+        if (page === 0) {
+            if (pushName) {
+                text += `🎉 Hey *${pushName}*! Here are your results 🍿\n\n`;
+            }
+            text += '┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n';
+            text += '┃  🎬 *MOVIE SEARCH RESULTS*  ┃\n';
+            text += '┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n';
+            text += `🔍 *Query:* _"${query}"_\n`;
+            text += `📊 *Found:* ${totalResults} result(s)`;
+            if (totalPages > 1) {
+                text += ` _(${totalPages} messages)_`;
+            }
+            text += '\n';
+            if (sources.length > 0) {
+                text += `🌐 *Sources:* ${sources.join(', ')}\n`;
+            }
+            text += '─────────────────────────────\n\n';
+        } else {
+            // Continuation header for subsequent messages
+            text += `📄 *Results ${startIdx + 1}-${endIdx} of ${totalResults}*\n`;
+            text += '─────────────────────────────\n\n';
         }
-        text += '\n';
-    });
+        
+        // Results
+        pageItems.forEach((item, idx) => {
+            const globalIdx = startIdx + idx + 1;
+            const title = cleanTitle(item.title);
+            const sourceTag = item.source ? ` [${item.source}]` : '';
+            text += `*${globalIdx}.* 🎥 ${title}${sourceTag}\n`;
 
-    text += '─────────────────────────────\n';
-    text += '💡 _Click link to download/watch_\n';
-    text += '⚠️ _Use VPN if links are blocked_\n';
-    text += '─────────────────────────────\n';
-    text += `🤖 _Powered by Sassy Bot_ ⚡\n`;
-    text += '⏰ _This message auto-deletes in 5 hours_';
-
-    return text;
+            if (item.links?.length) {
+                item.links.forEach((link) => {
+                    text += `     📦 ${link.size}  →  ${link.url}\n`;
+                });
+            }
+            text += '\n';
+        });
+        
+        // Footer only on last message
+        if (page === totalPages - 1) {
+            text += '─────────────────────────────\n';
+            text += '💡 _Click link to download/watch_\n';
+            text += '⚠️ _Use VPN if links are blocked_\n';
+            text += '─────────────────────────────\n';
+            text += `🤖 _Powered by Sassy Bot_ ⚡\n`;
+            text += '⏰ _This message auto-deletes in 5 hours_';
+        }
+        
+        messages.push(text);
+    }
+    
+    return messages;
 }
 
 function formatLimitReached(remaining) {
@@ -937,18 +964,34 @@ class MovieController {
             void this.logSearch(userId, query, results.length, chatId);
             void this._notifySearchLog(sock, userId, query, results.length, chatId, pushName);
 
-            const resultText = formatMovieResults(query, results, pushName, sources);
+            const resultMessages = formatMovieResults(query, results, pushName, sources);
             const footer = unlimited
                 ? '\n\n⭐ _Unlimited searches (Premium/Staff)_'
                 : `\n\n🔢 _Searches left today: *${remaining}* / ${DAILY_LIMIT}_`;
-            const sent = await sock.sendMessage(chatId, {
-                text: resultText + footer,
-                mentions: [senderJid],
-            }, { quoted: originalMsg || undefined });
+            
+            // Send all result messages
+            for (let i = 0; i < resultMessages.length; i++) {
+                let text = resultMessages[i];
+                
+                // Add footer to last message
+                if (i === resultMessages.length - 1) {
+                    text += footer;
+                }
+                
+                const sent = await sock.sendMessage(chatId, {
+                    text,
+                    mentions: i === 0 ? [senderJid] : undefined,
+                }, i === 0 ? { quoted: originalMsg || undefined } : undefined);
+                
+                this.scheduleDelete(sock, chatId, sent.key);
+                
+                // Small delay between messages to avoid rate limiting
+                if (i < resultMessages.length - 1) {
+                    await new Promise(r => setTimeout(r, 500));
+                }
+            }
 
-            this.scheduleDelete(sock, chatId, sent.key);
-
-            logger.info(`🎬 Movie search "${query}" by ${userId} → ${results.length} results from [${sources.join(', ')}] (${remaining} left)`);
+            logger.info(`🎬 Movie search "${query}" by ${userId} → ${results.length} results from [${sources.join(', ')}] (${resultMessages.length} msg(s), ${remaining} left)`);
         } catch (err) {
             try {
                 await sock.sendMessage(chatId, { delete: searchingMsg.key });
