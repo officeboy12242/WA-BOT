@@ -463,10 +463,35 @@ class AdminPanel {
                 return;
             }
             
-            // Simple ping endpoint (minimal response for keep-alive)
+            // Cool ping endpoint with ASCII art
             if (pathname === '/ping') {
-                res.writeHead(200, { 'Content-Type': 'text/plain' });
-                res.end('pong');
+                const metrics = getSystemMetrics();
+                const statusEmoji = this.connectionStatus === 'connected' ? '🟢' : '🔴';
+                const asciiArt = `
+╔═══════════════════════════════════════════════════════════╗
+║                                                           ║
+║     ███████╗ █████╗ ███████╗███████╗██╗   ██╗            ║
+║     ██╔════╝██╔══██╗██╔════╝██╔════╝╚██╗ ██╔╝            ║
+║     ███████╗███████║███████╗███████╗ ╚████╔╝             ║
+║     ╚════██║██╔══██║╚════██║╚════██║  ╚██╔╝              ║
+║     ███████║██║  ██║███████║███████║   ██║               ║
+║     ╚══════╝╚═╝  ╚═╝╚══════╝╚══════╝   ╚═╝               ║
+║                    🤖 BOT                                 ║
+╠═══════════════════════════════════════════════════════════╣
+║  STATUS    │ ${statusEmoji} ${this.connectionStatus.toUpperCase().padEnd(42)}║
+║  PHONE     │ ${(this.connectedPhone || 'Not connected').padEnd(44)}║
+║  UPTIME    │ ${metrics.uptime.formatted.padEnd(44)}║
+║  CPU       │ ${(metrics.cpu.usage_percent + '%').padEnd(44)}║
+║  MEMORY    │ ${(metrics.memory.usage_percent + '% (' + metrics.process_memory.rss_mb + ' MB)').padEnd(44)}║
+║  PLATFORM  │ ${(metrics.os.platform + ' ' + metrics.os.arch).padEnd(44)}║
+║  NODE      │ ${metrics.node.version.padEnd(44)}║
+╠═══════════════════════════════════════════════════════════╣
+║  🏓 PONG! Server is alive and kicking!                    ║
+║  ⏰ ${new Date().toISOString().padEnd(52)}║
+╚═══════════════════════════════════════════════════════════╝
+`;
+                res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+                res.end(asciiArt);
                 return;
             }
 
