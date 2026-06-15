@@ -334,6 +334,30 @@ class WhatsAppService {
             return;
         }
 
+        // Skip protocol/system messages that cause "Waiting for this message"
+        const msgContent = msg.message;
+        const protocolTypes = [
+            'protocolMessage',
+            'senderKeyDistributionMessage', 
+            'messageContextInfo',
+            'reactionMessage',
+            'pollUpdateMessage',
+        ];
+        
+        // Check if message only contains protocol data (no actual content)
+        const msgKeys = Object.keys(msgContent);
+        const hasOnlyProtocol = msgKeys.every(key => 
+            protocolTypes.includes(key) || key === 'messageContextInfo'
+        );
+        if (hasOnlyProtocol && !msgContent.stickerMessage) {
+            return;
+        }
+        
+        // Skip system/stub messages
+        if (msg.messageStubType) {
+            return;
+        }
+
         // Deduplication: skip if this message was already processed
         if (this._isMessageProcessed(messageId)) {
             return;
