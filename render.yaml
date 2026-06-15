@@ -25,3 +25,5 @@ services:
         value: Created By Sassy Bot 🤖
       - key: STICKER_PACK_AUTHOR
         value: ""
+      - key: ADMIN_TOKEN
+        sync: false

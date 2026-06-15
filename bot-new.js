@@ -6,7 +6,7 @@
 import { config } from './src/config/config.js';
 import { closeMongo, connectMongo } from './src/db/mongo.js';
 import { logger } from './src/utils/logger.js';
-import { startHealthCheckServer } from './src/utils/healthCheck.js';
+import AdminPanel from './src/utils/adminPanel.js';
 import DatabaseModel from './src/models/Database.js';
 import AuthDatabase from './src/models/AuthDatabase.js';
 import CourseAPI from './src/models/CourseAPI.js';
@@ -58,6 +58,7 @@ class WhatsAppCourseBot {
         this.morningScheduler = null;
         this.morningDatabase = null;
         this.stickerController = null;
+        this.adminPanel = null;
     }
 
     async start() {
@@ -147,7 +148,8 @@ class WhatsAppCourseBot {
                 this.groupManager,
                 config.STICKER_SOURCE_CHANNELS,
                 this.channelStickerPoller,
-                this.userManager
+                this.userManager,
+                this.adminPanel
             );
             
             // Connect to WhatsApp
@@ -240,9 +242,10 @@ class WhatsAppCourseBot {
 // ─── Start Bot ────────────────────────────────────────────────────────────────
 const bot = new WhatsAppCourseBot();
 
-// Start health check server (for Render to keep service alive)
+// Start admin panel server (includes health check for Render)
 const PORT = process.env.PORT || 3000;
-startHealthCheckServer(PORT);
+bot.adminPanel = new AdminPanel(PORT);
+bot.adminPanel.start();
 
 // Handle graceful shutdown
 process.on('SIGINT', () => {
