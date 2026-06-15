@@ -14,7 +14,9 @@ import { logger } from './logger.js';
 import { extractStickerFromMessage, isNewsletterChat } from './stickerExtract.js';
 
 const baileysLogger = pino({ level: 'silent' });
-const DOWNLOAD_TIMEOUT_MS = 10000;
+const DOWNLOAD_TIMEOUT_MS = 30000; // Increased to 30 seconds
+const MAX_RETRIES = 3;
+const RETRY_DELAY_MS = 2000;
 
 function withTimeout(promise, ms) {
     return Promise.race([
@@ -23,14 +25,19 @@ function withTimeout(promise, ms) {
     ]);
 }
 
+function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 async function tryDirectDownload(url, directPath) {
     const downloadUrl = url || (directPath ? `https://mmg.whatsapp.net${directPath}` : null);
     if (!downloadUrl) return null;
     
     const https = await import('https');
     return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error('timeout')), 8000);
-        https.default.get(downloadUrl, (res) => {
+        const timeout = setTimeout(() => reject(new Error('timeout')), 15000); // 15 second timeout
+        
+        const req = https.default.get(downloadUrl, { timeout: 15000 }, (res) => {
             if (res.statusCode !== 200) {
                 clearTimeout(timeout);
                 return reject(new Error(`HTTP ${res.statusCode}`));
@@ -45,9 +52,17 @@ async function tryDirectDownload(url, directPath) {
                 clearTimeout(timeout);
                 reject(err);
             });
-        }).on('error', (err) => {
+        });
+        
+        req.on('error', (err) => {
             clearTimeout(timeout);
             reject(err);
+        });
+        
+        req.on('timeout', () => {
+            req.destroy();
+            clearTimeout(timeout);
+            reject(new Error('request timeout'));
         });
     });
 }
@@ -123,25 +138,62 @@ export async function downloadStickerBuffer(sock, waMessage) {
     const isChannel = isNewsletterChat(chatId);
     const sticker = extractStickerFromMessage(waMessage.message);
 
+    // Channel stickers - use direct download
     if (isChannel && sticker) {
-        const directBuffer = await tryDirectDownload(sticker.url, sticker.directPath);
-        if (directBuffer?.length > 100) {
-            return directBuffer;
+        for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+            try {
+                const directBuffer = await tryDirectDownload(sticker.url, sticker.directPath);
+                if (directBuffer?.length > 100) {
+                    return directBuffer;
+                }
+            } catch (err) {
+                logger.debug(`Channel sticker download attempt ${attempt} failed: ${err.message}`);
+                if (attempt < MAX_RETRIES) {
+                    await delay(RETRY_DELAY_MS * attempt);
+                }
+            }
         }
-        throw new Error('Channel sticker download failed');
+        throw new Error('Channel sticker download failed after retries');
     }
 
-    if (sticker && hasMediaKey(sticker)) {
-        try {
-            return await tryDownloadMediaMessage(sock, waMessage);
-        } catch {
-            return await tryDownloadContent(sock, sticker);
-        }
-    }
+    // Group stickers - try multiple methods with retries
+    let lastError = null;
     
-    if (sticker) {
-        return await tryDownloadMediaMessage(sock, waMessage);
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        try {
+            // Method 1: downloadMediaMessage (preferred)
+            if (sticker && hasMediaKey(sticker)) {
+                try {
+                    return await tryDownloadMediaMessage(sock, waMessage);
+                } catch (err) {
+                    // Fall through to method 2
+                    lastError = err;
+                }
+            }
+            
+            // Method 2: downloadContentFromMessage
+            if (sticker) {
+                try {
+                    return await tryDownloadContent(sock, sticker);
+                } catch (err) {
+                    lastError = err;
+                }
+            }
+            
+            // Method 3: Try downloadMediaMessage without mediaKey check
+            if (sticker) {
+                return await tryDownloadMediaMessage(sock, waMessage);
+            }
+        } catch (err) {
+            lastError = err;
+            logger.debug(`Sticker download attempt ${attempt} failed: ${err.message}`);
+        }
+        
+        if (attempt < MAX_RETRIES) {
+            logger.debug(`Retrying sticker download in ${RETRY_DELAY_MS * attempt}ms...`);
+            await delay(RETRY_DELAY_MS * attempt);
+        }
     }
 
-    throw new Error('No sticker found');
+    throw lastError || new Error('No sticker found');
 }
