@@ -38,13 +38,20 @@ function getSystemStats() {
     return { cpuUsage, memUsage, processMemMB, cores: cpus.length, platform: os.platform(), arch: os.arch() };
 }
 
+function createProgressBar(percent, length = 10) {
+    const filled = Math.round((percent / 100) * length);
+    const empty = length - filled;
+    const bar = '█'.repeat(filled) + '░'.repeat(empty);
+    return bar;
+}
+
 export async function handlePing(sock, chatId, { botState, botStartTime }) {
     try {
         const uptime = Date.now() - botStartTime;
         const uptimeFormatted = formatUptime(uptime);
         const stats = getSystemStats();
         const statusEmoji = botState.isPaused ? '🟡' : '🟢';
-        const statusText = botState.isPaused ? 'PAUSED' : 'ONLINE';
+        const statusText = botState.isPaused ? 'PAUSED' : 'ACTIVE';
         
         const currentTime = new Date().toLocaleString('en-IN', {
             timeZone: 'Asia/Kolkata',
@@ -52,29 +59,30 @@ export async function handlePing(sock, chatId, { botState, botStartTime }) {
             timeStyle: 'short',
         });
 
+        const cpuBar = createProgressBar(parseFloat(stats.cpuUsage));
+        const memBar = createProgressBar(parseFloat(stats.memUsage));
+
         let r = `\`\`\`
-╔═══════════════════════════════════╗
-║                                   ║
-║   ███████╗ █████╗ ███████╗███████╗║
-║   ██╔════╝██╔══██╗██╔════╝██╔════╝║
-║   ███████╗███████║███████╗███████╗║
-║   ╚════██║██╔══██║╚════██║╚════██║║
-║   ███████║██║  ██║███████║███████║║
-║   ╚══════╝╚═╝  ╚═╝╚══════╝╚══════╝║
-║            🤖 BOT                 ║
-╠═══════════════════════════════════╣
-║  STATUS   │ ${statusEmoji} ${statusText.padEnd(18)}║
-║  UPTIME   │ ⏱️ ${uptimeFormatted.padEnd(17)}║
-║  CPU      │ 💻 ${(stats.cpuUsage + '%').padEnd(17)}║
-║  MEMORY   │ 🧠 ${(stats.memUsage + '%').padEnd(17)}║
-║  PROCESS  │ 📦 ${(stats.processMemMB + ' MB').padEnd(17)}║
-║  CORES    │ ⚙️ ${String(stats.cores).padEnd(17)}║
-║  PLATFORM │ 🖥️ ${(stats.platform + ' ' + stats.arch).padEnd(17)}║
-║  NODE     │ 📗 ${process.version.padEnd(17)}║
-╠═══════════════════════════════════╣
-║  🏓 PONG! All systems GO!         ║
-║  ⏰ ${currentTime.padEnd(28)}║
-╚═══════════════════════════════════╝
+┌──────────────────────────────────┐
+│  ⚡ SASSY BOT TERMINAL v2.0      │
+│  ════════════════════════════    │
+│                                  │
+│  $ system --status               │
+│  > ${statusEmoji} Status: ${statusText}              │
+│  > ⏱️ Uptime: ${uptimeFormatted.padEnd(17)}│
+│                                  │
+│  $ monitor --resources           │
+│  > CPU  [${cpuBar}] ${stats.cpuUsage.padStart(5)}%  │
+│  > MEM  [${memBar}] ${stats.memUsage.padStart(5)}%  │
+│  > PROC: ${stats.processMemMB} MB | CORES: ${stats.cores}      │
+│                                  │
+│  $ info --system                 │
+│  > OS: ${(stats.platform + '/' + stats.arch).padEnd(22)}│
+│  > NODE: ${process.version.padEnd(21)}│
+│  > TIME: ${currentTime.padEnd(21)}│
+│                                  │
+│  ✓ PONG! All systems operational │
+└──────────────────────────────────┘
 \`\`\``;
 
         await sock.sendMessage(chatId, { text: r });
