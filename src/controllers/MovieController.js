@@ -826,12 +826,33 @@ class MovieController {
     }
 
     async isUnlimitedUser(phoneNumber) {
-        if (!this.groupManager) return false;
-        if (this.groupManager.isOwner(phoneNumber)) return true;
-        if (this.groupManager.isModerator(phoneNumber)) return true;
-        if (await this.groupManager.isDynamicModerator(phoneNumber)) return true;
-        if (await this.groupManager.isBotAdmin(phoneNumber)) return true;
-        if (await this.groupManager.isPremiumUser(phoneNumber)) return true;
+        if (!this.groupManager) {
+            logger.warn(`⚠️ No groupManager available for unlimited check: ${phoneNumber}`);
+            return false;
+        }
+        
+        if (this.groupManager.isOwner(phoneNumber)) {
+            logger.debug(`✓ ${phoneNumber} is owner (unlimited)`);
+            return true;
+        }
+        if (this.groupManager.isModerator(phoneNumber)) {
+            logger.debug(`✓ ${phoneNumber} is moderator (unlimited)`);
+            return true;
+        }
+        if (await this.groupManager.isDynamicModerator(phoneNumber)) {
+            logger.debug(`✓ ${phoneNumber} is dynamic moderator (unlimited)`);
+            return true;
+        }
+        if (await this.groupManager.isBotAdmin(phoneNumber)) {
+            logger.debug(`✓ ${phoneNumber} is bot admin (unlimited)`);
+            return true;
+        }
+        if (await this.groupManager.isPremiumUser(phoneNumber)) {
+            logger.debug(`✓ ${phoneNumber} is premium user (unlimited)`);
+            return true;
+        }
+        
+        logger.debug(`✗ ${phoneNumber} is regular user (limited)`);
         return false;
     }
 
@@ -918,6 +939,8 @@ class MovieController {
         const userId = await this._resolvePhoneNumber(sock, chatId, senderJid);
         const unlimited = await this.isUnlimitedUser(userId);
         const currentCount = unlimited ? 0 : await this.getUserSearchCount(userId);
+
+        logger.info(`🎬 Movie search by ${userId}: unlimited=${unlimited}, count=${currentCount}`);
 
         if (!unlimited && currentCount >= DAILY_LIMIT) {
             const limitMsg = formatLimitReached();
