@@ -41,6 +41,11 @@ const ZODIAC_DATES = {
     pisces: 'Feb 19 - Mar 20'
 };
 
+const LUCKY_COLORS = [
+    'Red', 'Blue', 'Green', 'Gold', 'Purple', 'Orange',
+    'Pink', 'Yellow', 'Teal', 'Silver', 'Dark Green', 'Coral',
+];
+
 class HoroscopeService {
     constructor() {
         this._cache = new Map();
@@ -87,6 +92,70 @@ class HoroscopeService {
         return `${sign}_${today}`;
     }
 
+    _formatDate() {
+        return new Date().toLocaleDateString('en-IN', {
+            weekday: 'long',
+            year: 'numeric',
+            month: 'long',
+            day: 'numeric',
+        });
+    }
+
+    /**
+     * Deterministic daily luck when extras API is unavailable
+     */
+    _generateDailyLuck(sign) {
+        const today = new Date().toISOString().split('T')[0];
+        const seed = `${sign}_${today}`;
+        let hash = 0;
+
+        for (let i = 0; i < seed.length; i++) {
+            hash = ((hash << 5) - hash) + seed.charCodeAt(i);
+            hash |= 0;
+        }
+
+        const abs = Math.abs(hash);
+        return {
+            luckyNumber: (abs % 99) + 1,
+            luckyColor: LUCKY_COLORS[abs % LUCKY_COLORS.length],
+            mood: ['Optimistic', 'Focused', 'Calm', 'Energetic', 'Reflective'][abs % 5],
+            compatibility: ZODIAC_SIGNS[(abs + 3) % ZODIAC_SIGNS.length],
+        };
+    }
+
+    async _fetchOhmanda(sign) {
+        const response = await axios.get(
+            `https://ohmanda.com/api/horoscope/${sign}/`,
+            { timeout: 10000 }
+        );
+
+        if (!response.data?.horoscope) {
+            throw new Error('Invalid Ohmanda response');
+        }
+
+        return response.data.horoscope.trim();
+    }
+
+    async _fetchVedikaExtras(sign) {
+        const response = await axios.get(
+            'https://api.vedika.io/sandbox/horoscope/daily',
+            { params: { sign }, timeout: 10000 }
+        );
+
+        const data = response.data?.data;
+        if (!data) {
+            throw new Error('Invalid Vedika response');
+        }
+
+        return {
+            horoscope: data.prediction?.trim() || '',
+            luckyNumber: data.lucky_number,
+            luckyColor: data.lucky_color,
+            mood: data.mood,
+            compatibility: data.compatibility,
+        };
+    }
+
     /**
      * Fetch horoscope from API
      */
@@ -104,81 +173,39 @@ class HoroscopeService {
             return cached.data;
         }
 
-        try {
-            // Using Ohmanda Horoscope API (free, no key required)
-            const response = await axios.get(
-                `https://ohmanda.com/api/horoscope/${normalizedSign}/`,
-                { timeout: 10000 }
-            );
+        const [ohmandaResult, vedikaResult] = await Promise.allSettled([
+            this._fetchOhmanda(normalizedSign),
+            this._fetchVedikaExtras(normalizedSign),
+        ]);
 
-            if (response.data && response.data.horoscope) {
-                const data = {
-                    sign: normalizedSign,
-                    emoji: ZODIAC_EMOJIS[normalizedSign],
-                    dates: ZODIAC_DATES[normalizedSign],
-                    horoscope: response.data.horoscope,
-                    date: new Date().toLocaleDateString('en-IN', {
-                        weekday: 'long',
-                        year: 'numeric',
-                        month: 'long',
-                        day: 'numeric'
-                    })
-                };
+        const horoscopeText = ohmandaResult.status === 'fulfilled'
+            ? ohmandaResult.value
+            : (vedikaResult.status === 'fulfilled' ? vedikaResult.value.horoscope : '');
 
-                // Cache the result
-                this._cache.set(cacheKey, { data, timestamp: Date.now() });
-                logger.info(`Fetched horoscope for ${normalizedSign}`);
-                return data;
-            }
-
-            throw new Error('Invalid API response');
-        } catch (err) {
-            logger.error(`Horoscope API error for ${normalizedSign}:`, err.message);
-            
-            // Try backup API
-            return this._fetchBackup(normalizedSign);
-        }
-    }
-
-    /**
-     * Backup API if primary fails
-     */
-    async _fetchBackup(sign) {
-        try {
-            // Using Aztro-like endpoint
-            const response = await axios.post(
-                `https://aztro.sameerkumar.website/?sign=${sign}&day=today`,
-                {},
-                { timeout: 10000 }
-            );
-
-            if (response.data && response.data.description) {
-                const data = {
-                    sign: sign,
-                    emoji: ZODIAC_EMOJIS[sign],
-                    dates: ZODIAC_DATES[sign],
-                    horoscope: response.data.description,
-                    mood: response.data.mood,
-                    luckyNumber: response.data.lucky_number,
-                    luckyColor: response.data.color,
-                    date: new Date().toLocaleDateString('en-IN', {
-                        weekday: 'long',
-                        year: 'numeric',
-                        month: 'long',
-                        day: 'numeric'
-                    })
-                };
-
-                const cacheKey = this._getCacheKey(sign);
-                this._cache.set(cacheKey, { data, timestamp: Date.now() });
-                return data;
-            }
-
-            throw new Error('Backup API failed');
-        } catch (err) {
-            logger.error(`Backup horoscope API error:`, err.message);
+        if (!horoscopeText) {
+            logger.error(`Horoscope API error for ${normalizedSign}: all sources failed`);
             return { error: 'api_error' };
         }
+
+        const extras = vedikaResult.status === 'fulfilled'
+            ? vedikaResult.value
+            : this._generateDailyLuck(normalizedSign);
+
+        const data = {
+            sign: normalizedSign,
+            emoji: ZODIAC_EMOJIS[normalizedSign],
+            dates: ZODIAC_DATES[normalizedSign],
+            horoscope: horoscopeText,
+            mood: extras.mood,
+            luckyNumber: extras.luckyNumber,
+            luckyColor: extras.luckyColor,
+            compatibility: extras.compatibility,
+            date: this._formatDate(),
+        };
+
+        this._cache.set(cacheKey, { data, timestamp: Date.now() });
+        logger.info(`Fetched horoscope for ${normalizedSign}`);
+        return data;
     }
 
     /**
@@ -205,16 +232,17 @@ class HoroscopeService {
         msg += `🔮 *Today's Horoscope:*\n\n`;
         msg += `${data.horoscope}\n`;
         msg += `━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+        msg += `\n🍀 *Today's Luck*\n`;
+        msg += `🔢 *Lucky Number:* ${data.luckyNumber ?? '—'}\n`;
+        msg += `🎨 *Lucky Color:* ${data.luckyColor ?? '—'}`;
 
-        // Add extra details if available from backup API
         if (data.mood) {
             msg += `\n😊 *Mood:* ${data.mood}`;
         }
-        if (data.luckyNumber) {
-            msg += `\n🔢 *Lucky Number:* ${data.luckyNumber}`;
-        }
-        if (data.luckyColor) {
-            msg += `\n🎨 *Lucky Color:* ${data.luckyColor}`;
+        if (data.compatibility) {
+            const compat = String(data.compatibility).trim();
+            const compatEmoji = ZODIAC_EMOJIS[compat.toLowerCase()] || '💫';
+            msg += `\n💞 *Best Match:* ${compatEmoji} ${compat}`;
         }
 
         msg += `\n\n✨ _Have a wonderful day!_ ✨`;
