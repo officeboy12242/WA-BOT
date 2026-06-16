@@ -533,22 +533,29 @@ class MovieController {
                 return;
             }
 
+            logger.info(`📊 Preparing daily summary for ${movieGroups.length} group(s)...`);
+            
             let sent = 0;
+            let skipped = 0;
             for (const group of movieGroups) {
                 try {
                     const stats = await this.getDailySummaryStats(dateStr, group.group_id);
-                    if (stats.totalSearches === 0) continue;
+                    if (stats.totalSearches === 0) {
+                        skipped++;
+                        continue;
+                    }
                     const text = formatDailySummary(stats);
                     await this._sock.sendMessage(group.group_id, { text });
                     sent++;
+                    logger.info(`✅ Summary posted to ${group.group_name || group.group_id} (${stats.totalSearches} searches)`);
                     await new Promise((r) => setTimeout(r, 500));
                 } catch (err) {
-                    logger.warn(`Movie summary failed for ${group.group_id}: ${err.message}`);
+                    logger.error(`❌ Summary failed for ${group.group_id}: ${err.message}`);
                 }
             }
-            logger.info(`🎬 Daily movie summary posted to ${sent} group(s) (${movieGroups.length} enabled)`);
+            logger.info(`🎬 Daily movie summary: ${sent} sent, ${skipped} skipped (no activity), ${movieGroups.length} total`);
         } catch (err) {
-            logger.error(`Movie daily summary error: ${err.message}`);
+            logger.error(`Movie daily summary error: ${err.message}`, err.stack);
         }
     }
 
@@ -661,22 +668,32 @@ class MovieController {
                 return;
             }
 
+            logger.info(`🔥 Preparing weekly trending for ${trendingGroups.length} group(s)...`);
+            
             const { movies, weekLabel, source } = await this.getWeeklyTrending(10);
+            
+            if (!movies || movies.length === 0) {
+                logger.warn('Weekly trending: no movies found, skipping post');
+                return;
+            }
+            
             const text = formatWeeklyTrending(movies, weekLabel, source);
+            logger.info(`🔥 Trending data ready: ${movies.length} movie(s) from ${source}`);
 
             let sent = 0;
             for (const group of trendingGroups) {
                 try {
                     await this._sock.sendMessage(group.group_id, { text });
                     sent++;
+                    logger.info(`✅ Trending posted to ${group.group_name || group.group_id}`);
                     await new Promise((r) => setTimeout(r, 500));
                 } catch (err) {
-                    logger.warn(`Weekly trending failed for ${group.group_id}: ${err.message}`);
+                    logger.error(`❌ Trending failed for ${group.group_id}: ${err.message}`);
                 }
             }
             logger.info(`🔥 Weekly trending posted to ${sent}/${trendingGroups.length} group(s)`);
         } catch (err) {
-            logger.error(`Weekly trending error: ${err.message}`);
+            logger.error(`Weekly trending error: ${err.message}`, err.stack);
         }
     }
 
@@ -721,9 +738,11 @@ class MovieController {
                 return;
             }
 
+            logger.info(`🎬 Preparing weekly upcoming for ${movieGroups.length} group(s)...`);
+            
             const movies = await this._fetchUpcoming(8);
             if (!movies?.length) {
-                logger.info('Weekly upcoming: no upcoming movies found, skipping');
+                logger.warn('Weekly upcoming: no upcoming movies found, skipping');
                 return;
             }
 
@@ -731,20 +750,23 @@ class MovieController {
             const twoWeeks = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
             const dateRange = `${now.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })} - ${twoWeeks.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}`;
             const text = formatUpcomingMovies(movies, dateRange);
+            
+            logger.info(`🎬 Upcoming data ready: ${movies.length} movie(s)`);
 
             let sent = 0;
             for (const group of movieGroups) {
                 try {
                     await this._sock.sendMessage(group.group_id, { text });
                     sent++;
+                    logger.info(`✅ Upcoming posted to ${group.group_name || group.group_id}`);
                     await new Promise((r) => setTimeout(r, 500));
                 } catch (err) {
-                    logger.warn(`Weekly upcoming failed for ${group.group_id}: ${err.message}`);
+                    logger.error(`❌ Upcoming failed for ${group.group_id}: ${err.message}`);
                 }
             }
             logger.info(`🎬 Weekly upcoming posted to ${sent}/${movieGroups.length} group(s)`);
         } catch (err) {
-            logger.error(`Weekly upcoming error: ${err.message}`);
+            logger.error(`Weekly upcoming error: ${err.message}`, err.stack);
         }
     }
 
