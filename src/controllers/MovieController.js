@@ -8,7 +8,7 @@ import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import axios from 'axios';
 import { logger } from '../utils/logger.js';
-import { extractPhoneNumber, isGroupMessage } from '../utils/permissions.js';
+import { extractPhoneNumber, isGroupMessage, normalizePhoneNumber } from '../utils/permissions.js';
 import { config } from '../config/config.js';
 import { atozService } from '../services/AtoZService.js';
 
@@ -451,8 +451,9 @@ class MovieController {
 
     async logSearch(userId, query, resultCount, chatId) {
         try {
+            const normalizedUserId = normalizePhoneNumber(userId);
             await this.searchLog.insertOne({
-                user_id: userId,
+                user_id: normalizedUserId,
                 query: query.slice(0, 100),
                 query_lower: query.toLowerCase().slice(0, 100),
                 result_count: resultCount,
@@ -777,29 +778,32 @@ class MovieController {
     }
 
     async getUserSearchCount(userId) {
+        const normalizedUserId = normalizePhoneNumber(userId);
         const today = this.getTodayDateStr();
-        const record = await this.searchLimits.findOne({ user_id: userId, date: today });
+        const record = await this.searchLimits.findOne({ user_id: normalizedUserId, date: today });
         return record?.count || 0;
     }
 
     async incrementSearchCount(userId) {
+        const normalizedUserId = normalizePhoneNumber(userId);
         const today = this.getTodayDateStr();
         await this.searchLimits.updateOne(
-            { user_id: userId, date: today },
-            { $inc: { count: 1 }, $setOnInsert: { user_id: userId, date: today } },
+            { user_id: normalizedUserId, date: today },
+            { $inc: { count: 1 }, $setOnInsert: { user_id: normalizedUserId, date: today } },
             { upsert: true }
         );
     }
 
     async adjustSearchCount(userId, amount, days = 1) {
+        const normalizedUserId = normalizePhoneNumber(userId);
         const today = this.getTodayDateStr();
-        const currentCount = await this.getUserSearchCount(userId);
+        const currentCount = await this.getUserSearchCount(normalizedUserId);
         const newCount = Math.max(0, currentCount - amount);
         
         // Update today's count
         await this.searchLimits.updateOne(
-            { user_id: userId, date: today },
-            { $set: { count: newCount }, $setOnInsert: { user_id: userId, date: today } },
+            { user_id: normalizedUserId, date: today },
+            { $set: { count: newCount }, $setOnInsert: { user_id: normalizedUserId, date: today } },
             { upsert: true }
         );
         
@@ -810,8 +814,8 @@ class MovieController {
             const futureDateStr = futureDate.toISOString().split('T')[0];
             
             await this.searchLimits.updateOne(
-                { user_id: userId, date: futureDateStr },
-                { $set: { count: -amount }, $setOnInsert: { user_id: userId, date: futureDateStr } },
+                { user_id: normalizedUserId, date: futureDateStr },
+                { $set: { count: -amount }, $setOnInsert: { user_id: normalizedUserId, date: futureDateStr } },
                 { upsert: true }
             );
         }
@@ -831,28 +835,35 @@ class MovieController {
             return false;
         }
         
-        if (this.groupManager.isOwner(phoneNumber)) {
-            logger.debug(`✓ ${phoneNumber} is owner (unlimited)`);
+        // Normalize phone number for consistent checking
+        const normalizedPhone = normalizePhoneNumber(phoneNumber);
+        if (!normalizedPhone) {
+            logger.warn(`⚠️ Invalid phone number for unlimited check: ${phoneNumber}`);
+            return false;
+        }
+        
+        if (this.groupManager.isOwner(normalizedPhone)) {
+            logger.info(`✓ ${normalizedPhone} is owner (unlimited)`);
             return true;
         }
-        if (this.groupManager.isModerator(phoneNumber)) {
-            logger.debug(`✓ ${phoneNumber} is moderator (unlimited)`);
+        if (this.groupManager.isModerator(normalizedPhone)) {
+            logger.info(`✓ ${normalizedPhone} is moderator (unlimited)`);
             return true;
         }
-        if (await this.groupManager.isDynamicModerator(phoneNumber)) {
-            logger.debug(`✓ ${phoneNumber} is dynamic moderator (unlimited)`);
+        if (await this.groupManager.isDynamicModerator(normalizedPhone)) {
+            logger.info(`✓ ${normalizedPhone} is dynamic moderator (unlimited)`);
             return true;
         }
-        if (await this.groupManager.isBotAdmin(phoneNumber)) {
-            logger.debug(`✓ ${phoneNumber} is bot admin (unlimited)`);
+        if (await this.groupManager.isBotAdmin(normalizedPhone)) {
+            logger.info(`✓ ${normalizedPhone} is bot admin (unlimited)`);
             return true;
         }
-        if (await this.groupManager.isPremiumUser(phoneNumber)) {
-            logger.debug(`✓ ${phoneNumber} is premium user (unlimited)`);
+        if (await this.groupManager.isPremiumUser(normalizedPhone)) {
+            logger.info(`✓ ${normalizedPhone} is premium user (unlimited)`);
             return true;
         }
         
-        logger.debug(`✗ ${phoneNumber} is regular user (limited)`);
+        logger.debug(`✗ ${normalizedPhone} is regular user (limited)`);
         return false;
     }
 
@@ -937,10 +948,11 @@ class MovieController {
         }
 
         const userId = await this._resolvePhoneNumber(sock, chatId, senderJid);
+        const normalizedUserId = normalizePhoneNumber(userId);
         const unlimited = await this.isUnlimitedUser(userId);
-        const currentCount = unlimited ? 0 : await this.getUserSearchCount(userId);
+        const currentCount = unlimited ? 0 : await this.getUserSearchCount(normalizedUserId);
 
-        logger.info(`🎬 Movie search by ${userId}: unlimited=${unlimited}, count=${currentCount}`);
+        logger.info(`🎬 Movie search by ${userId} (normalized: ${normalizedUserId}): unlimited=${unlimited}, count=${currentCount}`);
 
         if (!unlimited && currentCount >= DAILY_LIMIT) {
             const limitMsg = formatLimitReached();
@@ -999,15 +1011,15 @@ class MovieController {
                 const noResult = getRandomDialogue(NO_RESULTS_DIALOGUES);
                 const noSent = await sock.sendMessage(chatId, { text: noResult });
                 this.scheduleDelete(sock, chatId, noSent.key);
-                if (!unlimited) await this.incrementSearchCount(userId);
-                void this.logSearch(userId, query, 0, chatId);
-                void this._notifySearchLog(sock, userId, query, 0, chatId, pushName);
+                if (!unlimited) await this.incrementSearchCount(normalizedUserId);
+                void this.logSearch(normalizedUserId, query, 0, chatId);
+                void this._notifySearchLog(sock, normalizedUserId, query, 0, chatId, pushName);
                 return;
             }
 
-            if (!unlimited) await this.incrementSearchCount(userId);
-            void this.logSearch(userId, query, results.length, chatId);
-            void this._notifySearchLog(sock, userId, query, results.length, chatId, pushName);
+            if (!unlimited) await this.incrementSearchCount(normalizedUserId);
+            void this.logSearch(normalizedUserId, query, results.length, chatId);
+            void this._notifySearchLog(sock, normalizedUserId, query, results.length, chatId, pushName);
 
             const resultMessages = formatMovieResults(query, results, pushName, sources);
             const footer = unlimited
