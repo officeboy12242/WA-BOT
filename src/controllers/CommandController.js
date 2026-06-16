@@ -59,6 +59,8 @@ import {
     handleNews,
 } from './handlers/instaHandlers.js';
 
+import { horoscopeService } from '../services/HoroscopeService.js';
+
 class CommandController {
     constructor(database, botState, groupManager, newsController = null, movieController = null, userManager = null, stickerController = null) {
         this.database = database;
@@ -193,6 +195,24 @@ class CommandController {
             /* ── Instagram / News / Movie ── */
             case 'insta': await _handleInsta(sock, chatId, args, originalMsg); break;
             case 'news':  await handleNews(sock, chatId, senderJid, ctx); break;
+            case 'horo':
+                try {
+                    const sign = args[0];
+                    if (!sign) {
+                        // No sign provided, show list
+                        const listMsg = horoscopeService.getSignsList();
+                        await sock.sendMessage(chatId, { text: listMsg }, { quoted: originalMsg });
+                    } else {
+                        // Fetch horoscope for the sign
+                        const data = await horoscopeService.fetchHoroscope(sign);
+                        const msg = horoscopeService.formatMessage(data);
+                        await sock.sendMessage(chatId, { text: msg }, { quoted: originalMsg });
+                    }
+                } catch (err) {
+                    logger.error('Horoscope command error:', err);
+                    await sock.sendMessage(chatId, { text: '⚠️ Failed to fetch horoscope. Please try again.' }, { quoted: originalMsg });
+                }
+                break;
             case 'movie':
                 if (!this.movieController) {
                     await sock.sendMessage(chatId, { text: '⚠️ Movie search is not available.' }, { quoted: originalMsg });
