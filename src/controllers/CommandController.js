@@ -174,11 +174,11 @@ class CommandController {
             case 'trending':   await handleTrending(sock, chatId, senderJid, args, ctx); break;
 
             /* ── Admin management ── */
-            case 'addadmin':    await handleAddAdmin(sock, chatId, senderJid, args, ctx); break;
-            case 'removeadmin': await handleRemoveAdmin(sock, chatId, senderJid, args, ctx); break;
+            case 'addadmin':    await handleAddAdmin(sock, chatId, senderJid, args, originalMsg, ctx); break;
+            case 'removeadmin': await handleRemoveAdmin(sock, chatId, senderJid, args, originalMsg, ctx); break;
             case 'admins':      await handleAdmins(sock, chatId, senderJid, ctx); break;
-            case 'increaselimit': await handleIncreaseLimit(sock, chatId, senderJid, args, ctx); break;
-            case 'checklimit': await handleCheckLimit(sock, chatId, senderJid, args, pushName, ctx); break;
+            case 'increaselimit': await handleIncreaseLimit(sock, chatId, senderJid, args, originalMsg, ctx); break;
+            case 'checklimit': await handleCheckLimit(sock, chatId, senderJid, args, originalMsg, pushName, ctx); break;
 
             /* ── Owner: premium / mod / channels ── */
             case 'addpremium':    await handleAddPremium(sock, chatId, senderJid, args, ctx); break;
