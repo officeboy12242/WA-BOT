@@ -116,6 +116,13 @@ export const COMMAND_REGISTRY = [
         help: 'Preview 10 tech news items; staff post to activated groups',
     },
     {
+        names: ['/horo', '/horoscope'],
+        key: 'horo',
+        scope: 'any',
+        role: 'anyone',
+        help: 'Daily horoscope — `/horo capricorn` or `/horo cap`',
+    },
+    {
         names: ['/posted'],
         key: 'posted',
         scope: 'any',
