@@ -313,71 +313,110 @@ function cleanTitle(raw) {
     return raw.replace(/^\*+|\*+$/g, '').trim();
 }
 
-function formatMovieResults(query, results, pushName = '', sources = []) {
-    const RESULTS_PER_MESSAGE = 5;
-    const messages = [];
-    const totalResults = results.length;
-    const totalPages = Math.ceil(totalResults / RESULTS_PER_MESSAGE);
-    
-    for (let page = 0; page < totalPages; page++) {
-        const startIdx = page * RESULTS_PER_MESSAGE;
-        const endIdx = Math.min(startIdx + RESULTS_PER_MESSAGE, totalResults);
-        const pageItems = results.slice(startIdx, endIdx);
-        
-        let text = '';
-        
-        // Header only on first message
-        if (page === 0) {
-            if (pushName) {
-                text += `🎉 Hey *${pushName}*! Here are your results 🍿\n\n`;
-            }
-            text += '┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n';
-            text += '┃  🎬 *MOVIE SEARCH RESULTS*  ┃\n';
-            text += '┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n';
-            text += `🔍 *Query:* _"${query}"_\n`;
-            text += `📊 *Found:* ${totalResults} result(s)`;
-            if (totalPages > 1) {
-                text += ` _(${totalPages} messages)_`;
-            }
-            text += '\n';
-            if (sources.length > 0) {
-                text += `🌐 *Sources:* ${sources.join(', ')}\n`;
-            }
-            text += '─────────────────────────────\n\n';
-        } else {
-            // Continuation header for subsequent messages
-            text += `📄 *Results ${startIdx + 1}-${endIdx} of ${totalResults}*\n`;
-            text += '─────────────────────────────\n\n';
-        }
-        
-        // Results
-        pageItems.forEach((item, idx) => {
-            const globalIdx = startIdx + idx + 1;
-            const title = cleanTitle(item.title);
-            const sourceTag = item.source ? ` [${item.source}]` : '';
-            text += `*${globalIdx}.* 🎥 ${title}${sourceTag}\n`;
+const WHATSAPP_MAX_LENGTH = 4096;
+const SEARCH_COUNT_FOOTER_RESERVE = 80;
 
-            if (item.links?.length) {
-                item.links.forEach((link) => {
-                    text += `     📦 ${link.size}  →  ${link.url}\n`;
-                });
-            }
-            text += '\n';
+function formatMovieResultBlock(item, globalIdx) {
+    const title = cleanTitle(item.title);
+    const sourceTag = item.source ? ` [${item.source}]` : '';
+    let block = `*${globalIdx}.* 🎥 ${title}${sourceTag}\n`;
+
+    if (item.links?.length) {
+        item.links.forEach((link) => {
+            block += `     📦 ${link.size}  →  ${link.url}\n`;
         });
-        
-        // Footer only on last message
-        if (page === totalPages - 1) {
-            text += '─────────────────────────────\n';
-            text += '💡 _Click link to download/watch_\n';
-            text += '⚠️ _Use VPN if links are blocked_\n';
-            text += '─────────────────────────────\n';
-            text += `🤖 _Powered by Sassy Bot_ ⚡\n`;
-            text += '⏰ _This message auto-deletes in 5 hours_';
-        }
-        
-        messages.push(text);
     }
-    
+
+    return `${block}\n`;
+}
+
+function formatMovieResultsFooter() {
+    let text = '─────────────────────────────\n';
+    text += '💡 _Click link to download/watch_\n';
+    text += '⚠️ _Use VPN if links are blocked_\n';
+    text += '─────────────────────────────\n';
+    text += '🤖 _Powered by Sassy Bot_ ⚡\n';
+    text += '⏰ _This message auto-deletes in 5 hours_';
+    return text;
+}
+
+function formatMovieResultsHeader(query, totalResults, pushName, sources, { totalPages = 1 } = {}) {
+    let text = '';
+
+    if (pushName) {
+        text += `🎉 Hey *${pushName}*! Here are your results 🍿\n\n`;
+    }
+    text += '┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n';
+    text += '┃  🎬 *MOVIE SEARCH RESULTS*  ┃\n';
+    text += '┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n';
+    text += `🔍 *Query:* _"${query}"_\n`;
+    text += `📊 *Found:* ${totalResults} result(s)`;
+    if (totalPages > 1) {
+        text += ` _(${totalPages} messages)_`;
+    }
+    text += '\n';
+    if (sources.length > 0) {
+        text += `🌐 *Sources:* ${sources.join(', ')}\n`;
+    }
+    text += '─────────────────────────────\n\n';
+    return text;
+}
+
+function formatMovieResultsContinuation(from, to, totalResults) {
+    return `📄 *Results ${from}-${to} of ${totalResults}*\n─────────────────────────────\n\n`;
+}
+
+function formatMovieResults(query, results, pushName = '', sources = []) {
+    if (!results.length) return [];
+
+    const footer = formatMovieResultsFooter();
+    const blocks = results.map((item, idx) => formatMovieResultBlock(item, idx + 1));
+    const totalResults = results.length;
+    const maxLen = WHATSAPP_MAX_LENGTH - SEARCH_COUNT_FOOTER_RESERVE;
+    const messages = [];
+    let chunkStart = 0;
+
+    while (chunkStart < blocks.length) {
+        const isFirst = messages.length === 0;
+        let body = '';
+        let i = chunkStart;
+
+        while (i < blocks.length) {
+            const chunkEnd = i + 1;
+            const header = isFirst
+                ? formatMovieResultsHeader(query, totalResults, pushName, sources)
+                : formatMovieResultsContinuation(chunkStart + 1, chunkEnd, totalResults);
+            const atEnd = chunkEnd === blocks.length;
+            const candidate = header + body + blocks[i] + (atEnd ? footer : '');
+
+            if (candidate.length > maxLen && i > chunkStart) break;
+
+            body += blocks[i];
+            i++;
+        }
+
+        const chunkEnd = i;
+        const header = isFirst
+            ? formatMovieResultsHeader(query, totalResults, pushName, sources)
+            : formatMovieResultsContinuation(chunkStart + 1, chunkEnd, totalResults);
+
+        let text = header + body;
+        if (chunkEnd === blocks.length) {
+            text += footer;
+        }
+
+        messages.push(text);
+        chunkStart = chunkEnd;
+    }
+
+    if (messages.length > 1) {
+        const baseHeader = formatMovieResultsHeader(query, totalResults, pushName, sources);
+        const multiHeader = formatMovieResultsHeader(query, totalResults, pushName, sources, {
+            totalPages: messages.length,
+        });
+        messages[0] = multiHeader + messages[0].slice(baseHeader.length);
+    }
+
     return messages;
 }
 
