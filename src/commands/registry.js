@@ -85,7 +85,7 @@ export const COMMAND_REGISTRY = [
         key: 'sticker',
         scope: 'any',
         role: 'anyone',
-        help: 'Create sticker from image/video (reply with options: pack, author, crop, nometadata)',
+        help: 'Create sticker from image/video (reply; options: circle, crop, pack, author, nometadata)',
     },
     {
         names: ['/steal'],
