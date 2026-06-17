@@ -10,6 +10,7 @@ const { Exif: StickerExif } = WSF;
 import ffmpeg from 'fluent-ffmpeg';
 import fs from 'fs';
 import { writeFile } from 'fs/promises';
+import { fileTypeFromBuffer } from 'file-type';
 import { logger } from '../utils/logger.js';
 import crypto from 'crypto';
 import path from 'path';
@@ -42,6 +43,7 @@ class StickerController {
         this.defaultPack = config.STICKER_PACK_NAME || '';
         this.defaultAuthor = config.STICKER_PACK_AUTHOR || '';
         this.tempDir = path.join(os.tmpdir(), 'whatsapp-bot-stickers');
+        this._circleMaskPath = null;
         this._ensureTempDir();
     }
 
@@ -63,6 +65,144 @@ class StickerController {
             }
         } catch (err) {
             logger.warn(`Failed to delete temp file ${filePath}: ${err.message}`);
+        }
+    }
+
+    _runFfmpeg(command) {
+        return new Promise((resolve, reject) => {
+            command.on('end', resolve).on('error', reject);
+        });
+    }
+
+    async _ensureCircleMask() {
+        if (this._circleMaskPath && fs.existsSync(this._circleMaskPath)) {
+            return this._circleMaskPath;
+        }
+
+        const maskPath = path.join(this.tempDir, 'circle-mask-512.png');
+        if (fs.existsSync(maskPath)) {
+            this._circleMaskPath = maskPath;
+            return maskPath;
+        }
+
+        const { createCanvas } = await import('@napi-rs/canvas');
+        const size = 512;
+        const canvas = createCanvas(size, size);
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, 0, size, size);
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(size / 2, size / 2, size / 2 - 2, 0, Math.PI * 2);
+        ctx.fill();
+
+        await writeFile(maskPath, canvas.toBuffer('image/png'));
+        this._circleMaskPath = maskPath;
+        return maskPath;
+    }
+
+    async _renderCircleImageSticker(mediaPath, outputPath) {
+        const { createCanvas, loadImage } = await import('@napi-rs/canvas');
+        const size = 512;
+        const img = await loadImage(mediaPath);
+        const minDim = Math.min(img.width, img.height);
+        const sx = (img.width - minDim) / 2;
+        const sy = (img.height - minDim) / 2;
+
+        const canvas = createCanvas(size, size);
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, size, size);
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(size / 2, size / 2, size / 2 - 1, 0, Math.PI * 2);
+        ctx.closePath();
+        ctx.clip();
+        ctx.drawImage(img, sx, sy, minDim, minDim, 0, 0, size, size);
+        ctx.restore();
+
+        await writeFile(outputPath, canvas.toBuffer('image/webp'));
+    }
+
+    _createCircleVideoFfmpeg(mediaPath, maskPath, fps = 15) {
+        return ffmpeg()
+            .input(mediaPath)
+            .input(maskPath)
+            .inputOptions(['-loop', '1', '-framerate', String(fps)])
+            .complexFilter([
+                `[0:v]crop=w='min(iw,ih)':h='min(iw,ih)',scale=512:512:flags=fast_bilinear,fps=${fps},format=rgba[fg]`,
+                '[1:v]scale=512:512,format=gray[mask]',
+                '[fg][mask]alphamerge[out]',
+            ])
+            .outputOptions([
+                '-map', '[out]',
+                '-vcodec', 'libwebp',
+                '-loop', '0',
+                '-an',
+                '-vsync', '0',
+                '-threads', '0',
+                '-compression_level', '4',
+                '-q:v', '80',
+                '-t', '10',
+                '-shortest',
+            ])
+            .toFormat('webp');
+    }
+
+    async _renderCircleVideoSticker(mediaPath, outputPath) {
+        const maskPath = await this._ensureCircleMask();
+
+        try {
+            await this._runFfmpeg(
+                this._createCircleVideoFfmpeg(mediaPath, maskPath, 15).save(outputPath)
+            );
+        } catch (err) {
+            logger.warn(`Circle video sticker retry at 10fps: ${err.message}`);
+            await this._runFfmpeg(
+                this._createCircleVideoFfmpeg(mediaPath, maskPath, 10).save(outputPath)
+            );
+        }
+    }
+
+    async _renderStandardSticker(mediaPath, outputPath, shape) {
+        const outputOptions = shape === 'crop'
+            ? [
+                '-vcodec', 'libwebp',
+                '-vf', "crop=w='min(min(iw,ih),500)':h='min(min(iw,ih),500)',scale=500:500,setsar=1,fps=15",
+                '-loop', '0',
+                '-ss', '00:00:00.0',
+                '-t', '00:00:09.0',
+                '-preset', 'default',
+                '-an',
+                '-vsync', '0',
+                '-s', '512:512',
+            ]
+            : [
+                '-vcodec', 'libwebp',
+                '-vf', "scale='min(220,iw)':min'(220,ih)':force_original_aspect_ratio=decrease,fps=15, pad=220:220:-1:-1:color=white@0.0, split [a][b]; [a] palettegen=reserve_transparent=on:transparency_color=ffffff [p]; [b][p] paletteuse",
+            ];
+
+        await this._runFfmpeg(
+            ffmpeg(mediaPath).addOutputOptions(outputOptions).toFormat('webp').save(outputPath)
+        );
+    }
+
+    async _sendStickerFromPath(sock, chatId, stickerPath, packName, authorName, noMetadata, quotedMsg) {
+        let stickerBuffer = fs.readFileSync(stickerPath);
+
+        if (!noMetadata) {
+            try {
+                const exif = new StickerExif({ pack: packName, author: authorName });
+                stickerBuffer = await exif.add(stickerBuffer);
+            } catch (metaErr) {
+                logger.warn(`Sticker metadata injection failed: ${metaErr.message}`);
+            }
+        }
+
+        try {
+            await sock.sendMessage(chatId, { sticker: stickerBuffer }, { quoted: quotedMsg });
+        } catch (wsError) {
+            logger.error('Sticker send error:', wsError instanceof Error ? wsError.message : wsError);
+            await sock.sendMessage(chatId, { sticker: fs.readFileSync(stickerPath) }, { quoted: quotedMsg });
         }
     }
 
@@ -120,7 +260,8 @@ class StickerController {
             }
 
             // Download media
-            const mediaPath = this._generateTempFileName(isImage ? '.png' : '.mp4');
+            let isAnimated = isVideo;
+            const mediaPath = this._generateTempFileName(isVideo ? '.mp4' : '.png');
             
             try {
                 const buffer = await downloadMediaMessage(targetMessage, 'buffer', {});
@@ -131,9 +272,18 @@ class StickerController {
                     return;
                 }
 
-                await writeFile(mediaPath, buffer);
+                const detectedType = await fileTypeFromBuffer(buffer);
+                if (detectedType?.mime === 'image/gif') {
+                    isAnimated = true;
+                }
 
-                if (!fs.existsSync(mediaPath)) {
+                const downloadPath = detectedType?.ext
+                    ? this._generateTempFileName(`.${detectedType.ext}`)
+                    : mediaPath;
+
+                await writeFile(downloadPath, buffer);
+
+                if (!fs.existsSync(downloadPath)) {
                     await sock.sendMessage(chatId, {
                         text: '❌ Failed to save media file. Please try again.'
                     });
@@ -141,10 +291,9 @@ class StickerController {
                 }
 
                 // Create sticker
-                await this._buildSticker(sock, chatId, mediaPath, packName, authorName, shape, noMetadata, waMessage);
+                await this._buildSticker(sock, chatId, downloadPath, packName, authorName, shape, noMetadata, waMessage, isAnimated);
             } catch (error) {
                 logger.error('Media download error:', error);
-                this._safeUnlink(mediaPath);
                 await sock.sendMessage(chatId, {
                     text: '❌ Failed to process media. Please try again.'
                 });
@@ -157,7 +306,7 @@ class StickerController {
         }
     }
 
-    async _buildSticker(sock, chatId, mediaPath, packName, authorName, shape, noMetadata, quotedMsg) {
+    async _buildSticker(sock, chatId, mediaPath, packName, authorName, shape, noMetadata, quotedMsg, isAnimated = false) {
         const stickerPath = this._generateTempFileName('.webp');
 
         try {
@@ -165,110 +314,25 @@ class StickerController {
                 throw new Error('Input media file not found');
             }
 
-            const circleFilter = [
-                "crop=w='min(iw,ih)':h='min(iw,ih)'",
-                'scale=512:512',
-                'format=rgba',
-                "geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(lte(hypot(X-(W/2),Y-(H/2)),W/2-2),255,0)'",
-                'fps=15',
-            ].join(',');
+            if (shape === 'circle' && !isAnimated) {
+                await this._renderCircleImageSticker(mediaPath, stickerPath);
+            } else if (shape === 'circle') {
+                await this._renderCircleVideoSticker(mediaPath, stickerPath);
+            } else {
+                await this._renderStandardSticker(mediaPath, stickerPath, shape);
+            }
 
-            const outputOptions = shape === 'circle'
-                ? [
-                    '-vcodec', 'libwebp',
-                    '-vf', circleFilter,
-                    '-loop', '0',
-                    '-ss', '00:00:00.0',
-                    '-t', '00:00:09.0',
-                    '-preset', 'default',
-                    '-an',
-                    '-vsync', '0',
-                ]
-                : shape === 'crop'
-                ? [
-                    '-vcodec', 'libwebp',
-                    '-vf', "crop=w='min(min(iw,ih),500)':h='min(min(iw,ih),500)',scale=500:500,setsar=1,fps=15",
-                    '-loop', '0',
-                    '-ss', '00:00:00.0',
-                    '-t', '00:00:09.0',
-                    '-preset', 'default',
-                    '-an',
-                    '-vsync', '0',
-                    '-s', '512:512'
-                ]
-                : [
-                    '-vcodec', 'libwebp',
-                    '-vf', "scale='min(220,iw)':min'(220,ih)':force_original_aspect_ratio=decrease,fps=15, pad=220:220:-1:-1:color=white@0.0, split [a][b]; [a] palettegen=reserve_transparent=on:transparency_color=ffffff [p]; [b][p] paletteuse"
-                ];
+            if (!fs.existsSync(stickerPath)) {
+                throw new Error('Output sticker file not created');
+            }
 
-            const ffmpegProcess = ffmpeg(mediaPath)
-                .addOutputOptions(outputOptions)
-                .toFormat('webp')
-                .save(stickerPath);
-
-            ffmpegProcess.on('error', (err) => {
-                logger.error('FFmpeg error:', err);
-                this._safeUnlink(mediaPath);
-                this._safeUnlink(stickerPath);
-                sock.sendMessage(chatId, {
-                    text: '❌ Error converting media to sticker.'
-                });
-            });
-
-            ffmpegProcess.on('end', async () => {
-                try {
-                    // Verify output file was created
-                    if (!fs.existsSync(stickerPath)) {
-                        throw new Error('Output sticker file not created');
-                    }
-
-                    // Read sticker buffer and optionally inject metadata via Exif
-                    let stickerBuffer = fs.readFileSync(stickerPath);
-                    if (!noMetadata) {
-                        try {
-                            const exif = new StickerExif({ pack: packName, author: authorName });
-                            stickerBuffer = await exif.add(stickerBuffer);
-                        } catch (metaErr) {
-                            logger.warn(`Sticker metadata injection failed: ${metaErr.message}`);
-                        }
-                    }
-
-                    await sock.sendMessage(chatId, { sticker: stickerBuffer }, { quoted: quotedMsg });
-
-                } catch (wsError) {
-                    const errorMsg = wsError instanceof Error ? wsError.message : String(wsError);
-                    const errorStack = wsError instanceof Error ? wsError.stack : '';
-                    logger.error('Sticker creation error:', errorMsg);
-                    logger.error('Sticker creation error stack:', errorStack);
-                    
-                    // Fallback: try sending without metadata
-                    try {
-                        if (fs.existsSync(stickerPath)) {
-                            await sock.sendMessage(chatId, {
-                                sticker: fs.readFileSync(stickerPath)
-                            }, { quoted: quotedMsg });
-                            logger.info('✓ Sticker sent successfully (fallback without metadata)');
-                        } else {
-                            throw new Error('No sticker file to send');
-                        }
-                    } catch (fallbackError) {
-                        const fbErrorMsg = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
-                        logger.error('Fallback error:', fbErrorMsg);
-                        await sock.sendMessage(chatId, {
-                            text: '❌ Failed to create sticker.'
-                        });
-                    }
-                } finally {
-                    // Ensure cleanup happens
-                    this._safeUnlink(mediaPath);
-                    this._safeUnlink(stickerPath);
-                }
-            });
+            await this._sendStickerFromPath(sock, chatId, stickerPath, packName, authorName, noMetadata, quotedMsg);
         } catch (err) {
             logger.error('buildSticker error:', err);
             await sock.sendMessage(chatId, {
-                text: `❌ Error: ${err.message}`
+                text: '❌ Failed to create sticker.',
             });
+        } finally {
             this._safeUnlink(mediaPath);
             this._safeUnlink(stickerPath);
         }
