@@ -102,7 +102,9 @@ class StickerController {
             // Parse arguments
             let packName = this.defaultPack;
             let authorName = this.defaultAuthor;
-            const cropMode = args.includes('crop') || args.includes('c');
+            const circleMode = args.some((a) => ['circle', 'round', 'circular'].includes(String(a).toLowerCase()));
+            const cropMode = !circleMode && (args.includes('crop') || args.includes('c'));
+            const shape = circleMode ? 'circle' : (cropMode ? 'crop' : 'default');
             const noMetadata = args.includes('nometadata');
 
             if (!noMetadata) {
@@ -139,7 +141,7 @@ class StickerController {
                 }
 
                 // Create sticker
-                await this._buildSticker(sock, chatId, mediaPath, packName, authorName, cropMode, noMetadata, waMessage);
+                await this._buildSticker(sock, chatId, mediaPath, packName, authorName, shape, noMetadata, waMessage);
             } catch (error) {
                 logger.error('Media download error:', error);
                 this._safeUnlink(mediaPath);
@@ -155,7 +157,7 @@ class StickerController {
         }
     }
 
-    async _buildSticker(sock, chatId, mediaPath, packName, authorName, cropMode, noMetadata, quotedMsg) {
+    async _buildSticker(sock, chatId, mediaPath, packName, authorName, shape, noMetadata, quotedMsg) {
         const stickerPath = this._generateTempFileName('.webp');
 
         try {
@@ -163,7 +165,26 @@ class StickerController {
                 throw new Error('Input media file not found');
             }
 
-            const outputOptions = cropMode
+            const circleFilter = [
+                "crop=w='min(iw,ih)':h='min(iw,ih)'",
+                'scale=512:512',
+                'format=rgba',
+                "geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(lte(hypot(X-(W/2),Y-(H/2)),W/2-2),255,0)'",
+                'fps=15',
+            ].join(',');
+
+            const outputOptions = shape === 'circle'
+                ? [
+                    '-vcodec', 'libwebp',
+                    '-vf', circleFilter,
+                    '-loop', '0',
+                    '-ss', '00:00:00.0',
+                    '-t', '00:00:09.0',
+                    '-preset', 'default',
+                    '-an',
+                    '-vsync', '0',
+                ]
+                : shape === 'crop'
                 ? [
                     '-vcodec', 'libwebp',
                     '-vf', "crop=w='min(min(iw,ih),500)':h='min(min(iw,ih),500)',scale=500:500,setsar=1,fps=15",
