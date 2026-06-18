@@ -3,8 +3,9 @@
  * Handles sticker creation, conversion, and metadata management
  */
 
-import { downloadMediaMessage, downloadContentFromMessage } from '@whiskeysockets/baileys';
-import { getTextFromWAMessage } from '../utils/waMessage.js';
+import { downloadMediaMessage } from '@whiskeysockets/baileys';
+import { getTextFromWAMessage, buildQuotedTargetMessage } from '../utils/waMessage.js';
+import { downloadStickerBuffer } from '../utils/stickerDownload.js';
 import WSF from 'wa-sticker-formatter';
 const { Exif: StickerExif } = WSF;
 import ffmpeg from 'fluent-ffmpeg';
@@ -42,6 +43,9 @@ class StickerController {
         this.defaultPack = config.STICKER_PACK_NAME || '';
         this.defaultAuthor = config.STICKER_PACK_AUTHOR || '';
         this.tempDir = path.join(os.tmpdir(), 'whatsapp-bot-stickers');
+        this._ffmpegQueue = [];
+        this._ffmpegActive = 0;
+        this._ffmpegMax = 2;
         this._ensureTempDir();
     }
 
@@ -72,6 +76,56 @@ class StickerController {
         });
     }
 
+    _enqueueFfmpeg(task) {
+        return new Promise((resolve, reject) => {
+            this._ffmpegQueue.push({ task, resolve, reject });
+            this._pumpFfmpegQueue();
+        });
+    }
+
+    _pumpFfmpegQueue() {
+        while (this._ffmpegActive < this._ffmpegMax && this._ffmpegQueue.length > 0) {
+            const job = this._ffmpegQueue.shift();
+            this._ffmpegActive++;
+            Promise.resolve()
+                .then(job.task)
+                .then(job.resolve, job.reject)
+                .finally(() => {
+                    this._ffmpegActive--;
+                    this._pumpFfmpegQueue();
+                });
+        }
+    }
+
+    async _downloadStickerBuffer(sock, primaryMessage, secondaryMessage = null) {
+        const attempts = [];
+        if (primaryMessage) attempts.push(primaryMessage);
+        if (secondaryMessage && secondaryMessage !== primaryMessage) attempts.push(secondaryMessage);
+
+        let lastError = null;
+
+        for (const target of attempts) {
+            try {
+                return await downloadStickerBuffer(sock, target);
+            } catch (err) {
+                lastError = err;
+            }
+        }
+
+        for (const target of attempts) {
+            try {
+                const buffer = await downloadMediaMessage(target, 'buffer', {});
+                if (buffer?.length) {
+                    return buffer;
+                }
+            } catch (err) {
+                lastError = err;
+            }
+        }
+
+        throw lastError || new Error('Failed to download sticker');
+    }
+
     _parseStickerShape(args) {
         const circleMode = args.some((a) => ['circle', 'round', 'circular', 'c'].includes(String(a).toLowerCase()));
         const cropMode = !circleMode && args.includes('crop');
@@ -80,31 +134,40 @@ class StickerController {
         return 'default';
     }
 
-    async _renderCircleSticker(mediaPath, outputPath) {
+    async _renderCircleSticker(mediaPath, outputPath, { animated = false } = {}) {
         const circleFilter = [
             "crop=w='min(iw,ih)':h='min(iw,ih)'",
             'scale=512:512',
             'format=rgba',
             "geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(lte(hypot(X-(W/2),Y-(H/2)),W/2-2),255,0)'",
-            'fps=15',
+            ...(animated ? ['fps=15'] : []),
         ].join(',');
 
-        await this._runFfmpeg(
+        const outputOptions = [
+            '-vcodec', 'libwebp',
+            '-vf', circleFilter,
+            '-loop', '0',
+            '-an',
+            '-vsync', '0',
+            '-threads', '0',
+            '-preset', 'default',
+        ];
+
+        if (animated) {
+            outputOptions.push('-ss', '00:00:00.0', '-t', '00:00:09.0');
+        } else {
+            outputOptions.push('-frames:v', '1');
+        }
+
+        const inputOptions = animated ? ['-ignore_loop', '0'] : [];
+
+        await this._enqueueFfmpeg(() => this._runFfmpeg(
             ffmpeg(mediaPath)
-                .addOutputOptions([
-                    '-vcodec', 'libwebp',
-                    '-vf', circleFilter,
-                    '-loop', '0',
-                    '-ss', '00:00:00.0',
-                    '-t', '00:00:09.0',
-                    '-preset', 'default',
-                    '-an',
-                    '-vsync', '0',
-                    '-threads', '0',
-                ])
+                .inputOptions(inputOptions)
+                .addOutputOptions(outputOptions)
                 .toFormat('webp')
                 .save(outputPath)
-        );
+        ));
     }
 
     async _renderStandardSticker(mediaPath, outputPath, shape) {
@@ -125,9 +188,9 @@ class StickerController {
                 '-vf', "scale='min(220,iw)':min'(220,ih)':force_original_aspect_ratio=decrease,fps=15, pad=220:220:-1:-1:color=white@0.0, split [a][b]; [a] palettegen=reserve_transparent=on:transparency_color=ffffff [p]; [b][p] paletteuse",
             ];
 
-        await this._runFfmpeg(
+        await this._enqueueFfmpeg(() => this._runFfmpeg(
             ffmpeg(mediaPath).addOutputOptions(outputOptions).toFormat('webp').save(outputPath)
-        );
+        ));
     }
 
     async _sendStickerFromPath(sock, chatId, stickerPath, packName, authorName, noMetadata, quotedMsg) {
@@ -154,15 +217,17 @@ class StickerController {
      * Create sticker from image or video
      */
     async handleSticker(sock, chatId, waMessage, args, textContent) {
+        void sock.sendMessage(chatId, {
+            text: '🎨 _Creating sticker... you can use other commands meanwhile._',
+        }, { quoted: waMessage }).catch(() => {});
+
         try {
-            // Check if replying to media
-            let targetMessage = waMessage;
-            if (waMessage.message.extendedTextMessage?.contextInfo?.quotedMessage) {
-                targetMessage = {
-                    ...waMessage,
-                    message: waMessage.message.extendedTextMessage.contextInfo.quotedMessage
-                };
-            }
+            const targetMessage = buildQuotedTargetMessage(waMessage) || {
+                ...waMessage,
+                message: waMessage.message.extendedTextMessage?.contextInfo?.quotedMessage
+                    ? waMessage.message.extendedTextMessage.contextInfo.quotedMessage
+                    : waMessage.message,
+            };
 
             const messageType = Object.keys(targetMessage.message)[0];
             const isImage = messageType === 'imageMessage';
@@ -223,7 +288,7 @@ class StickerController {
                 }
 
                 // Create sticker
-                await this._buildSticker(sock, chatId, mediaPath, packName, authorName, shape, noMetadata, waMessage);
+                await this._buildSticker(sock, chatId, mediaPath, packName, authorName, shape, noMetadata, waMessage, isVideo);
             } catch (error) {
                 logger.error('Media download error:', error);
                 await sock.sendMessage(chatId, {
@@ -238,7 +303,7 @@ class StickerController {
         }
     }
 
-    async _buildSticker(sock, chatId, mediaPath, packName, authorName, shape, noMetadata, quotedMsg) {
+    async _buildSticker(sock, chatId, mediaPath, packName, authorName, shape, noMetadata, quotedMsg, isAnimated = false) {
         const stickerPath = this._generateTempFileName('.webp');
 
         try {
@@ -247,7 +312,7 @@ class StickerController {
             }
 
             if (shape === 'circle') {
-                await this._renderCircleSticker(mediaPath, stickerPath);
+                await this._renderCircleSticker(mediaPath, stickerPath, { animated: isAnimated });
             } else {
                 await this._renderStandardSticker(mediaPath, stickerPath, shape);
             }
@@ -272,18 +337,24 @@ class StickerController {
      * Steal sticker (change metadata)
      */
     async handleSteal(sock, chatId, waMessage, args, textContent) {
+        void sock.sendMessage(chatId, {
+            text: '🎨 _Processing sticker... you can use other commands meanwhile._',
+        }, { quoted: waMessage }).catch(() => {});
+
         try {
-            logger.info('handleSteal called');
-            // Check if replying to sticker
-            const quotedMsg = waMessage.message.extendedTextMessage?.contextInfo?.quotedMessage;
-            logger.info(`quotedMsg exists: ${!!quotedMsg}, stickerMessage: ${!!quotedMsg?.stickerMessage}`);
-            
-            if (!quotedMsg || !quotedMsg.stickerMessage) {
+            const targetMessage = buildQuotedTargetMessage(waMessage);
+            const quotedMsg = targetMessage?.message
+                || waMessage.message.extendedTextMessage?.contextInfo?.quotedMessage;
+
+            if (!quotedMsg?.stickerMessage) {
                 await sock.sendMessage(chatId, {
-                    text: '❌ Please reply to a sticker.'
+                    text: '❌ Please reply to a sticker.',
                 });
                 return;
             }
+
+            const stickerMessage = quotedMsg.stickerMessage;
+            const isAnimated = Boolean(stickerMessage.isAnimated);
 
             // Parse arguments
             let packName = this.defaultPack;
@@ -303,17 +374,25 @@ class StickerController {
                 }
             }
 
-            // Download sticker using stream approach (same as reference repo)
-            const stickerMessage = quotedMsg.stickerMessage;
-            const stream = await downloadContentFromMessage(stickerMessage, 'sticker');
-            let buffer = Buffer.from([]);
-            for await (const chunk of stream) {
-                buffer = Buffer.concat([buffer, chunk]);
+            // Download sticker with full quoted message context (required for animated stickers)
+            const fallbackMessage = targetMessage ? null : {
+                ...waMessage,
+                message: quotedMsg,
+            };
+            let buffer;
+            try {
+                buffer = await this._downloadStickerBuffer(sock, targetMessage || fallbackMessage, fallbackMessage);
+            } catch (downloadErr) {
+                logger.error(`Steal download failed: ${downloadErr.message}`);
+                await sock.sendMessage(chatId, {
+                    text: '❌ Failed to download sticker.',
+                });
+                return;
             }
             
             if (!buffer || buffer.length === 0) {
                 await sock.sendMessage(chatId, {
-                    text: '❌ Failed to download sticker.'
+                    text: '❌ Failed to download sticker.',
                 });
                 return;
             }
@@ -325,9 +404,9 @@ class StickerController {
                 if (shape === 'circle') {
                     const circlePath = this._generateTempFileName('.webp');
                     try {
-                        await this._renderCircleSticker(stickerPath, circlePath);
+                        await this._renderCircleSticker(stickerPath, circlePath, { animated: isAnimated });
                         await this._sendStickerFromPath(sock, chatId, circlePath, packName, authorName, noMetadata, waMessage);
-                        logger.info('✓ Sticker converted to circle and metadata updated');
+                        logger.info(`✓ Sticker converted to circle (${isAnimated ? 'animated' : 'static'})`);
                     } finally {
                         this._safeUnlink(circlePath);
                     }
@@ -369,35 +448,37 @@ class StickerController {
      * Convert sticker to image
      */
     async handleToImage(sock, chatId, waMessage) {
+        void sock.sendMessage(chatId, {
+            text: '🎨 _Converting sticker... you can use other commands meanwhile._',
+        }, { quoted: waMessage }).catch(() => {});
+
         try {
-            // Check if replying to sticker
-            let targetMessage = waMessage;
-            if (waMessage.message.extendedTextMessage?.contextInfo?.quotedMessage) {
-                targetMessage = {
-                    ...waMessage,
-                    message: waMessage.message.extendedTextMessage.contextInfo.quotedMessage
-                };
-            }
+            const targetMessage = buildQuotedTargetMessage(waMessage) || {
+                ...waMessage,
+                message: waMessage.message.extendedTextMessage?.contextInfo?.quotedMessage || waMessage.message,
+            };
 
             const messageType = Object.keys(targetMessage.message)[0];
             if (messageType !== 'stickerMessage') {
                 await sock.sendMessage(chatId, {
-                    text: '❌ Please reply to a sticker.'
+                    text: '❌ Please reply to a sticker.',
                 });
                 return;
             }
 
-            // Download sticker using stream approach
-            const stickerMessage = targetMessage.message.stickerMessage;
-            const stream = await downloadContentFromMessage(stickerMessage, 'sticker');
-            let buffer = Buffer.from([]);
-            for await (const chunk of stream) {
-                buffer = Buffer.concat([buffer, chunk]);
+            let buffer;
+            try {
+                buffer = await this._downloadStickerBuffer(sock, targetMessage);
+            } catch {
+                await sock.sendMessage(chatId, {
+                    text: '❌ Failed to download sticker.',
+                });
+                return;
             }
             
             if (!buffer || buffer.length === 0) {
                 await sock.sendMessage(chatId, {
-                    text: '❌ Failed to download sticker.'
+                    text: '❌ Failed to download sticker.',
                 });
                 return;
             }
@@ -407,46 +488,32 @@ class StickerController {
 
             await writeFile(stickerPath, buffer);
 
-            // Convert to image
-            const ffmpegProcess = ffmpeg(stickerPath)
-                .fromFormat('webp_pipe')
-                .save(imagePath);
+            await this._enqueueFfmpeg(() => new Promise((resolve, reject) => {
+                const ffmpegProcess = ffmpeg(stickerPath)
+                    .fromFormat('webp_pipe')
+                    .save(imagePath);
 
-            ffmpegProcess.on('error', (err) => {
-                logger.error('FFmpeg error:', err);
-                this._safeUnlink(stickerPath);
-                this._safeUnlink(imagePath);
-                sock.sendMessage(chatId, {
-                    text: '❌ Failed to convert sticker. Only non-animated stickers can be converted to images.'
-                });
-            });
+                ffmpegProcess.on('error', reject);
+                ffmpegProcess.on('end', resolve);
+            }));
 
-            ffmpegProcess.on('end', async () => {
-                try {
-                    if (!fs.existsSync(imagePath)) {
-                        throw new Error('Output image file not created');
-                    }
+            if (!fs.existsSync(imagePath)) {
+                throw new Error('Output image file not created');
+            }
 
-                    const imageBuffer = fs.readFileSync(imagePath);
-                    await sock.sendMessage(chatId, {
-                        image: imageBuffer,
-                        caption: '✨ Sticker converted to image',
-                        mimetype: 'image/png'
-                    }, { quoted: waMessage });
-                } catch (error) {
-                    logger.error('Image send error:', error?.message || error);
-                    await sock.sendMessage(chatId, {
-                        text: '❌ Failed to send image.'
-                    });
-                } finally {
-                    this._safeUnlink(stickerPath);
-                    this._safeUnlink(imagePath);
-                }
-            });
+            const imageBuffer = fs.readFileSync(imagePath);
+            await sock.sendMessage(chatId, {
+                image: imageBuffer,
+                caption: '✨ Sticker converted to image',
+                mimetype: 'image/png',
+            }, { quoted: waMessage });
+
+            this._safeUnlink(stickerPath);
+            this._safeUnlink(imagePath);
         } catch (error) {
             logger.error('ToImage handler error:', error);
             await sock.sendMessage(chatId, {
-                text: '⚠️ Failed to convert sticker.'
+                text: '⚠️ Failed to convert sticker.',
             });
         }
     }

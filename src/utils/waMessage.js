@@ -112,6 +112,29 @@ function getContextInfo(message) {
 }
 
 /**
+ * Build a Baileys message object for downloading quoted media (stickers, images, etc.)
+ * @param {import('@whiskeysockets/baileys').proto.IWebMessageInfo | null | undefined} waMessage
+ * @returns {import('@whiskeysockets/baileys').proto.IWebMessageInfo | null}
+ */
+export function buildQuotedTargetMessage(waMessage) {
+    const ctx = getContextInfo(waMessage?.message);
+    const quotedMsg = ctx?.quotedMessage;
+    if (!quotedMsg || !ctx?.stanzaId) {
+        return null;
+    }
+
+    return {
+        key: {
+            remoteJid: ctx.remoteJid || waMessage.key.remoteJid,
+            id: ctx.stanzaId,
+            participant: ctx.participant,
+            fromMe: false,
+        },
+        message: quotedMsg,
+    };
+}
+
+/**
  * @param {import('@whiskeysockets/baileys').proto.IWebMessageInfo | null | undefined} waMessage
  * @returns {string}
  */

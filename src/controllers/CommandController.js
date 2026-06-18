@@ -237,53 +237,45 @@ class CommandController {
                 }
                 break;
 
-            /* ── Sticker Commands ── */
+            /* ── Sticker Commands (non-blocking — FFmpeg runs in background queue) ── */
             case 'sticker':
                 if (!this.stickerController) {
                     await sock.sendMessage(chatId, { text: '⚠️ Sticker functionality is not available.' }, { quoted: originalMsg });
                 } else {
-                    try {
-                        await this.stickerController.handleSticker(sock, chatId, originalMsg, args, command);
-                    } catch (err) {
+                    void this.stickerController.handleSticker(sock, chatId, originalMsg, args, command).catch((err) => {
                         logger.error('Sticker command error:', err);
-                        await sock.sendMessage(chatId, { text: '⚠️ Failed to process sticker command.' }, { quoted: originalMsg });
-                    }
+                        void sock.sendMessage(chatId, { text: '⚠️ Failed to process sticker command.' }, { quoted: originalMsg });
+                    });
                 }
                 break;
             case 'steal':
                 if (!this.stickerController) {
                     await sock.sendMessage(chatId, { text: '⚠️ Sticker functionality is not available.' }, { quoted: originalMsg });
                 } else {
-                    try {
-                        await this.stickerController.handleSteal(sock, chatId, originalMsg, args, command);
-                    } catch (err) {
+                    void this.stickerController.handleSteal(sock, chatId, originalMsg, args, command).catch((err) => {
                         logger.error('Steal command error:', err);
-                        await sock.sendMessage(chatId, { text: '⚠️ Failed to process steal command.' }, { quoted: originalMsg });
-                    }
+                        void sock.sendMessage(chatId, { text: '⚠️ Failed to process steal command.' }, { quoted: originalMsg });
+                    });
                 }
                 break;
             case 'toimg':
                 if (!this.stickerController) {
                     await sock.sendMessage(chatId, { text: '⚠️ Sticker functionality is not available.' }, { quoted: originalMsg });
                 } else {
-                    try {
-                        await this.stickerController.handleToImage(sock, chatId, originalMsg);
-                    } catch (err) {
+                    void this.stickerController.handleToImage(sock, chatId, originalMsg).catch((err) => {
                         logger.error('ToImage command error:', err);
-                        await sock.sendMessage(chatId, { text: '⚠️ Failed to convert sticker to image.' }, { quoted: originalMsg });
-                    }
+                        void sock.sendMessage(chatId, { text: '⚠️ Failed to convert sticker to image.' }, { quoted: originalMsg });
+                    });
                 }
                 break;
             case 'rgb':
                 if (!this.stickerController) {
                     await sock.sendMessage(chatId, { text: '⚠️ Sticker functionality is not available.' }, { quoted: originalMsg });
                 } else {
-                    try {
-                        await this.stickerController.handleRgbSticker(sock, chatId, args, originalMsg);
-                    } catch (err) {
+                    void this.stickerController.handleRgbSticker(sock, chatId, args, originalMsg).catch((err) => {
                         logger.error('RGB sticker error:', err);
-                        await sock.sendMessage(chatId, { text: '⚠️ Failed to generate RGB sticker.' }, { quoted: originalMsg });
-                    }
+                        void sock.sendMessage(chatId, { text: '⚠️ Failed to generate RGB sticker.' }, { quoted: originalMsg });
+                    });
                 }
                 break;
 
