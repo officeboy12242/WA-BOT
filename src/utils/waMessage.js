@@ -102,11 +102,19 @@ function getContextInfo(message) {
     if (!c) {
         return null;
     }
+
+    for (const value of Object.values(c)) {
+        if (value && typeof value === 'object' && value.contextInfo?.quotedMessage) {
+            return value.contextInfo;
+        }
+    }
+
     return (
         c.extendedTextMessage?.contextInfo ||
         c.imageMessage?.contextInfo ||
         c.videoMessage?.contextInfo ||
         c.documentMessage?.contextInfo ||
+        c.stickerMessage?.contextInfo ||
         null
     );
 }
@@ -117,21 +125,32 @@ function getContextInfo(message) {
  * @returns {import('@whiskeysockets/baileys').proto.IWebMessageInfo | null}
  */
 export function buildQuotedTargetMessage(waMessage) {
-    const ctx = getContextInfo(waMessage?.message);
+    if (!waMessage?.message) {
+        return null;
+    }
+    const ctx = getContextInfo(waMessage.message);
     const quotedMsg = ctx?.quotedMessage;
-    if (!quotedMsg || !ctx?.stanzaId) {
+    if (!quotedMsg) {
         return null;
     }
 
-    return {
-        key: {
-            remoteJid: ctx.remoteJid || waMessage.key.remoteJid,
-            id: ctx.stanzaId,
-            participant: ctx.participant,
-            fromMe: false,
-        },
+    const result = {
+        ...waMessage,
         message: quotedMsg,
     };
+
+    if (ctx?.stanzaId) {
+        result.key = {
+            ...waMessage.key,
+            id: ctx.stanzaId,
+            remoteJid: ctx.remoteJid || waMessage.key?.remoteJid,
+            ...(ctx.participant ? { participant: ctx.participant } : {}),
+            ...(ctx.participantLid ? { participantLid: ctx.participantLid } : {}),
+            ...(ctx.participantPn ? { participantPn: ctx.participantPn } : {}),
+        };
+    }
+
+    return result;
 }
 
 /**

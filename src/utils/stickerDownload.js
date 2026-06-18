@@ -89,6 +89,11 @@ function downloadContext(sock) {
     };
 }
 
+/** @param {import('@whiskeysockets/baileys').WASocket} sock */
+export function createDownloadContext(sock) {
+    return downloadContext(sock);
+}
+
 /**
  * @param {import('@whiskeysockets/baileys').WASocket} sock
  * @param {import('@whiskeysockets/baileys').proto.IWebMessageInfo} waMessage

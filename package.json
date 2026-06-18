@@ -32,6 +32,7 @@
     "pino": "^8.19.0",
     "pino-pretty": "^10.3.1",
     "qrcode-terminal": "^0.12.0",
+    "sharp": "^0.35.1",
     "snapsave-media-downloader": "^2.4.0",
     "wa-sticker-formatter": "^4.4.4"
   }
