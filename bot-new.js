@@ -194,6 +194,7 @@ class WhatsAppCourseBot {
 
             const sock = this.whatsappService.getSock();
             if (this.movieController) this.movieController.setSock(sock);
+            if (this.stickerController) this.stickerController.setConnectionProvider(this.whatsappService);
 
             await this.courseController.checkAndPostCourses(sock, botState);
 
