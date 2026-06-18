@@ -72,6 +72,14 @@ class StickerController {
         });
     }
 
+    _parseStickerShape(args) {
+        const circleMode = args.some((a) => ['circle', 'round', 'circular', 'c'].includes(String(a).toLowerCase()));
+        const cropMode = !circleMode && args.includes('crop');
+        if (circleMode) return 'circle';
+        if (cropMode) return 'crop';
+        return 'default';
+    }
+
     async _renderCircleSticker(mediaPath, outputPath) {
         const circleFilter = [
             "crop=w='min(iw,ih)':h='min(iw,ih)'",
@@ -178,9 +186,7 @@ class StickerController {
             // Parse arguments
             let packName = this.defaultPack;
             let authorName = this.defaultAuthor;
-            const circleMode = args.some((a) => ['circle', 'round', 'circular'].includes(String(a).toLowerCase()));
-            const cropMode = !circleMode && (args.includes('crop') || args.includes('c'));
-            const shape = circleMode ? 'circle' : (cropMode ? 'crop' : 'default');
+            const shape = this._parseStickerShape(args);
             const noMetadata = args.includes('nometadata');
 
             if (!noMetadata) {
@@ -282,6 +288,7 @@ class StickerController {
             // Parse arguments
             let packName = this.defaultPack;
             let authorName = this.defaultAuthor;
+            const shape = this._parseStickerShape(args);
             const noMetadata = textContent.includes('stealn');
 
             if (!noMetadata) {
@@ -315,24 +322,37 @@ class StickerController {
             await writeFile(stickerPath, buffer);
 
             try {
-                // Read buffer and inject metadata via Exif
-                let finalBuffer = fs.readFileSync(stickerPath);
-                if (!noMetadata) {
+                if (shape === 'circle') {
+                    const circlePath = this._generateTempFileName('.webp');
                     try {
-                        const exif = new StickerExif({ pack: packName, author: authorName });
-                        finalBuffer = await exif.add(finalBuffer);
-                    } catch (metaErr) {
-                        logger.warn(`Steal metadata injection failed: ${metaErr.message}`);
+                        await this._renderCircleSticker(stickerPath, circlePath);
+                        await this._sendStickerFromPath(sock, chatId, circlePath, packName, authorName, noMetadata, waMessage);
+                        logger.info('✓ Sticker converted to circle and metadata updated');
+                    } finally {
+                        this._safeUnlink(circlePath);
                     }
-                }
+                } else {
+                    // Read buffer and inject metadata via Exif
+                    let finalBuffer = fs.readFileSync(stickerPath);
+                    if (!noMetadata) {
+                        try {
+                            const exif = new StickerExif({ pack: packName, author: authorName });
+                            finalBuffer = await exif.add(finalBuffer);
+                        } catch (metaErr) {
+                            logger.warn(`Steal metadata injection failed: ${metaErr.message}`);
+                        }
+                    }
 
-                await sock.sendMessage(chatId, { sticker: finalBuffer }, { quoted: waMessage });
-                logger.info('✓ Sticker metadata updated successfully');
+                    await sock.sendMessage(chatId, { sticker: finalBuffer }, { quoted: waMessage });
+                    logger.info('✓ Sticker metadata updated successfully');
+                }
             } catch (error) {
                 const errorMsg = error instanceof Error ? error.message : String(error);
                 logger.error('Error in steal handler:', errorMsg);
                 await sock.sendMessage(chatId, {
-                    text: '❌ Failed to modify sticker metadata.'
+                    text: shape === 'circle'
+                        ? '❌ Failed to convert sticker to circle.'
+                        : '❌ Failed to modify sticker metadata.',
                 });
             } finally {
                 this._safeUnlink(stickerPath);
