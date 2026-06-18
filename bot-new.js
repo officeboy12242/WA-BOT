@@ -28,6 +28,7 @@ import MorningMessageController from './src/controllers/MorningMessageController
 import MovieController from './src/controllers/MovieController.js';
 import UserManager from './src/models/UserManager.js';
 import StickerController from './src/controllers/StickerController.js';
+import BotSettings from './src/models/BotSettings.js';
 import { InstanceLock } from './src/utils/instanceLock.js';
 
 // Bot state
@@ -61,6 +62,7 @@ class WhatsAppCourseBot {
         this.stickerController = null;
         this.adminPanel = null;
         this.instanceLock = null;
+        this.botSettings = null;
         this._isShuttingDown = false;
     }
 
@@ -90,6 +92,13 @@ class WhatsAppCourseBot {
             await this.groupManager.initChannels();
             await this.groupManager.initPremium();
             await this.groupManager.initDynamicModerators();
+
+            this.botSettings = new BotSettings(mongoDb);
+            await this.botSettings.init();
+            botState.isPaused = await this.botSettings.getCoursesPaused();
+            if (botState.isPaused) {
+                logger.info('⏸️ Course posting is PAUSED (restored from database)');
+            }
 
             this.instanceLock = new InstanceLock(mongoDb, () => {
                 void this.shutdown('Another instance took over');
@@ -122,7 +131,8 @@ class WhatsAppCourseBot {
                 this.newsController,
                 this.movieController,
                 this.userManager,
-                this.stickerController
+                this.stickerController,
+                this.botSettings
             );
             this.courseController = new CourseController(this.database, this.courseAPI, config, this.groupManager);
             const morningScraper = new MorningMessageScraper(this.morningDatabase);

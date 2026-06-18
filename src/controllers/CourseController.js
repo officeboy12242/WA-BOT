@@ -150,7 +150,7 @@ class CourseController {
 
         // Check if bot is paused
         if (botState.isPaused) {
-            logger.info('⏸️ Bot is paused. Skipping course check.');
+            logger.info('⏸️ Courses paused. Skipping course check.');
             return;
         }
 

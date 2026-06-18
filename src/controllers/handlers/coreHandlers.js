@@ -52,7 +52,7 @@ export async function handlePing(sock, chatId, { botState, botStartTime, origina
         const uptimeFormatted = formatUptime(uptime);
         const stats = getSystemStats();
         const statusEmoji = botState.isPaused ? '🟡' : '🟢';
-        const statusText = botState.isPaused ? 'PAUSED' : 'ACTIVE';
+        const statusText = botState.isPaused ? 'COURSES PAUSED' : 'ACTIVE';
         
         const currentTime = new Date().toLocaleString('en-IN', {
             timeZone: 'Asia/Kolkata',
@@ -206,57 +206,64 @@ export async function handleCancel(sock, chatId, { pendingClearConfirmations, or
     }
 }
 
-export async function handlePause(sock, chatId, { botState, originalMsg }) {
+export async function handlePause(sock, chatId, { botState, botSettings, originalMsg }) {
     try {
         if (botState.isPaused) {
             await sock.sendMessage(chatId, {
                 text:
                     '━━━━━━━━━━━━━━━━━━━━━━━━━━━\nℹ️ *ALREADY PAUSED* ℹ️\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
-                    'Bot is already paused.\nUse `/resume` to continue posting.',
+                    'Course posting is already paused.\nUse `/resume` to continue.',
             }, { quoted: originalMsg });
             return;
         }
 
         botState.isPaused = true;
+        if (botSettings) {
+            await botSettings.setCoursesPaused(true);
+        }
 
         let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-        r += '⏸️ *BOT PAUSED* ⏸️\n';
+        r += '⏸️ *COURSES PAUSED* ⏸️\n';
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
-        r += '🛑 Automatic course and tech news posting has been paused.\n\n';
-        r += 'The bot will continue running but will not post new content.\n\n';
+        r += '🛑 Automatic *course* posting has been paused.\n\n';
+        r += '📰 *Tech news* will continue posting on schedule.\n';
+        r += '💬 Commands still work normally.\n\n';
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-        r += '💡 Use `/resume` to continue posting';
+        r += '💡 Use `/resume` to resume course posting';
 
         await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
-        logger.info(`⏸️ Bot paused by ${chatId}`);
+        logger.info(`⏸️ Course posting paused by ${chatId}`);
     } catch (error) {
         logger.error(`Error pausing bot: ${error.message}`);
     }
 }
 
-export async function handleResume(sock, chatId, { botState, originalMsg }) {
+export async function handleResume(sock, chatId, { botState, botSettings, originalMsg }) {
     try {
         if (!botState.isPaused) {
             await sock.sendMessage(chatId, {
                 text:
                     '━━━━━━━━━━━━━━━━━━━━━━━━━━━\nℹ️ *ALREADY RUNNING* ℹ️\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
-                    'Bot is already running.\nUse `/pause` to stop posting.',
+                    'Course posting is already active.\nUse `/pause` to stop courses only.',
             }, { quoted: originalMsg });
             return;
         }
 
         botState.isPaused = false;
+        if (botSettings) {
+            await botSettings.setCoursesPaused(false);
+        }
 
         let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-        r += '▶️ *BOT RESUMED* ▶️\n';
+        r += '▶️ *COURSES RESUMED* ▶️\n';
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
-        r += '✅ Automatic course and tech news posting has been resumed.\n\n';
-        r += 'The bot will now check for and post new content.\n\n';
+        r += '✅ Automatic *course* posting has been resumed.\n\n';
+        r += '📰 Tech news continues on its normal schedule.\n\n';
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-        r += '💡 Use `/pause` to stop posting';
+        r += '💡 Use `/pause` to pause courses only';
 
         await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
-        logger.info(`▶️ Bot resumed by ${chatId}`);
+        logger.info(`▶️ Course posting resumed by ${chatId}`);
     } catch (error) {
         logger.error(`Error resuming bot: ${error.message}`);
     }
@@ -265,22 +272,24 @@ export async function handleResume(sock, chatId, { botState, originalMsg }) {
 export async function handleStatus(sock, chatId, { database, botState, originalMsg }) {
     try {
         const stats = await database.getPostedStats();
-        const status = botState.isPaused ? '⏸️ PAUSED' : '▶️ RUNNING';
         const lastCheck = botState.lastCheckTime
             ? new Date(botState.lastCheckTime).toLocaleString()
             : 'Never';
+        const courseStatus = botState.isPaused ? '⏸️ PAUSED' : '▶️ RUNNING';
+        const newsStatus = '📰 ON SCHEDULE';
 
         let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
         r += '🤖 *BOT STATUS* 🤖\n';
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
-        r += `📡 *Status:* ${status}\n`;
-        r += `⏰ *Last Check:* ${lastCheck}\n`;
-        r += `📊 *Total Posted:* ${stats.total} courses\n`;
+        r += `📚 *Courses:* ${courseStatus}\n`;
+        r += `📰 *Tech news:* ${newsStatus}\n`;
+        r += `⏰ *Last course check:* ${lastCheck}\n`;
+        r += `📊 *Total posted:* ${stats.total} courses\n`;
         r += `📅 *Today:* ${stats.today} courses\n\n`;
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
         r += botState.isPaused
-            ? '💡 Use `/resume` to start posting'
-            : '💡 Use `/pause` to stop posting';
+            ? '💡 Use `/resume` to resume course posting'
+            : '💡 Use `/pause` to pause courses only';
         r += '\n_⏰ Auto-deletes in 5 hours_';
 
         await sendAndDelete(sock, chatId, { text: r }, { quoted: originalMsg });

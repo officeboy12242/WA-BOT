@@ -115,11 +115,6 @@ class NewsController {
             return;
         }
 
-        if (botState.isPaused) {
-            logger.info('Bot is paused. Skipping news check.');
-            return;
-        }
-
         logger.info('─── Checking for tech news (Inshorts) ───');
         botState.lastNewsCheckTime = Date.now();
 

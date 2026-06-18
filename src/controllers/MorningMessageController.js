@@ -28,7 +28,7 @@ class MorningMessageController {
         }
 
         if (botState.isPaused) {
-            logger.info('Bot is paused. Skipping morning messages.');
+            logger.info('⏸️ Courses paused. Skipping morning messages.');
             return;
         }
 
