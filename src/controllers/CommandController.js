@@ -62,7 +62,7 @@ import {
 import { horoscopeService } from '../services/HoroscopeService.js';
 
 class CommandController {
-    constructor(database, botState, groupManager, newsController = null, movieController = null, userManager = null, stickerController = null) {
+    constructor(database, botState, groupManager, newsController = null, movieController = null, userManager = null, stickerController = null, botSettings = null) {
         this.database = database;
         this.botState = botState;
         this.groupManager = groupManager;
@@ -70,6 +70,7 @@ class CommandController {
         this.movieController = movieController;
         this.userManager = userManager;
         this.stickerController = stickerController;
+        this.botSettings = botSettings;
         this.pendingClearConfirmations = new Map();
         this.botStartTime = Date.now();
 
@@ -108,6 +109,7 @@ class CommandController {
             movieController: this.movieController,
             userManager: this.userManager,
             stickerController: this.stickerController,
+            botSettings: this.botSettings,
             pendingClearConfirmations: this.pendingClearConfirmations,
             botStartTime: this.botStartTime,
             isOwnerFromJid: this._isOwnerFromJid,

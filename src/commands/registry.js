@@ -183,7 +183,7 @@ export const COMMAND_REGISTRY = [
         key: 'pause',
         scope: 'any',
         role: 'admins',
-        help: 'Pause automatic course posting (bot-wide)',
+        help: 'Pause automatic course posting only (tech news continues)',
     },
     {
         names: ['/resume'],
