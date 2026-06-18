@@ -28,6 +28,7 @@ import MorningMessageController from './src/controllers/MorningMessageController
 import MovieController from './src/controllers/MovieController.js';
 import UserManager from './src/models/UserManager.js';
 import StickerController from './src/controllers/StickerController.js';
+import { InstanceLock } from './src/utils/instanceLock.js';
 
 // Bot state
 const botState = {
@@ -59,6 +60,8 @@ class WhatsAppCourseBot {
         this.morningDatabase = null;
         this.stickerController = null;
         this.adminPanel = null;
+        this.instanceLock = null;
+        this._isShuttingDown = false;
     }
 
     async start() {
@@ -87,6 +90,11 @@ class WhatsAppCourseBot {
             await this.groupManager.initChannels();
             await this.groupManager.initPremium();
             await this.groupManager.initDynamicModerators();
+
+            this.instanceLock = new InstanceLock(mongoDb, () => {
+                void this.shutdown('Another instance took over');
+            });
+            await this.instanceLock.claim();
             
             // Set owner numbers from config
             this.groupManager.setOwnerNumbers(config.OWNER_NUMBERS);
@@ -210,10 +218,15 @@ class WhatsAppCourseBot {
         }
     }
 
-    async shutdown() {
-        logger.info('👋 Shutting down...');
+    async shutdown(reason = 'Shutdown signal') {
+        if (this._isShuttingDown) return;
+        this._isShuttingDown = true;
+
+        logger.info(`👋 Shutting down (${reason})...`);
+
         if (this.checkInterval) {
             clearInterval(this.checkInterval);
+            this.checkInterval = null;
         }
         if (this.newsScheduler) {
             this.newsScheduler.stop();
@@ -223,6 +236,12 @@ class WhatsAppCourseBot {
         }
         if (this.logManager) {
             this.logManager.stop();
+        }
+        if (this.whatsappService) {
+            await this.whatsappService.disconnect();
+        }
+        if (this.instanceLock) {
+            await this.instanceLock.release();
         }
         if (this.database) {
             this.database.close();
@@ -252,12 +271,12 @@ const PORT = process.env.PORT || 3000;
 bot.adminPanel = new AdminPanel(PORT);
 bot.adminPanel.start();
 
-// Handle graceful shutdown
+// Handle graceful shutdown (Render sends SIGTERM on deploy)
 process.on('SIGINT', () => {
-    void bot.shutdown();
+    void bot.shutdown('SIGINT');
 });
 process.on('SIGTERM', () => {
-    void bot.shutdown();
+    void bot.shutdown('SIGTERM');
 });
 
 // Start the bot

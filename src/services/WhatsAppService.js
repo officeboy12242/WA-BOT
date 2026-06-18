@@ -66,6 +66,10 @@ class WhatsAppService {
         
         // Startup notification flag - only send once per session
         this._startupNotificationSent = false;
+
+        // Prevent reconnect loops during shutdown / deploy handoff
+        this._shuttingDown = false;
+        this._reconnectTimeout = null;
         
         // Give admin panel access to auth database for clearing
         if (this.adminPanel && this.authDatabase) {
@@ -157,6 +161,23 @@ class WhatsAppService {
     }
 
     async connect() {
+        if (this._shuttingDown) {
+            return null;
+        }
+
+        if (this._reconnectTimeout) {
+            clearTimeout(this._reconnectTimeout);
+            this._reconnectTimeout = null;
+        }
+
+        if (this.sock) {
+            try {
+                this.sock.ev.removeAllListeners();
+                this.sock.end(undefined);
+            } catch {}
+            this.sock = null;
+        }
+
         // Use database auth instead of file-based auth
         const { state, saveCreds } = await useDatabaseAuthState(this.authDatabase);
         const { version } = await fetchLatestBaileysVersion();
@@ -174,6 +195,33 @@ class WhatsAppService {
         this.setupEventHandlers(saveCreds);
         
         return this.sock;
+    }
+
+    async disconnect() {
+        this._shuttingDown = true;
+        this.isReady = false;
+
+        if (this._reconnectTimeout) {
+            clearTimeout(this._reconnectTimeout);
+            this._reconnectTimeout = null;
+        }
+
+        if (this._messageCleanupInterval) {
+            clearInterval(this._messageCleanupInterval);
+            this._messageCleanupInterval = null;
+        }
+
+        if (this.sock) {
+            try {
+                this.sock.ev.removeAllListeners();
+                this.sock.end(undefined);
+            } catch (err) {
+                logger.warn(`WhatsApp disconnect: ${err.message}`);
+            }
+            this.sock = null;
+        }
+
+        logger.info('📴 WhatsApp connection closed');
     }
 
     setupEventHandlers(saveCreds) {
@@ -197,21 +245,32 @@ class WhatsAppService {
                 if (this.adminPanel) {
                     this.adminPanel.setDisconnected();
                 }
+
+                if (this._shuttingDown) {
+                    logger.info('Connection closed during shutdown — not reconnecting');
+                    return;
+                }
                 
-                const shouldReconnect = (lastDisconnect?.error instanceof Boom)
-                    ? lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut
-                    : true;
+                const statusCode = (lastDisconnect?.error instanceof Boom)
+                    ? lastDisconnect.error.output.statusCode
+                    : undefined;
+                const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
                 logger.info('Connection closed. Reconnecting: ' + shouldReconnect);
 
                 if (shouldReconnect) {
-                    setTimeout(async () => {
+                    if (this._reconnectTimeout) {
+                        clearTimeout(this._reconnectTimeout);
+                    }
+                    this._reconnectTimeout = setTimeout(async () => {
+                        this._reconnectTimeout = null;
+                        if (this._shuttingDown) return;
                         try {
                             await this.connect();
                         } catch (error) {
                             logger.error('Reconnection error:', error.message);
                         }
-                    }, 3000); // Wait 3 seconds before reconnecting
+                    }, 3000);
                 }
             } else if (connection === 'open') {
                 logger.info('✅ Connected to WhatsApp!');
