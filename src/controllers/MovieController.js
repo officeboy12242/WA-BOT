@@ -7,6 +7,7 @@ import { readFileSync, existsSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import axios from 'axios';
+import { jidNormalizedUser } from '@whiskeysockets/baileys';
 import { logger } from '../utils/logger.js';
 import { extractPhoneNumber, isGroupMessage, normalizePhoneNumber } from '../utils/permissions.js';
 import { config } from '../config/config.js';
@@ -19,6 +20,7 @@ const QR_IMAGE_PATH = resolve(__dirname, '../../assets/payment_qr.jpg');
 
 const DAILY_LIMIT = 5;
 const AUTO_DELETE_MS = 5 * 60 * 60 * 1000; // 5 hours
+const GROUP_HANDOFF_MS = 5 * 60 * 1000; // 5 minutes — DM then delete from group
 const SUMMARY_HOUR = 23;
 const SUMMARY_MINUTE = 55;
 const WEEKLY_DAY = 0; // Sunday
@@ -938,6 +940,57 @@ class MovieController {
         }
     }
 
+    async _resolveDmJid(sock, chatId, senderJid) {
+        if (senderJid?.includes('@lid')) {
+            return jidNormalizedUser(senderJid) || senderJid;
+        }
+
+        const phone = normalizePhoneNumber(await this._resolvePhoneNumber(sock, chatId, senderJid));
+        if (/^\d{10,15}$/.test(phone)) {
+            return `${phone}@s.whatsapp.net`;
+        }
+
+        if (senderJid?.endsWith('@s.whatsapp.net')) {
+            return jidNormalizedUser(senderJid) || senderJid;
+        }
+
+        return null;
+    }
+
+    _scheduleGroupResultHandoff(sock, chatId, senderJid, messageKeys, messageTexts) {
+        if (!messageKeys.length || !messageTexts.length) return;
+
+        setTimeout(async () => {
+            try {
+                const dmJid = await this._resolveDmJid(sock, chatId, senderJid);
+                if (dmJid) {
+                    const intro =
+                        '🎬 *Your movie search results*\n' +
+                        '_Saved from the group before auto-delete._\n' +
+                        '─────────────────────────────\n\n';
+                    await sock.sendMessage(dmJid, { text: intro, linkPreview: false });
+
+                    for (const text of messageTexts) {
+                        await sock.sendMessage(dmJid, { text, linkPreview: false });
+                        await new Promise((r) => setTimeout(r, 400));
+                    }
+                    logger.info(`📩 Movie results sent to DM ${dmJid}`);
+                } else {
+                    logger.warn(`Could not resolve DM JID for group movie handoff (${senderJid})`);
+                }
+
+                for (const key of messageKeys) {
+                    try {
+                        await sock.sendMessage(chatId, { delete: key });
+                    } catch {}
+                }
+                logger.info(`🗑️ Group movie results deleted from ${chatId} after ${GROUP_HANDOFF_MS / 60000}m`);
+            } catch (err) {
+                logger.error(`Group movie handoff failed: ${err.message}`);
+            }
+        }, GROUP_HANDOFF_MS);
+    }
+
     scheduleDelete(sock, chatId, messageKey, delayMs = AUTO_DELETE_MS) {
         if (!isGroupMessage(chatId)) return;
 
@@ -1086,6 +1139,15 @@ class MovieController {
                 ? '\n\n⭐ _Unlimited searches (Premium/Staff)_'
                 : `\n\n🔢 _Searches left today: *${remaining}* / ${DAILY_LIMIT}_`;
 
+            const isGroup = isGroupMessage(chatId);
+            const groupHandoffKeys = [];
+            const groupHandoffTexts = [];
+
+            if (isGroup) {
+                const handoffNote = '\n\n📩 _Results will be sent to your DM in 5 min, then removed from group._';
+                resultMessages[resultMessages.length - 1] += handoffNote;
+            }
+
             let sentCount = 0;
             for (let i = 0; i < resultMessages.length; i++) {
                 let text = resultMessages[i];
@@ -1104,7 +1166,12 @@ class MovieController {
 
                     if (sent?.key) {
                         sentCount++;
-                        this.scheduleDelete(sock, chatId, sent.key);
+                        if (isGroup) {
+                            groupHandoffKeys.push(sent.key);
+                            groupHandoffTexts.push(text);
+                        } else {
+                            this.scheduleDelete(sock, chatId, sent.key);
+                        }
                     }
 
                     if (i < resultMessages.length - 1) {
@@ -1116,6 +1183,10 @@ class MovieController {
                         throw sendErr;
                     }
                 }
+            }
+
+            if (isGroup && groupHandoffKeys.length) {
+                this._scheduleGroupResultHandoff(sock, chatId, senderJid, groupHandoffKeys, groupHandoffTexts);
             }
 
             try {
