@@ -2,6 +2,7 @@
  * Scrape group participants and prepare member lists for owner broadcasts.
  */
 
+import { jidNormalizedUser } from '@whiskeysockets/baileys';
 import { logger } from '../utils/logger.js';
 import { extractPhoneNumber, normalizePhoneNumber } from '../utils/permissions.js';
 
@@ -18,21 +19,39 @@ function participantToPhone(participant) {
     return /^\d{10,15}$/.test(fromId) ? fromId : '';
 }
 
-function dmJidForMember(member) {
+function normalizeLidJid(value) {
+    if (!value) {
+        return '';
+    }
+    const jid = value.includes('@') ? value : `${value}@lid`;
+    return jidNormalizedUser(jid) || jid;
+}
+
+/**
+ * Prefer phone JID; fall back to LID when WhatsApp hides the number.
+ * @returns {{ jid: string, via: 'phone' | 'lid' } | null}
+ */
+export function dmTargetForMember(member) {
     const phone = normalizePhoneNumber(member.phone);
     if (/^\d{10,15}$/.test(phone)) {
-        return `${phone}@s.whatsapp.net`;
+        return { jid: `${phone}@s.whatsapp.net`, via: 'phone' };
     }
 
     const jid = member.jid || '';
     if (jid.endsWith('@s.whatsapp.net')) {
         const phoneFromJid = extractPhoneNumber(jid.split(':')[0]);
         if (/^\d{10,15}$/.test(phoneFromJid)) {
-            return `${phoneFromJid}@s.whatsapp.net`;
+            return { jid: `${phoneFromJid}@s.whatsapp.net`, via: 'phone' };
         }
     }
 
-    return '';
+    const lidSource = member.lid || (jid.endsWith('@lid') ? jid : '');
+    const lidJid = normalizeLidJid(lidSource);
+    if (lidJid.endsWith('@lid')) {
+        return { jid: lidJid, via: 'lid' };
+    }
+
+    return null;
 }
 
 class MemberScrapeController {
@@ -86,10 +105,34 @@ class MemberScrapeController {
         const rows = [];
         for (const group of groups) {
             const count = await this.groupMemberDatabase.getMemberCount(group.group_id);
-            const dmCount = (await this.getDmTargets(group.group_id)).length;
-            rows.push({ ...group, stored_count: count, dm_count: dmCount });
+            const dmStats = await this.getDmTargetStats(group.group_id);
+            rows.push({ ...group, stored_count: count, ...dmStats });
         }
         return rows;
+    }
+
+    async getDmTargetStats(groupId) {
+        const members = await this.groupMemberDatabase.getMembersForGroup(groupId);
+        const seen = new Set();
+        let dm_count = 0;
+        let phone_dm_count = 0;
+        let lid_dm_count = 0;
+
+        for (const member of members) {
+            const target = dmTargetForMember(member);
+            if (!target || seen.has(target.jid)) {
+                continue;
+            }
+            seen.add(target.jid);
+            dm_count++;
+            if (target.via === 'lid') {
+                lid_dm_count++;
+            } else {
+                phone_dm_count++;
+            }
+        }
+
+        return { dm_count, phone_dm_count, lid_dm_count };
     }
 
     async getDmTargets(groupId) {
@@ -98,12 +141,12 @@ class MemberScrapeController {
         const targets = [];
 
         for (const member of members) {
-            const jid = dmJidForMember(member);
-            if (!jid || seen.has(jid)) {
+            const target = dmTargetForMember(member);
+            if (!target || seen.has(target.jid)) {
                 continue;
             }
-            seen.add(jid);
-            targets.push(jid);
+            seen.add(target.jid);
+            targets.push(target.jid);
         }
 
         return targets;

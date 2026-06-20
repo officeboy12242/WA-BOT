@@ -41,6 +41,9 @@ function formatGroupList(groups, { stored = false } = {}) {
         text += `   👥 ${count} member(s)`;
         if (stored && group.dm_count != null) {
             text += `\n   📱 DM-able: ${group.dm_count}`;
+            if (group.phone_dm_count != null || group.lid_dm_count != null) {
+                text += ` (${group.phone_dm_count || 0} phone · ${group.lid_dm_count || 0} LID)`;
+            }
         }
         if (stored && group.scraped_at) {
             text += `\n   📅 Last scraped: ${new Date(group.scraped_at).toLocaleString('en-IN', {
@@ -158,19 +161,21 @@ export async function handleBroadcast(sock, chatId, senderJid, args, { memberScr
         }
 
         const targets = await memberScrapeController.getDmTargets(selected.group_id);
+        const dmStats = await memberScrapeController.getDmTargetStats(selected.group_id);
         if (!targets.length) {
             await sock.sendMessage(chatId, {
                 text:
-                    `📭 No valid phone numbers found for *${selected.group_name}*.\n\n` +
-                    'Re-run `/scrap` on that group — members with LID-only privacy cannot be DM\'d.',
+                    `📭 No DM targets found for *${selected.group_name}*.\n\n` +
+                    'Re-run `/scrap` on that group first.',
             }, { quoted: originalMsg });
             return;
         }
 
         await sock.sendMessage(chatId, {
             text:
-                `📤 Broadcasting to *${targets.length}* member(s) from *${selected.group_name}*...\n\n` +
-                '_Running in background. You will get a summary when done._',
+                `📤 Broadcasting to *${targets.length}* member(s) from *${selected.group_name}*...\n` +
+                `📱 Phone: *${dmStats.phone_dm_count}* · 🔒 LID: *${dmStats.lid_dm_count}*\n\n` +
+                '_Running in background. LID DMs work when WhatsApp hides numbers but the bot shares that group._',
         }, { quoted: originalMsg });
 
         void runBroadcastJob(sock, chatId, selected, message, targets).catch((err) => {
