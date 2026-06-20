@@ -68,6 +68,7 @@ import {
     handleScrap,
     handleScrapMembers,
     handleBroadcast,
+    handleGroupPost,
     handlePendingScrapSelection,
     createScrapSessionStore,
 } from './handlers/memberScrapeHandlers.js';
@@ -230,6 +231,7 @@ class CommandController {
             case 'broadcast':     void handleBroadcast(sock, chatId, senderJid, args, ctx).catch((err) => {
                 logger.error(`Broadcast handler error: ${err?.message || err?.output?.payload?.message || String(err)}`);
             }); break;
+            case 'grouppost':     await handleGroupPost(sock, chatId, senderJid, args, ctx); break;
 
             /* ── Instagram / News / Movie ── */
             case 'insta': await _handleInsta(sock, chatId, args, originalMsg); break;

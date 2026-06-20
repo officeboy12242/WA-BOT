@@ -62,7 +62,8 @@ function formatGroupList(groups, { stored = false } = {}) {
         text += '⏰ Expires in 5 minutes.';
     } else {
         text += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-        text += '💡 `/broadcast <number> <message>` to DM all stored members';
+        text += '💡 `/broadcast <number> <message>` — DM members\n';
+        text += '💡 `/grouppost <number> <message>` — post in the group';
     }
 
     return text;
@@ -234,6 +235,57 @@ async function runBroadcastJob(sock, chatId, selected, message, targets) {
     }
 }
 
+export async function handleGroupPost(sock, chatId, senderJid, args, { memberScrapeController, isOwnerFromJid, originalMsg }) {
+    try {
+        const isOwner = await isOwnerFromJid(sock, chatId, senderJid);
+        if (!isOwner) {
+            await sock.sendMessage(chatId, { text: '❌ Only bot owners can post to groups.' }, { quoted: originalMsg });
+            return;
+        }
+
+        if (!memberScrapeController) {
+            await sock.sendMessage(chatId, { text: '⚠️ Group post is not configured.' }, { quoted: originalMsg });
+            return;
+        }
+
+        const groupIndex = parseInt(args[0], 10);
+        const message = args.slice(1).join(' ').trim();
+
+        if (!Number.isFinite(groupIndex) || groupIndex < 1 || !message) {
+            await sock.sendMessage(chatId, {
+                text:
+                    '❌ Usage: `/grouppost <group#> <message>`\n\n' +
+                    'Posts one message in the WhatsApp group (reaches everyone including LID users).\n' +
+                    'Use `/scrapmembers` for group numbers.',
+            }, { quoted: originalMsg });
+            return;
+        }
+
+        const groups = await memberScrapeController.getStoredGroupsWithCounts();
+        const selected = groups[groupIndex - 1];
+        if (!selected) {
+            await sock.sendMessage(chatId, {
+                text: groups.length
+                    ? `❌ Invalid group number. Choose 1–${groups.length}.`
+                    : '❌ No scraped groups yet. Run `/scrap` first.',
+            }, { quoted: originalMsg });
+            return;
+        }
+
+        await sock.sendMessage(selected.group_id, { text: message });
+        await sock.sendMessage(chatId, {
+            text: `✅ Posted to group *${selected.group_name}*.\n\n_All members in that group can see it._`,
+        }, { quoted: originalMsg });
+
+        logger.info(`Group post sent to ${selected.group_name} (${selected.group_id})`);
+    } catch (err) {
+        logger.error(`Group post failed: ${formatError(err)}`);
+        await sock.sendMessage(chatId, {
+            text: `❌ Group post failed: ${formatError(err)}`,
+        }, { quoted: originalMsg });
+    }
+}
+
 export async function handlePendingScrapSelection(sock, chatId, senderJid, text, { memberScrapeController, pendingScrapSessions, isOwnerFromJid, originalMsg }) {
     const key = sessionKey(chatId, senderJid);
     const session = pendingScrapSessions.get(key);
@@ -288,7 +340,8 @@ export async function handlePendingScrapSelection(sock, chatId, senderJid, text,
                 `🔄 *Updated:* ${result.updated}\n\n` +
                 '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
                 '💡 `/scrapmembers` — view saved groups\n' +
-                '💡 `/broadcast <#> <message>` — DM all members',
+                '💡 `/broadcast <#> <message>` — DM all members\n' +
+                '💡 `/grouppost <#> <message>` — post in the group',
         });
         logger.info(`Scraped ${result.total} members from ${result.group_name}`);
     } catch (err) {

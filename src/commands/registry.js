@@ -389,6 +389,13 @@ export const COMMAND_REGISTRY = [
         role: 'owner',
         help: 'DM all scraped members — `/broadcast <group#> <message>` (owner only)',
     },
+    {
+        names: ['/grouppost', '/groupmsg'],
+        key: 'grouppost',
+        scope: 'any',
+        role: 'owner',
+        help: 'Post in a scraped WhatsApp group — `/grouppost <group#> <message>` (owner only)',
+    },
 ];
 
 const nameIndex = new Map();
