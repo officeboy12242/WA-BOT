@@ -32,6 +32,25 @@ class BotSettings {
             { upsert: true }
         );
     }
+
+    async getDriveSources() {
+        const doc = await this.collection.findOne({ key: 'drive_sources' });
+        return Array.isArray(doc?.value) ? doc.value : [];
+    }
+
+    async setDriveSources(urls) {
+        await this.collection.updateOne(
+            { key: 'drive_sources' },
+            {
+                $set: {
+                    key: 'drive_sources',
+                    value: urls,
+                    updated_at: new Date(),
+                },
+            },
+            { upsert: true },
+        );
+    }
 }
 
 export default BotSettings;

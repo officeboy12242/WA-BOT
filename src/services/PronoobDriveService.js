@@ -1,16 +1,17 @@
 /**
  * PronoobDrive Scraper Service
- * Scrapes movie download links from the self-hosted Render index page.
- * Uses the server-side search at /Sct?search=QUERY for each request.
+ * Scrapes movie download links from self-hosted Render instances.
+ * Rotates through configured base URLs with health checks.
  */
 
 import https from 'https';
 import http from 'http';
 import { logger } from '../utils/logger.js';
 
-const BASE_URL = 'https://pronoobdrive-7w2p.onrender.com';
+const DEFAULT_BASE_URL = 'https://pronoobdrive-7w2p.onrender.com';
 const REQUEST_TIMEOUT = 15000;
-const MAX_RESPONSE_BYTES = 512 * 1024; // abort if response exceeds 512KB
+const HEALTH_TIMEOUT = 8000;
+const MAX_RESPONSE_BYTES = 512 * 1024;
 const MAX_PARSED_CARDS = 20;
 
 const CARD_RE =
@@ -23,6 +24,18 @@ function decodeHtmlEntities(str) {
         .replace(/&lt;/g, '<')
         .replace(/&gt;/g, '>')
         .replace(/&quot;/g, '"');
+}
+
+function normalizeBaseUrl(raw) {
+    let u = String(raw || '').trim();
+    if (!u) return '';
+    if (!/^https?:\/\//i.test(u)) u = `https://${u}`;
+    try {
+        const parsed = new URL(u);
+        return `${parsed.protocol}//${parsed.host}`.replace(/\/$/, '');
+    } catch {
+        return '';
+    }
 }
 
 function qualityFromFilename(name) {
@@ -57,9 +70,141 @@ function titleFromFilename(raw) {
 class PronoobDriveService {
     constructor() {
         this.name = 'Drive';
+        this._settings = null;
+        this._urls = [DEFAULT_BASE_URL];
+        this._rotateIndex = 0;
+        this._lastHealthyUrl = null;
+        this._keepAliveIndex = 0;
     }
 
-    /** GET with response size limit to prevent OOM on broad queries. */
+    setSettings(botSettings) {
+        this._settings = botSettings;
+    }
+
+    async loadUrls() {
+        if (this._settings) {
+            const stored = (await this._settings.getDriveSources())
+                .map(normalizeBaseUrl)
+                .filter(Boolean);
+            if (stored.length) {
+                this._urls = [...new Set(stored)];
+                return;
+            }
+        }
+        this._urls = [DEFAULT_BASE_URL];
+    }
+
+    getUrls() {
+        return [...this._urls];
+    }
+
+    async addUrl(rawUrl) {
+        const url = normalizeBaseUrl(rawUrl);
+        if (!url) throw new Error('Invalid URL');
+        await this.loadUrls();
+        if (this._urls.includes(url)) {
+            return { added: false, urls: this._urls };
+        }
+        this._urls.push(url);
+        if (this._settings) {
+            await this._settings.setDriveSources(this._urls);
+        }
+        return { added: true, urls: this._urls };
+    }
+
+    async removeUrl(indexOneBased) {
+        await this.loadUrls();
+        const idx = indexOneBased - 1;
+        if (idx < 0 || idx >= this._urls.length) {
+            throw new Error('Invalid index');
+        }
+        const removed = this._urls.splice(idx, 1);
+        if (!this._urls.length) {
+            this._urls = [DEFAULT_BASE_URL];
+        }
+        if (this._settings) {
+            await this._settings.setDriveSources(
+                this._urls.length === 1 && this._urls[0] === DEFAULT_BASE_URL ? [] : this._urls,
+            );
+        }
+        this._rotateIndex = 0;
+        this._keepAliveIndex = 0;
+        return { removed: removed[0], urls: this._urls };
+    }
+
+    _orderedUrlsForRotation() {
+        if (!this._urls.length) return [DEFAULT_BASE_URL];
+        const ordered = [];
+        for (let i = 0; i < this._urls.length; i++) {
+            ordered.push(this._urls[(this._rotateIndex + i) % this._urls.length]);
+        }
+        return ordered;
+    }
+
+    _headCheck(baseUrl) {
+        return new Promise((resolve) => {
+            let settled = false;
+            const finish = (ok) => {
+                if (!settled) {
+                    settled = true;
+                    resolve(ok);
+                }
+            };
+            try {
+                const url = new URL(`${baseUrl}/Sct`);
+                const mod = url.protocol === 'https:' ? https : http;
+                const req = mod.request(
+                    { hostname: url.hostname, port: url.port, path: url.pathname, method: 'HEAD' },
+                    (res) => {
+                        res.resume();
+                        finish(res.statusCode >= 200 && res.statusCode < 400);
+                    },
+                );
+                req.on('error', () => finish(false));
+                req.setTimeout(HEALTH_TIMEOUT, () => {
+                    req.destroy();
+                    finish(false);
+                });
+                req.end();
+            } catch {
+                finish(false);
+            }
+        });
+    }
+
+    async _pickHealthyBase() {
+        await this.loadUrls();
+        const candidates = this._orderedUrlsForRotation();
+
+        for (let i = 0; i < candidates.length; i++) {
+            const base = candidates[i];
+            const ok = await this._headCheck(base);
+            if (ok) {
+                this._lastHealthyUrl = base;
+                const foundAt = this._urls.indexOf(base);
+                if (foundAt >= 0) {
+                    this._rotateIndex = (foundAt + 1) % this._urls.length;
+                }
+                logger.info(`Drive source OK: ${base}`);
+                return base;
+            }
+            logger.warn(`Drive source down: ${base}`);
+        }
+
+        return null;
+    }
+
+    async testAllSources() {
+        await this.loadUrls();
+        const results = [];
+        for (let i = 0; i < this._urls.length; i++) {
+            const url = this._urls[i];
+            const ok = await this._headCheck(url);
+            results.push({ index: i + 1, url, ok });
+        }
+        return results;
+    }
+
     _fetch(urlStr) {
         return new Promise((resolve, reject) => {
             const url = new URL(urlStr);
@@ -98,7 +243,7 @@ class PronoobDriveService {
         });
     }
 
-    _parseHtml(html) {
+    _parseHtml(html, baseUrl) {
         const files = [];
         let match;
         CARD_RE.lastIndex = 0;
@@ -111,7 +256,7 @@ class PronoobDriveService {
                 title: titleFromFilename(rawFilename),
                 quality: qualityFromFilename(rawFilename),
                 size,
-                url: `${BASE_URL}/${relUrl}`,
+                url: `${baseUrl}/${relUrl}`,
             });
             if (files.length >= MAX_PARSED_CARDS) break;
         }
@@ -120,15 +265,21 @@ class PronoobDriveService {
 
     async searchMovies(query, maxResults = 5) {
         try {
-            const searchUrl = `${BASE_URL}/Sct?search=${encodeURIComponent(query)}`;
-            const { status, data } = await this._fetch(searchUrl);
-
-            if (status !== 200) {
-                logger.warn(`PronoobDrive search returned status ${status}`);
+            const baseUrl = await this._pickHealthyBase();
+            if (!baseUrl) {
+                logger.warn('No healthy Drive source available');
                 return [];
             }
 
-            const files = this._parseHtml(data);
+            const searchUrl = `${baseUrl}/Sct?search=${encodeURIComponent(query)}`;
+            const { status, data } = await this._fetch(searchUrl);
+
+            if (status !== 200) {
+                logger.warn(`PronoobDrive search returned status ${status} from ${baseUrl}`);
+                return [];
+            }
+
+            const files = this._parseHtml(data, baseUrl);
             if (!files.length) return [];
 
             const groups = new Map();
@@ -154,24 +305,22 @@ class PronoobDriveService {
         }
     }
 
-    /** Lightweight HEAD ping to keep Render awake without downloading HTML. */
     startKeepAlive(intervalMs = 4 * 60 * 1000) {
         this.stopKeepAlive();
-        const ping = () => {
-            const url = new URL(`${BASE_URL}/Sct`);
-            const req = https.request(
-                { hostname: url.hostname, path: url.pathname, method: 'HEAD' },
-                (res) => {
-                    res.resume();
-                    logger.info(`🏓 Drive keep-alive ping OK (${res.statusCode})`);
-                },
-            );
-            req.on('error', () => logger.warn('🏓 Drive keep-alive ping failed (will retry)'));
-            req.setTimeout(10000, () => req.destroy());
-            req.end();
+        const ping = async () => {
+            await this.loadUrls();
+            if (!this._urls.length) return;
+            const base = this._urls[this._keepAliveIndex % this._urls.length];
+            this._keepAliveIndex = (this._keepAliveIndex + 1) % this._urls.length;
+            const ok = await this._headCheck(base);
+            if (ok) {
+                logger.info(`🏓 Drive keep-alive OK (${base})`);
+            } else {
+                logger.warn(`🏓 Drive keep-alive failed (${base})`);
+            }
         };
-        ping();
-        this._keepAliveTimer = setInterval(ping, intervalMs);
+        void ping();
+        this._keepAliveTimer = setInterval(() => { void ping(); }, intervalMs);
     }
 
     stopKeepAlive() {
