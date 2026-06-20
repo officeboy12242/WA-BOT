@@ -403,6 +403,7 @@ class GroupManager {
                     activated_by: activatedBy,
                     activated_at: new Date(),
                     is_active: true,
+                    news_enabled: true,
                 },
                 $setOnInsert: {
                     group_id: groupId,
@@ -471,6 +472,46 @@ class GroupManager {
     async getActiveGroups() {
         return this.groups
             .find({ is_active: true }, { projection: { _id: 0 } })
+            .sort({ activated_at: -1 })
+            .toArray();
+    }
+
+    async setNewsEnabled(groupId, groupName, enabled, setBy) {
+        await this.groups.updateOne(
+            { group_id: groupId },
+            {
+                $set: {
+                    group_name: groupName,
+                    news_enabled: enabled,
+                    news_set_by: setBy,
+                    news_set_at: new Date(),
+                },
+                $setOnInsert: { group_id: groupId, is_active: false },
+            },
+            { upsert: true }
+        );
+        logger.info(
+            `${enabled ? '📰 Tech news ON' : '📰 Tech news OFF'}: ${groupName} (${groupId}) by ${setBy}`
+        );
+    }
+
+    async isNewsEnabled(groupId) {
+        const row = await this.groups.findOne(
+            { group_id: groupId },
+            { projection: { news_enabled: 1, is_active: 1 } }
+        );
+        if (!row?.is_active) {
+            return false;
+        }
+        return row.news_enabled !== false;
+    }
+
+    async getNewsEnabledGroups() {
+        return this.groups
+            .find(
+                { is_active: true, news_enabled: { $ne: false } },
+                { projection: { _id: 0 } }
+            )
             .sort({ activated_at: -1 })
             .toArray();
     }

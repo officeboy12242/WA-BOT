@@ -27,6 +27,8 @@ import {
     handleDeactivate,
     handleInstaOn,
     handleInstaOff,
+    handleNewsOn,
+    handleNewsOff,
     handleGroups,
     handleSetWelcome,
     handleGroupParticipantsUpdate as _handleGroupParticipantsUpdate,
@@ -171,6 +173,8 @@ class CommandController {
             case 'deactivate': await handleDeactivate(sock, chatId, senderJid, ctx); break;
             case 'instaon':    await handleInstaOn(sock, chatId, senderJid, ctx); break;
             case 'instaoff':   await handleInstaOff(sock, chatId, senderJid, ctx); break;
+            case 'newson':     await handleNewsOn(sock, chatId, senderJid, ctx); break;
+            case 'newsoff':    await handleNewsOff(sock, chatId, senderJid, ctx); break;
             case 'groups':     await handleGroups(sock, chatId, senderJid, ctx); break;
             case 'setwc':      await handleSetWelcome(sock, chatId, senderJid, command.trim(), ctx); break;
             case 'movieon':    await handleMovieOn(sock, chatId, senderJid, ctx); break;
