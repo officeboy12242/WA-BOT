@@ -85,19 +85,41 @@ class MemberScrapeController {
         const participants = meta.participants || [];
         const name = meta.subject || groupName || 'Unknown Group';
 
-        if (this.userManager) {
-            for (const participant of participants) {
-                if (participant.id) {
-                    const stored = await this.userManager.getUser(participant.id);
-                    if (!stored?.pushName && participant.notify) {
-                        await this.userManager.updateUser(participant.id, participant.notify);
-                    }
-                }
-            }
+        // Fire-and-forget — don't block scrape on per-user DB writes
+        if (this.userManager && participants.length) {
+            void this._cacheParticipantNames(participants);
         }
 
         const stats = await this.groupMemberDatabase.upsertMembers(groupId, name, participants);
         return { ...stats, group_name: name, group_id: groupId };
+    }
+
+    async _cacheParticipantNames(participants) {
+        for (const participant of participants) {
+            if (!participant.id || !participant.notify) {
+                continue;
+            }
+            try {
+                const stored = await this.userManager.getUser(participant.id);
+                if (!stored?.pushName) {
+                    await this.userManager.updateUser(participant.id, participant.notify);
+                }
+            } catch {
+                // ignore individual name cache failures
+            }
+        }
+    }
+
+    filterTargetsForBroadcast(targets, sock) {
+        if (!sock?.user?.id) {
+            return targets;
+        }
+        const selfPhone = extractPhoneNumber(sock.user.id);
+        const selfJid = sock.user.id.split(':')[0];
+        return targets.filter((jid) => {
+            const phone = extractPhoneNumber(jid.split(':')[0]);
+            return jid !== selfJid && jid !== sock.user.id && phone !== selfPhone;
+        });
     }
 
     async getStoredGroupsWithCounts() {

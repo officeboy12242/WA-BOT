@@ -5,6 +5,8 @@
 import { logger } from '../utils/logger.js';
 import { extractPhoneNumber, normalizePhoneNumber } from '../utils/permissions.js';
 
+const BULK_BATCH_SIZE = 100;
+
 function participantToPhone(participant) {
     const fromPn = extractPhoneNumber(participant.phoneNumber || participant.pn || '');
     if (/^\d{10,15}$/.test(fromPn)) {
@@ -51,8 +53,7 @@ class GroupMemberDatabase {
 
     async upsertMembers(groupId, groupName, participants = []) {
         const now = new Date();
-        let inserted = 0;
-        let updated = 0;
+        const ops = [];
 
         for (const participant of participants) {
             const jid = participant.id || '';
@@ -63,31 +64,42 @@ class GroupMemberDatabase {
                 continue;
             }
 
-            const result = await this.members.updateOne(
-                { group_id: groupId, member_key: memberKey },
-                {
-                    $set: {
-                        group_id: groupId,
-                        group_name: groupName,
-                        member_key: memberKey,
-                        jid,
-                        phone: normalizePhoneNumber(phone) || phone,
-                        lid: lid || null,
-                        admin: participant.admin || null,
-                        updated_at: now,
+            ops.push({
+                updateOne: {
+                    filter: { group_id: groupId, member_key: memberKey },
+                    update: {
+                        $set: {
+                            group_id: groupId,
+                            group_name: groupName,
+                            member_key: memberKey,
+                            jid,
+                            phone: normalizePhoneNumber(phone) || phone,
+                            lid: lid || null,
+                            admin: participant.admin || null,
+                            updated_at: now,
+                        },
+                        $setOnInsert: {
+                            scraped_at: now,
+                        },
                     },
-                    $setOnInsert: {
-                        scraped_at: now,
-                    },
+                    upsert: true,
                 },
-                { upsert: true }
-            );
+            });
+        }
 
-            if (result.upsertedCount) {
-                inserted++;
-            } else if (result.modifiedCount) {
-                updated++;
+        let inserted = 0;
+        let updated = 0;
+
+        for (let i = 0; i < ops.length; i += BULK_BATCH_SIZE) {
+            const batch = ops.slice(i, i + BULK_BATCH_SIZE);
+            if (!batch.length) {
+                continue;
             }
+            const result = await this.members.bulkWrite(batch, { ordered: false });
+            inserted += result.upsertedCount || 0;
+            updated += result.modifiedCount || 0;
+            // Yield so other bot work can run between batches
+            await new Promise((resolve) => setImmediate(resolve));
         }
 
         await this.scrapes.updateOne(
