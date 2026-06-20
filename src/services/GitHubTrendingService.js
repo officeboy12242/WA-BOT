@@ -60,6 +60,18 @@ function parseRepoFromArticle($, article) {
     };
 }
 
+function dedupeRepos(repos) {
+    const seen = new Set();
+    return (repos || []).filter((repo) => {
+        const key = repo.fullName?.trim().toLowerCase();
+        if (!key || seen.has(key)) {
+            return false;
+        }
+        seen.add(key);
+        return true;
+    });
+}
+
 class GitHubTrendingService {
     constructor(count = 5) {
         this.count = count;
@@ -124,7 +136,7 @@ class GitHubTrendingService {
             const scraped = await this.fetchFromTrendingPage();
             if (scraped.length >= Math.min(3, this.count)) {
                 logger.info(`GitHub trending: ${scraped.length} repo(s) from trending page`);
-                return scraped.slice(0, this.count);
+                return dedupeRepos(scraped).slice(0, this.count);
             }
         } catch (err) {
             logger.warn(`GitHub trending scrape failed: ${err.message}`);
@@ -134,7 +146,7 @@ class GitHubTrendingService {
             const fromApi = await this.fetchFromSearchApi();
             if (fromApi.length) {
                 logger.info(`GitHub trending: ${fromApi.length} repo(s) from search API fallback`);
-                return fromApi;
+                return dedupeRepos(fromApi).slice(0, this.count);
             }
         } catch (err) {
             logger.warn(`GitHub search API fallback failed: ${err.message}`);

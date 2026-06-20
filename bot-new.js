@@ -28,6 +28,7 @@ import MorningMessageScraper from './src/services/MorningMessageScraper.js';
 import MorningMessageController from './src/controllers/MorningMessageController.js';
 import MovieController from './src/controllers/MovieController.js';
 import GitHubTrendingController from './src/controllers/GitHubTrendingController.js';
+import GitHubTrendingDatabase from './src/models/GitHubTrendingDatabase.js';
 import UserManager from './src/models/UserManager.js';
 import StickerController from './src/controllers/StickerController.js';
 import BotSettings from './src/models/BotSettings.js';
@@ -85,6 +86,7 @@ class WhatsAppCourseBot {
             // Initialize databases
             this.database = new DatabaseModel(mongoDb);
             this.newsDatabase = new NewsDatabase(mongoDb);
+            this.githubTrendingDatabase = new GitHubTrendingDatabase(mongoDb);
             this.morningDatabase = new MorningMessageDatabase(mongoDb);
             this.groupManager = new GroupManager(mongoDb);
             this.userManager = new UserManager(mongoDb);
@@ -92,6 +94,7 @@ class WhatsAppCourseBot {
             await Promise.all([
                 this.database.init(),
                 this.newsDatabase.init(),
+                this.githubTrendingDatabase.init(),
                 this.morningDatabase.init(),
                 this.groupManager.init(),
                 this.authDatabase.init(),
@@ -126,7 +129,11 @@ class WhatsAppCourseBot {
                 config,
                 this.groupManager
             );
-            this.githubTrendingController = new GitHubTrendingController(config, this.groupManager);
+            this.githubTrendingController = new GitHubTrendingController(
+                config,
+                this.groupManager,
+                this.githubTrendingDatabase
+            );
             this.movieController = new MovieController(mongoDb, this.groupManager);
             await this.movieController.init();
             
