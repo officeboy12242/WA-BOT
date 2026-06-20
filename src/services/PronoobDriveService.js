@@ -9,7 +9,10 @@ import http from 'http';
 import { logger } from '../utils/logger.js';
 
 const BASE_URL = 'https://pronoobdrive-7w2p.onrender.com';
-const REQUEST_TIMEOUT = 20000;
+const REQUEST_TIMEOUT = 15000;
+const MAX_RESPONSE_BYTES = 512 * 1024; // abort if response exceeds 512KB
+const MAX_PARSED_CARDS = 20;
+
 const CARD_RE =
     /<!-- Card\s+-->\s*<div title="\s*[^|]+\|\s*([^"]+?)\s*"[^>]*>[\s\S]*?<a href="(Sct\/\d+\/[^"]+)"[\s\S]*?<button title="([^"]+?)\.m3u"/g;
 
@@ -35,8 +38,8 @@ function qualityFromFilename(name) {
 
 function titleFromFilename(raw) {
     let name = raw
-        .replace(/^@\S+\s*[-–]\s*/, '')   // strip channel tags
-        .replace(/\.[^.]+$/, '');           // strip extension
+        .replace(/^@\S+\s*[-–]\s*/, '')
+        .replace(/\.[^.]+$/, '');
 
     name = name.replace(/[._]/g, ' ').replace(/\s{2,}/g, ' ').trim();
 
@@ -56,6 +59,7 @@ class PronoobDriveService {
         this.name = 'Drive';
     }
 
+    /** GET with response size limit to prevent OOM on broad queries. */
     _fetch(urlStr) {
         return new Promise((resolve, reject) => {
             const url = new URL(urlStr);
@@ -68,9 +72,18 @@ class PronoobDriveService {
                         res.resume();
                         return this._fetch(redirect).then(resolve, reject);
                     }
+                    let size = 0;
                     const chunks = [];
-                    res.on('data', (c) => chunks.push(c));
-                    res.on('end', () => resolve({ status: res.statusCode, data: Buffer.concat(chunks).toString() }));
+                    res.on('data', (c) => {
+                        size += c.length;
+                        if (size > MAX_RESPONSE_BYTES) {
+                            res.destroy();
+                            resolve({ status: res.statusCode, data: Buffer.concat(chunks).toString(), truncated: true });
+                            return;
+                        }
+                        chunks.push(c);
+                    });
+                    res.on('end', () => resolve({ status: res.statusCode, data: Buffer.concat(chunks).toString(), truncated: false }));
                 },
             );
             req.on('error', reject);
@@ -94,15 +107,11 @@ class PronoobDriveService {
                 size,
                 url: `${BASE_URL}/${relUrl}`,
             });
+            if (files.length >= MAX_PARSED_CARDS) break;
         }
         return files;
     }
 
-    /**
-     * Search movies using the server-side search endpoint.
-     * Returns results in the format MovieController expects:
-     *   [{ title, source, links: [{ size, url }] }]
-     */
     async searchMovies(query, maxResults = 5) {
         try {
             const searchUrl = `${BASE_URL}/Sct?search=${encodeURIComponent(query)}`;
@@ -116,7 +125,6 @@ class PronoobDriveService {
             const files = this._parseHtml(data);
             if (!files.length) return [];
 
-            // Group files by cleaned title so multiple qualities appear as links
             const groups = new Map();
             for (const file of files) {
                 const key = file.title.toLowerCase();
@@ -140,13 +148,21 @@ class PronoobDriveService {
         }
     }
 
-    /** Periodic ping to prevent Render from sleeping. */
+    /** Lightweight HEAD ping to keep Render awake without downloading HTML. */
     startKeepAlive(intervalMs = 4 * 60 * 1000) {
         this.stopKeepAlive();
         const ping = () => {
-            this._fetch(`${BASE_URL}/Sct?search=ping`)
-                .then(() => logger.info('🏓 Drive keep-alive ping OK'))
-                .catch(() => logger.warn('🏓 Drive keep-alive ping failed (will retry)'));
+            const url = new URL(`${BASE_URL}/Sct`);
+            const req = https.request(
+                { hostname: url.hostname, path: url.pathname, method: 'HEAD' },
+                (res) => {
+                    res.resume();
+                    logger.info(`🏓 Drive keep-alive ping OK (${res.statusCode})`);
+                },
+            );
+            req.on('error', () => logger.warn('🏓 Drive keep-alive ping failed (will retry)'));
+            req.setTimeout(10000, () => req.destroy());
+            req.end();
         };
         ping();
         this._keepAliveTimer = setInterval(ping, intervalMs);
