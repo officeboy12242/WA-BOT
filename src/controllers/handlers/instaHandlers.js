@@ -232,26 +232,54 @@ export async function handleGithub(sock, chatId, senderJid, { githubTrendingCont
             return;
         }
 
-        await githubTrendingController.previewAll(sock, chatId, repos);
-        logger.info(`GitHub trending preview (${repos.length} repos) sent to ${chatId}`);
-
         const canPost = await groupManager.canManualPostNews(senderJid);
-        if (!canPost) return;
+        const githubGroups = canPost ? await groupManager.getGithubTrendingGroups() : [];
+        const postToThisChat = githubGroups.some((group) => group.group_id === chatId);
 
-        const { posted, groups, messages } = await githubTrendingController.postAllReposIndividually(sock, repos);
-        if (groups === 0) {
+        if (!postToThisChat) {
+            const previewRepos = await githubTrendingController.filterUnpostedRepos(repos, chatId);
+            if (!previewRepos.length) {
+                await sock.sendMessage(chatId, {
+                    text: 'ℹ️ These trending repos were already sent here. No repeats.',
+                });
+                if (!canPost) {
+                    return;
+                }
+            } else {
+                const { sent } = await githubTrendingController.previewAll(sock, chatId, previewRepos);
+                logger.info(`GitHub trending preview (${sent} repo(s)) sent to ${chatId}`);
+            }
+        }
+
+        if (!canPost) {
+            return;
+        }
+
+        if (githubGroups.length === 0) {
             await sock.sendMessage(chatId, {
                 text: 'ℹ️ Preview only — no groups with GitHub trending enabled. Use `/activate` and `/githubon` first.',
             });
             return;
         }
 
-        await sock.sendMessage(chatId, {
-            text:
-                messages > 0
-                    ? `✅ Posted *${repos.length}* GitHub trending repos individually to *${posted}* group(s).`
-                    : 'ℹ️ Could not post to any GitHub-enabled groups.',
-        });
+        const { posted, groups, messages, skipped } = await githubTrendingController.postAllReposIndividually(
+            sock,
+            repos
+        );
+
+        if (messages > 0) {
+            await sock.sendMessage(chatId, {
+                text: `✅ Posted *${messages}* new GitHub trending repo message(s) across *${posted}* group(s).`,
+            });
+        } else if (skipped > 0) {
+            await sock.sendMessage(chatId, {
+                text: 'ℹ️ All trending repos were already posted to github-enabled groups. No repeats.',
+            });
+        } else {
+            await sock.sendMessage(chatId, {
+                text: 'ℹ️ Could not post to any GitHub-enabled groups.',
+            });
+        }
     } catch (error) {
         logger.error(`Error handling github command: ${error.message}`);
         await sock.sendMessage(chatId, { text: 'Could not fetch GitHub trending right now. Try again later.' });
