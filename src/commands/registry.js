@@ -371,23 +371,23 @@ export const COMMAND_REGISTRY = [
     {
         names: ['/scrap'],
         key: 'scrap',
-        scope: 'dm_only',
+        scope: 'any',
         role: 'owner',
-        help: 'Pick a group by number and scrape all members to database (owner DM only)',
+        help: 'Pick a group by number and scrape all members to database (owner only)',
     },
     {
         names: ['/scrapmembers', '/scraped'],
         key: 'scrapmembers',
-        scope: 'dm_only',
+        scope: 'any',
         role: 'owner',
-        help: 'List scraped groups and member counts (owner DM only)',
+        help: 'List scraped groups and member counts (owner only)',
     },
     {
         names: ['/broadcast'],
         key: 'broadcast',
-        scope: 'dm_only',
+        scope: 'any',
         role: 'owner',
-        help: 'DM all scraped members — `/broadcast <group#> <message>` (owner DM only)',
+        help: 'DM all scraped members — `/broadcast <group#> <message>` (owner only)',
     },
 ];
 
