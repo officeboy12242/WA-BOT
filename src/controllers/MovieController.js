@@ -1018,13 +1018,17 @@ class MovieController {
             if (driveResults.status === 'fulfilled' && driveResults.value?.length > 0) {
                 results.push(...driveResults.value);
                 sources.push('Drive');
-            } else if (driveResults.status === 'rejected') {
-                logger.warn(`Drive scraper failed: ${driveResults.reason?.message || 'unknown'}`);
+                logger.info(`Drive: ${driveResults.value.length} results for "${query}"`);
+            } else {
+                logger.warn(`Drive: ${driveResults.status === 'rejected' ? driveResults.reason?.message : 'no results'} for "${query}"`);
             }
 
             if (atozResults.status === 'fulfilled' && atozResults.value?.length > 0) {
                 results.push(...atozResults.value);
                 sources.push('AtoZ');
+                logger.info(`AtoZ: ${atozResults.value.length} results for "${query}"`);
+            } else {
+                logger.warn(`AtoZ: ${atozResults.status === 'rejected' ? atozResults.reason?.message : 'no results'} for "${query}"`);
             }
 
             if (!results?.length) {
@@ -1109,7 +1113,7 @@ class MovieController {
             }, { quoted: originalMsg || undefined });
             this.scheduleDelete(sock, chatId, errSent.key);
 
-            logger.error(`Movie search error for "${query}": ${err.message}`);
+            logger.error(`Movie search error for "${query}": ${err.stack || err.message}`);
         }
     }
 

@@ -64,30 +64,36 @@ class PronoobDriveService {
         return new Promise((resolve, reject) => {
             const url = new URL(urlStr);
             const mod = url.protocol === 'https:' ? https : http;
+            let settled = false;
+            const done = (val) => { if (!settled) { settled = true; resolve(val); } };
+            const fail = (err) => { if (!settled) { settled = true; reject(err); } };
+
             const req = mod.request(
                 { hostname: url.hostname, port: url.port, path: url.pathname + url.search, method: 'GET' },
                 (res) => {
                     if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
                         const redirect = new URL(res.headers.location, urlStr).href;
                         res.resume();
-                        return this._fetch(redirect).then(resolve, reject);
+                        return this._fetch(redirect).then(done, fail);
                     }
                     let size = 0;
                     const chunks = [];
                     res.on('data', (c) => {
+                        if (settled) return;
                         size += c.length;
                         if (size > MAX_RESPONSE_BYTES) {
                             res.destroy();
-                            resolve({ status: res.statusCode, data: Buffer.concat(chunks).toString(), truncated: true });
+                            done({ status: res.statusCode, data: Buffer.concat(chunks).toString() });
                             return;
                         }
                         chunks.push(c);
                     });
-                    res.on('end', () => resolve({ status: res.statusCode, data: Buffer.concat(chunks).toString(), truncated: false }));
+                    res.on('end', () => done({ status: res.statusCode, data: Buffer.concat(chunks).toString() }));
+                    res.on('error', () => done({ status: res.statusCode, data: Buffer.concat(chunks).toString() }));
                 },
             );
-            req.on('error', reject);
-            req.setTimeout(REQUEST_TIMEOUT, () => { req.destroy(); reject(new Error('Request timeout')); });
+            req.on('error', fail);
+            req.setTimeout(REQUEST_TIMEOUT, () => { req.destroy(); fail(new Error('Request timeout')); });
             req.end();
         });
     }
