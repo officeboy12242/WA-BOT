@@ -1004,9 +1004,12 @@ class MovieController {
         const searchingMsg = await sock.sendMessage(chatId, { text: dialogue });
 
         try {
+            const withTimeout = (promise, ms) =>
+                Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
+
             const [driveResults, atozResults] = await Promise.allSettled([
-                pronoobDriveService.searchMovies(query, 5),
-                atozService.searchMovies(query, 3),
+                withTimeout(pronoobDriveService.searchMovies(query, 5), 8000),
+                withTimeout(atozService.searchMovies(query, 3), 8000),
             ]);
 
             let results = [];

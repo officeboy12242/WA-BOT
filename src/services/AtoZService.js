@@ -173,40 +173,28 @@ class AtoZService {
     async searchMovies(query, maxResults = 5) {
         try {
             const slugs = await this.search(query);
-            
+
             if (!slugs.length) {
                 return [];
             }
-            
+
+            const movies = await Promise.all(
+                slugs.slice(0, maxResults).map((slug) => this.getMovieBySlug(slug)),
+            );
+
             const results = [];
-            
-            // Get details for top results
-            for (const slug of slugs.slice(0, maxResults)) {
-                const movie = await this.getMovieBySlug(slug);
-                if (movie && movie.files.length > 0) {
-                    // Shorten all URLs in parallel
-                    const shortenedLinks = await Promise.all(
-                        movie.files.map(async (f) => {
-                            const shortUrl = await this._shortenUrl(f.url);
-                            return {
-                                size: `${f.quality} • ${f.size}`,
-                                url: shortUrl,
-                            };
-                        })
-                    );
-                    
-                    // Format for MovieController compatibility
-                    results.push({
-                        title: movie.title,
-                        source: 'AtoZ',
-                        links: shortenedLinks,
-                    });
-                }
-                
-                // Small delay between requests
-                await new Promise(r => setTimeout(r, 300));
+            for (const movie of movies) {
+                if (!movie || !movie.files.length) continue;
+                results.push({
+                    title: movie.title,
+                    source: 'AtoZ',
+                    links: movie.files.map((f) => ({
+                        size: `${f.quality} • ${f.size}`,
+                        url: f.url,
+                    })),
+                });
             }
-            
+
             return results;
         } catch (err) {
             logger.error(`AtoZ searchMovies error: ${err.message}`);
