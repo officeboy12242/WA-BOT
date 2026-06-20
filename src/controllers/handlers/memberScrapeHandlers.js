@@ -12,6 +12,16 @@ function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function formatError(err) {
+    if (!err) {
+        return 'Unknown error';
+    }
+    if (typeof err === 'string') {
+        return err;
+    }
+    return err.message || err.output?.payload?.message || String(err);
+}
+
 function sessionKey(chatId, senderJid) {
     return `${chatId}|${senderJid}`;
 }
@@ -29,6 +39,9 @@ function formatGroupList(groups, { stored = false } = {}) {
         const count = stored ? group.stored_count : group.member_count;
         text += `*${index + 1}.* ${group.group_name}\n`;
         text += `   👥 ${count} member(s)`;
+        if (stored && group.dm_count != null) {
+            text += `\n   📱 DM-able: ${group.dm_count}`;
+        }
         if (stored && group.scraped_at) {
             text += `\n   📅 Last scraped: ${new Date(group.scraped_at).toLocaleString('en-IN', {
                 timeZone: 'Asia/Kolkata',
@@ -109,67 +122,111 @@ export async function handleScrapMembers(sock, chatId, senderJid, { memberScrape
 }
 
 export async function handleBroadcast(sock, chatId, senderJid, args, { memberScrapeController, isOwnerFromJid, originalMsg }) {
-    const isOwner = await isOwnerFromJid(sock, chatId, senderJid);
-    if (!isOwner) {
-        await sock.sendMessage(chatId, { text: '❌ Only bot owners can send member broadcasts.' }, { quoted: originalMsg });
-        return;
-    }
+    try {
+        const isOwner = await isOwnerFromJid(sock, chatId, senderJid);
+        if (!isOwner) {
+            await sock.sendMessage(chatId, { text: '❌ Only bot owners can send member broadcasts.' }, { quoted: originalMsg });
+            return;
+        }
 
-    if (!memberScrapeController) {
-        await sock.sendMessage(chatId, { text: '⚠️ Member broadcast is not configured.' }, { quoted: originalMsg });
-        return;
-    }
+        if (!memberScrapeController) {
+            await sock.sendMessage(chatId, { text: '⚠️ Member broadcast is not configured.' }, { quoted: originalMsg });
+            return;
+        }
 
-    const groupIndex = parseInt(args[0], 10);
-    const message = args.slice(1).join(' ').trim();
+        const groupIndex = parseInt(args[0], 10);
+        const message = args.slice(1).join(' ').trim();
 
-    if (!Number.isFinite(groupIndex) || groupIndex < 1 || !message) {
+        if (!Number.isFinite(groupIndex) || groupIndex < 1 || !message) {
+            await sock.sendMessage(chatId, {
+                text:
+                    '❌ Usage: `/broadcast <group#> <message>`\n\n' +
+                    'Use `/scrapmembers` to see group numbers from scraped data.',
+            }, { quoted: originalMsg });
+            return;
+        }
+
+        const groups = await memberScrapeController.getStoredGroupsWithCounts();
+        const selected = groups[groupIndex - 1];
+        if (!selected) {
+            await sock.sendMessage(chatId, {
+                text: groups.length
+                    ? `❌ Invalid group number. Choose 1–${groups.length}.`
+                    : '❌ No scraped groups yet. Run `/scrap` first.',
+            }, { quoted: originalMsg });
+            return;
+        }
+
+        const targets = await memberScrapeController.getDmTargets(selected.group_id);
+        if (!targets.length) {
+            await sock.sendMessage(chatId, {
+                text:
+                    `📭 No valid phone numbers found for *${selected.group_name}*.\n\n` +
+                    'Re-run `/scrap` on that group — members with LID-only privacy cannot be DM\'d.',
+            }, { quoted: originalMsg });
+            return;
+        }
+
         await sock.sendMessage(chatId, {
             text:
-                '❌ Usage: `/broadcast <group#> <message>`\n\n' +
-                'Use `/scrapmembers` to see group numbers from scraped data.',
+                `📤 Broadcasting to *${targets.length}* member(s) from *${selected.group_name}*...\n\n` +
+                '_Running in background. You will get a summary when done._',
         }, { quoted: originalMsg });
-        return;
-    }
 
-    const groups = await memberScrapeController.getStoredGroupsWithCounts();
-    const selected = groups[groupIndex - 1];
-    if (!selected) {
-        await sock.sendMessage(chatId, { text: `❌ Invalid group number. Choose 1–${groups.length}.` }, { quoted: originalMsg });
-        return;
-    }
-
-    const targets = await memberScrapeController.getDmTargets(selected.group_id);
-    if (!targets.length) {
+        void runBroadcastJob(sock, chatId, selected, message, targets).catch((err) => {
+            logger.error(`Broadcast job error: ${formatError(err)}`);
+        });
+    } catch (err) {
+        logger.error(`Broadcast command failed: ${formatError(err)}`);
         await sock.sendMessage(chatId, {
-            text: `📭 No DM targets found for *${selected.group_name}*. Run /scrap again.`,
+            text: `❌ Broadcast failed: ${formatError(err)}`,
         }, { quoted: originalMsg });
-        return;
     }
+}
 
-    await sock.sendMessage(chatId, {
-        text: `📤 Broadcasting to *${targets.length}* member(s) from *${selected.group_name}*...\n\n_This may take a few minutes._`,
-    }, { quoted: originalMsg });
-
+async function runBroadcastJob(sock, chatId, selected, message, targets) {
     let sent = 0;
     let failed = 0;
 
-    for (const targetJid of targets) {
-        try {
-            await sock.sendMessage(targetJid, { text: message });
-            sent++;
+    try {
+        for (const targetJid of targets) {
+            if (!sock) {
+                throw new Error('WhatsApp disconnected during broadcast');
+            }
+
+            try {
+                await sock.sendMessage(targetJid, { text: message });
+                sent++;
+            } catch (err) {
+                failed++;
+                logger.warn(`Broadcast failed for ${targetJid}: ${formatError(err)}`);
+            }
+
             await delay(BROADCAST_DELAY_MS);
-        } catch (err) {
-            failed++;
-            logger.warn(`Broadcast failed for ${targetJid}: ${err.message}`);
+        }
+
+        await sock.sendMessage(chatId, {
+            text:
+                `✅ Broadcast done for *${selected.group_name}*\n\n` +
+                `📤 Sent: *${sent}*\n` +
+                `❌ Failed: *${failed}*`,
+        });
+
+        logger.info(`Broadcast to ${selected.group_name}: sent=${sent}, failed=${failed}`);
+    } catch (err) {
+        logger.error(`Broadcast job failed: ${formatError(err)}`);
+        try {
+            await sock?.sendMessage(chatId, {
+                text:
+                    `❌ Broadcast stopped for *${selected.group_name}*\n\n` +
+                    `📤 Sent: *${sent}*\n` +
+                    `❌ Failed: *${failed}*\n` +
+                    `⚠️ Error: ${formatError(err)}`,
+            });
+        } catch (notifyErr) {
+            logger.error(`Could not send broadcast failure notice: ${formatError(notifyErr)}`);
         }
     }
-
-    await sock.sendMessage(chatId, {
-        text: `✅ Broadcast done for *${selected.group_name}*\n\n📤 Sent: *${sent}*\n❌ Failed: *${failed}*`,
-    });
-
-    logger.info(`Broadcast to ${selected.group_name}: sent=${sent}, failed=${failed}`);
 }
 
 export async function handlePendingScrapSelection(sock, chatId, senderJid, text, { memberScrapeController, pendingScrapSessions, isOwnerFromJid, originalMsg }) {

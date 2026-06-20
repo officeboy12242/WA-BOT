@@ -3,22 +3,35 @@
  */
 
 import { logger } from '../utils/logger.js';
-import { normalizePhoneNumber } from '../utils/permissions.js';
+import { extractPhoneNumber, normalizePhoneNumber } from '../utils/permissions.js';
+
+function participantToPhone(participant) {
+    const fromPn = extractPhoneNumber(participant.phoneNumber || participant.pn || '');
+    if (/^\d{10,15}$/.test(fromPn)) {
+        return fromPn;
+    }
+    const id = participant.id || '';
+    if (id.includes('@lid')) {
+        return '';
+    }
+    const fromId = extractPhoneNumber(id);
+    return /^\d{10,15}$/.test(fromId) ? fromId : '';
+}
 
 function dmJidForMember(member) {
     const phone = normalizePhoneNumber(member.phone);
     if (/^\d{10,15}$/.test(phone)) {
         return `${phone}@s.whatsapp.net`;
     }
-    if (member.jid?.endsWith('@s.whatsapp.net')) {
-        return member.jid;
+
+    const jid = member.jid || '';
+    if (jid.endsWith('@s.whatsapp.net')) {
+        const phoneFromJid = extractPhoneNumber(jid.split(':')[0]);
+        if (/^\d{10,15}$/.test(phoneFromJid)) {
+            return `${phoneFromJid}@s.whatsapp.net`;
+        }
     }
-    if (member.lid) {
-        return member.lid.includes('@') ? member.lid : `${member.lid}@lid`;
-    }
-    if (member.jid?.endsWith('@lid')) {
-        return member.jid;
-    }
+
     return '';
 }
 
@@ -73,7 +86,8 @@ class MemberScrapeController {
         const rows = [];
         for (const group of groups) {
             const count = await this.groupMemberDatabase.getMemberCount(group.group_id);
-            rows.push({ ...group, stored_count: count });
+            const dmCount = (await this.getDmTargets(group.group_id)).length;
+            rows.push({ ...group, stored_count: count, dm_count: dmCount });
         }
         return rows;
     }
