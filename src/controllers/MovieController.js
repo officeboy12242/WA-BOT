@@ -1042,13 +1042,13 @@ class MovieController {
                 sources.push('AtoZ');
             }
 
-            try {
-                await sock.sendMessage(chatId, { delete: searchingMsg.key });
-            } catch {}
-
             if (!results?.length) {
+                try {
+                    await sock.sendMessage(chatId, { delete: searchingMsg.key });
+                } catch {}
+
                 const noResult = getRandomDialogue(NO_RESULTS_DIALOGUES);
-                const noSent = await sock.sendMessage(chatId, { text: noResult });
+                const noSent = await sock.sendMessage(chatId, { text: noResult }, { quoted: originalMsg || undefined });
                 this.scheduleDelete(sock, chatId, noSent.key);
                 if (!unlimited) await this.incrementSearchCount(normalizedUserId);
                 void this.logSearch(normalizedUserId, query, 0, chatId);
@@ -1061,33 +1061,54 @@ class MovieController {
             void this._notifySearchLog(sock, normalizedUserId, query, results.length, chatId, pushName);
 
             const resultMessages = formatMovieResults(query, results, pushName, sources);
+            if (!resultMessages.length) {
+                try {
+                    await sock.sendMessage(chatId, { delete: searchingMsg.key });
+                } catch {}
+                const errSent = await sock.sendMessage(chatId, {
+                    text: '⚠️ Found movies but could not format results. Try again.',
+                }, { quoted: originalMsg || undefined });
+                this.scheduleDelete(sock, chatId, errSent.key);
+                return;
+            }
+
             const footer = unlimited
                 ? '\n\n⭐ _Unlimited searches (Premium/Staff)_'
                 : `\n\n🔢 _Searches left today: *${remaining}* / ${DAILY_LIMIT}_`;
-            
-            // Send all result messages
+
+            let sentCount = 0;
             for (let i = 0; i < resultMessages.length; i++) {
                 let text = resultMessages[i];
-                
-                // Add footer to last message
                 if (i === resultMessages.length - 1) {
                     text += footer;
                 }
-                
-                const sent = await sock.sendMessage(chatId, {
-                    text,
-                    mentions: i === 0 ? [senderJid] : undefined,
-                }, i === 0 ? { quoted: originalMsg || undefined } : undefined);
-                
-                this.scheduleDelete(sock, chatId, sent.key);
-                
-                // Small delay between messages to avoid rate limiting
-                if (i < resultMessages.length - 1) {
-                    await new Promise(r => setTimeout(r, 500));
+
+                try {
+                    const sent = await sock.sendMessage(chatId, {
+                        text,
+                    }, i === 0 ? { quoted: originalMsg || undefined } : undefined);
+
+                    if (sent?.key) {
+                        sentCount++;
+                        this.scheduleDelete(sock, chatId, sent.key);
+                    }
+
+                    if (i < resultMessages.length - 1) {
+                        await new Promise(r => setTimeout(r, 500));
+                    }
+                } catch (sendErr) {
+                    logger.error(`Movie result send failed (part ${i + 1}/${resultMessages.length}): ${sendErr.message}`);
+                    if (sentCount === 0) {
+                        throw sendErr;
+                    }
                 }
             }
 
-            logger.info(`🎬 Movie search "${query}" by ${userId} → ${results.length} results from [${sources.join(', ')}] (${resultMessages.length} msg(s), ${remaining} left)`);
+            try {
+                await sock.sendMessage(chatId, { delete: searchingMsg.key });
+            } catch {}
+
+            logger.info(`🎬 Movie search "${query}" by ${userId} → ${results.length} results from [${sources.join(', ')}] (${sentCount}/${resultMessages.length} msg(s), ${remaining} left)`);
         } catch (err) {
             try {
                 await sock.sendMessage(chatId, { delete: searchingMsg.key });
@@ -1100,7 +1121,7 @@ class MovieController {
             ];
             const errSent = await sock.sendMessage(chatId, {
                 text: getRandomDialogue(errorDialogues),
-            });
+            }, { quoted: originalMsg || undefined });
             this.scheduleDelete(sock, chatId, errSent.key);
 
             logger.error(`Movie search error for "${query}": ${err.message}`);
