@@ -404,6 +404,7 @@ class GroupManager {
                     activated_at: new Date(),
                     is_active: true,
                     news_enabled: true,
+                    github_trending: true,
                 },
                 $setOnInsert: {
                     group_id: groupId,
@@ -510,6 +511,46 @@ class GroupManager {
         return this.groups
             .find(
                 { is_active: true, news_enabled: { $ne: false } },
+                { projection: { _id: 0 } }
+            )
+            .sort({ activated_at: -1 })
+            .toArray();
+    }
+
+    async setGithubTrendingEnabled(groupId, groupName, enabled, setBy) {
+        await this.groups.updateOne(
+            { group_id: groupId },
+            {
+                $set: {
+                    group_name: groupName,
+                    github_trending: enabled,
+                    github_trending_by: setBy,
+                    github_trending_at: new Date(),
+                },
+                $setOnInsert: { group_id: groupId, is_active: false },
+            },
+            { upsert: true }
+        );
+        logger.info(
+            `${enabled ? '🐙 GitHub trending ON' : '🐙 GitHub trending OFF'}: ${groupName} (${groupId}) by ${setBy}`
+        );
+    }
+
+    async isGithubTrendingEnabled(groupId) {
+        const row = await this.groups.findOne(
+            { group_id: groupId },
+            { projection: { github_trending: 1, is_active: 1 } }
+        );
+        if (!row?.is_active) {
+            return false;
+        }
+        return row.github_trending !== false;
+    }
+
+    async getGithubTrendingGroups() {
+        return this.groups
+            .find(
+                { is_active: true, github_trending: { $ne: false } },
                 { projection: { _id: 0 } }
             )
             .sort({ activated_at: -1 })

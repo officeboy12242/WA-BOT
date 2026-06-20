@@ -218,3 +218,42 @@ export async function handleNews(sock, chatId, senderJid, { newsController, grou
         await sock.sendMessage(chatId, { text: 'Could not fetch tech news right now. Try again later.' });
     }
 }
+
+export async function handleGithub(sock, chatId, senderJid, { githubTrendingController, groupManager }) {
+    try {
+        if (!githubTrendingController) {
+            await sock.sendMessage(chatId, { text: 'GitHub trending is not configured on this bot.' });
+            return;
+        }
+
+        const repos = await githubTrendingController.fetchTrendingRepos();
+        if (!repos.length) {
+            await sock.sendMessage(chatId, { text: '📭 No GitHub trending repos found right now. Try again later.' });
+            return;
+        }
+
+        await githubTrendingController.previewAll(sock, chatId, repos);
+        logger.info(`GitHub trending preview (${repos.length} repos) sent to ${chatId}`);
+
+        const canPost = await groupManager.canManualPostNews(senderJid);
+        if (!canPost) return;
+
+        const { posted, groups, messages } = await githubTrendingController.postAllReposIndividually(sock, repos);
+        if (groups === 0) {
+            await sock.sendMessage(chatId, {
+                text: 'ℹ️ Preview only — no groups with GitHub trending enabled. Use `/activate` and `/githubon` first.',
+            });
+            return;
+        }
+
+        await sock.sendMessage(chatId, {
+            text:
+                messages > 0
+                    ? `✅ Posted *${repos.length}* GitHub trending repos individually to *${posted}* group(s).`
+                    : 'ℹ️ Could not post to any GitHub-enabled groups.',
+        });
+    } catch (error) {
+        logger.error(`Error handling github command: ${error.message}`);
+        await sock.sendMessage(chatId, { text: 'Could not fetch GitHub trending right now. Try again later.' });
+    }
+}

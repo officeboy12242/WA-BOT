@@ -21,11 +21,13 @@ import LogManager from './src/services/LogManager.js';
 import StickerForwarder from './src/services/StickerForwarder.js';
 import ChannelStickerPoller from './src/services/ChannelStickerPoller.js';
 import { startNewsScheduler } from './src/utils/newsScheduler.js';
+import { startGithubScheduler } from './src/utils/githubScheduler.js';
 import { startMorningScheduler } from './src/utils/morningScheduler.js';
 import MorningMessageDatabase from './src/models/MorningMessageDatabase.js';
 import MorningMessageScraper from './src/services/MorningMessageScraper.js';
 import MorningMessageController from './src/controllers/MorningMessageController.js';
 import MovieController from './src/controllers/MovieController.js';
+import GitHubTrendingController from './src/controllers/GitHubTrendingController.js';
 import UserManager from './src/models/UserManager.js';
 import StickerController from './src/controllers/StickerController.js';
 import BotSettings from './src/models/BotSettings.js';
@@ -38,6 +40,10 @@ const botState = {
     lastNewsCheckTime: null,
     lastNewsPostSlot: null,
     lastMorningPostSlot: null,
+    lastGithubPostSlot: null,
+    lastGithubPostSlots: {},
+    lastGithubCheckTime: null,
+    githubTrendingCache: null,
 };
 
 // ─── Main Application ─────────────────────────────────────────────────────────
@@ -57,6 +63,7 @@ class WhatsAppCourseBot {
         this.logManager = new LogManager('bot.log', '917887499710', 600000, 14400000); // Check every 10 min, delete after 4 hours
         this.checkInterval = null;
         this.newsScheduler = null;
+        this.githubScheduler = null;
         this.morningScheduler = null;
         this.morningDatabase = null;
         this.stickerController = null;
@@ -119,6 +126,7 @@ class WhatsAppCourseBot {
                 config,
                 this.groupManager
             );
+            this.githubTrendingController = new GitHubTrendingController(config, this.groupManager);
             this.movieController = new MovieController(mongoDb, this.groupManager);
             await this.movieController.init();
             
@@ -132,7 +140,8 @@ class WhatsAppCourseBot {
                 this.movieController,
                 this.userManager,
                 this.stickerController,
-                this.botSettings
+                this.botSettings,
+                this.githubTrendingController
             );
             this.courseController = new CourseController(this.database, this.courseAPI, config, this.groupManager);
             const morningScraper = new MorningMessageScraper(this.morningDatabase);
@@ -188,8 +197,11 @@ class WhatsAppCourseBot {
             const morningInfo = config.MORNING_MESSAGES_ENABLED && config.MORNING_MESSAGE_NUMBERS.length
                 ? ` Morning msgs ${config.MORNING_MESSAGE_TIME_START}–${config.MORNING_MESSAGE_TIME_END} random (${config.MORNING_TIMEZONE}) to ${config.MORNING_MESSAGE_NUMBERS.length} number(s).`
                 : '';
+            const githubInfo = config.GITHUB_TRENDING_ENABLED
+                ? ` GitHub trending (${config.GITHUB_TRENDING_COUNT} repos) at ${config.GITHUB_TRENDING_TIMES.join(', ')} (${config.GITHUB_TRENDING_TIMEZONE}).`
+                : '';
             logger.info(
-                `🤖 Bot is ready! Courses every ${config.CHECK_INTERVAL}s. Tech news at ${config.NEWS_POST_TIMES.join(', ')} (${config.NEWS_TIMEZONE}).${morningInfo}`
+                `🤖 Bot is ready! Courses every ${config.CHECK_INTERVAL}s. Tech news at ${config.NEWS_POST_TIMES.join(', ')} (${config.NEWS_TIMEZONE}).${githubInfo}${morningInfo}`
             );
 
             const sock = this.whatsappService.getSock();
@@ -202,6 +214,13 @@ class WhatsAppCourseBot {
                 getSock: () => this.whatsappService.getSock(),
                 botState,
                 newsController: this.newsController,
+                config,
+            });
+
+            this.githubScheduler = startGithubScheduler({
+                getSock: () => this.whatsappService.getSock(),
+                botState,
+                githubController: this.githubTrendingController,
                 config,
             });
 
@@ -241,6 +260,9 @@ class WhatsAppCourseBot {
         }
         if (this.newsScheduler) {
             this.newsScheduler.stop();
+        }
+        if (this.githubScheduler) {
+            this.githubScheduler.stop();
         }
         if (this.morningScheduler) {
             this.morningScheduler.stop();

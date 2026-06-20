@@ -116,6 +116,13 @@ export const COMMAND_REGISTRY = [
         help: 'Preview 10 tech news items; staff post to news-enabled groups',
     },
     {
+        names: ['/github'],
+        key: 'github',
+        scope: 'any',
+        role: 'anyone',
+        help: 'Preview top 5 GitHub trending repos individually; staff post to github-enabled groups',
+    },
+    {
         names: ['/horo', '/horoscope'],
         key: 'horo',
         scope: 'any',
@@ -163,6 +170,20 @@ export const COMMAND_REGISTRY = [
         scope: 'group_only',
         role: 'staff',
         help: 'Disable tech news only — courses continue',
+    },
+    {
+        names: ['/githubon'],
+        key: 'githubon',
+        scope: 'group_only',
+        role: 'staff',
+        help: 'Enable daily GitHub trending repos in this group',
+    },
+    {
+        names: ['/githuboff'],
+        key: 'githuboff',
+        scope: 'group_only',
+        role: 'staff',
+        help: 'Disable GitHub trending only — courses continue',
     },
     {
         names: ['/instaon'],
