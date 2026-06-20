@@ -4,6 +4,7 @@
 
 import { logger } from '../utils/logger.js';
 import { formatGitHubRepoMessage } from '../utils/githubFormatter.js';
+import { sendTextWithLinkPreview } from '../utils/linkPreview.js';
 import GitHubTrendingService from '../services/GitHubTrendingService.js';
 
 const GROUP_DELAY_MS = 500;
@@ -41,7 +42,7 @@ class GitHubTrendingController {
 
     async sendRepoMessage(sock, chatId, repo, index, total) {
         const text = formatGitHubRepoMessage(repo, index, total);
-        await sock.sendMessage(chatId, { text });
+        await sendTextWithLinkPreview(sock, chatId, text, repo.url);
     }
 
     async postSingleRepoToGroups(sock, repo, index, total) {
