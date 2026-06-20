@@ -15,10 +15,11 @@ import { atozService } from '../services/AtoZService.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const QR_IMAGE_PATH = resolve(__dirname, '../../assets/payment_qr.jpg');
 
-// Primary Drive API disabled — will re-enable when self-hosted instance is ready
-// const MOVIE_API = 'https://pronoob-drive.vercel.app/?name=';
+const MOVIE_API = 'https://pronoobdrive-7w2p.onrender.com/?name=';
+const PRIMARY_API_TIMEOUT_MS = 10000;
 const DAILY_LIMIT = 5;
 const AUTO_DELETE_MS = 5 * 60 * 60 * 1000; // 5 hours
+const KEEP_ALIVE_INTERVAL_MS = 4 * 60 * 1000;
 const SUMMARY_HOUR = 23;
 const SUMMARY_MINUTE = 55;
 const WEEKLY_DAY = 0; // Sunday
@@ -469,7 +470,16 @@ class MovieController {
     }
 
     _startKeepAlive() {
-        // Primary API (Drive) disabled — keep-alive is a no-op until re-enabled
+        const ping = async () => {
+            try {
+                await axios.get(MOVIE_API + 'ping', { timeout: 10000 });
+                logger.info('🏓 Movie API keep-alive ping OK');
+            } catch {
+                logger.warn('🏓 Movie API keep-alive ping failed (will retry)');
+            }
+        };
+        ping();
+        this._keepAliveTimer = setInterval(ping, KEEP_ALIVE_INTERVAL_MS);
     }
 
     stopKeepAlive() {
@@ -1008,13 +1018,26 @@ class MovieController {
         const searchingMsg = await sock.sendMessage(chatId, { text: dialogue });
 
         try {
-            const atozResults = await atozService.searchMovies(query, 5);
+            const [primaryResponse, atozResults] = await Promise.allSettled([
+                axios.get(`${MOVIE_API}${encodeURIComponent(query)}`, { timeout: PRIMARY_API_TIMEOUT_MS }),
+                atozService.searchMovies(query, 3),
+            ]);
 
             let results = [];
             const sources = [];
 
-            if (atozResults?.length > 0) {
-                results.push(...atozResults);
+            if (primaryResponse.status === 'fulfilled') {
+                const primaryData = primaryResponse.value?.data?.data?.data || [];
+                if (primaryData.length > 0) {
+                    results.push(...primaryData.map(item => ({ ...item, source: 'Drive' })));
+                    sources.push('Drive');
+                }
+            } else {
+                logger.warn(`Drive API failed: ${primaryResponse.reason?.message || 'unknown'}`);
+            }
+
+            if (atozResults.status === 'fulfilled' && atozResults.value?.length > 0) {
+                results.push(...atozResults.value);
                 sources.push('AtoZ');
             }
 
