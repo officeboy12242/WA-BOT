@@ -95,15 +95,13 @@ class WhatsAppService {
     _startMessageCleanup() {
         if (this._messageCleanupInterval) return;
         
-        // Clear old message IDs every 10 minutes
         this._messageCleanupInterval = setInterval(() => {
-            if (this._processedMessages.size > 5000) {
-                // Keep only the last 1000 messages
+            if (this._processedMessages.size > 1000) {
                 const arr = [...this._processedMessages];
-                this._processedMessages = new Set(arr.slice(-1000));
+                this._processedMessages = new Set(arr.slice(-500));
                 logger.debug(`Message dedup cache trimmed: ${arr.length} → ${this._processedMessages.size}`);
             }
-        }, 10 * 60 * 1000);
+        }, 5 * 60 * 1000);
     }
     
     /**
@@ -184,12 +182,14 @@ class WhatsAppService {
 
         this.sock = makeWASocket({
             version,
-            logger: pino({ level: 'silent' }), // Reduce Baileys logging
+            logger: pino({ level: 'silent' }),
             auth: {
                 creds: state.creds,
-                keys: makeCacheableSignalKeyStore(state.keys, logger),
+                keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
             },
-            generateHighQualityLinkPreview: true,
+            generateHighQualityLinkPreview: false,
+            syncFullHistory: false,
+            markOnlineOnConnect: false,
             options: { timeout: 20000 },
         });
 

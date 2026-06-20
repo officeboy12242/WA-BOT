@@ -9,6 +9,7 @@ import { logger } from '../utils/logger.js';
 const BASE_URL = 'https://atoz.cinemaz.workers.dev';
 const REQUEST_TIMEOUT = 15000;
 const TINYURL_API = 'https://tinyurl.com/api-create.php?url=';
+const MAX_URL_CACHE_SIZE = 500;
 
 class AtoZService {
     constructor() {
@@ -28,6 +29,10 @@ class AtoZService {
         try {
             const result = await this._fetch(`${TINYURL_API}${encodeURIComponent(longUrl)}`);
             if (result.status === 200 && result.data.startsWith('https://tinyurl.com/')) {
+                if (this._shortUrlCache.size >= MAX_URL_CACHE_SIZE) {
+                    const oldest = this._shortUrlCache.keys().next().value;
+                    this._shortUrlCache.delete(oldest);
+                }
                 this._shortUrlCache.set(longUrl, result.data);
                 return result.data;
             }

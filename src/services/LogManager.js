@@ -83,34 +83,23 @@ class LogManager {
                 return;
             }
 
-            // Read log file content
-            const logContent = fs.readFileSync(this.logFilePath, 'utf-8');
-            const logLines = logContent.split('\n');
-            const totalLines = logLines.length;
-
-            // Get file size
             const stats = fs.statSync(this.logFilePath);
             const fileSizeKB = (stats.size / 1024).toFixed(2);
 
-            // Create summary message
             let message = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
             message += '📋 *BOT LOG REPORT* 📋\n';
             message += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
             message += `📅 *Date:* ${new Date().toLocaleString()}\n`;
-            message += `📊 *Total Lines:* ${totalLines}\n`;
             message += `💾 *File Size:* ${fileSizeKB} KB\n\n`;
             message += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
             message += '📎 Log file attached below';
 
-            // Format admin number for WhatsApp
             const adminJid = `${this.adminNumber}@s.whatsapp.net`;
-
-            // Send summary message
             await this.sock.sendMessage(adminJid, { text: message });
 
-            // Send log file as document
+            const fileBuffer = fs.readFileSync(this.logFilePath);
             await this.sock.sendMessage(adminJid, {
-                document: fs.readFileSync(this.logFilePath),
+                document: fileBuffer,
                 fileName: `bot-log-${Date.now()}.log`,
                 mimetype: 'text/plain',
                 caption: '📋 Bot Log File'

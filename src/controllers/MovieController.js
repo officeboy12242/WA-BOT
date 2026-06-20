@@ -444,7 +444,7 @@ class MovieController {
         this.mongoDb = mongoDb;
         this.groupManager = groupManager;
         this.searchLimits = null;
-        this.scheduledDeletes = [];
+        this._activeDeleteTimers = 0;
     }
 
     async init() {
@@ -938,7 +938,9 @@ class MovieController {
     scheduleDelete(sock, chatId, messageKey, delayMs = AUTO_DELETE_MS) {
         if (!isGroupMessage(chatId)) return;
 
-        const timer = setTimeout(async () => {
+        this._activeDeleteTimers++;
+        setTimeout(async () => {
+            this._activeDeleteTimers--;
             try {
                 await sock.sendMessage(chatId, { delete: messageKey });
                 logger.info(`🗑️ Auto-deleted movie result in ${chatId}`);
@@ -946,8 +948,6 @@ class MovieController {
                 logger.error(`Failed to auto-delete movie msg: ${err.message}`);
             }
         }, delayMs);
-
-        this.scheduledDeletes.push(timer);
     }
 
     async _resolvePhoneNumber(sock, chatId, senderJid) {
