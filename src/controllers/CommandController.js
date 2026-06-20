@@ -227,7 +227,9 @@ class CommandController {
             case 'channels':      await handleChannels(sock, chatId, senderJid, ctx); break;
             case 'scrap':         await handleScrap(sock, chatId, senderJid, args, ctx); break;
             case 'scrapmembers':  await handleScrapMembers(sock, chatId, senderJid, ctx); break;
-            case 'broadcast':     await handleBroadcast(sock, chatId, senderJid, args, ctx); break;
+            case 'broadcast':     void handleBroadcast(sock, chatId, senderJid, args, ctx).catch((err) => {
+                logger.error(`Broadcast handler error: ${err?.message || err?.output?.payload?.message || String(err)}`);
+            }); break;
 
             /* ── Instagram / News / Movie ── */
             case 'insta': await _handleInsta(sock, chatId, args, originalMsg); break;

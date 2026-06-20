@@ -5,6 +5,19 @@
 import { logger } from '../utils/logger.js';
 import { extractPhoneNumber, normalizePhoneNumber } from '../utils/permissions.js';
 
+function participantToPhone(participant) {
+    const fromPn = extractPhoneNumber(participant.phoneNumber || participant.pn || '');
+    if (/^\d{10,15}$/.test(fromPn)) {
+        return fromPn;
+    }
+    const id = participant.id || '';
+    if (id.includes('@lid')) {
+        return '';
+    }
+    const fromId = extractPhoneNumber(id);
+    return /^\d{10,15}$/.test(fromId) ? fromId : '';
+}
+
 function memberKeyFromFields({ phone, jid }) {
     const normalized = normalizePhoneNumber(phone);
     if (normalized) {
@@ -43,7 +56,7 @@ class GroupMemberDatabase {
 
         for (const participant of participants) {
             const jid = participant.id || '';
-            const phone = extractPhoneNumber(participant.phoneNumber || participant.pn || participant.id);
+            const phone = participantToPhone(participant);
             const memberKey = memberKeyFromFields({ phone, jid });
             if (!memberKey) {
                 continue;
