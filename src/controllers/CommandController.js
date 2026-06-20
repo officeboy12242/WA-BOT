@@ -64,10 +64,18 @@ import {
     handleGithub,
 } from './handlers/instaHandlers.js';
 
+import {
+    handleScrap,
+    handleScrapMembers,
+    handleBroadcast,
+    handlePendingScrapSelection,
+    createScrapSessionStore,
+} from './handlers/memberScrapeHandlers.js';
+
 import { horoscopeService } from '../services/HoroscopeService.js';
 
 class CommandController {
-    constructor(database, botState, groupManager, newsController = null, movieController = null, userManager = null, stickerController = null, botSettings = null, githubTrendingController = null) {
+    constructor(database, botState, groupManager, newsController = null, movieController = null, userManager = null, stickerController = null, botSettings = null, githubTrendingController = null, memberScrapeController = null) {
         this.database = database;
         this.botState = botState;
         this.groupManager = groupManager;
@@ -77,7 +85,9 @@ class CommandController {
         this.stickerController = stickerController;
         this.botSettings = botSettings;
         this.githubTrendingController = githubTrendingController;
+        this.memberScrapeController = memberScrapeController;
         this.pendingClearConfirmations = new Map();
+        this.pendingScrapSessions = createScrapSessionStore();
         this.botStartTime = Date.now();
 
         this._isOwnerFromJid = this._isOwnerFromJid.bind(this);
@@ -113,14 +123,25 @@ class CommandController {
             groupManager: this.groupManager,
             newsController: this.newsController,
             githubTrendingController: this.githubTrendingController,
+            memberScrapeController: this.memberScrapeController,
             movieController: this.movieController,
             userManager: this.userManager,
             stickerController: this.stickerController,
             botSettings: this.botSettings,
             pendingClearConfirmations: this.pendingClearConfirmations,
+            pendingScrapSessions: this.pendingScrapSessions,
             botStartTime: this.botStartTime,
             isOwnerFromJid: this._isOwnerFromJid,
         };
+    }
+
+    async tryHandlePendingInput(sock, chatId, messageText, senderJid, originalMsg = null) {
+        if (!messageText?.trim() || messageText.trim().startsWith('/')) {
+            return false;
+        }
+
+        const ctx = { ...this._ctx(), originalMsg };
+        return handlePendingScrapSelection(sock, chatId, senderJid, messageText.trim(), ctx);
     }
 
     async handleGroupParticipantsUpdate(sock, update) {
@@ -204,6 +225,9 @@ class CommandController {
             case 'addchannel':    await handleAddChannel(sock, chatId, args, senderJid, ctx); break;
             case 'removechannel': await handleRemoveChannel(sock, chatId, args, senderJid, ctx); break;
             case 'channels':      await handleChannels(sock, chatId, senderJid, ctx); break;
+            case 'scrap':         await handleScrap(sock, chatId, senderJid, args, ctx); break;
+            case 'scrapmembers':  await handleScrapMembers(sock, chatId, senderJid, ctx); break;
+            case 'broadcast':     await handleBroadcast(sock, chatId, senderJid, args, ctx); break;
 
             /* ── Instagram / News / Movie ── */
             case 'insta': await _handleInsta(sock, chatId, args, originalMsg); break;
