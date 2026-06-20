@@ -468,10 +468,12 @@ class MovieController {
     }
 
     _startKeepAlive() {
-        pronoobDriveService.warmUp();
+        pronoobDriveService.startKeepAlive();
     }
 
-    stopKeepAlive() {}
+    stopKeepAlive() {
+        pronoobDriveService.stopKeepAlive();
+    }
 
     async logSearch(userId, query, resultCount, chatId) {
         try {

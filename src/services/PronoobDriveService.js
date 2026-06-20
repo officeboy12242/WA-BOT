@@ -140,9 +140,23 @@ class PronoobDriveService {
         }
     }
 
-    /** Keep-alive ping to prevent Render from sleeping. */
-    warmUp() {
-        this._fetch(`${BASE_URL}/Sct?search=ping`).catch(() => {});
+    /** Periodic ping to prevent Render from sleeping. */
+    startKeepAlive(intervalMs = 4 * 60 * 1000) {
+        this.stopKeepAlive();
+        const ping = () => {
+            this._fetch(`${BASE_URL}/Sct?search=ping`)
+                .then(() => logger.info('🏓 Drive keep-alive ping OK'))
+                .catch(() => logger.warn('🏓 Drive keep-alive ping failed (will retry)'));
+        };
+        ping();
+        this._keepAliveTimer = setInterval(ping, intervalMs);
+    }
+
+    stopKeepAlive() {
+        if (this._keepAliveTimer) {
+            clearInterval(this._keepAliveTimer);
+            this._keepAliveTimer = null;
+        }
     }
 }
 
