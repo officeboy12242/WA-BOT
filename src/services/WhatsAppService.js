@@ -190,6 +190,7 @@ class WhatsAppService {
                 keys: makeCacheableSignalKeyStore(state.keys, logger),
             },
             generateHighQualityLinkPreview: true,
+            options: { timeout: 20000 },
         });
 
         this.setupEventHandlers(saveCreds);
