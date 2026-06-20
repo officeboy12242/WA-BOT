@@ -112,6 +112,7 @@ class AdminPanel {
         this.connectedPhone = null;
         this.authDatabase = null;
         this.whatsappService = null;
+        this.shortLinkService = null;
         this.adminToken = process.env.ADMIN_TOKEN || 'sassy123';
         this.lastActivity = new Date();
     }
@@ -122,6 +123,10 @@ class AdminPanel {
 
     setWhatsAppService(waService) {
         this.whatsappService = waService;
+    }
+
+    setShortLinkService(shortLinkService) {
+        this.shortLinkService = shortLinkService;
     }
 
     updateQR(qr, qrText = null) {
@@ -492,6 +497,31 @@ class AdminPanel {
 `;
                 res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
                 res.end(asciiArt);
+                return;
+            }
+
+            // Short link redirect (no auth — public movie download links)
+            if (pathname.startsWith('/d/')) {
+                const code = pathname.slice(3).split('/')[0];
+                if (!this.shortLinkService) {
+                    res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' });
+                    res.end('Short links not ready');
+                    return;
+                }
+                try {
+                    const longUrl = await this.shortLinkService.resolve(code);
+                    if (!longUrl) {
+                        res.writeHead(410, { 'Content-Type': 'text/plain; charset=utf-8' });
+                        res.end('⏰ This link has expired (links last 7 hours). Search again with /movie');
+                        return;
+                    }
+                    res.writeHead(302, { Location: longUrl });
+                    res.end();
+                } catch (err) {
+                    logger.error(`Short link redirect error: ${err.message}`);
+                    res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+                    res.end('Redirect failed');
+                }
                 return;
             }
 

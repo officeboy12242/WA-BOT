@@ -1,38 +1,20 @@
 /**
- * TinyURL shortener with in-memory cache.
+ * Shorten long movie download URLs via self-hosted /d/:code links (7h TTL).
  */
 
-import https from 'https';
 import { logger } from './logger.js';
 
-const TINYURL_API = 'https://tinyurl.com/api-create.php?url=';
-const MAX_CACHE_SIZE = 500;
-const SHORTEN_TIMEOUT_MS = 4000;
 const MIN_LENGTH_TO_SHORTEN = 55;
+const MAX_WAIT_MS = 7000;
 
 class UrlShortener {
     constructor() {
+        this._service = null;
         this._cache = new Map();
     }
 
-    _fetch(urlStr) {
-        return new Promise((resolve, reject) => {
-            const url = new URL(urlStr);
-            const req = https.request(
-                { hostname: url.hostname, path: url.pathname + url.search, method: 'GET' },
-                (res) => {
-                    let data = '';
-                    res.on('data', (c) => { data += c; });
-                    res.on('end', () => resolve({ status: res.statusCode, data }));
-                },
-            );
-            req.on('error', reject);
-            req.setTimeout(SHORTEN_TIMEOUT_MS, () => {
-                req.destroy();
-                reject(new Error('Shorten timeout'));
-            });
-            req.end();
-        });
+    setService(service) {
+        this._service = service;
     }
 
     needsShortening(url) {
@@ -42,24 +24,19 @@ class UrlShortener {
     async shorten(url) {
         if (!this.needsShortening(url)) return url;
         if (this._cache.has(url)) return this._cache.get(url);
+        if (!this._service) return url;
 
         try {
-            const { status, data } = await this._fetch(`${TINYURL_API}${encodeURIComponent(url)}`);
-            if (status === 200 && data.startsWith('https://tinyurl.com/')) {
-                if (this._cache.size >= MAX_CACHE_SIZE) {
-                    this._cache.delete(this._cache.keys().next().value);
-                }
-                this._cache.set(url, data);
-                return data;
-            }
+            const short = await this._service.shorten(url);
+            this._cache.set(url, short);
+            return short;
         } catch (err) {
             logger.warn(`URL shorten failed: ${err.message}`);
+            return url;
         }
-        return url;
     }
 
-    /** Shorten all long links in movie results (parallel, capped wait time). */
-    async shortenMovieResults(results, maxWaitMs = 7000) {
+    async shortenMovieResults(results, maxWaitMs = MAX_WAIT_MS) {
         const links = [];
         for (const item of results) {
             for (const link of item.links || []) {

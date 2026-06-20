@@ -35,6 +35,8 @@ import UserManager from './src/models/UserManager.js';
 import StickerController from './src/controllers/StickerController.js';
 import BotSettings from './src/models/BotSettings.js';
 import { InstanceLock } from './src/utils/instanceLock.js';
+import { shortLinkService } from './src/services/ShortLinkService.js';
+import { urlShortener } from './src/utils/urlShortener.js';
 
 // Bot state
 const botState = {
@@ -106,6 +108,12 @@ class WhatsAppCourseBot {
             await this.groupManager.initChannels();
             await this.groupManager.initPremium();
             await this.groupManager.initDynamicModerators();
+
+            await shortLinkService.init(mongoDb);
+            urlShortener.setService(shortLinkService);
+            if (this.adminPanel) {
+                this.adminPanel.setShortLinkService(shortLinkService);
+            }
 
             this.botSettings = new BotSettings(mongoDb);
             await this.botSettings.init();

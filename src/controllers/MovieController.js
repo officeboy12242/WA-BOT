@@ -349,6 +349,7 @@ function formatMovieResultsFooter() {
     let text = '─────────────────────────────\n';
     text += '💡 _Click link to download/watch_\n';
     text += '⚠️ _Use VPN if links are blocked_\n';
+    text += '⏰ _Download links expire in 7 hours_\n';
     text += '─────────────────────────────\n';
     text += '🤖 _Powered by Sassy Bot_ ⚡\n';
     text += '⏰ _This message auto-deletes in 5 hours_';
