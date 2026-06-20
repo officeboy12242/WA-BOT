@@ -312,6 +312,21 @@ function cleanTitle(raw) {
     return raw.replace(/^\*+|\*+$/g, '').trim();
 }
 
+/** Quoting @lid senders in groups can hang Baileys — skip quote in that case. */
+function shouldQuoteMessage(originalMsg) {
+    if (!originalMsg?.key) return false;
+    const participant = originalMsg.key.participant || originalMsg.key.remoteJid || '';
+    return !participant.includes('@lid');
+}
+
+function movieReplyOptions(originalMsg) {
+    const opts = { linkPreview: false };
+    if (shouldQuoteMessage(originalMsg)) {
+        opts.quoted = originalMsg;
+    }
+    return opts;
+}
+
 const WHATSAPP_MAX_LENGTH = 4096;
 const SEARCH_COUNT_FOOTER_RESERVE = 80;
 
@@ -1037,7 +1052,7 @@ class MovieController {
                 } catch {}
 
                 const noResult = getRandomDialogue(NO_RESULTS_DIALOGUES);
-                const noSent = await sock.sendMessage(chatId, { text: noResult }, { quoted: originalMsg || undefined });
+                const noSent = await sock.sendMessage(chatId, { text: noResult, linkPreview: false }, movieReplyOptions(originalMsg));
                 this.scheduleDelete(sock, chatId, noSent.key);
                 if (!unlimited) await this.incrementSearchCount(normalizedUserId);
                 void this.logSearch(normalizedUserId, query, 0, chatId);
@@ -1047,16 +1062,18 @@ class MovieController {
 
             if (!unlimited) await this.incrementSearchCount(normalizedUserId);
             void this.logSearch(normalizedUserId, query, results.length, chatId);
-            void this._notifySearchLog(sock, normalizedUserId, query, results.length, chatId, pushName);
 
             const resultMessages = formatMovieResults(query, results, pushName, sources);
+            logger.info(`Formatted ${resultMessages.length} message(s) for "${query}" (${resultMessages.reduce((a, m) => a + m.length, 0)} chars)`);
+
             if (!resultMessages.length) {
                 try {
                     await sock.sendMessage(chatId, { delete: searchingMsg.key });
                 } catch {}
                 const errSent = await sock.sendMessage(chatId, {
                     text: '⚠️ Found movies but could not format results. Try again.',
-                }, { quoted: originalMsg || undefined });
+                    linkPreview: false,
+                }, movieReplyOptions(originalMsg));
                 this.scheduleDelete(sock, chatId, errSent.key);
                 return;
             }
@@ -1073,9 +1090,13 @@ class MovieController {
                 }
 
                 try {
-                    const sent = await sock.sendMessage(chatId, {
-                        text,
-                    }, i === 0 ? { quoted: originalMsg || undefined } : undefined);
+                    logger.info(`Sending movie result part ${i + 1}/${resultMessages.length} (${text.length} chars) to ${chatId}...`);
+                    const sent = await sock.sendMessage(
+                        chatId,
+                        { text, linkPreview: false },
+                        i === 0 ? movieReplyOptions(originalMsg) : { linkPreview: false },
+                    );
+                    logger.info(`Sent movie result part ${i + 1} OK`);
 
                     if (sent?.key) {
                         sentCount++;
@@ -1086,7 +1107,7 @@ class MovieController {
                         await new Promise(r => setTimeout(r, 500));
                     }
                 } catch (sendErr) {
-                    logger.error(`Movie result send failed (part ${i + 1}/${resultMessages.length}): ${sendErr.message}`);
+                    logger.error(`Movie result send failed (part ${i + 1}/${resultMessages.length}): ${sendErr.stack || sendErr.message}`);
                     if (sentCount === 0) {
                         throw sendErr;
                     }
@@ -1098,6 +1119,7 @@ class MovieController {
             } catch {}
 
             logger.info(`🎬 Movie search "${query}" by ${userId} → ${results.length} results from [${sources.join(', ')}] (${sentCount}/${resultMessages.length} msg(s), ${remaining} left)`);
+            void this._notifySearchLog(sock, normalizedUserId, query, results.length, chatId, pushName);
         } catch (err) {
             try {
                 await sock.sendMessage(chatId, { delete: searchingMsg.key });
@@ -1110,7 +1132,8 @@ class MovieController {
             ];
             const errSent = await sock.sendMessage(chatId, {
                 text: getRandomDialogue(errorDialogues),
-            }, { quoted: originalMsg || undefined });
+                linkPreview: false,
+            }, movieReplyOptions(originalMsg));
             this.scheduleDelete(sock, chatId, errSent.key);
 
             logger.error(`Movie search error for "${query}": ${err.stack || err.message}`);
