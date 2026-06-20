@@ -15,13 +15,10 @@ import { atozService } from '../services/AtoZService.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const QR_IMAGE_PATH = resolve(__dirname, '../../assets/payment_qr.jpg');
 
-const MOVIE_API = 'https://pronoob-drive.vercel.app/?name=';
-const PRIMARY_API_TIMEOUT_MS = 8000;
-const CIRCUIT_OPEN_MS = 5 * 60 * 1000;
-const CIRCUIT_FAIL_THRESHOLD = 3;
+// Primary Drive API disabled — will re-enable when self-hosted instance is ready
+// const MOVIE_API = 'https://pronoob-drive.vercel.app/?name=';
 const DAILY_LIMIT = 5;
 const AUTO_DELETE_MS = 5 * 60 * 60 * 1000; // 5 hours
-const KEEP_ALIVE_INTERVAL_MS = 4 * 60 * 1000; // ping every 4 minutes
 const SUMMARY_HOUR = 23;
 const SUMMARY_MINUTE = 55;
 const WEEKLY_DAY = 0; // Sunday
@@ -447,8 +444,6 @@ class MovieController {
         this.groupManager = groupManager;
         this.searchLimits = null;
         this.scheduledDeletes = [];
-        this._primaryApiFailCount = 0;
-        this._primaryApiOpenUntil = 0;
     }
 
     async init() {
@@ -473,43 +468,8 @@ class MovieController {
         logger.info('Movie search controller ready');
     }
 
-    _isPrimaryCircuitOpen() {
-        if (Date.now() < this._primaryApiOpenUntil) {
-            return true;
-        }
-        if (this._primaryApiOpenUntil > 0) {
-            this._primaryApiOpenUntil = 0;
-            this._primaryApiFailCount = 0;
-        }
-        return false;
-    }
-
-    _recordPrimaryResult(ok) {
-        if (ok) {
-            this._primaryApiFailCount = 0;
-            this._primaryApiOpenUntil = 0;
-        } else {
-            this._primaryApiFailCount++;
-            if (this._primaryApiFailCount >= CIRCUIT_FAIL_THRESHOLD) {
-                this._primaryApiOpenUntil = Date.now() + CIRCUIT_OPEN_MS;
-                logger.warn(`🔴 Primary movie API circuit OPEN — skipping for ${CIRCUIT_OPEN_MS / 1000}s`);
-            }
-        }
-    }
-
     _startKeepAlive() {
-        const ping = async () => {
-            try {
-                await axios.get(MOVIE_API + 'ping', { timeout: 10000 });
-                this._recordPrimaryResult(true);
-                logger.info('🏓 Movie API keep-alive ping OK');
-            } catch {
-                this._recordPrimaryResult(false);
-                logger.warn('🏓 Movie API keep-alive ping failed (will retry)');
-            }
-        };
-        ping();
-        this._keepAliveTimer = setInterval(ping, KEEP_ALIVE_INTERVAL_MS);
+        // Primary API (Drive) disabled — keep-alive is a no-op until re-enabled
     }
 
     stopKeepAlive() {
@@ -1048,33 +1008,13 @@ class MovieController {
         const searchingMsg = await sock.sendMessage(chatId, { text: dialogue });
 
         try {
-            const skipPrimary = this._isPrimaryCircuitOpen();
-            const promises = [
-                skipPrimary
-                    ? Promise.resolve({ skip: true })
-                    : axios.get(`${MOVIE_API}${encodeURIComponent(query)}`, { timeout: PRIMARY_API_TIMEOUT_MS }),
-                atozService.searchMovies(query, 3),
-            ];
-
-            const [primaryResponse, atozResults] = await Promise.allSettled(promises);
+            const atozResults = await atozService.searchMovies(query, 5);
 
             let results = [];
             const sources = [];
 
-            if (!skipPrimary && primaryResponse.status === 'fulfilled' && !primaryResponse.value?.skip) {
-                const primaryData = primaryResponse.value?.data?.data?.data || [];
-                if (primaryData.length > 0) {
-                    results.push(...primaryData.map(item => ({ ...item, source: 'Drive' })));
-                    sources.push('Drive');
-                }
-                this._recordPrimaryResult(true);
-            } else if (!skipPrimary && primaryResponse.status === 'rejected') {
-                this._recordPrimaryResult(false);
-                logger.warn(`Primary movie API failed: ${primaryResponse.reason?.message || 'unknown'}`);
-            }
-
-            if (atozResults.status === 'fulfilled' && atozResults.value?.length > 0) {
-                results.push(...atozResults.value);
+            if (atozResults?.length > 0) {
+                results.push(...atozResults);
                 sources.push('AtoZ');
             }
 
