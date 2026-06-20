@@ -30,9 +30,10 @@ export async function handleActivate(sock, chatId, senderJid, { groupManager, or
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
         r += `📢 *Group:* ${groupName}\n\n`;
         r += '🎓 This group will now receive free course updates!\n';
-        r += '📰 Tech news digests at *10:00 AM* & *10:00 PM* (IST)!\n\n';
+        r += '📰 Tech news digests at *10:00 AM* & *10:00 PM* (IST)!\n';
+        r += '🐙 GitHub trending repos daily at *9:00, 11:30, 2:00, 4:30 & 7:00 PM* (IST)!\n\n';
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-        r += '💡 Use `/newsoff` to stop tech news only\n';
+        r += '💡 Use `/newsoff` or `/githuboff` to turn off individually\n';
         r += '💡 Use `/instaon` for auto Instagram downloads\n';
         r += '💡 Use `/deactivate` to stop all updates';
 
@@ -141,10 +142,11 @@ export async function handleGroups(sock, chatId, senderJid, { groupManager }) {
     try {
         const senderPhone = extractPhoneNumber(senderJid);
 
-        const [activeGroups, newsGroups, instaAutoGroups, welcomeGroups, movieGroups, trendingGroups, groupCount, memberCounts] =
+        const [activeGroups, newsGroups, githubGroups, instaAutoGroups, welcomeGroups, movieGroups, trendingGroups, groupCount, memberCounts] =
             await Promise.all([
                 groupManager.getActiveGroups(),
                 groupManager.getNewsEnabledGroups(),
+                groupManager.getGithubTrendingGroups(),
                 groupManager.getInstaAutoGroups(),
                 groupManager.getWelcomeEnabledGroups(),
                 groupManager.getMovieEnabledGroups(),
@@ -158,6 +160,7 @@ export async function handleGroups(sock, chatId, senderJid, { groupManager }) {
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
         r += `📊 *Courses:* ${groupCount.active} active / ${groupCount.total} tracked\n`;
         r += `📰 *Tech news:* ${newsGroups.length} ON\n`;
+        r += `🐙 *GitHub trending:* ${githubGroups.length} ON\n`;
         r += `📸 *Insta auto:* ${instaAutoGroups.length} group(s)\n`;
         r += `🎬 *Movie:* ${movieGroups.length} ON\n`;
         r += `🔥 *Trending:* ${trendingGroups.length} ON\n`;
@@ -173,9 +176,10 @@ export async function handleGroups(sock, chatId, senderJid, { groupManager }) {
                 const activatedDate = new Date(group.activated_at).toLocaleDateString();
                 const members = groupManager.formatMemberCount(memberCounts, group.group_id);
                 const newsOn = group.news_enabled !== false;
+                const githubOn = group.github_trending !== false;
                 r += `${index + 1}. *${group.group_name}*\n`;
                 r += `   👥 Members: ${members}\n`;
-                r += `   📰 News: ${newsOn ? '✅ ON' : '❌ OFF'}\n`;
+                r += `   📰 News: ${newsOn ? '✅ ON' : '❌ OFF'} · 🐙 GitHub: ${githubOn ? '✅ ON' : '❌ OFF'}\n`;
                 r += `   📅 Activated: ${activatedDate}\n\n`;
             });
         }
@@ -192,6 +196,23 @@ export async function handleGroups(sock, chatId, senderJid, { groupManager }) {
                 r += `   👥 Members: ${members}\n`;
                 if (group.news_set_at) {
                     r += `   📅 Since: ${new Date(group.news_set_at).toLocaleDateString()}\n`;
+                }
+                r += '\n';
+            });
+        }
+
+        r += '🐙 *GitHub trending ON — groups*\n';
+        r += '_(daily top 5 repos — one post each via `/githubon` · off with `/githuboff`)_\n\n';
+
+        if (!githubGroups.length) {
+            r += '📭 None yet. Use `/activate` then `/githubon` in a group.\n\n';
+        } else {
+            githubGroups.forEach((group, index) => {
+                const members = groupManager.formatMemberCount(memberCounts, group.group_id);
+                r += `${index + 1}. *${group.group_name}*\n`;
+                r += `   👥 Members: ${members}\n`;
+                if (group.github_trending_at) {
+                    r += `   📅 Since: ${new Date(group.github_trending_at).toLocaleDateString()}\n`;
                 }
                 r += '\n';
             });
@@ -252,7 +273,7 @@ export async function handleGroups(sock, chatId, senderJid, { groupManager }) {
 
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
         r += '💡 `/activate` `/deactivate` · `/newson` `/newsoff`\n';
-        r += '💡 `/instaon` `/instaoff` · `/movieon` `/movieoff` · `/trending on/off` · `/setwc`';
+        r += '💡 `/githubon` `/githuboff` · `/instaon` `/instaoff` · `/movieon` `/movieoff` · `/trending on/off` · `/setwc`';
 
         await sock.sendMessage(chatId, { text: r });
         logger.info(`📋 Group list sent to ${senderPhone}`);
@@ -482,6 +503,94 @@ export async function handleNewsOff(sock, chatId, senderJid, { groupManager, ori
         logger.info(`📰 Tech news disabled: ${chatId} by ${senderPhone}`);
     } catch (error) {
         logger.error(`Error disabling tech news: ${error.message}`);
+    }
+}
+
+export async function handleGithubOn(sock, chatId, senderJid, { groupManager, originalMsg }) {
+    try {
+        const senderPhone = extractPhoneNumber(senderJid);
+        const isActive = await groupManager.isGroupActive(chatId);
+        if (!isActive) {
+            await sock.sendMessage(chatId, {
+                text:
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\nℹ️ *GROUP NOT ACTIVATED* ℹ️\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                    'GitHub trending requires an activated group.\n\nUse `/activate` first, then `/githubon`.',
+            }, { quoted: originalMsg });
+            return;
+        }
+
+        let groupName = 'Unknown Group';
+        try {
+            const meta = await sock.groupMetadata(chatId);
+            groupName = meta.subject;
+        } catch (err) {
+            logger.error(`Error fetching group metadata: ${err.message}`);
+        }
+
+        await groupManager.setGithubTrendingEnabled(chatId, groupName, true, senderPhone);
+
+        let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        r += '✅ *GITHUB TRENDING ON* ✅\n';
+        r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+        r += `📢 *Group:* ${groupName}\n\n`;
+        r += '🐙 Daily top 5 GitHub trending repos — *one post each* with link preview.\n';
+        r += '🎓 Courses continue as normal.\n\n';
+        r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        r += '💡 Use `/githuboff` to stop GitHub trending only';
+
+        await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
+        logger.info(`🐙 GitHub trending enabled: ${groupName} (${chatId}) by ${senderPhone}`);
+    } catch (error) {
+        logger.error(`Error enabling GitHub trending: ${error.message}`);
+    }
+}
+
+export async function handleGithubOff(sock, chatId, senderJid, { groupManager, originalMsg }) {
+    try {
+        const senderPhone = extractPhoneNumber(senderJid);
+        const isActive = await groupManager.isGroupActive(chatId);
+        if (!isActive) {
+            await sock.sendMessage(chatId, {
+                text:
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\nℹ️ *GROUP NOT ACTIVATED* ℹ️\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                    'This group is not activated.\n\nUse `/activate` to enable updates.',
+            }, { quoted: originalMsg });
+            return;
+        }
+
+        const githubEnabled = await groupManager.isGithubTrendingEnabled(chatId);
+        if (!githubEnabled) {
+            await sock.sendMessage(chatId, {
+                text:
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\nℹ️ *GITHUB TRENDING ALREADY OFF* ℹ️\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                    'GitHub trending is not enabled in this group.\n\nUse `/githubon` to enable it.',
+            }, { quoted: originalMsg });
+            return;
+        }
+
+        let groupName = 'Unknown Group';
+        try {
+            const meta = await sock.groupMetadata(chatId);
+            groupName = meta.subject;
+        } catch (err) {
+            logger.error(`Error fetching group metadata: ${err.message}`);
+        }
+
+        await groupManager.setGithubTrendingEnabled(chatId, groupName, false, senderPhone);
+
+        let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        r += '🛑 *GITHUB TRENDING OFF* 🛑\n';
+        r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+        r += `📢 *Group:* ${groupName}\n\n`;
+        r += '🐙 Daily GitHub trending posts are disabled here.\n';
+        r += '🎓 Course updates will continue as normal.\n\n';
+        r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        r += '💡 Use `/githubon` to enable again';
+
+        await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
+        logger.info(`🐙 GitHub trending disabled: ${chatId} by ${senderPhone}`);
+    } catch (error) {
+        logger.error(`Error disabling GitHub trending: ${error.message}`);
     }
 }
 

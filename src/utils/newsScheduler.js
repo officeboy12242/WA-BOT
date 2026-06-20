@@ -34,6 +34,10 @@ function parsePostTimes(times) {
         .filter((slot) => !Number.isNaN(slot.hour) && !Number.isNaN(slot.minute));
 }
 
+export function parsePostTimesFromConfig(times) {
+    return parsePostTimes(times);
+}
+
 export function msUntilTimeInTimezone(hour, minute, timezone, fromMs = Date.now()) {
     for (let addMin = 1; addMin <= 48 * 60; addMin++) {
         const candidate = new Date(fromMs + addMin * 60_000);

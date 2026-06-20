@@ -29,6 +29,8 @@ import {
     handleInstaOff,
     handleNewsOn,
     handleNewsOff,
+    handleGithubOn,
+    handleGithubOff,
     handleGroups,
     handleSetWelcome,
     handleGroupParticipantsUpdate as _handleGroupParticipantsUpdate,
@@ -59,12 +61,13 @@ import {
 import {
     handleInsta as _handleInsta,
     handleNews,
+    handleGithub,
 } from './handlers/instaHandlers.js';
 
 import { horoscopeService } from '../services/HoroscopeService.js';
 
 class CommandController {
-    constructor(database, botState, groupManager, newsController = null, movieController = null, userManager = null, stickerController = null, botSettings = null) {
+    constructor(database, botState, groupManager, newsController = null, movieController = null, userManager = null, stickerController = null, botSettings = null, githubTrendingController = null) {
         this.database = database;
         this.botState = botState;
         this.groupManager = groupManager;
@@ -73,6 +76,7 @@ class CommandController {
         this.userManager = userManager;
         this.stickerController = stickerController;
         this.botSettings = botSettings;
+        this.githubTrendingController = githubTrendingController;
         this.pendingClearConfirmations = new Map();
         this.botStartTime = Date.now();
 
@@ -108,6 +112,7 @@ class CommandController {
             botState: this.botState,
             groupManager: this.groupManager,
             newsController: this.newsController,
+            githubTrendingController: this.githubTrendingController,
             movieController: this.movieController,
             userManager: this.userManager,
             stickerController: this.stickerController,
@@ -175,6 +180,8 @@ class CommandController {
             case 'instaoff':   await handleInstaOff(sock, chatId, senderJid, ctx); break;
             case 'newson':     await handleNewsOn(sock, chatId, senderJid, ctx); break;
             case 'newsoff':    await handleNewsOff(sock, chatId, senderJid, ctx); break;
+            case 'githubon':   await handleGithubOn(sock, chatId, senderJid, ctx); break;
+            case 'githuboff':  await handleGithubOff(sock, chatId, senderJid, ctx); break;
             case 'groups':     await handleGroups(sock, chatId, senderJid, ctx); break;
             case 'setwc':      await handleSetWelcome(sock, chatId, senderJid, command.trim(), ctx); break;
             case 'movieon':    await handleMovieOn(sock, chatId, senderJid, ctx); break;
@@ -201,6 +208,7 @@ class CommandController {
             /* ── Instagram / News / Movie ── */
             case 'insta': await _handleInsta(sock, chatId, args, originalMsg); break;
             case 'news':  await handleNews(sock, chatId, senderJid, ctx); break;
+            case 'github': await handleGithub(sock, chatId, senderJid, ctx); break;
             case 'horo':
                 try {
                     const sign = args[0];
