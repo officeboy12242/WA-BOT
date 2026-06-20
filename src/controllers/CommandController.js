@@ -89,9 +89,14 @@ class CommandController {
         this.memberScrapeController = memberScrapeController;
         this.pendingClearConfirmations = new Map();
         this.pendingScrapSessions = createScrapSessionStore();
+        this.getSock = null;
         this.botStartTime = Date.now();
 
         this._isOwnerFromJid = this._isOwnerFromJid.bind(this);
+    }
+
+    setGetSock(getSock) {
+        this.getSock = getSock;
     }
 
     /**
@@ -131,6 +136,7 @@ class CommandController {
             botSettings: this.botSettings,
             pendingClearConfirmations: this.pendingClearConfirmations,
             pendingScrapSessions: this.pendingScrapSessions,
+            getSock: this.getSock,
             botStartTime: this.botStartTime,
             isOwnerFromJid: this._isOwnerFromJid,
         };

@@ -7,6 +7,8 @@ import { extractPhoneNumber } from '../../utils/permissions.js';
 
 const SCRAP_SESSION_MS = 5 * 60 * 1000;
 const BROADCAST_DELAY_MS = 3500;
+const DM_RETRY_DELAY_MS = 1500;
+const DM_MAX_RETRIES = 1;
 
 function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -24,6 +26,10 @@ function formatError(err) {
 
 function sessionKey(chatId, senderJid) {
     return `${chatId}|${senderJid}`;
+}
+
+function resolveSock(getSock, fallbackSock) {
+    return (typeof getSock === 'function' ? getSock() : null) || fallbackSock;
 }
 
 export function createScrapSessionStore() {
@@ -67,6 +73,22 @@ function formatGroupList(groups, { stored = false } = {}) {
     }
 
     return text;
+}
+
+async function sendDmWithRetry(sock, targetJid, message) {
+    let lastErr;
+    for (let attempt = 0; attempt <= DM_MAX_RETRIES; attempt++) {
+        try {
+            await sock.sendMessage(targetJid, { text: message });
+            return;
+        } catch (err) {
+            lastErr = err;
+            if (attempt < DM_MAX_RETRIES) {
+                await delay(DM_RETRY_DELAY_MS);
+            }
+        }
+    }
+    throw lastErr;
 }
 
 export async function handleScrap(sock, chatId, senderJid, args, { memberScrapeController, isOwnerFromJid, pendingScrapSessions, originalMsg }) {
@@ -125,7 +147,7 @@ export async function handleScrapMembers(sock, chatId, senderJid, { memberScrape
     await sock.sendMessage(chatId, { text: formatGroupList(groups, { stored: true }) }, { quoted: originalMsg });
 }
 
-export async function handleBroadcast(sock, chatId, senderJid, args, { memberScrapeController, isOwnerFromJid, originalMsg }) {
+export async function handleBroadcast(sock, chatId, senderJid, args, { memberScrapeController, isOwnerFromJid, getSock, originalMsg }) {
     try {
         const isOwner = await isOwnerFromJid(sock, chatId, senderJid);
         if (!isOwner) {
@@ -161,7 +183,8 @@ export async function handleBroadcast(sock, chatId, senderJid, args, { memberScr
             return;
         }
 
-        const targets = await memberScrapeController.getDmTargets(selected.group_id);
+        const rawTargets = await memberScrapeController.getDmTargets(selected.group_id);
+        const targets = memberScrapeController.filterTargetsForBroadcast(rawTargets, sock);
         const dmStats = await memberScrapeController.getDmTargetStats(selected.group_id);
         if (!targets.length) {
             await sock.sendMessage(chatId, {
@@ -176,10 +199,10 @@ export async function handleBroadcast(sock, chatId, senderJid, args, { memberScr
             text:
                 `📤 Broadcasting to *${targets.length}* member(s) from *${selected.group_name}*...\n` +
                 `📱 Phone: *${dmStats.phone_dm_count}* · 🔒 LID: *${dmStats.lid_dm_count}*\n\n` +
-                '_Running in background. LID DMs work when WhatsApp hides numbers but the bot shares that group._',
+                '_Running in background — other bot commands keep working._',
         }, { quoted: originalMsg });
 
-        void runBroadcastJob(sock, chatId, selected, message, targets).catch((err) => {
+        void runBroadcastJob(getSock, sock, chatId, selected, message, targets).catch((err) => {
             logger.error(`Broadcast job error: ${formatError(err)}`);
         });
     } catch (err) {
@@ -190,18 +213,19 @@ export async function handleBroadcast(sock, chatId, senderJid, args, { memberScr
     }
 }
 
-async function runBroadcastJob(sock, chatId, selected, message, targets) {
+async function runBroadcastJob(getSock, fallbackSock, chatId, selected, message, targets) {
     let sent = 0;
     let failed = 0;
 
     try {
         for (const targetJid of targets) {
+            const sock = resolveSock(getSock, fallbackSock);
             if (!sock) {
                 throw new Error('WhatsApp disconnected during broadcast');
             }
 
             try {
-                await sock.sendMessage(targetJid, { text: message });
+                await sendDmWithRetry(sock, targetJid, message);
                 sent++;
             } catch (err) {
                 failed++;
@@ -211,18 +235,22 @@ async function runBroadcastJob(sock, chatId, selected, message, targets) {
             await delay(BROADCAST_DELAY_MS);
         }
 
-        await sock.sendMessage(chatId, {
-            text:
-                `✅ Broadcast done for *${selected.group_name}*\n\n` +
-                `📤 Sent: *${sent}*\n` +
-                `❌ Failed: *${failed}*`,
-        });
+        const notifySock = resolveSock(getSock, fallbackSock);
+        if (notifySock) {
+            await notifySock.sendMessage(chatId, {
+                text:
+                    `✅ Broadcast done for *${selected.group_name}*\n\n` +
+                    `📤 Sent: *${sent}*\n` +
+                    `❌ Failed: *${failed}*`,
+            });
+        }
 
         logger.info(`Broadcast to ${selected.group_name}: sent=${sent}, failed=${failed}`);
     } catch (err) {
         logger.error(`Broadcast job failed: ${formatError(err)}`);
         try {
-            await sock?.sendMessage(chatId, {
+            const notifySock = resolveSock(getSock, fallbackSock);
+            await notifySock?.sendMessage(chatId, {
                 text:
                     `❌ Broadcast stopped for *${selected.group_name}*\n\n` +
                     `📤 Sent: *${sent}*\n` +
@@ -286,7 +314,50 @@ export async function handleGroupPost(sock, chatId, senderJid, args, { memberScr
     }
 }
 
-export async function handlePendingScrapSelection(sock, chatId, senderJid, text, { memberScrapeController, pendingScrapSessions, isOwnerFromJid, originalMsg }) {
+async function runScrapeJob(getSock, fallbackSock, chatId, memberScrapeController, selected) {
+    try {
+        const sock = resolveSock(getSock, fallbackSock);
+        if (!sock) {
+            throw new Error('WhatsApp disconnected');
+        }
+
+        const result = await memberScrapeController.scrapeGroup(sock, selected.group_id, selected.group_name);
+        const dmStats = await memberScrapeController.getDmTargetStats(selected.group_id);
+
+        const notifySock = resolveSock(getSock, fallbackSock);
+        if (notifySock) {
+            await notifySock.sendMessage(chatId, {
+                text:
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
+                    '✅ *MEMBERS SCRAPED* ✅\n' +
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                    `📢 *Group:* ${result.group_name}\n` +
+                    `👥 *Total:* ${result.total}\n` +
+                    `🆕 *New:* ${result.inserted}\n` +
+                    `🔄 *Updated:* ${result.updated}\n` +
+                    `📱 *DM-able:* ${dmStats.dm_count} (${dmStats.phone_dm_count} phone · ${dmStats.lid_dm_count} LID)\n\n` +
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
+                    '💡 `/scrapmembers` — view saved groups\n' +
+                    '💡 `/broadcast <#> <message>` — DM all members\n' +
+                    '💡 `/grouppost <#> <message>` — post in the group',
+            });
+        }
+
+        logger.info(`Scraped ${result.total} members from ${result.group_name}`);
+    } catch (err) {
+        logger.error(`Member scrape failed: ${formatError(err)}`);
+        try {
+            const notifySock = resolveSock(getSock, fallbackSock);
+            await notifySock?.sendMessage(chatId, {
+                text: `❌ Failed to scrape *${selected.group_name}*.\n\n⚠️ ${formatError(err)}`,
+            });
+        } catch (notifyErr) {
+            logger.error(`Could not send scrape failure notice: ${formatError(notifyErr)}`);
+        }
+    }
+}
+
+export async function handlePendingScrapSelection(sock, chatId, senderJid, text, { memberScrapeController, pendingScrapSessions, isOwnerFromJid, getSock, originalMsg }) {
     const key = sessionKey(chatId, senderJid);
     const session = pendingScrapSessions.get(key);
     if (!session) {
@@ -324,32 +395,14 @@ export async function handlePendingScrapSelection(sock, chatId, senderJid, text,
     const selected = session.groups[choice - 1];
 
     await sock.sendMessage(chatId, {
-        text: `⏳ Scraping members from *${selected.group_name}*...`,
+        text:
+            `⏳ Scraping *${selected.group_name}* in the background...\n\n` +
+            '_Other bot commands keep working — you will get a summary when done._',
     }, { quoted: originalMsg });
 
-    try {
-        const result = await memberScrapeController.scrapeGroup(sock, selected.group_id, selected.group_name);
-        await sock.sendMessage(chatId, {
-            text:
-                '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
-                '✅ *MEMBERS SCRAPED* ✅\n' +
-                '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
-                `📢 *Group:* ${result.group_name}\n` +
-                `👥 *Total:* ${result.total}\n` +
-                `🆕 *New:* ${result.inserted}\n` +
-                `🔄 *Updated:* ${result.updated}\n\n` +
-                '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
-                '💡 `/scrapmembers` — view saved groups\n' +
-                '💡 `/broadcast <#> <message>` — DM all members\n' +
-                '💡 `/grouppost <#> <message>` — post in the group',
-        });
-        logger.info(`Scraped ${result.total} members from ${result.group_name}`);
-    } catch (err) {
-        logger.error(`Member scrape failed: ${err.message}`);
-        await sock.sendMessage(chatId, {
-            text: `❌ Failed to scrape *${selected.group_name}*. The bot may not be in that group anymore.`,
-        });
-    }
+    void runScrapeJob(getSock, sock, chatId, memberScrapeController, selected).catch((err) => {
+        logger.error(`Scrape job error: ${formatError(err)}`);
+    });
 
     return true;
 }
