@@ -57,6 +57,7 @@ class GroupMemberDatabase {
         for (const participant of participants) {
             const jid = participant.id || '';
             const phone = participantToPhone(participant);
+            const lid = participant.lid || (jid.endsWith('@lid') ? jid : null);
             const memberKey = memberKeyFromFields({ phone, jid });
             if (!memberKey) {
                 continue;
@@ -71,7 +72,7 @@ class GroupMemberDatabase {
                         member_key: memberKey,
                         jid,
                         phone: normalizePhoneNumber(phone) || phone,
-                        lid: participant.lid || null,
+                        lid: lid || null,
                         admin: participant.admin || null,
                         updated_at: now,
                     },
