@@ -57,4 +57,6 @@ export const config = {
         .filter(Boolean),
     GITHUB_TRENDING_TIMEZONE: process.env.GITHUB_TRENDING_TIMEZONE || 'Asia/Kolkata',
     GITHUB_TRENDING_COUNT: parseInt(process.env.GITHUB_TRENDING_COUNT, 10) || 5,
+    /** Public URL for short links (Render sets RENDER_EXTERNAL_URL automatically). */
+    PUBLIC_URL: (process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || '').replace(/\/$/, ''),
 };
