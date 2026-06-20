@@ -5,7 +5,7 @@
   "main": "bot.js",
   "type": "module",
   "scripts": {
-    "start": "node bot-new.js",
+    "start": "node --max-old-space-size=384 bot-new.js",
     "dev": "node --watch bot-new.js"
   },
   "engines": {

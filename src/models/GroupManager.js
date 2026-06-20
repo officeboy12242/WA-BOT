@@ -121,6 +121,10 @@ class GroupManager {
             return cached.data;
         }
         const data = await sock.groupMetadata(groupId);
+        if (this.groupMetaCache.size > 200) {
+            const oldest = this.groupMetaCache.keys().next().value;
+            this.groupMetaCache.delete(oldest);
+        }
         this.groupMetaCache.set(groupId, { data, at: Date.now() });
         return data;
     }

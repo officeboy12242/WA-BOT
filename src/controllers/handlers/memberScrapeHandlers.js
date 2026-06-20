@@ -33,7 +33,14 @@ function resolveSock(getSock, fallbackSock) {
 }
 
 export function createScrapSessionStore() {
-    return new Map();
+    const store = new Map();
+    setInterval(() => {
+        const now = Date.now();
+        for (const [key, session] of store) {
+            if (now > session.expiresAt) store.delete(key);
+        }
+    }, 60_000);
+    return store;
 }
 
 function formatGroupList(groups, { stored = false } = {}) {
