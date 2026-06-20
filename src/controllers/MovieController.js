@@ -12,6 +12,7 @@ import { extractPhoneNumber, isGroupMessage, normalizePhoneNumber } from '../uti
 import { config } from '../config/config.js';
 import { atozService } from '../services/AtoZService.js';
 import { pronoobDriveService } from '../services/PronoobDriveService.js';
+import { urlShortener } from '../utils/urlShortener.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const QR_IMAGE_PATH = resolve(__dirname, '../../assets/payment_qr.jpg');
@@ -1062,6 +1063,8 @@ class MovieController {
 
             if (!unlimited) await this.incrementSearchCount(normalizedUserId);
             void this.logSearch(normalizedUserId, query, results.length, chatId);
+
+            await urlShortener.shortenMovieResults(results);
 
             const resultMessages = formatMovieResults(query, results, pushName, sources);
             logger.info(`Formatted ${resultMessages.length} message(s) for "${query}" (${resultMessages.reduce((a, m) => a + m.length, 0)} chars)`);
