@@ -396,6 +396,14 @@ export const COMMAND_REGISTRY = [
         role: 'owner',
         help: 'Post in a scraped WhatsApp group — `/grouppost <group#> <message>` (owner only)',
     },
+    {
+        names: ['/driveurl', '/drivesource'],
+        key: 'driveurl',
+        scope: 'any',
+        role: 'owner',
+        help: 'Manage Drive scrape URLs — add/remove/list/test Render sources (owner only)',
+        category: 'movie',
+    },
 ];
 
 const nameIndex = new Map();

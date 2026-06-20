@@ -37,6 +37,7 @@ import BotSettings from './src/models/BotSettings.js';
 import { InstanceLock } from './src/utils/instanceLock.js';
 import { shortLinkService } from './src/services/ShortLinkService.js';
 import { urlShortener } from './src/utils/urlShortener.js';
+import { pronoobDriveService } from './src/services/PronoobDriveService.js';
 
 // Bot state
 const botState = {
@@ -117,6 +118,8 @@ class WhatsAppCourseBot {
 
             this.botSettings = new BotSettings(mongoDb);
             await this.botSettings.init();
+            pronoobDriveService.setSettings(this.botSettings);
+            await pronoobDriveService.loadUrls();
             botState.isPaused = await this.botSettings.getCoursesPaused();
             if (botState.isPaused) {
                 logger.info('⏸️ Course posting is PAUSED (restored from database)');

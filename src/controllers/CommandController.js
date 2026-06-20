@@ -74,6 +74,7 @@ import {
 } from './handlers/memberScrapeHandlers.js';
 
 import { horoscopeService } from '../services/HoroscopeService.js';
+import { handleDriveUrl } from './handlers/driveHandlers.js';
 
 class CommandController {
     constructor(database, botState, groupManager, newsController = null, movieController = null, userManager = null, stickerController = null, botSettings = null, githubTrendingController = null, memberScrapeController = null) {
@@ -238,6 +239,7 @@ class CommandController {
                 logger.error(`Broadcast handler error: ${err?.message || err?.output?.payload?.message || String(err)}`);
             }); break;
             case 'grouppost':     await handleGroupPost(sock, chatId, senderJid, args, ctx); break;
+            case 'driveurl':      await handleDriveUrl(sock, chatId, senderJid, args, ctx); break;
 
             /* ── Instagram / News / Movie ── */
             case 'insta': await _handleInsta(sock, chatId, args, originalMsg); break;
