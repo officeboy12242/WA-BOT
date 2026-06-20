@@ -79,9 +79,9 @@ class NewsController {
             return { posted: 0, groups: 0 };
         }
 
-        const activeGroups = await this.groupManager.getActiveGroups();
+        const activeGroups = await this.groupManager.getNewsEnabledGroups();
         if (!activeGroups.length) {
-            logger.warn('No active groups for tech news. Use /activate in a group.');
+            logger.warn('No groups with tech news enabled. Use /activate and /newson in a group.');
             return { posted: 0, groups: 0 };
         }
 

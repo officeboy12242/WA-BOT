@@ -202,7 +202,7 @@ export async function handleNews(sock, chatId, senderJid, { newsController, grou
         const { posted, groups } = await newsController.postNews(sock, articles);
         if (groups === 0) {
             await sock.sendMessage(chatId, {
-                text: 'ℹ️ Preview only — no activated groups. Use `/activate` in a group first.',
+                text: 'ℹ️ Preview only — no groups with tech news enabled. Use `/activate` and `/newson` in a group first.',
             });
             return;
         }
@@ -210,8 +210,8 @@ export async function handleNews(sock, chatId, senderJid, { newsController, grou
         await sock.sendMessage(chatId, {
             text:
                 posted > 0
-                    ? `✅ Posted *${sent}* tech news message(s) to *${posted}* activated group(s).`
-                    : 'ℹ️ News was already posted to all activated groups.',
+                    ? `✅ Posted *${sent}* tech news message(s) to *${posted}* group(s) with news enabled.`
+                    : 'ℹ️ News was already posted to all news-enabled groups.',
         });
     } catch (error) {
         logger.error(`Error handling news command: ${error.message}`);

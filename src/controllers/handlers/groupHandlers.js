@@ -32,8 +32,9 @@ export async function handleActivate(sock, chatId, senderJid, { groupManager, or
         r += '🎓 This group will now receive free course updates!\n';
         r += '📰 Tech news digests at *10:00 AM* & *10:00 PM* (IST)!\n\n';
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        r += '💡 Use `/newsoff` to stop tech news only\n';
         r += '💡 Use `/instaon` for auto Instagram downloads\n';
-        r += '💡 Use `/deactivate` to stop receiving updates';
+        r += '💡 Use `/deactivate` to stop all updates';
 
         await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
         logger.info(`✅ Group activated: ${groupName} (${chatId}) by ${senderPhone}`);
@@ -51,7 +52,7 @@ export async function handleDeactivate(sock, chatId, senderJid, { groupManager, 
             let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
             r += '🛑 *GROUP DEACTIVATED* 🛑\n';
             r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
-            r += '📢 This group will no longer receive course or tech news updates.\n\n';
+            r += '📢 This group will no longer receive courses or tech news.\n\n';
             r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
             r += '💡 Use `/activate` to start receiving updates again';
             await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
@@ -140,9 +141,10 @@ export async function handleGroups(sock, chatId, senderJid, { groupManager }) {
     try {
         const senderPhone = extractPhoneNumber(senderJid);
 
-        const [activeGroups, instaAutoGroups, welcomeGroups, movieGroups, trendingGroups, groupCount, memberCounts] =
+        const [activeGroups, newsGroups, instaAutoGroups, welcomeGroups, movieGroups, trendingGroups, groupCount, memberCounts] =
             await Promise.all([
                 groupManager.getActiveGroups(),
+                groupManager.getNewsEnabledGroups(),
                 groupManager.getInstaAutoGroups(),
                 groupManager.getWelcomeEnabledGroups(),
                 groupManager.getMovieEnabledGroups(),
@@ -155,13 +157,14 @@ export async function handleGroups(sock, chatId, senderJid, { groupManager }) {
         r += '📋 *GROUPS OVERVIEW* 📋\n';
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
         r += `📊 *Courses:* ${groupCount.active} active / ${groupCount.total} tracked\n`;
+        r += `📰 *Tech news:* ${newsGroups.length} ON\n`;
         r += `📸 *Insta auto:* ${instaAutoGroups.length} group(s)\n`;
         r += `🎬 *Movie:* ${movieGroups.length} ON\n`;
         r += `🔥 *Trending:* ${trendingGroups.length} ON\n`;
         r += `👋 *Welcome:* ${welcomeGroups.length} ON\n\n`;
 
         r += '🎓 *Auto courses — active groups*\n';
-        r += '_(courses + tech news via `/activate`)_\n\n';
+        r += '_(courses via `/activate` · tech news via `/newson`)_\n\n';
 
         if (!activeGroups.length) {
             r += '📭 None yet. Use `/activate` in a group.\n\n';
@@ -169,9 +172,28 @@ export async function handleGroups(sock, chatId, senderJid, { groupManager }) {
             activeGroups.forEach((group, index) => {
                 const activatedDate = new Date(group.activated_at).toLocaleDateString();
                 const members = groupManager.formatMemberCount(memberCounts, group.group_id);
+                const newsOn = group.news_enabled !== false;
                 r += `${index + 1}. *${group.group_name}*\n`;
                 r += `   👥 Members: ${members}\n`;
+                r += `   📰 News: ${newsOn ? '✅ ON' : '❌ OFF'}\n`;
                 r += `   📅 Activated: ${activatedDate}\n\n`;
+            });
+        }
+
+        r += '📰 *Tech news ON — groups*\n';
+        r += '_(scheduled digests via `/newson` · off with `/newsoff`)_\n\n';
+
+        if (!newsGroups.length) {
+            r += '📭 None yet. Use `/activate` then `/newson` in a group.\n\n';
+        } else {
+            newsGroups.forEach((group, index) => {
+                const members = groupManager.formatMemberCount(memberCounts, group.group_id);
+                r += `${index + 1}. *${group.group_name}*\n`;
+                r += `   👥 Members: ${members}\n`;
+                if (group.news_set_at) {
+                    r += `   📅 Since: ${new Date(group.news_set_at).toLocaleDateString()}\n`;
+                }
+                r += '\n';
             });
         }
 
@@ -229,8 +251,8 @@ export async function handleGroups(sock, chatId, senderJid, { groupManager }) {
         }
 
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-        r += '💡 `/activate` `/deactivate` · `/instaon` `/instaoff`\n';
-        r += '💡 `/movieon` `/movieoff` · `/trending on/off` · `/setwc`';
+        r += '💡 `/activate` `/deactivate` · `/newson` `/newsoff`\n';
+        r += '💡 `/instaon` `/instaoff` · `/movieon` `/movieoff` · `/trending on/off` · `/setwc`';
 
         await sock.sendMessage(chatId, { text: r });
         logger.info(`📋 Group list sent to ${senderPhone}`);
@@ -372,6 +394,94 @@ export async function handleGroupParticipantsUpdate(sock, update, { groupManager
         }
     } catch (error) {
         logger.error(`Welcome message error: ${error.message}`);
+    }
+}
+
+export async function handleNewsOn(sock, chatId, senderJid, { groupManager, originalMsg }) {
+    try {
+        const senderPhone = extractPhoneNumber(senderJid);
+        const isActive = await groupManager.isGroupActive(chatId);
+        if (!isActive) {
+            await sock.sendMessage(chatId, {
+                text:
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\nℹ️ *GROUP NOT ACTIVATED* ℹ️\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                    'Tech news requires an activated group.\n\nUse `/activate` first, then `/newson`.',
+            }, { quoted: originalMsg });
+            return;
+        }
+
+        let groupName = 'Unknown Group';
+        try {
+            const meta = await sock.groupMetadata(chatId);
+            groupName = meta.subject;
+        } catch (err) {
+            logger.error(`Error fetching group metadata: ${err.message}`);
+        }
+
+        await groupManager.setNewsEnabled(chatId, groupName, true, senderPhone);
+
+        let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        r += '✅ *TECH NEWS ON* ✅\n';
+        r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+        r += `📢 *Group:* ${groupName}\n\n`;
+        r += '📰 This group will receive tech news at *10:00 AM* & *10:00 PM* (IST).\n';
+        r += '🎓 Courses continue as normal.\n\n';
+        r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        r += '💡 Use `/newsoff` to stop tech news only';
+
+        await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
+        logger.info(`📰 Tech news enabled: ${groupName} (${chatId}) by ${senderPhone}`);
+    } catch (error) {
+        logger.error(`Error enabling tech news: ${error.message}`);
+    }
+}
+
+export async function handleNewsOff(sock, chatId, senderJid, { groupManager, originalMsg }) {
+    try {
+        const senderPhone = extractPhoneNumber(senderJid);
+        const isActive = await groupManager.isGroupActive(chatId);
+        if (!isActive) {
+            await sock.sendMessage(chatId, {
+                text:
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\nℹ️ *GROUP NOT ACTIVATED* ℹ️\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                    'This group is not activated.\n\nUse `/activate` to enable courses and tech news.',
+            }, { quoted: originalMsg });
+            return;
+        }
+
+        const newsEnabled = await groupManager.isNewsEnabled(chatId);
+        if (!newsEnabled) {
+            await sock.sendMessage(chatId, {
+                text:
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\nℹ️ *TECH NEWS ALREADY OFF* ℹ️\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                    'Tech news is not enabled in this group.\n\nUse `/newson` to enable it.',
+            }, { quoted: originalMsg });
+            return;
+        }
+
+        let groupName = 'Unknown Group';
+        try {
+            const meta = await sock.groupMetadata(chatId);
+            groupName = meta.subject;
+        } catch (err) {
+            logger.error(`Error fetching group metadata: ${err.message}`);
+        }
+
+        await groupManager.setNewsEnabled(chatId, groupName, false, senderPhone);
+
+        let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        r += '🛑 *TECH NEWS OFF* 🛑\n';
+        r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+        r += `📢 *Group:* ${groupName}\n\n`;
+        r += '📰 Scheduled tech news digests are disabled here.\n';
+        r += '🎓 Course updates will continue as normal.\n\n';
+        r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        r += '💡 Use `/newson` to enable again';
+
+        await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
+        logger.info(`📰 Tech news disabled: ${chatId} by ${senderPhone}`);
+    } catch (error) {
+        logger.error(`Error disabling tech news: ${error.message}`);
     }
 }
 
