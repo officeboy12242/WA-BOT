@@ -11,15 +11,13 @@ import { logger } from '../utils/logger.js';
 import { extractPhoneNumber, isGroupMessage, normalizePhoneNumber } from '../utils/permissions.js';
 import { config } from '../config/config.js';
 import { atozService } from '../services/AtoZService.js';
+import { pronoobDriveService } from '../services/PronoobDriveService.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const QR_IMAGE_PATH = resolve(__dirname, '../../assets/payment_qr.jpg');
 
-const MOVIE_API = 'https://pronoobdrive-7w2p.onrender.com/?name=';
-const PRIMARY_API_TIMEOUT_MS = 10000;
 const DAILY_LIMIT = 5;
 const AUTO_DELETE_MS = 5 * 60 * 60 * 1000; // 5 hours
-const KEEP_ALIVE_INTERVAL_MS = 4 * 60 * 1000;
 const SUMMARY_HOUR = 23;
 const SUMMARY_MINUTE = 55;
 const WEEKLY_DAY = 0; // Sunday
@@ -470,24 +468,10 @@ class MovieController {
     }
 
     _startKeepAlive() {
-        const ping = async () => {
-            try {
-                await axios.get(MOVIE_API + 'ping', { timeout: 10000 });
-                logger.info('🏓 Movie API keep-alive ping OK');
-            } catch {
-                logger.warn('🏓 Movie API keep-alive ping failed (will retry)');
-            }
-        };
-        ping();
-        this._keepAliveTimer = setInterval(ping, KEEP_ALIVE_INTERVAL_MS);
+        pronoobDriveService.warmUp();
     }
 
-    stopKeepAlive() {
-        if (this._keepAliveTimer) {
-            clearInterval(this._keepAliveTimer);
-            this._keepAliveTimer = null;
-        }
-    }
+    stopKeepAlive() {}
 
     async logSearch(userId, query, resultCount, chatId) {
         try {
@@ -1018,22 +1002,19 @@ class MovieController {
         const searchingMsg = await sock.sendMessage(chatId, { text: dialogue });
 
         try {
-            const [primaryResponse, atozResults] = await Promise.allSettled([
-                axios.get(`${MOVIE_API}${encodeURIComponent(query)}`, { timeout: PRIMARY_API_TIMEOUT_MS }),
+            const [driveResults, atozResults] = await Promise.allSettled([
+                pronoobDriveService.searchMovies(query, 5),
                 atozService.searchMovies(query, 3),
             ]);
 
             let results = [];
             const sources = [];
 
-            if (primaryResponse.status === 'fulfilled') {
-                const primaryData = primaryResponse.value?.data?.data?.data || [];
-                if (primaryData.length > 0) {
-                    results.push(...primaryData.map(item => ({ ...item, source: 'Drive' })));
-                    sources.push('Drive');
-                }
-            } else {
-                logger.warn(`Drive API failed: ${primaryResponse.reason?.message || 'unknown'}`);
+            if (driveResults.status === 'fulfilled' && driveResults.value?.length > 0) {
+                results.push(...driveResults.value);
+                sources.push('Drive');
+            } else if (driveResults.status === 'rejected') {
+                logger.warn(`Drive scraper failed: ${driveResults.reason?.message || 'unknown'}`);
             }
 
             if (atozResults.status === 'fulfilled' && atozResults.value?.length > 0) {
