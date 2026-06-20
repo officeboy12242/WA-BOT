@@ -29,6 +29,8 @@ import MorningMessageController from './src/controllers/MorningMessageController
 import MovieController from './src/controllers/MovieController.js';
 import GitHubTrendingController from './src/controllers/GitHubTrendingController.js';
 import GitHubTrendingDatabase from './src/models/GitHubTrendingDatabase.js';
+import GroupMemberDatabase from './src/models/GroupMemberDatabase.js';
+import MemberScrapeController from './src/controllers/MemberScrapeController.js';
 import UserManager from './src/models/UserManager.js';
 import StickerController from './src/controllers/StickerController.js';
 import BotSettings from './src/models/BotSettings.js';
@@ -87,6 +89,7 @@ class WhatsAppCourseBot {
             this.database = new DatabaseModel(mongoDb);
             this.newsDatabase = new NewsDatabase(mongoDb);
             this.githubTrendingDatabase = new GitHubTrendingDatabase(mongoDb);
+            this.groupMemberDatabase = new GroupMemberDatabase(mongoDb);
             this.morningDatabase = new MorningMessageDatabase(mongoDb);
             this.groupManager = new GroupManager(mongoDb);
             this.userManager = new UserManager(mongoDb);
@@ -95,6 +98,7 @@ class WhatsAppCourseBot {
                 this.database.init(),
                 this.newsDatabase.init(),
                 this.githubTrendingDatabase.init(),
+                this.groupMemberDatabase.init(),
                 this.morningDatabase.init(),
                 this.groupManager.init(),
                 this.authDatabase.init(),
@@ -134,6 +138,10 @@ class WhatsAppCourseBot {
                 this.groupManager,
                 this.githubTrendingDatabase
             );
+            this.memberScrapeController = new MemberScrapeController(
+                this.groupMemberDatabase,
+                this.userManager
+            );
             this.movieController = new MovieController(mongoDb, this.groupManager);
             await this.movieController.init();
             
@@ -148,7 +156,8 @@ class WhatsAppCourseBot {
                 this.userManager,
                 this.stickerController,
                 this.botSettings,
-                this.githubTrendingController
+                this.githubTrendingController,
+                this.memberScrapeController
             );
             this.courseController = new CourseController(this.database, this.courseAPI, config, this.groupManager);
             const morningScraper = new MorningMessageScraper(this.morningDatabase);

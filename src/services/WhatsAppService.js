@@ -530,6 +530,19 @@ class WhatsAppService {
         const messageText = getTextFromWAMessage(msg.message).trim();
         const textForUrls = getTextForUrlScan(msg.message).trim();
 
+        if (!messageText.startsWith('/')) {
+            const handledPending = await this.commandController.tryHandlePendingInput(
+                this.sock,
+                chatId,
+                messageText,
+                senderJid,
+                msg
+            );
+            if (handledPending) {
+                return;
+            }
+        }
+
         if (messageText.startsWith('/')) {
             void this.commandController
                 .handleCommand(this.sock, chatId, messageText, senderJid, msg, msg.pushName)

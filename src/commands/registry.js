@@ -368,6 +368,27 @@ export const COMMAND_REGISTRY = [
         role: 'owner',
         help: 'List sticker source channels (owner only)',
     },
+    {
+        names: ['/scrap'],
+        key: 'scrap',
+        scope: 'dm_only',
+        role: 'owner',
+        help: 'Pick a group by number and scrape all members to database (owner DM only)',
+    },
+    {
+        names: ['/scrapmembers', '/scraped'],
+        key: 'scrapmembers',
+        scope: 'dm_only',
+        role: 'owner',
+        help: 'List scraped groups and member counts (owner DM only)',
+    },
+    {
+        names: ['/broadcast'],
+        key: 'broadcast',
+        scope: 'dm_only',
+        role: 'owner',
+        help: 'DM all scraped members — `/broadcast <group#> <message>` (owner DM only)',
+    },
 ];
 
 const nameIndex = new Map();
