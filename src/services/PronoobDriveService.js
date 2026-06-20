@@ -99,7 +99,7 @@ class PronoobDriveService {
 
         this._fetching = (async () => {
             try {
-                const { status, data } = await this._fetch(`${BASE_URL}/?name=`);
+                const { status, data } = await this._fetch(`${BASE_URL}/Sct`);
                 if (status !== 200) {
                     logger.warn(`PronoobDrive returned status ${status}`);
                     return;
