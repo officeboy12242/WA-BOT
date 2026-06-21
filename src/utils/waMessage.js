@@ -107,7 +107,7 @@ export function collectMessageSenderDmCandidates(key) {
 
     const seen = new Set();
     const out = [];
-    for (const raw of [key.participantLid, key.participantPn, key.participant]) {
+    for (const raw of [key.participantPn, key.participantLid, key.participant]) {
         if (!raw) continue;
         const normalized = jidNormalizedUser(raw.split(':')[0]) || raw.split(':')[0];
         if (!normalized || seen.has(normalized)) continue;
