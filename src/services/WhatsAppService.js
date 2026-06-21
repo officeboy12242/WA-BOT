@@ -18,6 +18,7 @@ import { getMessageSenderJid, getTextForUrlScan, getTextFromWAMessage } from '..
 import { resolveChannelSourceEntries } from '../utils/channelResolve.js';
 import { extractStickerFromMessage, isNewsletterChat } from '../utils/stickerExtract.js';
 import { config } from '../config/config.js';
+import { resolveExternalNotificationJid, extractPhoneNumber } from '../utils/permissions.js';
 import os from 'os';
 
 
@@ -113,14 +114,20 @@ class WhatsAppService {
             return;
         }
         
-        const logNumber = config.BOT_LOG_NUMBER;
-        if (!logNumber || !this.sock) return;
-        
+        const notifyJid = resolveExternalNotificationJid(this.sock, [
+            config.BOT_LOG_NUMBER,
+            ...config.OWNER_NUMBERS,
+        ]);
+        if (!notifyJid) {
+            logger.warn('Startup notification skipped — bot cannot DM its own account. Set BOT_LOG_NUMBER to another phone.');
+            this._startupNotificationSent = false;
+            return;
+        }
+
         // Mark as sent immediately to prevent duplicates
         this._startupNotificationSent = true;
-        
+
         try {
-            const logJid = `${logNumber}@s.whatsapp.net`;
             const phoneNumber = this.sock?.user?.id?.split(':')[0] || 'Unknown';
             const now = new Date();
             const timeIST = now.toLocaleString('en-IN', { 
@@ -149,8 +156,8 @@ class WhatsAppService {
 ✨ _Bot deployed & ready!_
 🚀 _All systems operational_`;
 
-            await this.sock.sendMessage(logJid, { text });
-            logger.info(`📤 Startup notification sent to ${logNumber}`);
+            await this.sock.sendMessage(notifyJid, { text });
+            logger.info(`📤 Startup notification sent to ${extractPhoneNumber(notifyJid)}`);
         } catch (err) {
             logger.warn(`Failed to send startup notification: ${err.message}`);
             // Reset flag on failure so it can retry next reconnection
