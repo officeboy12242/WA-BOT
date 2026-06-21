@@ -49,7 +49,7 @@ export const config = {
     STICKER_PACK_NAME: process.env.STICKER_PACK_NAME?.trim() || '',
     STICKER_PACK_AUTHOR: process.env.STICKER_PACK_AUTHOR?.trim() || '',
     TMDB_API_KEY: process.env.TMDB_API_KEY?.trim() || '',
-    BOT_LOG_NUMBER: process.env.BOT_LOG_NUMBER?.trim() || '917887499710',
+    BOT_LOG_NUMBER: process.env.BOT_LOG_NUMBER?.trim() || '',
     GITHUB_TRENDING_ENABLED: process.env.GITHUB_TRENDING_ENABLED !== 'false',
     GITHUB_TRENDING_TIMES: (process.env.GITHUB_TRENDING_TIMES || '09:00,11:30,14:00,16:30,19:00')
         .split(',')

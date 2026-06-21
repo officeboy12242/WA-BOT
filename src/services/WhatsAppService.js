@@ -117,9 +117,9 @@ class WhatsAppService {
         const notifyJid = resolveExternalNotificationJid(this.sock, [
             config.BOT_LOG_NUMBER,
             ...config.OWNER_NUMBERS,
-        ]);
+        ].filter(Boolean));
         if (!notifyJid) {
-            logger.warn('Startup notification skipped — bot cannot DM its own account. Set BOT_LOG_NUMBER to another phone.');
+            logger.warn('Startup notification skipped — no external phone configured (bot cannot DM itself).');
             this._startupNotificationSent = false;
             return;
         }
