@@ -49,6 +49,26 @@ export function extractGroupId(jid) {
 }
 
 /**
+ * Best-effort phone number for the connected bot account.
+ * @param {import('@whiskeysockets/baileys').WASocket | null | undefined} sock
+ * @returns {string}
+ */
+export function getBotAccountPhone(sock) {
+    const candidates = [
+        sock?.authState?.creds?.me?.id,
+        sock?.user?.id,
+    ].filter(Boolean);
+
+    for (const raw of candidates) {
+        const value = String(raw);
+        if (value.includes('@lid')) continue;
+        const phone = normalizePhoneNumber(extractPhoneNumber(value));
+        if (/^\d{10,15}$/.test(phone)) return phone;
+    }
+    return '';
+}
+
+/**
  * True when jid is the connected bot account (phone or LID) — DMs to self won't show up.
  * @param {import('@whiskeysockets/baileys').WASocket | null | undefined} sock
  * @param {string} jid
@@ -56,7 +76,7 @@ export function extractGroupId(jid) {
 export function isBotSelfTarget(sock, jid) {
     if (!jid || !sock?.user?.id) return false;
 
-    const selfPhone = normalizePhoneNumber(extractPhoneNumber(sock.user.id));
+    const botPhone = getBotAccountPhone(sock);
     const selfJid = jidNormalizedUser(sock.user.id.split(':')[0]) || sock.user.id.split(':')[0];
     const botLid = sock.authState?.creds?.me?.lid || sock.user?.lid || '';
     const normBotLid = botLid ? (jidNormalizedUser(String(botLid)) || String(botLid)) : '';
@@ -65,7 +85,7 @@ export function isBotSelfTarget(sock, jid) {
     const targetJid = jidNormalizedUser(targetBare) || targetBare;
     const targetPhone = normalizePhoneNumber(extractPhoneNumber(jid));
 
-    if (targetPhone && selfPhone && targetPhone === selfPhone) return true;
+    if (botPhone && targetPhone && targetPhone === botPhone) return true;
     if (targetJid === selfJid) return true;
     if (normBotLid && targetJid === normBotLid) return true;
     return false;
@@ -78,9 +98,11 @@ export function isBotSelfTarget(sock, jid) {
  * @returns {string | null}
  */
 export function resolveExternalNotificationJid(sock, preferredNumbers = []) {
+    const botPhone = getBotAccountPhone(sock);
     for (const raw of preferredNumbers) {
         const phone = normalizePhoneNumber(raw);
         if (!/^\d{10,15}$/.test(phone)) continue;
+        if (botPhone && phone === botPhone) continue;
         const jid = `${phone}@s.whatsapp.net`;
         if (!isBotSelfTarget(sock, jid)) return jid;
     }
