@@ -59,4 +59,6 @@ export const config = {
     GITHUB_TRENDING_COUNT: parseInt(process.env.GITHUB_TRENDING_COUNT, 10) || 5,
     /** Public URL for short links (Render sets RENDER_EXTERNAL_URL automatically). */
     PUBLIC_URL: (process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || '').replace(/\/$/, ''),
+    /** Delay before DM-ing group movie results and deleting from group (default 5 min). */
+    MOVIE_GROUP_HANDOFF_MS: parseInt(process.env.MOVIE_GROUP_HANDOFF_MS, 10) || (5 * 60 * 1000),
 };
