@@ -39,16 +39,6 @@ function normalizeBaseUrl(raw) {
     }
 }
 
-function driveSourceLabel(baseUrl, urlCount) {
-    if (urlCount <= 1) return 'Drive';
-    try {
-        const host = new URL(baseUrl).hostname.replace(/\.onrender\.com$/i, '');
-        return `Drive (${host})`;
-    } catch {
-        return 'Drive';
-    }
-}
-
 function qualityFromFilename(name) {
     const n = name.toLowerCase();
     if (n.includes('2160p') || n.includes('4k')) return '4K';
@@ -315,14 +305,12 @@ class PronoobDriveService {
     async searchMovies(query, maxResults = 5) {
         try {
             await this.loadUrls();
-            const urlCount = this._urls.length || 1;
             const urls = this._orderedUrlsForRotation();
 
             for (let i = 0; i < urls.length; i++) {
                 const baseUrl = urls[i];
-                const sourceLabel = driveSourceLabel(baseUrl, urlCount);
                 try {
-                    const results = await this._searchSingleBase(baseUrl, query, maxResults, sourceLabel);
+                    const results = await this._searchSingleBase(baseUrl, query, maxResults, 'Drive');
                     if (results.length > 0) {
                         logger.info(`Drive ${baseUrl}: ${results.length} result(s) for "${query}"`);
                         return results;
