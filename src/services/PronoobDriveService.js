@@ -274,11 +274,16 @@ class PronoobDriveService {
 
     async _searchSingleBase(baseUrl, query, maxResults, sourceLabel) {
         const searchUrl = `${baseUrl}/Sct?search=${encodeURIComponent(query)}`;
-        const { status, data } = await this._fetch(searchUrl);
+        let status;
+        let data;
+        try {
+            ({ status, data } = await this._fetch(searchUrl));
+        } catch (err) {
+            throw new Error(`unreachable: ${err.message}`);
+        }
 
         if (status !== 200) {
-            logger.warn(`PronoobDrive search returned status ${status} from ${baseUrl}`);
-            return [];
+            throw new Error(`HTTP ${status}`);
         }
 
         const files = this._parseHtml(data, baseUrl);
@@ -310,34 +315,32 @@ class PronoobDriveService {
     async searchMovies(query, maxResults = 5) {
         try {
             await this.loadUrls();
-            const urls = this.getUrls();
-            const perSource = urls.length > 1
-                ? Math.max(2, Math.ceil(maxResults / urls.length))
-                : maxResults;
+            const urlCount = this._urls.length || 1;
+            const urls = this._orderedUrlsForRotation();
 
-            const settled = await Promise.allSettled(
-                urls.map(async (baseUrl) => {
-                    const sourceLabel = driveSourceLabel(baseUrl, urls.length);
-                    return this._searchSingleBase(baseUrl, query, perSource, sourceLabel);
-                }),
-            );
-
-            const merged = [];
-            for (let i = 0; i < settled.length; i++) {
-                const result = settled[i];
+            for (let i = 0; i < urls.length; i++) {
                 const baseUrl = urls[i];
-                if (result.status === 'fulfilled' && result.value?.length) {
-                    merged.push(...result.value);
-                    logger.info(`Drive ${baseUrl}: ${result.value.length} result(s) for "${query}"`);
-                } else if (result.status === 'rejected') {
-                    logger.warn(`Drive ${baseUrl} search failed: ${result.reason?.message || result.reason}`);
+                const sourceLabel = driveSourceLabel(baseUrl, urlCount);
+                try {
+                    const results = await this._searchSingleBase(baseUrl, query, maxResults, sourceLabel);
+                    if (results.length > 0) {
+                        logger.info(`Drive ${baseUrl}: ${results.length} result(s) for "${query}"`);
+                        return results;
+                    }
+                    logger.warn(`Drive ${baseUrl}: no results for "${query}"${i < urls.length - 1 ? ', trying next source' : ''}`);
+                } catch (err) {
+                    logger.warn(`Drive ${baseUrl} unavailable (${err.message})${i < urls.length - 1 ? ', trying next source' : ''}`);
                 }
             }
 
-            return merged.slice(0, maxResults * urls.length);
+            return [];
         } catch (err) {
             logger.error(`PronoobDrive searchMovies error: ${err.message}`);
             return [];
+        } finally {
+            if (this._urls.length) {
+                this._rotateIndex = (this._rotateIndex + 1) % this._urls.length;
+            }
         }
     }
 
