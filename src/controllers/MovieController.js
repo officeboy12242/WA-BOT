@@ -10,6 +10,7 @@ import axios from 'axios';
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
 import { logger } from '../utils/logger.js';
 import { extractPhoneNumber, isGroupMessage, normalizePhoneNumber } from '../utils/permissions.js';
+import { collectMessageSenderDmCandidates } from '../utils/waMessage.js';
 import { config } from '../config/config.js';
 import { atozService } from '../services/AtoZService.js';
 import { pronoobDriveService } from '../services/PronoobDriveService.js';
@@ -20,7 +21,6 @@ const QR_IMAGE_PATH = resolve(__dirname, '../../assets/payment_qr.jpg');
 
 const DAILY_LIMIT = 5;
 const AUTO_DELETE_MS = 5 * 60 * 60 * 1000; // 5 hours
-const GROUP_HANDOFF_MS = 5 * 60 * 1000; // 5 minutes — DM then delete from group
 const DM_HANDOFF_RETRIES = 2;
 const DM_HANDOFF_RETRY_MS = 1500;
 const SUMMARY_HOUR = 23;
@@ -325,6 +325,12 @@ function participantMatchesSender(participant, senderJid) {
         const normalized = norm(field);
         if (normalized === target || field === senderJid) return true;
     }
+    const senderPhone = normalizePhoneNumber(extractPhoneNumber(senderJid));
+    const participantPhone = phoneFromParticipant(participant);
+    if (senderPhone && participantPhone && senderPhone === participantPhone) {
+        return true;
+    }
+
     return false;
 }
 
@@ -338,6 +344,34 @@ function phoneFromParticipant(participant) {
         if (/^\d{10,15}$/.test(fromId)) return fromId;
     }
     return '';
+}
+
+function jidToDmTarget(jid) {
+    if (!jid) return null;
+    if (jid.includes('@lid')) {
+        const lidJid = normalizeLidJid(jid);
+        return lidJid.endsWith('@lid') ? { jid: lidJid, via: 'lid' } : null;
+    }
+    const phone = normalizePhoneNumber(extractPhoneNumber(jid));
+    if (/^\d{10,15}$/.test(phone)) {
+        return { jid: `${phone}@s.whatsapp.net`, via: 'phone' };
+    }
+    return null;
+}
+
+function orderDmTargets(targets, { preferLid = false } = {}) {
+    const lids = targets.filter((t) => t.via === 'lid');
+    const phones = targets.filter((t) => t.via === 'phone');
+    return preferLid ? [...lids, ...phones] : [...phones, ...lids];
+}
+
+function snapshotMessageKey(key) {
+    if (!key) return null;
+    return {
+        participant: key.participant || '',
+        participantLid: key.participantLid || '',
+        participantPn: key.participantPn || '',
+    };
 }
 
 function getRandomDialogue(arr) {
@@ -971,6 +1005,15 @@ class MovieController {
         }
     }
 
+    _getGroupHandoffMs() {
+        return config.MOVIE_GROUP_HANDOFF_MS;
+    }
+
+    _groupHandoffMinutesLabel() {
+        const mins = Math.round(this._getGroupHandoffMs() / 60000);
+        return mins === 1 ? '1 min' : `${mins} min`;
+    }
+
     setSock(sock) {
         this._sock = sock;
     }
@@ -999,12 +1042,7 @@ class MovieController {
         throw lastErr;
     }
 
-    async _resolveDmTarget(sock, chatId, senderJid) {
-        const targets = await this._resolveDmTargets(sock, chatId, senderJid);
-        return targets[0] || null;
-    }
-
-    async _resolveDmTargets(sock, chatId, senderJid) {
+    async _resolveDmTargets(sock, chatId, senderJid, messageKey = null) {
         const targets = [];
         const seen = new Set();
 
@@ -1014,10 +1052,13 @@ class MovieController {
             targets.push({ jid, via });
         };
 
-        const directPhone = normalizePhoneNumber(extractPhoneNumber(senderJid));
-        if (/^\d{10,15}$/.test(directPhone) && !senderJid.includes('@lid')) {
-            addTarget(`${directPhone}@s.whatsapp.net`, 'phone');
+        for (const candidate of collectMessageSenderDmCandidates(messageKey)) {
+            const target = jidToDmTarget(candidate);
+            if (target) addTarget(target.jid, target.via);
         }
+
+        const directTarget = jidToDmTarget(senderJid);
+        if (directTarget) addTarget(directTarget.jid, directTarget.via);
 
         if (chatId?.endsWith('@g.us') && sock) {
             try {
@@ -1044,17 +1085,6 @@ class MovieController {
             }
         }
 
-        if (!targets.length && senderJid.includes('@lid')) {
-            const lidJid = normalizeLidJid(senderJid);
-            if (lidJid.endsWith('@lid')) {
-                addTarget(lidJid, 'lid');
-            }
-        }
-
-        if (!targets.length && senderJid.endsWith('@s.whatsapp.net') && /^\d{10,15}$/.test(directPhone)) {
-            addTarget(`${directPhone}@s.whatsapp.net`, 'phone');
-        }
-
         if (targets.length) {
             logger.info(`DM targets for ${senderJid}: ${targets.map((t) => `${t.jid} (${t.via})`).join(', ')}`);
         }
@@ -1062,13 +1092,28 @@ class MovieController {
         return targets;
     }
 
-    async _resolveDmJid(sock, chatId, senderJid) {
-        const target = await this._resolveDmTarget(sock, chatId, senderJid);
+    async _resolveDmTarget(sock, chatId, senderJid, messageKey = null) {
+        const preferLid = Boolean(messageKey?.participantLid || senderJid?.includes('@lid'));
+        const targets = orderDmTargets(
+            await this._resolveDmTargets(sock, chatId, senderJid, messageKey),
+            { preferLid },
+        );
+        return targets[0] || null;
+    }
+
+    async _resolveDmJid(sock, chatId, senderJid, messageKey = null) {
+        const target = await this._resolveDmTarget(sock, chatId, senderJid, messageKey);
         return target?.jid || null;
     }
 
-    _scheduleGroupResultHandoff(fallbackSock, chatId, senderJid, messageKeys, messageTexts) {
+    _scheduleGroupResultHandoff(fallbackSock, chatId, senderJid, messageKeys, messageTexts, cachedTargets = [], messageKeySnapshot = null) {
         if (!messageKeys.length || !messageTexts.length) return;
+
+        const delayMs = this._getGroupHandoffMs();
+        logger.info(
+            `Scheduled movie DM handoff in ${Math.round(delayMs / 1000)}s for ${senderJid} `
+            + `(targets: ${cachedTargets.map((t) => t.jid).join(', ') || 'pending'})`,
+        );
 
         setTimeout(async () => {
             const sock = this._resolveActiveSock(fallbackSock);
@@ -1078,7 +1123,15 @@ class MovieController {
             }
 
             try {
-                const dmTargets = await this._resolveDmTargets(sock, chatId, senderJid);
+                let dmTargets = cachedTargets;
+                if (!dmTargets.length) {
+                    const preferLid = Boolean(messageKeySnapshot?.participantLid || senderJid?.includes('@lid'));
+                    dmTargets = orderDmTargets(
+                        await this._resolveDmTargets(sock, chatId, senderJid, messageKeySnapshot),
+                        { preferLid },
+                    );
+                }
+
                 let dmDelivered = false;
 
                 for (const dmTarget of dmTargets) {
@@ -1097,7 +1150,7 @@ class MovieController {
                         logger.info(`📩 Movie results sent to DM ${dmTarget.jid} (${dmTarget.via})`);
                         break;
                     } catch (err) {
-                        logger.warn(`DM handoff failed via ${dmTarget.via} (${dmTarget.jid}): ${err.message}`);
+                        logger.warn(`DM handoff failed via ${dmTarget.via} (${dmTarget.jid}): ${err.stack || err.message}`);
                     }
                 }
 
@@ -1111,11 +1164,11 @@ class MovieController {
                         await sock.sendMessage(chatId, { delete: key });
                     } catch {}
                 }
-                logger.info(`🗑️ Group movie results deleted from ${chatId} after ${GROUP_HANDOFF_MS / 60000}m`);
+                logger.info(`🗑️ Group movie results deleted from ${chatId} after ${Math.round(delayMs / 60000)}m`);
             } catch (err) {
                 logger.error(`Group movie handoff failed: ${err.stack || err.message}`);
             }
-        }, GROUP_HANDOFF_MS);
+        }, delayMs);
     }
 
     scheduleDelete(sock, chatId, messageKey, delayMs = AUTO_DELETE_MS) {
@@ -1271,7 +1324,7 @@ class MovieController {
             const groupHandoffTexts = [];
 
             if (isGroup) {
-                const handoffNote = '\n\n📩 _Results will be sent to your DM in 5 min, then removed from group._';
+                const handoffNote = `\n\n📩 _Results will be sent to your DM in ${this._groupHandoffMinutesLabel()}, then removed from group._`;
                 resultMessages[resultMessages.length - 1] += handoffNote;
             }
 
@@ -1313,7 +1366,21 @@ class MovieController {
             }
 
             if (isGroup && groupHandoffKeys.length) {
-                this._scheduleGroupResultHandoff(sock, chatId, senderJid, groupHandoffKeys, groupHandoffTexts);
+                const messageKeySnapshot = snapshotMessageKey(originalMsg?.key);
+                const preferLid = Boolean(messageKeySnapshot?.participantLid || senderJid?.includes('@lid'));
+                const dmTargets = orderDmTargets(
+                    await this._resolveDmTargets(sock, chatId, senderJid, messageKeySnapshot),
+                    { preferLid },
+                );
+                this._scheduleGroupResultHandoff(
+                    sock,
+                    chatId,
+                    senderJid,
+                    groupHandoffKeys,
+                    groupHandoffTexts,
+                    dmTargets,
+                    messageKeySnapshot,
+                );
             }
 
             try {

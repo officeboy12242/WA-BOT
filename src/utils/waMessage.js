@@ -2,7 +2,7 @@
  * WA incoming message helpers (aligned with Baileys unwrap rules).
  */
 
-import { normalizeMessageContent } from '@whiskeysockets/baileys';
+import { normalizeMessageContent, jidNormalizedUser } from '@whiskeysockets/baileys';
 import { extractPhoneNumber } from './permissions.js';
 
 /**
@@ -92,6 +92,29 @@ export function getMessageSenderJid(key) {
         return key.participant || key.participantLid || key.participantPn || '';
     }
     return key.participant || key.remoteJid;
+}
+
+/**
+ * All sender JIDs from an incoming group message key (LID / phone / legacy participant).
+ * Order matches WhatsApp privacy fields — LID and PN are often more reliable than participant alone.
+ * @param {import('@whiskeysockets/baileys').WAMessage['key']} key
+ * @returns {string[]}
+ */
+export function collectMessageSenderDmCandidates(key) {
+    if (!key) {
+        return [];
+    }
+
+    const seen = new Set();
+    const out = [];
+    for (const raw of [key.participantLid, key.participantPn, key.participant]) {
+        if (!raw) continue;
+        const normalized = jidNormalizedUser(raw.split(':')[0]) || raw.split(':')[0];
+        if (!normalized || seen.has(normalized)) continue;
+        seen.add(normalized);
+        out.push(normalized);
+    }
+    return out;
 }
 
 function getContextInfo(message) {
