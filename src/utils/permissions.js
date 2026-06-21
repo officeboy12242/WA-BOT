@@ -48,13 +48,41 @@ export function extractGroupId(jid) {
     return jid;
 }
 
+function getConfiguredBotPhone() {
+    const fromEnv = normalizePhoneNumber(process.env.BOT_PHONE || '');
+    if (/^\d{10,15}$/.test(fromEnv)) return fromEnv;
+
+    const chatId = process.env.WHATSAPP_CHAT_ID || '';
+    const match = chatId.match(/^(\d{10,15})-/);
+    return match ? match[1] : '';
+}
+
+function getBotLinkedLid(sock) {
+    const raw = sock?.authState?.creds?.me?.lid || sock?.user?.lid || '';
+    if (raw) {
+        return jidNormalizedUser(String(raw)) || String(raw);
+    }
+    for (const value of [sock?.authState?.creds?.me?.id, sock?.user?.id]) {
+        if (!value) continue;
+        const id = String(value);
+        if (id.includes('@lid')) {
+            return jidNormalizedUser(id.split(':')[0]) || id.split(':')[0];
+        }
+    }
+    return '';
+}
+
 /**
  * Best-effort phone number for the connected bot account.
  * @param {import('@whiskeysockets/baileys').WASocket | null | undefined} sock
  * @returns {string}
  */
 export function getBotAccountPhone(sock) {
+    const configured = getConfiguredBotPhone();
+    if (/^\d{10,15}$/.test(configured)) return configured;
+
     const candidates = [
+        sock?.authState?.creds?.me?.phoneNumber,
         sock?.authState?.creds?.me?.id,
         sock?.user?.id,
     ].filter(Boolean);
@@ -65,7 +93,7 @@ export function getBotAccountPhone(sock) {
         const phone = normalizePhoneNumber(extractPhoneNumber(value));
         if (/^\d{10,15}$/.test(phone)) return phone;
     }
-    return '';
+    return configured;
 }
 
 /**
@@ -78,8 +106,7 @@ export function isBotSelfTarget(sock, jid) {
 
     const botPhone = getBotAccountPhone(sock);
     const selfJid = jidNormalizedUser(sock.user.id.split(':')[0]) || sock.user.id.split(':')[0];
-    const botLid = sock.authState?.creds?.me?.lid || sock.user?.lid || '';
-    const normBotLid = botLid ? (jidNormalizedUser(String(botLid)) || String(botLid)) : '';
+    const botLid = getBotLinkedLid(sock);
 
     const targetBare = jid.split(':')[0];
     const targetJid = jidNormalizedUser(targetBare) || targetBare;
@@ -87,7 +114,7 @@ export function isBotSelfTarget(sock, jid) {
 
     if (botPhone && targetPhone && targetPhone === botPhone) return true;
     if (targetJid === selfJid) return true;
-    if (normBotLid && targetJid === normBotLid) return true;
+    if (botLid && targetJid === botLid) return true;
     return false;
 }
 

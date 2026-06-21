@@ -7,6 +7,7 @@
 import https from 'https';
 import http from 'http';
 import { logger } from '../utils/logger.js';
+import { audioFromFilename } from '../utils/movieMetadata.js';
 
 const DEFAULT_BASE_URL = 'https://pronoobdrive-7w2p.onrender.com';
 const REQUEST_TIMEOUT = 15000;
@@ -35,6 +36,16 @@ function normalizeBaseUrl(raw) {
         return `${parsed.protocol}//${parsed.host}`.replace(/\/$/, '');
     } catch {
         return '';
+    }
+}
+
+function driveSourceLabel(baseUrl, urlCount) {
+    if (urlCount <= 1) return 'Drive';
+    try {
+        const host = new URL(baseUrl).hostname.replace(/\.onrender\.com$/i, '');
+        return `Drive (${host})`;
+    } catch {
+        return 'Drive';
     }
 }
 
@@ -74,7 +85,6 @@ class PronoobDriveService {
         this._urls = [DEFAULT_BASE_URL];
         this._rotateIndex = 0;
         this._lastHealthyUrl = null;
-        this._keepAliveIndex = 0;
     }
 
     setSettings(botSettings) {
@@ -128,7 +138,6 @@ class PronoobDriveService {
             );
         }
         this._rotateIndex = 0;
-        this._keepAliveIndex = 0;
         return { removed: removed[0], urls: this._urls };
     }
 
@@ -263,42 +272,69 @@ class PronoobDriveService {
         return files;
     }
 
+    async _searchSingleBase(baseUrl, query, maxResults, sourceLabel) {
+        const searchUrl = `${baseUrl}/Sct?search=${encodeURIComponent(query)}`;
+        const { status, data } = await this._fetch(searchUrl);
+
+        if (status !== 200) {
+            logger.warn(`PronoobDrive search returned status ${status} from ${baseUrl}`);
+            return [];
+        }
+
+        const files = this._parseHtml(data, baseUrl);
+        if (!files.length) return [];
+
+        const groups = new Map();
+        for (const file of files) {
+            const key = file.title.toLowerCase();
+            if (!groups.has(key)) {
+                groups.set(key, { title: file.title, links: [] });
+            }
+            const label = file.quality ? `${file.quality} • ${file.size}` : file.size;
+            groups.get(key).links.push({
+                size: label,
+                audio: audioFromFilename(file.rawFilename),
+                url: file.url,
+            });
+        }
+
+        const results = [];
+        for (const [, group] of groups) {
+            results.push({ title: group.title, source: sourceLabel, links: group.links });
+            if (results.length >= maxResults) break;
+        }
+
+        return results;
+    }
+
     async searchMovies(query, maxResults = 5) {
         try {
-            const baseUrl = await this._pickHealthyBase();
-            if (!baseUrl) {
-                logger.warn('No healthy Drive source available');
-                return [];
-            }
+            await this.loadUrls();
+            const urls = this.getUrls();
+            const perSource = urls.length > 1
+                ? Math.max(2, Math.ceil(maxResults / urls.length))
+                : maxResults;
 
-            const searchUrl = `${baseUrl}/Sct?search=${encodeURIComponent(query)}`;
-            const { status, data } = await this._fetch(searchUrl);
+            const settled = await Promise.allSettled(
+                urls.map(async (baseUrl) => {
+                    const sourceLabel = driveSourceLabel(baseUrl, urls.length);
+                    return this._searchSingleBase(baseUrl, query, perSource, sourceLabel);
+                }),
+            );
 
-            if (status !== 200) {
-                logger.warn(`PronoobDrive search returned status ${status} from ${baseUrl}`);
-                return [];
-            }
-
-            const files = this._parseHtml(data, baseUrl);
-            if (!files.length) return [];
-
-            const groups = new Map();
-            for (const file of files) {
-                const key = file.title.toLowerCase();
-                if (!groups.has(key)) {
-                    groups.set(key, { title: file.title, links: [] });
+            const merged = [];
+            for (let i = 0; i < settled.length; i++) {
+                const result = settled[i];
+                const baseUrl = urls[i];
+                if (result.status === 'fulfilled' && result.value?.length) {
+                    merged.push(...result.value);
+                    logger.info(`Drive ${baseUrl}: ${result.value.length} result(s) for "${query}"`);
+                } else if (result.status === 'rejected') {
+                    logger.warn(`Drive ${baseUrl} search failed: ${result.reason?.message || result.reason}`);
                 }
-                const label = file.quality ? `${file.quality} • ${file.size}` : file.size;
-                groups.get(key).links.push({ size: label, url: file.url });
             }
 
-            const results = [];
-            for (const [, group] of groups) {
-                results.push({ title: group.title, source: 'Drive', links: group.links });
-                if (results.length >= maxResults) break;
-            }
-
-            return results;
+            return merged.slice(0, maxResults * urls.length);
         } catch (err) {
             logger.error(`PronoobDrive searchMovies error: ${err.message}`);
             return [];
@@ -309,15 +345,17 @@ class PronoobDriveService {
         this.stopKeepAlive();
         const ping = async () => {
             await this.loadUrls();
-            if (!this._urls.length) return;
-            const base = this._urls[this._keepAliveIndex % this._urls.length];
-            this._keepAliveIndex = (this._keepAliveIndex + 1) % this._urls.length;
-            const ok = await this._headCheck(base);
-            if (ok) {
-                logger.info(`🏓 Drive keep-alive OK (${base})`);
-            } else {
-                logger.warn(`🏓 Drive keep-alive failed (${base})`);
-            }
+            const urls = this.getUrls();
+            if (!urls.length) return;
+
+            await Promise.allSettled(urls.map(async (base) => {
+                const ok = await this._headCheck(base);
+                if (ok) {
+                    logger.info(`🏓 Drive keep-alive OK (${base})`);
+                } else {
+                    logger.warn(`🏓 Drive keep-alive failed (${base})`);
+                }
+            }));
         };
         void ping();
         this._keepAliveTimer = setInterval(() => { void ping(); }, intervalMs);

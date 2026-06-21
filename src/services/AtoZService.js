@@ -5,6 +5,7 @@
 
 import https from 'https';
 import { logger } from '../utils/logger.js';
+import { audioFromFilename } from '../utils/movieMetadata.js';
 
 const BASE_URL = 'https://atoz.cinemaz.workers.dev';
 const REQUEST_TIMEOUT = 15000;
@@ -190,6 +191,7 @@ class AtoZService {
                     source: 'AtoZ',
                     links: movie.files.map((f) => ({
                         size: `${f.quality} • ${f.size}`,
+                        audio: audioFromFilename(f.filename),
                         url: f.url,
                     })),
                 });
@@ -199,6 +201,60 @@ class AtoZService {
         } catch (err) {
             logger.error(`AtoZ searchMovies error: ${err.message}`);
             return [];
+        }
+    }
+
+    /**
+     * Light ping to keep the AtoZ worker warm on free-tier hosts.
+     */
+    _headCheck() {
+        return new Promise((resolve) => {
+            let settled = false;
+            const finish = (ok) => {
+                if (!settled) {
+                    settled = true;
+                    resolve(ok);
+                }
+            };
+            try {
+                const url = new URL(BASE_URL);
+                const req = https.request(
+                    { hostname: url.hostname, path: url.pathname || '/', method: 'HEAD' },
+                    (res) => {
+                        res.resume();
+                        finish(res.statusCode >= 200 && res.statusCode < 400);
+                    },
+                );
+                req.on('error', () => finish(false));
+                req.setTimeout(8000, () => {
+                    req.destroy();
+                    finish(false);
+                });
+                req.end();
+            } catch {
+                finish(false);
+            }
+        });
+    }
+
+    startKeepAlive(intervalMs = 4 * 60 * 1000) {
+        this.stopKeepAlive();
+        const ping = async () => {
+            const ok = await this._headCheck();
+            if (ok) {
+                logger.info(`🏓 AtoZ keep-alive OK (${BASE_URL})`);
+            } else {
+                logger.warn(`🏓 AtoZ keep-alive failed (${BASE_URL})`);
+            }
+        };
+        void ping();
+        this._keepAliveTimer = setInterval(() => { void ping(); }, intervalMs);
+    }
+
+    stopKeepAlive() {
+        if (this._keepAliveTimer) {
+            clearInterval(this._keepAliveTimer);
+            this._keepAliveTimer = null;
         }
     }
 }
