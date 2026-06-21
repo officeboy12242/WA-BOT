@@ -234,7 +234,6 @@ class WhatsAppCourseBot {
             const sock = this.whatsappService.getSock();
             if (this.movieController) {
                 this.movieController.setSock(sock);
-                this.movieController.setGetSock(() => this.whatsappService.getSock());
             }
             if (this.stickerController) this.stickerController.setConnectionProvider(this.whatsappService);
             this.commandController.setGetSock(() => this.whatsappService.getSock());
