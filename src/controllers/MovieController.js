@@ -21,6 +21,8 @@ const QR_IMAGE_PATH = resolve(__dirname, '../../assets/payment_qr.jpg');
 const DAILY_LIMIT = 5;
 const AUTO_DELETE_MS = 5 * 60 * 60 * 1000; // 5 hours
 const GROUP_HANDOFF_MS = 5 * 60 * 1000; // 5 minutes — DM then delete from group
+const DM_HANDOFF_RETRIES = 2;
+const DM_HANDOFF_RETRY_MS = 1500;
 const SUMMARY_HOUR = 23;
 const SUMMARY_MINUTE = 55;
 const WEEKLY_DAY = 0; // Sunday
@@ -307,6 +309,37 @@ const NO_RESULTS_DIALOGUES = [
     "🎭 _\"Server ne kaha — ye movie mujhe bhi nahi pata!\"_\nTry a different search!",
 ];
 
+function normalizeLidJid(value) {
+    if (!value) return '';
+    const jid = value.includes('@') ? value : `${value}@lid`;
+    return jidNormalizedUser(jid) || jid;
+}
+
+function participantMatchesSender(participant, senderJid) {
+    const norm = (jid) => (jid ? (jidNormalizedUser(jid) || jid) : '');
+    const target = norm(senderJid);
+    if (!target) return false;
+
+    for (const field of [participant.id, participant.lid, participant.phoneNumber, participant.pn]) {
+        if (!field) continue;
+        const normalized = norm(field);
+        if (normalized === target || field === senderJid) return true;
+    }
+    return false;
+}
+
+function phoneFromParticipant(participant) {
+    const fromPn = normalizePhoneNumber(extractPhoneNumber(participant.phoneNumber || participant.pn || ''));
+    if (/^\d{10,15}$/.test(fromPn)) return fromPn;
+
+    const id = participant.id || '';
+    if (!id.includes('@lid')) {
+        const fromId = normalizePhoneNumber(extractPhoneNumber(id));
+        if (/^\d{10,15}$/.test(fromId)) return fromId;
+    }
+    return '';
+}
+
 function getRandomDialogue(arr) {
     return arr[Math.floor(Math.random() * arr.length)];
 }
@@ -462,6 +495,8 @@ class MovieController {
         this.groupManager = groupManager;
         this.searchLimits = null;
         this._activeDeleteTimers = 0;
+        this._sock = null;
+        this._getSock = null;
     }
 
     async init() {
@@ -603,10 +638,6 @@ class MovieController {
         } catch (err) {
             logger.error(`Movie daily summary error: ${err.message}`, err.stack);
         }
-    }
-
-    setSock(sock) {
-        this._sock = sock;
     }
 
     _getWeekDateRange() {
@@ -940,43 +971,139 @@ class MovieController {
         }
     }
 
-    async _resolveDmJid(sock, chatId, senderJid) {
-        if (senderJid?.includes('@lid')) {
-            return jidNormalizedUser(senderJid) || senderJid;
-        }
-
-        const phone = normalizePhoneNumber(await this._resolvePhoneNumber(sock, chatId, senderJid));
-        if (/^\d{10,15}$/.test(phone)) {
-            return `${phone}@s.whatsapp.net`;
-        }
-
-        if (senderJid?.endsWith('@s.whatsapp.net')) {
-            return jidNormalizedUser(senderJid) || senderJid;
-        }
-
-        return null;
+    setSock(sock) {
+        this._sock = sock;
     }
 
-    _scheduleGroupResultHandoff(sock, chatId, senderJid, messageKeys, messageTexts) {
+    setGetSock(getSock) {
+        this._getSock = getSock;
+    }
+
+    _resolveActiveSock(fallbackSock) {
+        return (typeof this._getSock === 'function' ? this._getSock() : null) || this._sock || fallbackSock;
+    }
+
+    async _sendDmWithRetry(sock, targetJid, text) {
+        let lastErr;
+        for (let attempt = 0; attempt <= DM_HANDOFF_RETRIES; attempt++) {
+            try {
+                await sock.sendMessage(targetJid, { text, linkPreview: false });
+                return;
+            } catch (err) {
+                lastErr = err;
+                if (attempt < DM_HANDOFF_RETRIES) {
+                    await new Promise((r) => setTimeout(r, DM_HANDOFF_RETRY_MS));
+                }
+            }
+        }
+        throw lastErr;
+    }
+
+    async _resolveDmTarget(sock, chatId, senderJid) {
+        const targets = await this._resolveDmTargets(sock, chatId, senderJid);
+        return targets[0] || null;
+    }
+
+    async _resolveDmTargets(sock, chatId, senderJid) {
+        const targets = [];
+        const seen = new Set();
+
+        const addTarget = (jid, via) => {
+            if (!jid || seen.has(jid)) return;
+            seen.add(jid);
+            targets.push({ jid, via });
+        };
+
+        const directPhone = normalizePhoneNumber(extractPhoneNumber(senderJid));
+        if (/^\d{10,15}$/.test(directPhone) && !senderJid.includes('@lid')) {
+            addTarget(`${directPhone}@s.whatsapp.net`, 'phone');
+        }
+
+        if (chatId?.endsWith('@g.us') && sock) {
+            try {
+                const meta = await sock.groupMetadata(chatId);
+                for (const participant of meta.participants || []) {
+                    if (!participantMatchesSender(participant, senderJid)) continue;
+
+                    const phone = phoneFromParticipant(participant);
+                    if (/^\d{10,15}$/.test(phone)) {
+                        addTarget(`${phone}@s.whatsapp.net`, 'phone');
+                    }
+
+                    const lidSource = participant.lid
+                        || (participant.id?.endsWith('@lid') ? participant.id : '')
+                        || (senderJid.includes('@lid') ? senderJid : '');
+                    const lidJid = normalizeLidJid(lidSource);
+                    if (lidJid.endsWith('@lid')) {
+                        addTarget(lidJid, 'lid');
+                    }
+                    break;
+                }
+            } catch (err) {
+                logger.warn(`Group metadata DM lookup failed: ${err.message}`);
+            }
+        }
+
+        if (!targets.length && senderJid.includes('@lid')) {
+            const lidJid = normalizeLidJid(senderJid);
+            if (lidJid.endsWith('@lid')) {
+                addTarget(lidJid, 'lid');
+            }
+        }
+
+        if (!targets.length && senderJid.endsWith('@s.whatsapp.net') && /^\d{10,15}$/.test(directPhone)) {
+            addTarget(`${directPhone}@s.whatsapp.net`, 'phone');
+        }
+
+        if (targets.length) {
+            logger.info(`DM targets for ${senderJid}: ${targets.map((t) => `${t.jid} (${t.via})`).join(', ')}`);
+        }
+
+        return targets;
+    }
+
+    async _resolveDmJid(sock, chatId, senderJid) {
+        const target = await this._resolveDmTarget(sock, chatId, senderJid);
+        return target?.jid || null;
+    }
+
+    _scheduleGroupResultHandoff(fallbackSock, chatId, senderJid, messageKeys, messageTexts) {
         if (!messageKeys.length || !messageTexts.length) return;
 
         setTimeout(async () => {
+            const sock = this._resolveActiveSock(fallbackSock);
+            if (!sock) {
+                logger.error('Group movie handoff aborted: WhatsApp socket unavailable');
+                return;
+            }
+
             try {
-                const dmJid = await this._resolveDmJid(sock, chatId, senderJid);
-                if (dmJid) {
+                const dmTargets = await this._resolveDmTargets(sock, chatId, senderJid);
+                let dmDelivered = false;
+
+                for (const dmTarget of dmTargets) {
                     const intro =
                         '🎬 *Your movie search results*\n' +
                         '_Saved from the group before auto-delete._\n' +
                         '─────────────────────────────\n\n';
-                    await sock.sendMessage(dmJid, { text: intro, linkPreview: false });
 
-                    for (const text of messageTexts) {
-                        await sock.sendMessage(dmJid, { text, linkPreview: false });
-                        await new Promise((r) => setTimeout(r, 400));
+                    try {
+                        await this._sendDmWithRetry(sock, dmTarget.jid, intro);
+                        for (const text of messageTexts) {
+                            await this._sendDmWithRetry(sock, dmTarget.jid, text);
+                            await new Promise((r) => setTimeout(r, 400));
+                        }
+                        dmDelivered = true;
+                        logger.info(`📩 Movie results sent to DM ${dmTarget.jid} (${dmTarget.via})`);
+                        break;
+                    } catch (err) {
+                        logger.warn(`DM handoff failed via ${dmTarget.via} (${dmTarget.jid}): ${err.message}`);
                     }
-                    logger.info(`📩 Movie results sent to DM ${dmJid}`);
-                } else {
-                    logger.warn(`Could not resolve DM JID for group movie handoff (${senderJid})`);
+                }
+
+                if (!dmDelivered) {
+                    logger.warn(`Could not DM movie results for ${senderJid} — keeping group messages`);
+                    return;
                 }
 
                 for (const key of messageKeys) {
@@ -986,7 +1113,7 @@ class MovieController {
                 }
                 logger.info(`🗑️ Group movie results deleted from ${chatId} after ${GROUP_HANDOFF_MS / 60000}m`);
             } catch (err) {
-                logger.error(`Group movie handoff failed: ${err.message}`);
+                logger.error(`Group movie handoff failed: ${err.stack || err.message}`);
             }
         }, GROUP_HANDOFF_MS);
     }
