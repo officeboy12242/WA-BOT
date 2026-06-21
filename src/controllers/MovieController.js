@@ -329,17 +329,31 @@ function movieReplyOptions(originalMsg) {
 }
 
 const WHATSAPP_MAX_LENGTH = 4096;
-const SEARCH_COUNT_FOOTER_RESERVE = 80;
+const SEARCH_COUNT_FOOTER_RESERVE = 120;
+
+function parseLinkSizeLabel(sizeLabel) {
+    if (!sizeLabel) return { quality: '', fileSize: '' };
+    const parts = String(sizeLabel).split(' • ').map((p) => p.trim()).filter(Boolean);
+    if (parts.length <= 1) {
+        return { quality: '', fileSize: parts[0] || sizeLabel };
+    }
+    return { quality: parts[0], fileSize: parts.slice(1).join(' • ') };
+}
 
 function formatMovieResultBlock(item, globalIdx) {
     const title = cleanTitle(item.title);
     const sourceTag = item.source ? ` [${item.source}]` : '';
-    let block = `*${globalIdx}.* 🎥 ${title}${sourceTag}\n`;
+    let block = `*${globalIdx}. ${title}*${sourceTag}\n`;
 
     if (item.links?.length) {
         item.links.forEach((link) => {
-            const audioPart = link.audio ? ` • 🔊 ${link.audio}` : '';
-            block += `     📦 ${link.size}${audioPart}  →  ${link.url}\n`;
+            const { quality, fileSize } = parseLinkSizeLabel(link.size);
+            const sizeLine = quality ? `${quality} · ${fileSize}` : fileSize;
+            block += `┌ ${sizeLine}\n`;
+            if (link.audio) {
+                block += `│ 🔊 ${link.audio}\n`;
+            }
+            block += `└ 🔗 ${link.url}\n`;
         });
     }
 
