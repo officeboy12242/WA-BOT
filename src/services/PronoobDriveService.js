@@ -16,7 +16,70 @@ const MAX_RESPONSE_BYTES = 512 * 1024;
 const MAX_PARSED_CARDS = 20;
 
 const CARD_RE =
-    /<!-- Card\s+-->\s*<div title="\s*[^|]+\|\s*([^"]+?)\s*"[^>]*>[\s\S]*?<a href="(Sct\/\d+\/[^"]+)"[\s\S]*?<button title="([^"]+?)\.m3u"/g;
+    /<!-- Card\s+-->\s*<div title="\s*[^|]+\|\s*([^"]+?)\s*"[^>]*>[\s\S]*?<div class="p-2">([\s\S]*?)<\/div>[\s\S]*?<a href="(Sct\/\d+\/[^"]+)"[\s\S]*?<button title="([^"]+?)\.m3u"/g;
+
+const CARD_AUDIO_ALIASES = {
+    jap: 'Japanese',
+    japanese: 'Japanese',
+    jpn: 'Japanese',
+    eng: 'English',
+    english: 'English',
+    hin: 'Hindi',
+    hindi: 'Hindi',
+    h: 'Hindi',
+    tam: 'Tamil',
+    tel: 'Telugu',
+    mal: 'Malayalam',
+    kan: 'Kannada',
+    ben: 'Bengali',
+    pun: 'Punjabi',
+    mar: 'Marathi',
+    guj: 'Gujarati',
+    urd: 'Urdu',
+};
+
+function normalizeCardAudio(raw) {
+    if (!raw) return '';
+    return raw
+        .replace(/^[-:\s]+/, '')
+        .split('+')
+        .map((part) => part.trim())
+        .filter(Boolean)
+        .map((part) => CARD_AUDIO_ALIASES[part.toLowerCase()] || part)
+        .join(' + ');
+}
+
+function parseCardLabel(raw) {
+    const text = decodeHtmlEntities(String(raw || '')).replace(/\s+/g, ' ').trim();
+    const match = text.match(/[➪⇨]\s*(.+?)\s*[➪⇨]\s*Audio\s*[:-]\s*(.+)$/i);
+    if (!match) {
+        return { title: text, audio: '' };
+    }
+    return {
+        title: match[1].trim(),
+        audio: normalizeCardAudio(match[2].trim()),
+    };
+}
+
+function episodeFromFilename(raw) {
+    const name = String(raw || '').replace(/\.[^.]+$/, '');
+    const match = name.match(/\bS(\d+)\s*[-–]\s*(\d+)\b/i);
+    if (!match) return '';
+    return `S${match[1]} - ${match[2]}`;
+}
+
+function buildDisplayTitle(cardTitle, rawFilename) {
+    const episode = episodeFromFilename(rawFilename);
+    const fallback = titleFromFilename(rawFilename);
+
+    if (cardTitle && episode) {
+        const episodePattern = new RegExp(`S${episode.split(' - ')[0].replace('S', '')}\\s*[-–]\\s*${episode.split(' - ')[1]}`, 'i');
+        if (episodePattern.test(cardTitle)) return cardTitle;
+        return `${cardTitle} · ${episode}`;
+    }
+    if (cardTitle) return cardTitle;
+    return fallback;
+}
 
 function decodeHtmlEntities(str) {
     return str
@@ -248,13 +311,16 @@ class PronoobDriveService {
         CARD_RE.lastIndex = 0;
         while ((match = CARD_RE.exec(html)) !== null) {
             const size = match[1].trim();
-            const relUrl = match[2];
-            const rawFilename = decodeHtmlEntities(match[3]);
+            const cardLabel = match[2];
+            const relUrl = match[3];
+            const rawFilename = decodeHtmlEntities(match[4]);
+            const { title: cardTitle, audio: cardAudio } = parseCardLabel(cardLabel);
             files.push({
                 rawFilename,
-                title: titleFromFilename(rawFilename),
+                title: buildDisplayTitle(cardTitle, rawFilename),
                 quality: qualityFromFilename(rawFilename),
                 size,
+                audio: cardAudio || audioFromFilename(rawFilename),
                 url: `${baseUrl}/${relUrl}`,
             });
             if (files.length >= MAX_PARSED_CARDS) break;
@@ -288,7 +354,7 @@ class PronoobDriveService {
             const label = file.quality ? `${file.quality} • ${file.size}` : file.size;
             groups.get(key).links.push({
                 size: label,
-                audio: audioFromFilename(file.rawFilename),
+                audio: file.audio || audioFromFilename(file.rawFilename),
                 url: file.url,
             });
         }

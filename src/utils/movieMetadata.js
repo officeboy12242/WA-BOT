@@ -1,6 +1,7 @@
 const LANGUAGE_PATTERNS = [
     { re: /\bDual[\s._-]?Audio\b/i, label: 'Dual Audio' },
     { re: /\bMulti[\s._-]?Audio\b/i, label: 'Multi Audio' },
+    { re: /\[(Multi|MULTI)\]/i, label: 'Multi Audio' },
     { re: /\bHindi\b/i, label: 'Hindi' },
     { re: /\bEnglish\b/i, label: 'English' },
     { re: /\bTamil\b/i, label: 'Tamil' },
