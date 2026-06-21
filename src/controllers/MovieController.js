@@ -9,7 +9,7 @@ import { fileURLToPath } from 'url';
 import axios from 'axios';
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
 import { logger } from '../utils/logger.js';
-import { extractPhoneNumber, isGroupMessage, normalizePhoneNumber } from '../utils/permissions.js';
+import { extractPhoneNumber, isGroupMessage, normalizePhoneNumber, isBotSelfTarget, resolveExternalNotificationJid } from '../utils/permissions.js';
 import { collectMessageSenderDmCandidates } from '../utils/waMessage.js';
 import { config } from '../config/config.js';
 import { atozService } from '../services/AtoZService.js';
@@ -360,7 +360,7 @@ function jidToDmTarget(jid) {
     return null;
 }
 
-function orderDmTargets(targets, { usesLid = false, messageKey = null } = {}) {
+function orderDmTargets(targets, { usesLid = false, messageKey = null, sock = null } = {}) {
     const lids = targets.filter((t) => t.via === 'lid');
     const phones = targets.filter((t) => t.via === 'phone');
     const ordered = [];
@@ -368,6 +368,7 @@ function orderDmTargets(targets, { usesLid = false, messageKey = null } = {}) {
 
     const push = (target) => {
         if (!target || seen.has(target.jid)) return;
+        if (sock && isBotSelfTarget(sock, target.jid)) return;
         seen.add(target.jid);
         ordered.push(target);
     };
@@ -387,19 +388,8 @@ function orderDmTargets(targets, { usesLid = false, messageKey = null } = {}) {
 }
 
 function filterSelfDmTargets(sock, targets) {
-    if (!sock?.user?.id || !targets.length) return targets;
-
-    const selfPhone = normalizePhoneNumber(extractPhoneNumber(sock.user.id));
-    const selfJid = jidNormalizedUser(sock.user.id.split(':')[0]) || sock.user.id.split(':')[0];
-
-    const filtered = targets.filter((target) => {
-        if (target.via === 'lid') return true;
-        const phone = normalizePhoneNumber(extractPhoneNumber(target.jid));
-        const jid = jidNormalizedUser(target.jid) || target.jid;
-        return phone !== selfPhone && jid !== selfJid;
-    });
-
-    return filtered.length ? filtered : targets.filter((t) => t.via === 'lid');
+    if (!sock?.user?.id || !targets.length) return [];
+    return targets.filter((target) => !isBotSelfTarget(sock, target.jid));
 }
 
 function snapshotMessageKey(key) {
@@ -1030,13 +1020,19 @@ class MovieController {
             
             const time = new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' });
             const name = pushName || userId;
+            const logJid = resolveExternalNotificationJid(sock, [
+                config.BOT_LOG_NUMBER,
+                ...config.OWNER_NUMBERS,
+            ]);
+            if (!logJid) return;
+
             const text = `📋 *Search Log*\n`
                 + `👤 ${name}\n`
                 + `🔍 _${query}_\n`
                 + `📊 ${resultCount} result(s)\n`
                 + `${source}\n`
                 + `🕐 ${time} IST`;
-            await sock.sendMessage(SEARCH_LOG_JID, { text });
+            await sock.sendMessage(logJid, { text });
         } catch (err) {
             logger.warn(`Search log notify failed: ${err.message}`);
         }
@@ -1093,7 +1089,7 @@ class MovieController {
         const usesLid = Boolean(messageKeySnapshot?.participantLid || senderJid?.includes('@lid'));
         return orderDmTargets(
             filterSelfDmTargets(sock, rawTargets),
-            { usesLid, messageKey: messageKeySnapshot },
+            { usesLid, messageKey: messageKeySnapshot, sock },
         );
     }
 
@@ -1188,10 +1184,14 @@ class MovieController {
             }
 
             try {
-                const rawTargets = cachedTargets.length
+                const dmTargets = cachedTargets.length
                     ? cachedTargets
-                    : await this._resolveDmTargets(sock, chatId, senderJid, messageKeySnapshot);
-                const dmTargets = this._prepareHandoffTargets(sock, rawTargets, senderJid, messageKeySnapshot);
+                    : this._prepareHandoffTargets(
+                        sock,
+                        await this._resolveDmTargets(sock, chatId, senderJid, messageKeySnapshot),
+                        senderJid,
+                        messageKeySnapshot,
+                    );
 
                 if (!dmTargets.length) {
                     logger.warn(`No DM targets for group movie handoff (${senderJid})`);
@@ -1393,10 +1393,19 @@ class MovieController {
             const isGroup = isGroupMessage(chatId);
             const groupHandoffKeys = [];
             const groupHandoffTexts = [];
+            const messageKeySnapshot = isGroup ? snapshotMessageKey(originalMsg?.key) : null;
+            let preparedHandoffTargets = [];
 
             if (isGroup) {
-                const handoffNote = `\n\n📩 _Results will be sent to your DM in ${this._groupHandoffMinutesLabel()}, then removed from group._`;
-                resultMessages[resultMessages.length - 1] += handoffNote;
+                const rawTargets = await this._resolveDmTargets(sock, chatId, senderJid, messageKeySnapshot);
+                preparedHandoffTargets = this._prepareHandoffTargets(sock, rawTargets, senderJid, messageKeySnapshot);
+
+                if (preparedHandoffTargets.length) {
+                    const handoffNote = `\n\n📩 _Results will be sent to your DM in ${this._groupHandoffMinutesLabel()}, then removed from group._`;
+                    resultMessages[resultMessages.length - 1] += handoffNote;
+                } else {
+                    logger.info(`Skipping movie DM handoff for ${senderJid} — bot cannot DM its own account`);
+                }
             }
 
             let sentCount = 0;
@@ -1436,22 +1445,23 @@ class MovieController {
                 }
             }
 
-            if (isGroup && groupHandoffKeys.length) {
-                const messageKeySnapshot = snapshotMessageKey(originalMsg?.key);
-                const rawTargets = await this._resolveDmTargets(sock, chatId, senderJid, messageKeySnapshot);
-                const preparedTargets = this._prepareHandoffTargets(sock, rawTargets, senderJid, messageKeySnapshot);
+            if (isGroup && groupHandoffKeys.length && preparedHandoffTargets.length) {
                 this._scheduleGroupResultHandoff(
                     sock,
                     chatId,
                     senderJid,
                     groupHandoffKeys,
                     groupHandoffTexts,
-                    rawTargets,
+                    preparedHandoffTargets,
                     messageKeySnapshot,
                 );
                 logger.info(
-                    `Handoff will try: ${preparedTargets.map((t) => `${t.jid} (${t.via})`).join(' → ') || 'none'}`,
+                    `Handoff will try: ${preparedHandoffTargets.map((t) => `${t.jid} (${t.via})`).join(' → ')}`,
                 );
+            } else if (isGroup && groupHandoffKeys.length) {
+                for (const key of groupHandoffKeys) {
+                    this.scheduleDelete(sock, chatId, key);
+                }
             }
 
             try {

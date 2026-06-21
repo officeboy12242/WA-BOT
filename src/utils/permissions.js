@@ -3,6 +3,8 @@
  * Helper functions for permission checks
  */
 
+import { jidNormalizedUser } from '@whiskeysockets/baileys';
+
 /**
  * Extract phone number from WhatsApp JID
  * @param {string} jid - WhatsApp JID (e.g., "919876543210@s.whatsapp.net")
@@ -44,4 +46,43 @@ export function isGroupMessage(jid) {
  */
 export function extractGroupId(jid) {
     return jid;
+}
+
+/**
+ * True when jid is the connected bot account (phone or LID) — DMs to self won't show up.
+ * @param {import('@whiskeysockets/baileys').WASocket | null | undefined} sock
+ * @param {string} jid
+ */
+export function isBotSelfTarget(sock, jid) {
+    if (!jid || !sock?.user?.id) return false;
+
+    const selfPhone = normalizePhoneNumber(extractPhoneNumber(sock.user.id));
+    const selfJid = jidNormalizedUser(sock.user.id.split(':')[0]) || sock.user.id.split(':')[0];
+    const botLid = sock.authState?.creds?.me?.lid || sock.user?.lid || '';
+    const normBotLid = botLid ? (jidNormalizedUser(String(botLid)) || String(botLid)) : '';
+
+    const targetBare = jid.split(':')[0];
+    const targetJid = jidNormalizedUser(targetBare) || targetBare;
+    const targetPhone = normalizePhoneNumber(extractPhoneNumber(jid));
+
+    if (targetPhone && selfPhone && targetPhone === selfPhone) return true;
+    if (targetJid === selfJid) return true;
+    if (normBotLid && targetJid === normBotLid) return true;
+    return false;
+}
+
+/**
+ * Pick a DM JID for notifications that is not the bot's own account.
+ * @param {import('@whiskeysockets/baileys').WASocket | null | undefined} sock
+ * @param {string[]} preferredNumbers
+ * @returns {string | null}
+ */
+export function resolveExternalNotificationJid(sock, preferredNumbers = []) {
+    for (const raw of preferredNumbers) {
+        const phone = normalizePhoneNumber(raw);
+        if (!/^\d{10,15}$/.test(phone)) continue;
+        const jid = `${phone}@s.whatsapp.net`;
+        if (!isBotSelfTarget(sock, jid)) return jid;
+    }
+    return null;
 }
