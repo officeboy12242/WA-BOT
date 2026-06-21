@@ -23,6 +23,7 @@ const DAILY_LIMIT = 5;
 const AUTO_DELETE_MS = 5 * 60 * 60 * 1000; // 5 hours
 const DM_HANDOFF_RETRIES = 2;
 const DM_HANDOFF_RETRY_MS = 1500;
+const DM_SEND_TIMEOUT_MS = 15000;
 const SUMMARY_HOUR = 23;
 const SUMMARY_MINUTE = 55;
 const WEEKLY_DAY = 0; // Sunday
@@ -359,10 +360,11 @@ function jidToDmTarget(jid) {
     return null;
 }
 
-function orderDmTargets(targets, { preferLid = false } = {}) {
+function orderDmTargets(targets) {
     const lids = targets.filter((t) => t.via === 'lid');
     const phones = targets.filter((t) => t.via === 'phone');
-    return preferLid ? [...lids, ...phones] : [...phones, ...lids];
+    // Phone JIDs are more reliable for DMs; LID sends can hang on some Baileys builds.
+    return [...phones, ...lids];
 }
 
 function snapshotMessageKey(key) {
@@ -1030,10 +1032,16 @@ class MovieController {
         let lastErr;
         for (let attempt = 0; attempt <= DM_HANDOFF_RETRIES; attempt++) {
             try {
-                await sock.sendMessage(targetJid, { text, linkPreview: false });
+                await Promise.race([
+                    sock.sendMessage(targetJid, { text, linkPreview: false }),
+                    new Promise((_, reject) => {
+                        setTimeout(() => reject(new Error(`DM send timed out after ${DM_SEND_TIMEOUT_MS}ms`)), DM_SEND_TIMEOUT_MS);
+                    }),
+                ]);
                 return;
             } catch (err) {
                 lastErr = err;
+                logger.warn(`DM send attempt ${attempt + 1} to ${targetJid} failed: ${err.message}`);
                 if (attempt < DM_HANDOFF_RETRIES) {
                     await new Promise((r) => setTimeout(r, DM_HANDOFF_RETRY_MS));
                 }
@@ -1093,11 +1101,7 @@ class MovieController {
     }
 
     async _resolveDmTarget(sock, chatId, senderJid, messageKey = null) {
-        const preferLid = Boolean(messageKey?.participantLid || senderJid?.includes('@lid'));
-        const targets = orderDmTargets(
-            await this._resolveDmTargets(sock, chatId, senderJid, messageKey),
-            { preferLid },
-        );
+        const targets = orderDmTargets(await this._resolveDmTargets(sock, chatId, senderJid, messageKey));
         return targets[0] || null;
     }
 
@@ -1116,6 +1120,7 @@ class MovieController {
         );
 
         setTimeout(async () => {
+            logger.info(`Group movie handoff firing for ${senderJid} in ${chatId}`);
             const sock = this._resolveActiveSock(fallbackSock);
             if (!sock) {
                 logger.error('Group movie handoff aborted: WhatsApp socket unavailable');
@@ -1123,14 +1128,9 @@ class MovieController {
             }
 
             try {
-                let dmTargets = cachedTargets;
-                if (!dmTargets.length) {
-                    const preferLid = Boolean(messageKeySnapshot?.participantLid || senderJid?.includes('@lid'));
-                    dmTargets = orderDmTargets(
-                        await this._resolveDmTargets(sock, chatId, senderJid, messageKeySnapshot),
-                        { preferLid },
-                    );
-                }
+                let dmTargets = cachedTargets.length
+                    ? orderDmTargets(cachedTargets)
+                    : orderDmTargets(await this._resolveDmTargets(sock, chatId, senderJid, messageKeySnapshot));
 
                 let dmDelivered = false;
 
@@ -1367,10 +1367,8 @@ class MovieController {
 
             if (isGroup && groupHandoffKeys.length) {
                 const messageKeySnapshot = snapshotMessageKey(originalMsg?.key);
-                const preferLid = Boolean(messageKeySnapshot?.participantLid || senderJid?.includes('@lid'));
                 const dmTargets = orderDmTargets(
                     await this._resolveDmTargets(sock, chatId, senderJid, messageKeySnapshot),
-                    { preferLid },
                 );
                 this._scheduleGroupResultHandoff(
                     sock,
