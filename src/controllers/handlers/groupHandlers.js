@@ -533,7 +533,7 @@ export async function handleGithubOn(sock, chatId, senderJid, { groupManager, or
         r += '✅ *GITHUB TRENDING ON* ✅\n';
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
         r += `📢 *Group:* ${groupName}\n\n`;
-        r += '🐙 Daily top 5 GitHub trending repos — *one post each* with link preview.\n';
+        r += '🐙 Daily GitHub picks — *trending, popular & hidden gems* (5 posts, fresh each time).\n';
         r += '🎓 Courses continue as normal.\n\n';
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
         r += '💡 Use `/githuboff` to stop GitHub trending only';

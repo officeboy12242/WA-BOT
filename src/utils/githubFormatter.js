@@ -15,8 +15,18 @@ function starsTodaySuffix(repo) {
     return count ? ` (+${count} today)` : '';
 }
 
+const CATEGORY_HEADERS = {
+    trending: '🔥 *GITHUB TRENDING*',
+    popular: '⭐ *GITHUB POPULAR*',
+    underrated: '💎 *GITHUB HIDDEN GEM*',
+};
+
+function categoryHeader(repo) {
+    return CATEGORY_HEADERS[repo.category] || CATEGORY_HEADERS.trending;
+}
+
 /**
- * @param {{ fullName: string, description: string, language: string, starsToday?: string, totalStars?: string, forks?: string, url: string }} repo
+ * @param {{ fullName: string, description: string, language: string, starsToday?: string, totalStars?: string, forks?: string, url: string, category?: string }} repo
  * @param {number} index - 1-based position
  * @param {number} total
  */
@@ -24,7 +34,7 @@ export function formatGitHubRepoMessage(repo, index = 1, total = 5) {
     const num = NUMBER_EMOJI[index - 1] || `#${index}`;
 
     let text = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-    text += `🐙 *GITHUB TRENDING ${num}/${total}*\n`;
+    text += `${categoryHeader(repo)} ${num}/${total}\n`;
     text += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
     text += `*${repo.fullName}*\n`;
     text += `${truncate(repo.description)}\n\n`;

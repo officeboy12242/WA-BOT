@@ -62,6 +62,8 @@ import {
     handleInsta as _handleInsta,
     handleNews,
     handleGithub,
+    handlePendingGithubConfirmation,
+    createGithubPostSessionStore,
 } from './handlers/instaHandlers.js';
 
 import {
@@ -90,6 +92,7 @@ class CommandController {
         this.memberScrapeController = memberScrapeController;
         this.pendingClearConfirmations = new Map();
         this.pendingScrapSessions = createScrapSessionStore();
+        this.pendingGithubPosts = createGithubPostSessionStore();
         this.getSock = null;
         this.botStartTime = Date.now();
 
@@ -137,6 +140,7 @@ class CommandController {
             botSettings: this.botSettings,
             pendingClearConfirmations: this.pendingClearConfirmations,
             pendingScrapSessions: this.pendingScrapSessions,
+            pendingGithubPosts: this.pendingGithubPosts,
             getSock: this.getSock,
             botStartTime: this.botStartTime,
             isOwnerFromJid: this._isOwnerFromJid,
@@ -149,6 +153,13 @@ class CommandController {
         }
 
         const ctx = { ...this._ctx(), originalMsg };
+        const handledGithub = await handlePendingGithubConfirmation(
+            sock, chatId, senderJid, messageText.trim(), ctx,
+        );
+        if (handledGithub) {
+            return true;
+        }
+
         return handlePendingScrapSelection(sock, chatId, senderJid, messageText.trim(), ctx);
     }
 
@@ -195,7 +206,7 @@ class CommandController {
             case 'posted':   await handlePosted(sock, chatId, ctx); break;
             case 'clear':    await handleClear(sock, chatId, ctx); break;
             case 'confirm':  await handleConfirm(sock, chatId, ctx); break;
-            case 'cancel':   await handleCancel(sock, chatId, ctx); break;
+            case 'cancel':  await handleCancel(sock, chatId, senderJid, ctx); break;
             case 'pause':    await handlePause(sock, chatId, ctx); break;
             case 'resume':   await handleResume(sock, chatId, ctx); break;
             case 'status':   await handleStatus(sock, chatId, ctx); break;

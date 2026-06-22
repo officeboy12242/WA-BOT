@@ -1,21 +1,17 @@
 /**
- * Daily GitHub trending repository posts — one repo per message with link preview.
+ * Daily GitHub repo posts — trending, popular & hidden gems (fresh each slot).
  */
 
 import { logger } from '../utils/logger.js';
 import { formatGitHubRepoMessage } from '../utils/githubFormatter.js';
 import { sendTextWithLinkPreview } from '../utils/linkPreview.js';
-import GitHubTrendingService from '../services/GitHubTrendingService.js';
+import GitHubTrendingService, { GITHUB_SLOT_CATEGORIES } from '../services/GitHubTrendingService.js';
 
 const GROUP_DELAY_MS = 500;
 const REPO_DELAY_MS = 2000;
 
 function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function todayKey(timezone) {
-    return new Date().toLocaleDateString('en-CA', { timeZone: timezone });
 }
 
 class GitHubTrendingController {
@@ -27,18 +23,7 @@ class GitHubTrendingController {
     }
 
     async fetchTrendingRepos() {
-        return this.service.fetchTrending();
-    }
-
-    async ensureDailyCache(botState) {
-        const key = todayKey(this.config.GITHUB_TRENDING_TIMEZONE);
-        if (botState.githubTrendingCache?.date === key && botState.githubTrendingCache.repos?.length) {
-            return botState.githubTrendingCache.repos;
-        }
-
-        const repos = await this.fetchTrendingRepos();
-        botState.githubTrendingCache = { date: key, repos };
-        return repos;
+        return this.service.fetchMixedPool();
     }
 
     async filterUnpostedRepos(repos, chatId) {
@@ -111,7 +96,7 @@ class GitHubTrendingController {
                 sock,
                 repos[i],
                 i + 1,
-                total
+                total,
             );
             totalPosted += posted;
             totalSkipped += skipped;
@@ -129,7 +114,27 @@ class GitHubTrendingController {
         };
     }
 
-    /** Post one repo at a scheduled slot (0-based index). */
+    async resolveFreshRepoForSlot(slotIndex) {
+        const targetGroups = await this.groupManager.getGithubTrendingGroups();
+        const groupIds = targetGroups.map((g) => g.group_id);
+
+        const candidates = await this.service.fetchForSlot(slotIndex);
+        if (!candidates.length) {
+            return null;
+        }
+
+        if (this.githubDatabase && groupIds.length) {
+            const fresh = await this.githubDatabase.pickFreshRepo(candidates, groupIds);
+            if (fresh) return fresh;
+
+            const mixed = await this.service.fetchMixedPool();
+            return this.githubDatabase.pickFreshRepo(mixed, groupIds);
+        }
+
+        return candidates[0];
+    }
+
+    /** Post one fresh repo at a scheduled slot (0-based index). */
     async checkAndPostRepo(sock, botState, slotIndex) {
         if (!this.config.GITHUB_TRENDING_ENABLED) {
             return;
@@ -141,21 +146,23 @@ class GitHubTrendingController {
         }
 
         try {
-            const repos = await this.ensureDailyCache(botState);
-            const repo = repos[slotIndex];
+            const repo = await this.resolveFreshRepoForSlot(slotIndex);
             if (!repo) {
-                logger.info(`No GitHub trending repo for slot ${slotIndex + 1}`);
+                logger.info(`No fresh GitHub repo for slot ${slotIndex + 1}`);
                 return;
             }
 
-            const total = Math.min(repos.length, this.config.GITHUB_TRENDING_COUNT);
+            const total = this.config.GITHUB_TRENDING_COUNT;
+            const category = GITHUB_SLOT_CATEGORIES[slotIndex] || repo.category || 'trending';
+            logger.info(`GitHub slot ${slotIndex + 1}: ${repo.fullName} (${category})`);
+
             const { posted, groups } = await this.postSingleRepoToGroups(sock, repo, slotIndex + 1, total);
             if (posted > 0) {
-                logger.info(`🐙 GitHub trending #${slotIndex + 1} posted to ${posted}/${groups} group(s)`);
+                logger.info(`🐙 GitHub #${slotIndex + 1} posted to ${posted}/${groups} group(s)`);
             }
 
             if (slotIndex === 0 && this.githubDatabase) {
-                const removed = await this.githubDatabase.cleanupOldPosted(7);
+                const removed = await this.githubDatabase.cleanupOldPosted(14);
                 if (removed > 0) {
                     logger.info(`Cleaned ${removed} old posted_github_repos record(s)`);
                 }
@@ -163,6 +170,19 @@ class GitHubTrendingController {
         } catch (err) {
             logger.error(`GitHub trending slot ${slotIndex + 1} failed: ${err.message}`);
         }
+    }
+
+    async selectFreshRepos(repos, limit = null) {
+        const max = limit ?? this.config.GITHUB_TRENDING_COUNT;
+        const targetGroups = await this.groupManager.getGithubTrendingGroups();
+        const groupIds = targetGroups.map((g) => g.group_id);
+
+        if (!this.githubDatabase || !groupIds.length) {
+            return (repos || []).slice(0, max);
+        }
+
+        const fresh = await this.githubDatabase.filterFreshForGroups(repos, groupIds);
+        return fresh.slice(0, max);
     }
 
     async previewAll(sock, chatId, repos) {

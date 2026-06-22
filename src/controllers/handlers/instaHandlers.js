@@ -219,69 +219,138 @@ export async function handleNews(sock, chatId, senderJid, { newsController, grou
     }
 }
 
-export async function handleGithub(sock, chatId, senderJid, { githubTrendingController, groupManager }) {
+const GITHUB_POST_CONFIRM_MS = 2 * 60 * 1000;
+
+export function createGithubPostSessionStore() {
+    return new Map();
+}
+
+function githubSessionKey(chatId, senderJid) {
+    return `${chatId}:${senderJid}`;
+}
+
+export async function handleGithub(sock, chatId, senderJid, { githubTrendingController, groupManager, pendingGithubPosts }) {
     try {
         if (!githubTrendingController) {
-            await sock.sendMessage(chatId, { text: 'GitHub trending is not configured on this bot.' });
+            await sock.sendMessage(chatId, { text: 'GitHub repos are not configured on this bot.' });
             return;
         }
 
         const repos = await githubTrendingController.fetchTrendingRepos();
         if (!repos.length) {
-            await sock.sendMessage(chatId, { text: '📭 No GitHub trending repos found right now. Try again later.' });
+            await sock.sendMessage(chatId, { text: '📭 No GitHub repos found right now. Try again later.' });
+            return;
+        }
+
+        const previewRepos = await githubTrendingController.filterUnpostedRepos(repos, chatId);
+        const toPreview = (previewRepos.length ? previewRepos : repos).slice(0, 5);
+
+        const { sent } = await githubTrendingController.previewAll(sock, chatId, toPreview);
+        logger.info(`GitHub preview (${sent} repo(s)) sent to ${chatId}`);
+
+        if (!sent) {
+            await sock.sendMessage(chatId, {
+                text: 'ℹ️ These repos were already sent here. Try again later for fresh picks.',
+            });
             return;
         }
 
         const canPost = await groupManager.canManualPostNews(senderJid);
-        const githubGroups = canPost ? await groupManager.getGithubTrendingGroups() : [];
-        const postToThisChat = githubGroups.some((group) => group.group_id === chatId);
-
-        if (!postToThisChat) {
-            const previewRepos = await githubTrendingController.filterUnpostedRepos(repos, chatId);
-            if (!previewRepos.length) {
-                await sock.sendMessage(chatId, {
-                    text: 'ℹ️ These trending repos were already sent here. No repeats.',
-                });
-                if (!canPost) {
-                    return;
-                }
-            } else {
-                const { sent } = await githubTrendingController.previewAll(sock, chatId, previewRepos);
-                logger.info(`GitHub trending preview (${sent} repo(s)) sent to ${chatId}`);
-            }
-        }
-
         if (!canPost) {
             return;
         }
 
-        if (githubGroups.length === 0) {
+        const githubGroups = await groupManager.getGithubTrendingGroups();
+        if (!githubGroups.length) {
             await sock.sendMessage(chatId, {
-                text: 'ℹ️ Preview only — no groups with GitHub trending enabled. Use `/activate` and `/githubon` first.',
+                text: 'ℹ️ Preview only — no groups with GitHub enabled. Use `/activate` and `/githubon` first.',
             });
             return;
         }
 
-        const { posted, groups, messages, skipped } = await githubTrendingController.postAllReposIndividually(
-            sock,
-            repos
-        );
+        const freshRepos = await githubTrendingController.selectFreshRepos(repos);
+        if (!freshRepos.length) {
+            await sock.sendMessage(chatId, {
+                text: 'ℹ️ All fetched repos were already posted to github-enabled groups.',
+            });
+            return;
+        }
 
-        if (messages > 0) {
-            await sock.sendMessage(chatId, {
-                text: `✅ Posted *${messages}* new GitHub trending repo message(s) across *${posted}* group(s).`,
-            });
-        } else if (skipped > 0) {
-            await sock.sendMessage(chatId, {
-                text: 'ℹ️ All trending repos were already posted to github-enabled groups. No repeats.',
-            });
-        } else {
-            await sock.sendMessage(chatId, {
-                text: 'ℹ️ Could not post to any GitHub-enabled groups.',
+        if (pendingGithubPosts) {
+            const key = githubSessionKey(chatId, senderJid);
+            pendingGithubPosts.set(key, {
+                repos,
+                expiresAt: Date.now() + GITHUB_POST_CONFIRM_MS,
             });
         }
+
+        await sock.sendMessage(chatId, {
+            text:
+                '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'
+                + '🐙 *POST THESE REPOS?*\n'
+                + '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n'
+                + `📢 *${freshRepos.length}* fresh repo(s) ready for *${githubGroups.length}* GitHub-enabled group(s).\n\n`
+                + 'Reply *yes* to post · *no* to cancel\n'
+                + '⏱️ Expires in 2 minutes',
+        });
     } catch (error) {
         logger.error(`Error handling github command: ${error.message}`);
-        await sock.sendMessage(chatId, { text: 'Could not fetch GitHub trending right now. Try again later.' });
+        await sock.sendMessage(chatId, { text: 'Could not fetch GitHub repos right now. Try again later.' });
     }
+}
+
+export async function handlePendingGithubConfirmation(sock, chatId, senderJid, text, ctx) {
+    const { pendingGithubPosts, githubTrendingController } = ctx;
+    if (!pendingGithubPosts || !githubTrendingController) {
+        return false;
+    }
+
+    const key = githubSessionKey(chatId, senderJid);
+    const session = pendingGithubPosts.get(key);
+    if (!session) {
+        return false;
+    }
+
+    if (Date.now() > session.expiresAt) {
+        pendingGithubPosts.delete(key);
+        await sock.sendMessage(chatId, { text: '⏱️ GitHub post request expired. Run `/github` again.' });
+        return true;
+    }
+
+    const reply = text.trim().toLowerCase();
+    if (['no', 'n', 'cancel'].includes(reply)) {
+        pendingGithubPosts.delete(key);
+        await sock.sendMessage(chatId, { text: '❌ GitHub post cancelled.' });
+        return true;
+    }
+
+    if (!['yes', 'y', 'post', 'confirm'].includes(reply)) {
+        return false;
+    }
+
+    pendingGithubPosts.delete(key);
+
+    try {
+        const freshRepos = await githubTrendingController.selectFreshRepos(session.repos);
+        if (!freshRepos.length) {
+            await sock.sendMessage(chatId, {
+                text: 'ℹ️ All repos were already posted. Run `/github` again for fresh picks.',
+            });
+            return true;
+        }
+
+        const { posted, messages } = await githubTrendingController.postAllReposIndividually(sock, freshRepos);
+        if (messages > 0) {
+            await sock.sendMessage(chatId, {
+                text: `✅ Posted *${messages}* GitHub repo(s) across *${posted}* group(s).`,
+            });
+        } else {
+            await sock.sendMessage(chatId, { text: 'ℹ️ Could not post to any GitHub-enabled groups.' });
+        }
+    } catch (error) {
+        logger.error(`GitHub post confirmation failed: ${error.message}`);
+        await sock.sendMessage(chatId, { text: '⚠️ Failed to post GitHub repos. Try `/github` again.' });
+    }
+
+    return true;
 }
