@@ -182,8 +182,19 @@ export async function handleConfirm(sock, chatId, { database, pendingClearConfir
     }
 }
 
-export async function handleCancel(sock, chatId, { pendingClearConfirmations, originalMsg }) {
+export async function handleCancel(sock, chatId, senderJid, { pendingClearConfirmations, pendingGithubPosts, originalMsg }) {
     try {
+        if (pendingGithubPosts && senderJid) {
+            const githubKey = `${chatId}:${senderJid}`;
+            if (pendingGithubPosts.has(githubKey)) {
+                pendingGithubPosts.delete(githubKey);
+                await sock.sendMessage(chatId, {
+                    text: '❌ GitHub post cancelled.',
+                }, { quoted: originalMsg });
+                return;
+            }
+        }
+
         if (!pendingClearConfirmations.has(chatId)) {
             await sock.sendMessage(chatId, {
                 text:

@@ -66,6 +66,32 @@ class GitHubTrendingDatabase {
         return unposted;
     }
 
+    /** Repos not yet posted to any of the given groups (fresh for everyone). */
+    async filterFreshForGroups(repos, groupIds) {
+        if (!repos?.length || !groupIds?.length) {
+            return repos || [];
+        }
+        const fresh = [];
+        for (const repo of repos) {
+            let postedAnywhere = false;
+            for (const groupId of groupIds) {
+                if (await this.isRepoPosted(repo.fullName, groupId)) {
+                    postedAnywhere = true;
+                    break;
+                }
+            }
+            if (!postedAnywhere) {
+                fresh.push(repo);
+            }
+        }
+        return fresh;
+    }
+
+    async pickFreshRepo(repos, groupIds) {
+        const fresh = await this.filterFreshForGroups(repos, groupIds);
+        return fresh[0] || null;
+    }
+
     async cleanupOldPosted(days = 7) {
         const cutoff = new Date();
         cutoff.setDate(cutoff.getDate() - days);

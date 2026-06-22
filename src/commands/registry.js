@@ -120,7 +120,7 @@ export const COMMAND_REGISTRY = [
         key: 'github',
         scope: 'any',
         role: 'anyone',
-        help: 'Preview top 5 GitHub trending repos individually; staff post to github-enabled groups',
+        help: 'Preview GitHub repos; staff reply yes/no to post to github-enabled groups',
     },
     {
         names: ['/horo', '/horoscope'],
