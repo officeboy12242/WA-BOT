@@ -8,7 +8,7 @@ import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import axios from 'axios';
 import { logger } from '../utils/logger.js';
-import { extractPhoneNumber, isGroupMessage, normalizePhoneNumber, resolveExternalNotificationJid } from '../utils/permissions.js';
+import { extractPhoneNumber, isGroupMessage, normalizePhoneNumber, resolveNotificationJid } from '../utils/permissions.js';
 import { config } from '../config/config.js';
 import { atozService } from '../services/AtoZService.js';
 import { pronoobDriveService } from '../services/PronoobDriveService.js';
@@ -941,7 +941,7 @@ class MovieController {
             
             const time = new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' });
             const name = pushName || userId;
-            const logJid = resolveExternalNotificationJid(sock, [
+            const logJid = resolveNotificationJid(sock, [
                 config.BOT_LOG_NUMBER,
                 ...config.OWNER_NUMBERS,
             ]);

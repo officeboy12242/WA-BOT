@@ -118,6 +118,33 @@ export function isBotSelfTarget(sock, jid) {
     return false;
 }
 
+/** WhatsApp "Message yourself" chat — same account as the connected bot. */
+export function isBotSelfChat(sock, chatId) {
+    if (!chatId || isGroupMessage(chatId)) return false;
+    if (chatId === 'status@broadcast' || chatId.endsWith('@broadcast')) return false;
+    return isBotSelfTarget(sock, chatId);
+}
+
+/** Sender JID for commands sent in the bot account's self-chat. */
+export function getBotSelfSenderJid(sock) {
+    const phone = getBotAccountPhone(sock);
+    if (/^\d{10,15}$/.test(phone)) {
+        return `${phone}@s.whatsapp.net`;
+    }
+    if (!sock?.user?.id) return '';
+    const bare = sock.user.id.split(':')[0];
+    return jidNormalizedUser(bare) || bare;
+}
+
+/** JID for WhatsApp "Message yourself" on the connected bot account. */
+export function getBotSelfChatJid(sock) {
+    const phone = getBotAccountPhone(sock);
+    if (/^\d{10,15}$/.test(phone)) {
+        return `${phone}@s.whatsapp.net`;
+    }
+    return getBotSelfSenderJid(sock);
+}
+
 /**
  * Pick a DM JID for notifications that is not the bot's own account.
  * @param {import('@whiskeysockets/baileys').WASocket | null | undefined} sock
@@ -133,5 +160,17 @@ export function resolveExternalNotificationJid(sock, preferredNumbers = []) {
         const jid = `${phone}@s.whatsapp.net`;
         if (!isBotSelfTarget(sock, jid)) return jid;
     }
+    return null;
+}
+
+/**
+ * Notification target: external owner phone first, else bot self-chat ("Message yourself").
+ */
+export function resolveNotificationJid(sock, preferredNumbers = []) {
+    const external = resolveExternalNotificationJid(sock, preferredNumbers);
+    if (external) return external;
+
+    const selfChat = getBotSelfChatJid(sock);
+    if (selfChat && sock?.user?.id) return selfChat;
     return null;
 }

@@ -18,7 +18,7 @@ import { getMessageSenderJid, getTextForUrlScan, getTextFromWAMessage } from '..
 import { resolveChannelSourceEntries } from '../utils/channelResolve.js';
 import { extractStickerFromMessage, isNewsletterChat } from '../utils/stickerExtract.js';
 import { config } from '../config/config.js';
-import { resolveExternalNotificationJid, extractPhoneNumber } from '../utils/permissions.js';
+import { resolveNotificationJid, extractPhoneNumber, isBotSelfChat, getBotSelfSenderJid } from '../utils/permissions.js';
 import os from 'os';
 
 
@@ -114,12 +114,12 @@ class WhatsAppService {
             return;
         }
         
-        const notifyJid = resolveExternalNotificationJid(this.sock, [
+        const notifyJid = resolveNotificationJid(this.sock, [
             config.BOT_LOG_NUMBER,
             ...config.OWNER_NUMBERS,
         ].filter(Boolean));
         if (!notifyJid) {
-            logger.warn('Startup notification skipped — no external phone configured (bot cannot DM itself).');
+            logger.warn('Startup notification skipped — no notification target configured.');
             this._startupNotificationSent = false;
             return;
         }
@@ -519,11 +519,18 @@ class WhatsAppService {
             }
         }
 
-        if (msg.key.fromMe || isChannel) {
+        if (isChannel) {
             return;
         }
 
-        const senderJid = getMessageSenderJid(msg.key);
+        const selfChat = msg.key.fromMe && isBotSelfChat(this.sock, chatId);
+        if (msg.key.fromMe && !selfChat) {
+            return;
+        }
+
+        const senderJid = selfChat
+            ? getBotSelfSenderJid(this.sock)
+            : getMessageSenderJid(msg.key);
         if (chatId.endsWith('@g.us') && !senderJid) {
             logger.warn('Group message with no sender participant; ignoring');
             return;
