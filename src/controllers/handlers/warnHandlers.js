@@ -9,6 +9,7 @@ import {
     resolveTargetParticipant,
     resolveJidToPhone,
     hasModerationTarget,
+    getQuotedPushName,
 } from '../../utils/waMessage.js';
 
 export const MAX_WARNS = 5;
@@ -56,6 +57,52 @@ function buildWarnListMessage({ title, count, max, warns, memberLabel }) {
 
     r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━';
     return r;
+}
+
+async function resolveMemberDisplay(sock, chatId, target, waMessage, groupManager, userManager) {
+    const participant = await findParticipantRecord(sock, chatId, target.jid, target.phone, groupManager);
+
+    const possibleJids = [];
+    if (target.jid) possibleJids.push(target.jid);
+    if (participant?.id) possibleJids.push(participant.id);
+    if (participant?.lid) possibleJids.push(participant.lid);
+    if (participant?.pn) possibleJids.push(participant.pn);
+    if (participant?.phoneNumber) possibleJids.push(participant.phoneNumber);
+    if (target.phone) {
+        possibleJids.push(`${target.phone}@s.whatsapp.net`);
+        possibleJids.push(`${target.phone}@lid`);
+    }
+
+    let displayName = getQuotedPushName(waMessage);
+    if (!displayName && userManager) {
+        displayName = await userManager.resolveUserName(possibleJids);
+    }
+    if (!displayName && target.phone) {
+        displayName = target.phone;
+    }
+    if (!displayName) {
+        displayName = 'Member';
+    }
+
+    const mentionJid =
+        participant?.lid ||
+        participant?.id ||
+        target.jid ||
+        (target.phone ? `${target.phone}@s.whatsapp.net` : '');
+
+    return { displayName, mentionJid };
+}
+
+function memberLine(displayName) {
+    return `@${displayName}`;
+}
+
+async function sendWithMention(sock, chatId, text, mentionJid, quoted) {
+    const payload = { text };
+    if (mentionJid) {
+        payload.mentions = [mentionJid];
+    }
+    await sock.sendMessage(chatId, payload, { quoted });
 }
 
 async function findParticipantRecord(sock, chatId, jid, phone, groupManager) {
@@ -113,7 +160,7 @@ async function kickFromGroup(sock, chatId, jid, phone, groupManager) {
 }
 
 export async function handleWarn(sock, chatId, senderJid, args, waMessage, ctx) {
-    const { groupManager, warnDatabase, originalMsg } = ctx;
+    const { groupManager, warnDatabase, userManager, originalMsg } = ctx;
 
     if (!warnDatabase) {
         logger.error('/warn: warnDatabase not initialized');
@@ -211,11 +258,14 @@ export async function handleWarn(sock, chatId, senderJid, args, waMessage, ctx) 
             warnedByJid: senderJid,
         });
 
-        const targetLabel = target.phone ? `+${target.phone}` : target.jid.split('@')[0];
+        const { displayName, mentionJid } = await resolveMemberDisplay(
+            sock, chatId, target, waMessage, groupManager, userManager,
+        );
+
         let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
         r += '⚠️ *MEMBER WARNED* ⚠️\n';
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
-        r += `👤 *Member:* ${targetLabel}\n`;
+        r += `👤 *Member:* ${memberLine(displayName)}\n`;
         r += `📝 *Reason:* ${reason}\n`;
         r += `🔢 *Warnings:* ${count}/${MAX_WARNS}\n\n`;
 
@@ -223,7 +273,7 @@ export async function handleWarn(sock, chatId, senderJid, args, waMessage, ctx) 
             const kick = await kickFromGroup(sock, chatId, target.jid, target.phone, groupManager);
             if (kick.ok) {
                 r += '🚫 *Auto-kicked* — reached 5 warnings.\n';
-                logger.info(`🚫 Auto-kicked ${targetLabel} from ${chatId} (${count} warns)`);
+                logger.info(`🚫 Auto-kicked ${displayName} from ${chatId} (${count} warns)`);
             } else if (kick.reason === 'bot_not_admin') {
                 r += '⚠️ *Limit reached* but bot is not a group admin — could not kick.\n';
             } else {
@@ -234,8 +284,8 @@ export async function handleWarn(sock, chatId, senderJid, args, waMessage, ctx) 
         }
 
         r += '\n━━━━━━━━━━━━━━━━━━━━━━━━━━━';
-        await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
-        logger.info(`⚠️ Warned ${targetLabel} in ${chatId} (${count}/${MAX_WARNS}) by ${senderPhone}`);
+        await sendWithMention(sock, chatId, r, mentionJid, originalMsg);
+        logger.info(`⚠️ Warned ${displayName} in ${chatId} (${count}/${MAX_WARNS}) by ${senderPhone}`);
     } catch (error) {
         logger.error(`Error in /warn: ${error.message}`);
     }
@@ -281,7 +331,7 @@ export async function handleMyWarns(sock, chatId, senderJid, ctx) {
 }
 
 export async function handleWarns(sock, chatId, senderJid, args, waMessage, ctx) {
-    const { warnDatabase, originalMsg } = ctx;
+    const { warnDatabase, groupManager, userManager, originalMsg } = ctx;
 
     try {
         const hasTarget = hasModerationTarget(waMessage, senderJid, args);
@@ -292,23 +342,25 @@ export async function handleWarns(sock, chatId, senderJid, args, waMessage, ctx)
             warnDatabase.getWarns(chatId, memberKey),
         ]);
 
-        const memberLabel = subject.phone ? `+${subject.phone}` : subject.jid?.split('@')[0] || 'Member';
+        const { displayName, mentionJid } = await resolveMemberDisplay(
+            sock, chatId, subject, waMessage, groupManager, userManager,
+        );
         const text = buildWarnListMessage({
             title: '⚠️ *MEMBER WARNINGS* ⚠️',
             count,
             max: MAX_WARNS,
             warns,
-            memberLabel,
+            memberLabel: memberLine(displayName),
         });
 
-        await sock.sendMessage(chatId, { text }, { quoted: originalMsg });
+        await sendWithMention(sock, chatId, text, mentionJid, originalMsg);
     } catch (error) {
         logger.error(`Error in /warns: ${error.message}`);
     }
 }
 
 export async function handleClearWarns(sock, chatId, senderJid, args, waMessage, ctx) {
-    const { warnDatabase, originalMsg } = ctx;
+    const { warnDatabase, groupManager, userManager, originalMsg } = ctx;
 
     try {
         const target = await resolveTargetParticipant(sock, chatId, args, waMessage, senderJid);
@@ -328,20 +380,18 @@ export async function handleClearWarns(sock, chatId, senderJid, args, waMessage,
 
         const memberKey = memberKeyFromTarget(target);
         const removed = await warnDatabase.clearWarns(chatId, memberKey);
-        const targetLabel = target.phone ? `+${target.phone}` : target.jid.split('@')[0];
-
-        await sock.sendMessage(
-            chatId,
-            {
-                text:
-                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n✅ *WARNS CLEARED* ✅\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
-                    `👤 *Member:* ${targetLabel}\n` +
-                    `🗑️ *Removed:* ${removed} warning(s)\n\n` +
-                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━',
-            },
-            { quoted: originalMsg },
+        const { displayName, mentionJid } = await resolveMemberDisplay(
+            sock, chatId, target, waMessage, groupManager, userManager,
         );
-        logger.info(`🗑️ Cleared ${removed} warn(s) for ${targetLabel} in ${chatId}`);
+
+        const text =
+            '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n✅ *WARNS CLEARED* ✅\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+            `👤 *Member:* ${memberLine(displayName)}\n` +
+            `🗑️ *Removed:* ${removed} warning(s)\n\n` +
+            '━━━━━━━━━━━━━━━━━━━━━━━━━━━';
+
+        await sendWithMention(sock, chatId, text, mentionJid, originalMsg);
+        logger.info(`🗑️ Cleared ${removed} warn(s) for ${displayName} in ${chatId}`);
     } catch (error) {
         logger.error(`Error in /clearwarns: ${error.message}`);
     }
