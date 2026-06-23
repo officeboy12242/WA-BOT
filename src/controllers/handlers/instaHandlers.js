@@ -7,6 +7,7 @@ import { snapsave } from 'snapsave-media-downloader';
 import { logger } from '../../utils/logger.js';
 import { downloadMediaBuffer } from '../../utils/downloadMediaBuffer.js';
 import { extractInstagramUrl, isSupportedInstagramUrl } from '../../utils/instagramUrl.js';
+import { getSafeSendOptions } from '../../utils/waMessage.js';
 
 function formatInstaDownloadStatus(mediaList) {
     const images = mediaList.filter((m) => m.type === 'image').length;
@@ -68,7 +69,7 @@ async function sendDownloadedMedia(sock, chatId, buffer, sendOpts, index) {
 
 export async function handleInsta(sock, chatId, args, quotedMessage, options = {}) {
     const { requireCommandArgs = true } = options;
-    const replyToCommand = quotedMessage ? { quoted: quotedMessage } : {};
+    const replyToCommand = quotedMessage ? getSafeSendOptions(quotedMessage) : {};
 
     if (requireCommandArgs && !args.length) {
         await sock.sendMessage(

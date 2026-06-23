@@ -106,7 +106,14 @@ export function getMessageSenderJid(key) {
     if (key.remoteJid.endsWith('@g.us')) {
         return key.participant || key.participantLid || key.participantPn || '';
     }
-    return key.participant || key.remoteJid;
+    for (const raw of [key.participantPn, key.participantLid, key.participant, key.remoteJidAlt, key.remoteJid]) {
+        if (!raw) continue;
+        const normalized = jidNormalizedUser(String(raw).split(':')[0]) || String(raw).split(':')[0];
+        if (normalized) {
+            return normalized;
+        }
+    }
+    return key.remoteJid;
 }
 
 /**
@@ -377,4 +384,32 @@ export function hasModerationTarget(waMessage, senderJid, args = []) {
         return true;
     }
     return getMentionedJids(waMessage).some((jid) => jid && jid !== senderJid);
+}
+
+/**
+ * Build sendMessage options, omitting quote when it can hang Baileys (LID chats/users).
+ * @param {import('@whiskeysockets/baileys').proto.IWebMessageInfo | null | undefined} waMessage
+ * @param {object} [extra]
+ * @returns {object}
+ */
+export function getSafeSendOptions(waMessage, extra = {}) {
+    const opts = { ...extra };
+    if (!waMessage?.key) {
+        return opts;
+    }
+
+    const key = waMessage.key;
+    const chatJid = key.remoteJid || '';
+    const isGroup = chatJid.endsWith('@g.us');
+    const senderHint =
+        key.participantPn || key.participantLid || key.participant || key.remoteJidAlt || '';
+    const lidInvolved =
+        senderHint.includes('@lid') ||
+        key.remoteJidAlt?.includes('@lid') ||
+        (!isGroup && chatJid.includes('@lid'));
+
+    if (!lidInvolved) {
+        opts.quoted = waMessage;
+    }
+    return opts;
 }

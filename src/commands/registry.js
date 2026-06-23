@@ -519,6 +519,7 @@ function fmtCmd(def) {
  * @param {boolean} opts.canManageAdmins
  * @param {boolean} opts.canSetWelcome
  * @param {boolean} opts.isOwner
+ * @param {boolean} opts.isDirectMessage - user is in a private chat with the bot
  * @param {boolean} opts.movieOnly - group has only movie features, not full activation
  * @param {object}  opts.features  - { courses, insta, movie, trending, welcome }
  */
@@ -529,9 +530,10 @@ export function formatHelpText({
     canSetWelcome = false,
     isOwner = false,
     movieOnly = false,
+    isDirectMessage = false,
     features = {},
 } = {}) {
-    const movieEnabled = features.movie || movieOnly;
+    const movieEnabled = features.movie || movieOnly || isDirectMessage;
 
     const all = COMMAND_REGISTRY;
     const isMovieCmd = (d) => d.category === 'movie';

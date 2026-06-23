@@ -40,6 +40,24 @@ export function isGroupMessage(jid) {
 }
 
 /**
+ * Direct (1:1) chat — includes phone JIDs and WhatsApp LID privacy chats.
+ * @param {string} jid
+ * @returns {boolean}
+ */
+export function isDirectMessage(jid) {
+    if (!jid || isGroupMessage(jid)) {
+        return false;
+    }
+    if (jid === 'status@broadcast' || jid.endsWith('@broadcast')) {
+        return false;
+    }
+    if (jid.includes('newsletter')) {
+        return false;
+    }
+    return jid.endsWith('@s.whatsapp.net') || jid.endsWith('@lid') || jid.endsWith('@hosted.lid');
+}
+
+/**
  * Extract group ID from JID
  * @param {string} jid - WhatsApp JID
  * @returns {string}

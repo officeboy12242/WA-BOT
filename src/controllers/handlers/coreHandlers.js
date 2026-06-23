@@ -5,9 +5,10 @@
 import axios from 'axios';
 import os from 'os';
 import { logger } from '../../utils/logger.js';
-import { extractPhoneNumber } from '../../utils/permissions.js';
+import { extractPhoneNumber, isDirectMessage } from '../../utils/permissions.js';
 import { formatHelpText } from '../../commands/registry.js';
 import { sendAndDelete } from '../../utils/autoDelete.js';
+import { getSafeSendOptions } from '../../utils/waMessage.js';
 
 function formatUptime(milliseconds) {
     const seconds = Math.floor(milliseconds / 1000);
@@ -84,7 +85,7 @@ export async function handlePing(sock, chatId, { botState, botStartTime, origina
 
 _⏰ Auto-deletes in 5 hours_`;
 
-        await sendAndDelete(sock, chatId, { text: r }, { quoted: originalMsg });
+        await sendAndDelete(sock, chatId, { text: r }, getSafeSendOptions(originalMsg));
         logger.info(`🏓 Ping response sent to ${chatId}`);
     } catch (error) {
         logger.error(`Error handling ping command: ${error.message}`);
@@ -107,7 +108,7 @@ export async function handlePosted(sock, chatId, { database, originalMsg }) {
         r += '💡 Stats shown for this group only\n';
         r += '_⏰ Auto-deletes in 5 hours_';
 
-        await sendAndDelete(sock, chatId, { text: r }, { quoted: originalMsg });
+        await sendAndDelete(sock, chatId, { text: r }, getSafeSendOptions(originalMsg));
         logger.info(`📊 Stats sent to ${chatId}`);
     } catch (error) {
         logger.error(`Error sending stats: ${error.message}`);
@@ -123,7 +124,7 @@ export async function handleClear(sock, chatId, { database, pendingClearConfirma
                 text:
                     '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n📭 *DATABASE EMPTY* 📭\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
                     'There are no courses in the database for this group.',
-            }, { quoted: originalMsg });
+            }, getSafeSendOptions(originalMsg));
             return;
         }
 
@@ -146,7 +147,7 @@ export async function handleClear(sock, chatId, { database, pendingClearConfirma
         r += "⏱️ This confirmation expires in 30 seconds\n";
         r += "💡 Only this group's data will be cleared";
 
-        await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
+        await sock.sendMessage(chatId, { text: r }, getSafeSendOptions(originalMsg));
         logger.info(`⚠️ Clear confirmation requested for ${chatId} (${totalCourses} courses)`);
     } catch (error) {
         logger.error(`Error handling clear command: ${error.message}`);
@@ -160,7 +161,7 @@ export async function handleConfirm(sock, chatId, { database, pendingClearConfir
                 text:
                     '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n❌ *NO PENDING CONFIRMATION* ❌\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
                     'There is no pending clear operation.\n\nUse `/clear` first to initiate deletion.',
-            }, { quoted: originalMsg });
+            }, getSafeSendOptions(originalMsg));
             return;
         }
 
@@ -175,7 +176,7 @@ export async function handleConfirm(sock, chatId, { database, pendingClearConfir
         r += '💡 These courses will be posted again on next check!\n';
         r += '💡 Other groups are not affected';
 
-        await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
+        await sock.sendMessage(chatId, { text: r }, getSafeSendOptions(originalMsg));
         logger.info(`🗑️ Database cleared for group ${chatId}: ${deletedCount} courses deleted`);
     } catch (error) {
         logger.error(`Error confirming clear: ${error.message}`);
@@ -190,7 +191,7 @@ export async function handleCancel(sock, chatId, senderJid, { pendingClearConfir
                 pendingGithubPosts.delete(githubKey);
                 await sock.sendMessage(chatId, {
                     text: '❌ GitHub post cancelled.',
-                }, { quoted: originalMsg });
+                }, getSafeSendOptions(originalMsg));
                 return;
             }
         }
@@ -200,7 +201,7 @@ export async function handleCancel(sock, chatId, senderJid, { pendingClearConfir
                 text:
                     '━━━━━━━━━━━━━━━━━━━━━━━━━━━\nℹ️ *NO PENDING OPERATION* ℹ️\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
                     'There is nothing to cancel.',
-            }, { quoted: originalMsg });
+            }, getSafeSendOptions(originalMsg));
             return;
         }
 
@@ -210,7 +211,7 @@ export async function handleCancel(sock, chatId, senderJid, { pendingClearConfir
             text:
                 '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n✅ *OPERATION CANCELLED* ✅\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
                 'Clear operation has been cancelled.\nNo courses were deleted.',
-        }, { quoted: originalMsg });
+        }, getSafeSendOptions(originalMsg));
         logger.info(`❌ Clear operation cancelled by ${chatId}`);
     } catch (error) {
         logger.error(`Error cancelling clear: ${error.message}`);
@@ -224,7 +225,7 @@ export async function handlePause(sock, chatId, { botState, botSettings, origina
                 text:
                     '━━━━━━━━━━━━━━━━━━━━━━━━━━━\nℹ️ *ALREADY PAUSED* ℹ️\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
                     'Course posting is already paused.\nUse `/resume` to continue.',
-            }, { quoted: originalMsg });
+            }, getSafeSendOptions(originalMsg));
             return;
         }
 
@@ -242,7 +243,7 @@ export async function handlePause(sock, chatId, { botState, botSettings, origina
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
         r += '💡 Use `/resume` to resume course posting';
 
-        await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
+        await sock.sendMessage(chatId, { text: r }, getSafeSendOptions(originalMsg));
         logger.info(`⏸️ Course posting paused by ${chatId}`);
     } catch (error) {
         logger.error(`Error pausing bot: ${error.message}`);
@@ -256,7 +257,7 @@ export async function handleResume(sock, chatId, { botState, botSettings, origin
                 text:
                     '━━━━━━━━━━━━━━━━━━━━━━━━━━━\nℹ️ *ALREADY RUNNING* ℹ️\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
                     'Course posting is already active.\nUse `/pause` to stop courses only.',
-            }, { quoted: originalMsg });
+            }, getSafeSendOptions(originalMsg));
             return;
         }
 
@@ -273,7 +274,7 @@ export async function handleResume(sock, chatId, { botState, botSettings, origin
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
         r += '💡 Use `/pause` to pause courses only';
 
-        await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
+        await sock.sendMessage(chatId, { text: r }, getSafeSendOptions(originalMsg));
         logger.info(`▶️ Course posting resumed by ${chatId}`);
     } catch (error) {
         logger.error(`Error resuming bot: ${error.message}`);
@@ -303,7 +304,7 @@ export async function handleStatus(sock, chatId, { database, botState, originalM
             : '💡 Use `/pause` to pause courses only';
         r += '\n_⏰ Auto-deletes in 5 hours_';
 
-        await sendAndDelete(sock, chatId, { text: r }, { quoted: originalMsg });
+        await sendAndDelete(sock, chatId, { text: r }, getSafeSendOptions(originalMsg));
         logger.info(`📊 Status sent to ${chatId}`);
     } catch (error) {
         logger.error(`Error sending status: ${error.message}`);
@@ -325,7 +326,7 @@ export async function handleFacts(sock, chatId, { originalMsg }) {
         r += '_Did you know? Drop another `/facts` for more!_ 🧠✨\n';
         r += '_⏰ Auto-deletes in 5 hours_';
 
-        await sendAndDelete(sock, chatId, { text: r }, { quoted: originalMsg });
+        await sendAndDelete(sock, chatId, { text: r }, getSafeSendOptions(originalMsg));
         logger.info(`🎭 Fact sent to ${chatId}`);
     } catch (error) {
         logger.error(`Error fetching fact: ${error.message}`);
@@ -335,7 +336,7 @@ export async function handleFacts(sock, chatId, { originalMsg }) {
                 text:
                     '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n😅 *Oops!* Could not fetch a fact right now.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\nTry again in a moment.',
             },
-            { quoted: originalMsg }
+            getSafeSendOptions(originalMsg)
         );
     }
 }
@@ -343,6 +344,7 @@ export async function handleFacts(sock, chatId, { originalMsg }) {
 export async function handleHelp(sock, chatId, senderJid, { groupManager, isOwnerFromJid, originalMsg }) {
     try {
         const isGroup = chatId?.endsWith('@g.us');
+        const inDirectMessage = isDirectMessage(chatId);
         const [isStaff, isPrivileged, canManageAdmins] = await Promise.all([
             groupManager.isStaffAsync(sock, chatId, senderJid),
             groupManager.isPrivilegedAsync(sock, chatId, senderJid),
@@ -374,10 +376,11 @@ export async function handleHelp(sock, chatId, senderJid, { groupManager, isOwne
             canSetWelcome,
             isOwner,
             movieOnly,
+            isDirectMessage: inDirectMessage,
             features,
         });
         response += '\n\n_⏰ Auto-deletes in 5 hours_';
-        await sendAndDelete(sock, chatId, { text: response }, { quoted: originalMsg || undefined });
+        await sendAndDelete(sock, chatId, { text: response }, getSafeSendOptions(originalMsg));
         logger.info(`📖 Help sent to ${chatId}`);
     } catch (error) {
         logger.error(`Error sending help: ${error.message}`);
