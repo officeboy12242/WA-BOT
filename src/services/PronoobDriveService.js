@@ -8,6 +8,8 @@ import https from 'https';
 import http from 'http';
 import { logger } from '../utils/logger.js';
 import { audioFromFilename, filenameToDisplayTitle, qualityFromFilename, LANGUAGE_ALIASES } from '../utils/movieMetadata.js';
+import { fetchMonthlyBandwidthMB, formatBandwidth } from '../utils/renderMetrics.js';
+import { config } from '../config/config.js';
 
 const DEFAULT_BASE_URL = 'https://pronoobdrive-7w2p.onrender.com';
 const REQUEST_TIMEOUT = 15000;
@@ -62,6 +64,68 @@ function normalizeBaseUrl(raw) {
     }
 }
 
+function normalizeDriveSource(entry) {
+    if (typeof entry === 'string') {
+        const url = normalizeBaseUrl(entry);
+        return url ? { url } : null;
+    }
+    if (entry && typeof entry === 'object') {
+        const url = normalizeBaseUrl(entry.url);
+        if (!url) return null;
+        const renderServiceId = String(entry.renderServiceId || '').trim();
+        const renderApiKey = String(entry.renderApiKey || '').trim();
+        const out = { url };
+        if (renderServiceId) out.renderServiceId = renderServiceId;
+        if (renderApiKey) out.renderApiKey = renderApiKey;
+        return out;
+    }
+    return null;
+}
+
+function parseAddDriveArgs(raw) {
+    const text = String(raw || '').trim();
+    if (!text) return { url: '', renderServiceId: '', renderApiKey: '' };
+
+    let renderServiceId = '';
+    let renderApiKey = '';
+    const urlParts = [];
+
+    for (const part of text.split(/\s+/)) {
+        if (/^srv-[a-z0-9]+$/i.test(part)) {
+            renderServiceId = part;
+        } else if (/^rnd_[a-z0-9]+$/i.test(part)) {
+            renderApiKey = part;
+        } else {
+            urlParts.push(part);
+        }
+    }
+
+    return {
+        url: urlParts.join(' ').trim(),
+        renderServiceId,
+        renderApiKey,
+    };
+}
+
+function sourceUrl(source) {
+    return typeof source === 'string' ? source : source?.url || '';
+}
+
+function sourcesEqual(a, b) {
+    return sourceUrl(a) === sourceUrl(b);
+}
+
+function serializeSources(sources) {
+    return sources.map((s) => {
+        if (typeof s === 'string') return s;
+        const out = { url: s.url };
+        if (s.renderServiceId) out.renderServiceId = s.renderServiceId;
+        if (s.renderApiKey) out.renderApiKey = s.renderApiKey;
+        if (!s.renderServiceId && !s.renderApiKey) return s.url;
+        return out;
+    });
+}
+
 function mergeAudioLabels(...parts) {
     const seen = new Set();
     const out = [];
@@ -83,7 +147,7 @@ class PronoobDriveService {
     constructor() {
         this.name = 'Drive';
         this._settings = null;
-        this._urls = [DEFAULT_BASE_URL];
+        this._sources = [{ url: DEFAULT_BASE_URL }];
         this._rotateIndex = 0;
         this._lastHealthyUrl = null;
     }
@@ -95,58 +159,85 @@ class PronoobDriveService {
     async loadUrls() {
         if (this._settings) {
             const stored = (await this._settings.getDriveSources())
-                .map(normalizeBaseUrl)
+                .map(normalizeDriveSource)
                 .filter(Boolean);
             if (stored.length) {
-                this._urls = [...new Set(stored)];
+                const seen = new Set();
+                this._sources = stored.filter((s) => {
+                    if (seen.has(s.url)) return false;
+                    seen.add(s.url);
+                    return true;
+                });
                 return;
             }
         }
-        this._urls = [DEFAULT_BASE_URL];
+
+        const fromEnv = (config.DRIVE_SOURCES || [])
+            .map(normalizeDriveSource)
+            .filter(Boolean);
+        if (fromEnv.length) {
+            this._sources = fromEnv;
+            return;
+        }
+
+        this._sources = [{ url: DEFAULT_BASE_URL }];
     }
 
     getUrls() {
-        return [...this._urls];
+        return this._sources.map(sourceUrl);
     }
 
-    async addUrl(rawUrl) {
-        const url = normalizeBaseUrl(rawUrl);
+    getSources() {
+        return this._sources.map((s) => ({ ...s }));
+    }
+
+    async addUrl(rawUrl, renderServiceId = '', renderApiKey = '') {
+        const parsed = typeof rawUrl === 'string' && !renderServiceId && !renderApiKey
+            ? parseAddDriveArgs(rawUrl)
+            : { url: rawUrl, renderServiceId, renderApiKey };
+        const url = normalizeBaseUrl(parsed.url);
         if (!url) throw new Error('Invalid URL');
+        const svcId = String(parsed.renderServiceId || renderServiceId || '').trim();
+        const apiKey = String(parsed.renderApiKey || renderApiKey || '').trim();
+
         await this.loadUrls();
-        if (this._urls.includes(url)) {
-            return { added: false, urls: this._urls };
+        if (this._sources.some((s) => sourceUrl(s) === url)) {
+            return { added: false, urls: this.getUrls(), sources: this.getSources() };
         }
-        this._urls.push(url);
+
+        const entry = { url };
+        if (svcId) entry.renderServiceId = svcId;
+        if (apiKey) entry.renderApiKey = apiKey;
+        this._sources.push(entry);
         if (this._settings) {
-            await this._settings.setDriveSources(this._urls);
+            await this._settings.setDriveSources(serializeSources(this._sources));
         }
-        return { added: true, urls: this._urls };
+        return { added: true, urls: this.getUrls(), sources: this.getSources() };
     }
 
     async removeUrl(indexOneBased) {
         await this.loadUrls();
         const idx = indexOneBased - 1;
-        if (idx < 0 || idx >= this._urls.length) {
+        if (idx < 0 || idx >= this._sources.length) {
             throw new Error('Invalid index');
         }
-        const removed = this._urls.splice(idx, 1);
-        if (!this._urls.length) {
-            this._urls = [DEFAULT_BASE_URL];
+        const removed = sourceUrl(this._sources.splice(idx, 1)[0]);
+        if (!this._sources.length) {
+            this._sources = [{ url: DEFAULT_BASE_URL }];
         }
         if (this._settings) {
-            await this._settings.setDriveSources(
-                this._urls.length === 1 && this._urls[0] === DEFAULT_BASE_URL ? [] : this._urls,
-            );
+            const isDefaultOnly = this._sources.length === 1 && sourceUrl(this._sources[0]) === DEFAULT_BASE_URL;
+            await this._settings.setDriveSources(isDefaultOnly ? [] : serializeSources(this._sources));
         }
         this._rotateIndex = 0;
-        return { removed: removed[0], urls: this._urls };
+        return { removed, urls: this.getUrls(), sources: this.getSources() };
     }
 
     _orderedUrlsForRotation() {
-        if (!this._urls.length) return [DEFAULT_BASE_URL];
+        if (!this._sources.length) return [DEFAULT_BASE_URL];
         const ordered = [];
-        for (let i = 0; i < this._urls.length; i++) {
-            ordered.push(this._urls[(this._rotateIndex + i) % this._urls.length]);
+        for (let i = 0; i < this._sources.length; i++) {
+            ordered.push(sourceUrl(this._sources[(this._rotateIndex + i) % this._sources.length]));
         }
         return ordered;
     }
@@ -191,9 +282,9 @@ class PronoobDriveService {
             const ok = await this._headCheck(base);
             if (ok) {
                 this._lastHealthyUrl = base;
-                const foundAt = this._urls.indexOf(base);
+                const foundAt = this._sources.findIndex((s) => sourceUrl(s) === base);
                 if (foundAt >= 0) {
-                    this._rotateIndex = (foundAt + 1) % this._urls.length;
+                    this._rotateIndex = (foundAt + 1) % this._sources.length;
                 }
                 logger.info(`Drive source OK: ${base}`);
                 return base;
@@ -207,10 +298,26 @@ class PronoobDriveService {
     async testAllSources() {
         await this.loadUrls();
         const results = [];
-        for (let i = 0; i < this._urls.length; i++) {
-            const url = this._urls[i];
+        for (let i = 0; i < this._sources.length; i++) {
+            const source = this._sources[i];
+            const url = sourceUrl(source);
             const ok = await this._headCheck(url);
-            results.push({ index: i + 1, url, ok });
+            const row = { index: i + 1, url, ok, renderServiceId: source.renderServiceId || '' };
+
+            if (ok && source.renderServiceId) {
+                try {
+                    const mb = await fetchMonthlyBandwidthMB(
+                        source.renderServiceId,
+                        source.renderApiKey || undefined,
+                    );
+                    row.bandwidthMB = mb;
+                    row.bandwidthText = mb == null ? null : formatBandwidth(mb);
+                } catch {
+                    row.bandwidthText = null;
+                }
+            }
+
+            results.push(row);
         }
         return results;
     }
@@ -344,8 +451,8 @@ class PronoobDriveService {
             logger.error(`PronoobDrive searchMovies error: ${err.message}`);
             return [];
         } finally {
-            if (this._urls.length) {
-                this._rotateIndex = (this._rotateIndex + 1) % this._urls.length;
+            if (this._sources.length) {
+                this._rotateIndex = (this._rotateIndex + 1) % this._sources.length;
             }
         }
     }

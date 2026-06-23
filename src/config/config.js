@@ -61,4 +61,15 @@ export const config = {
     PUBLIC_URL: (process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || '').replace(/\/$/, ''),
     RENDER_API_KEY: process.env.RENDER_API_KEY?.trim() || '',
     RENDER_SERVICE_ID: process.env.RENDER_SERVICE_ID?.trim() || '',
+    /** Optional bootstrap for drive sources: JSON array of { url, renderServiceId?, renderApiKey? } */
+    DRIVE_SOURCES: (() => {
+        try {
+            const raw = process.env.DRIVE_SOURCES_JSON?.trim();
+            if (!raw) return [];
+            const parsed = JSON.parse(raw);
+            return Array.isArray(parsed) ? parsed : [];
+        } catch {
+            return [];
+        }
+    })(),
 };

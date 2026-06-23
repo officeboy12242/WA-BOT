@@ -10,13 +10,14 @@ function usageText() {
         '┃   🌐 *DRIVE SOURCE URLS*   ┃\n' +
         '┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n' +
         '*Commands:*\n' +
-        '• `/driveurl add <url>` — add Render base URL\n' +
+        '• `/driveurl add <url> [srv-id] [api-key]` — add Render base URL\n' +
         '• `/driveurl remove <#>` — remove by list number\n' +
         '• `/driveurl list` — show all sources\n' +
         '• `/driveurl test` — health-check all sources\n\n' +
+        '_Add optional Render service ID + API key to show bandwidth in test._\n' +
         '_Bot rotates sources one-by-one and uses the first that responds._\n\n' +
         '*Example:*\n' +
-        '`/driveurl add https://pronoobdrive-7w2p.onrender.com`'
+        '`/driveurl add https://pronoobdrive-7w2p.onrender.com srv-xxxxx`'
     );
 }
 
@@ -39,7 +40,7 @@ export async function handleDriveUrl(sock, chatId, senderJid, args, { isOwnerFro
         const raw = rest.join(' ').trim();
         if (!raw) {
             await sock.sendMessage(chatId, {
-                text: '❌ Provide a URL.\n\n_Example: `/driveurl add https://your-app.onrender.com`_',
+                text: '❌ Provide a URL.\n\n_Example: `/driveurl add https://your-app.onrender.com srv-xxxxx`_',
             }, { quoted: originalMsg });
             return;
         }
@@ -81,16 +82,23 @@ export async function handleDriveUrl(sock, chatId, senderJid, args, { isOwnerFro
 
     if (action === 'list' || action === 'ls') {
         await pronoobDriveService.loadUrls();
-        const urls = pronoobDriveService.getUrls();
+        const sources = pronoobDriveService.getSources();
         let text = '┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n';
         text += '┃   🌐 *DRIVE SOURCE URLS*   ┃\n';
         text += '┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n';
 
-        if (!urls.length) {
+        if (!sources.length) {
             text += '📭 No custom sources — using default.\n';
         } else {
-            urls.forEach((url, i) => {
-                text += `*${i + 1}.* ${url}\n`;
+            sources.forEach((source, i) => {
+                text += `*${i + 1}.* ${source.url}`;
+                if (source.renderServiceId) {
+                    text += `\n   🆔 ${source.renderServiceId}`;
+                }
+                if (source.renderApiKey) {
+                    text += '\n   🔑 Render API key configured';
+                }
+                text += '\n';
             });
         }
 
@@ -111,7 +119,15 @@ export async function handleDriveUrl(sock, chatId, senderJid, args, { isOwnerFro
             text += '📭 No sources configured.';
         } else {
             for (const r of results) {
-                text += `${r.ok ? '🟢' : '🔴'} *${r.index}.* ${r.url}\n`;
+                text += `${r.ok ? '🟢' : '🔴'} *${r.index}.* ${r.url}`;
+                if (r.bandwidthText) {
+                    text += `\n   📊 BW: ${r.bandwidthText} this month`;
+                } else if (r.renderServiceId && r.ok) {
+                    text += '\n   📊 BW: unavailable';
+                } else if (!r.renderServiceId && r.ok) {
+                    text += '\n   📊 BW: add srv-id to track';
+                }
+                text += '\n';
             }
         }
 
