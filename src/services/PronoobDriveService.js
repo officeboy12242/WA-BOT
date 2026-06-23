@@ -7,7 +7,7 @@
 import https from 'https';
 import http from 'http';
 import { logger } from '../utils/logger.js';
-import { audioFromFilename } from '../utils/movieMetadata.js';
+import { audioFromFilename, filenameToDisplayTitle, qualityFromFilename, LANGUAGE_ALIASES } from '../utils/movieMetadata.js';
 
 const DEFAULT_BASE_URL = 'https://pronoobdrive-7w2p.onrender.com';
 const REQUEST_TIMEOUT = 15000;
@@ -16,27 +16,7 @@ const MAX_RESPONSE_BYTES = 512 * 1024;
 const MAX_PARSED_CARDS = 20;
 
 const CARD_RE =
-    /<!-- Card\s+-->\s*<div title="\s*[^|]+\|\s*([^"]+?)\s*"[^>]*>[\s\S]*?<div class="p-2">([\s\S]*?)<\/div>[\s\S]*?<a href="(Sct\/\d+\/[^"]+)"[\s\S]*?<button title="([^"]+?)\.m3u"/g;
-
-const CARD_AUDIO_ALIASES = {
-    jap: 'Japanese',
-    japanese: 'Japanese',
-    jpn: 'Japanese',
-    eng: 'English',
-    english: 'English',
-    hin: 'Hindi',
-    hindi: 'Hindi',
-    h: 'Hindi',
-    tam: 'Tamil',
-    tel: 'Telugu',
-    mal: 'Malayalam',
-    kan: 'Kannada',
-    ben: 'Bengali',
-    pun: 'Punjabi',
-    mar: 'Marathi',
-    guj: 'Gujarati',
-    urd: 'Urdu',
-};
+    /<!-- Card\s+-->\s*<div title="\s*[^|]+\|\s*([^"]+?)\s*"[^>]*>[\s\S]*?<div class="p-2">([\s\S]*?)<\/div>[\s\S]*?<a href="(Sct\/\d+\/[^"]+)"[\s\S]*?<button title="([^"]+)"/g;
 
 function normalizeCardAudio(raw) {
     if (!raw) return '';
@@ -45,7 +25,7 @@ function normalizeCardAudio(raw) {
         .split('+')
         .map((part) => part.trim())
         .filter(Boolean)
-        .map((part) => CARD_AUDIO_ALIASES[part.toLowerCase()] || part)
+        .map((part) => LANGUAGE_ALIASES[part.toLowerCase()] || part)
         .join(' + ');
 }
 
@@ -82,15 +62,21 @@ function normalizeBaseUrl(raw) {
     }
 }
 
-function qualityFromFilename(name) {
-    const n = name.toLowerCase();
-    if (n.includes('2160p') || n.includes('4k')) return '4K';
-    if (n.includes('1080p')) return '1080p';
-    if (n.includes('1440p')) return '1440p';
-    if (n.includes('720p') && n.includes('hevc')) return '720p HEVC';
-    if (n.includes('720p')) return '720p';
-    if (n.includes('480p')) return '480p';
-    return '';
+function mergeAudioLabels(...parts) {
+    const seen = new Set();
+    const out = [];
+    for (const part of parts) {
+        if (!part) continue;
+        for (const token of String(part).split(/\s*\+\s*|\s*•\s*/)) {
+            const label = token.trim();
+            if (!label) continue;
+            const key = label.toLowerCase();
+            if (seen.has(key)) continue;
+            seen.add(key);
+            out.push(label);
+        }
+    }
+    return out.join(' + ');
 }
 
 class PronoobDriveService {
@@ -277,12 +263,14 @@ class PronoobDriveService {
             const relUrl = match[3];
             const rawFilename = decodeHtmlEntities(match[4]);
             const { title: cardTitle, audio: cardAudio } = parseCardLabel(cardLabel);
+            const title = filenameToDisplayTitle(rawFilename) || cardTitle;
+            const parsedAudio = audioFromFilename(rawFilename);
             files.push({
                 rawFilename,
-                title: rawFilename || cardTitle,
+                title,
                 quality: qualityFromFilename(rawFilename),
                 size,
-                audio: cardAudio || audioFromFilename(rawFilename),
+                audio: mergeAudioLabels(cardAudio, parsedAudio),
                 url: `${baseUrl}/${relUrl}`,
             });
             if (files.length >= MAX_PARSED_CARDS) break;
@@ -317,6 +305,8 @@ class PronoobDriveService {
             groups.get(key).links.push({
                 size: label,
                 audio: file.audio || audioFromFilename(file.rawFilename),
+                quality: file.quality || qualityFromFilename(file.rawFilename),
+                rawFilename: file.rawFilename,
                 url: file.url,
             });
         }

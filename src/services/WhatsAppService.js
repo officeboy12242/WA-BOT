@@ -14,7 +14,7 @@ import qrcode from 'qrcode-terminal';
 import { logger } from '../utils/logger.js';
 import { useDatabaseAuthState } from '../utils/databaseAuthState.js';
 import { extractInstagramUrl } from '../utils/instagramUrl.js';
-import { getMessageSenderJid, getTextForUrlScan, getTextFromWAMessage } from '../utils/waMessage.js';
+import { getMessageSenderJid, getTextForUrlScan, getTextFromWAMessage, resolveConversationChatId } from '../utils/waMessage.js';
 import { resolveChannelSourceEntries } from '../utils/channelResolve.js';
 import { extractStickerFromMessage, isNewsletterChat } from '../utils/stickerExtract.js';
 import { config } from '../config/config.js';
@@ -409,7 +409,7 @@ class WhatsAppService {
             return;
         }
 
-        const chatId = msg.key.remoteJid;
+        const chatId = resolveConversationChatId(msg.key) || msg.key.remoteJid;
         const messageId = msg.key?.id;
         if (!chatId || !messageId) {
             return;
@@ -425,7 +425,12 @@ class WhatsAppService {
             return;
         }
 
-        // Skip old messages (more than 60 seconds old) to avoid processing history
+        const msgContent = msg.message;
+        const messageTextPreview = getTextFromWAMessage(msgContent).trim();
+        const textForUrlsPreview = getTextForUrlScan(msgContent).trim();
+        const isCommandMessage = messageTextPreview.startsWith('/');
+
+        // Skip old messages (more than 60 seconds) unless it's a command in a DM (Render can lag)
         const messageTimestamp = msg.messageTimestamp;
         if (messageTimestamp) {
             const msgTime = typeof messageTimestamp === 'number' 
@@ -433,13 +438,13 @@ class WhatsAppService {
                 : Number(messageTimestamp) * 1000;
             const now = Date.now();
             const age = now - msgTime;
-            if (age > 60000) { // Skip messages older than 60 seconds
+            const maxAge = isCommandMessage && shouldAutoDetectInstaLink(chatId) ? 120000 : 60000;
+            if (age > maxAge) {
                 return;
             }
         }
 
         // Skip protocol/system messages that cause "Waiting for this message"
-        const msgContent = msg.message;
         const protocolOnlyTypes = [
             'protocolMessage',
             'senderKeyDistributionMessage', 
@@ -460,15 +465,17 @@ class WhatsAppService {
             'stickerMessage', 'contactMessage', 'locationMessage',
             'liveLocationMessage', 'templateMessage', 'buttonsMessage',
             'listMessage', 'viewOnceMessage', 'viewOnceMessageV2',
+            'ephemeralMessage', 'documentWithCaptionMessage',
         ];
         
         const hasActualContent = msgKeys.some(key => contentTypes.includes(key));
         const hasOnlyProtocol = msgKeys.every(key => 
             protocolOnlyTypes.includes(key) || key === 'messageContextInfo'
         );
+        const hasExtractableText = Boolean(messageTextPreview || textForUrlsPreview);
         
-        // Skip if no actual content and not a sticker
-        if (!hasActualContent && hasOnlyProtocol) {
+        // Skip if no actual content and not a sticker — but never drop commands / URLs in wrappers
+        if (!hasExtractableText && !hasActualContent && hasOnlyProtocol) {
             return;
         }
 
@@ -541,8 +548,12 @@ class WhatsAppService {
             void this.userManager.updateUser(senderJid, msg.pushName).catch(() => {});
         }
 
-        const messageText = getTextFromWAMessage(msg.message).trim();
-        const textForUrls = getTextForUrlScan(msg.message).trim();
+        const messageText = messageTextPreview || getTextFromWAMessage(msg.message).trim();
+        const textForUrls = textForUrlsPreview || getTextForUrlScan(msg.message).trim();
+
+        if (messageText.startsWith('/')) {
+            logger.info(`📩 DM/group command: ${messageText.split(/\s+/)[0]} from ${senderJid} in ${chatId}`);
+        }
 
         if (!messageText.startsWith('/')) {
             const handledPending = await this.commandController.tryHandlePendingInput(
