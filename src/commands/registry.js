@@ -431,6 +431,13 @@ export const COMMAND_REGISTRY = [
         help: 'Manage Drive scrape URLs — add/remove/list/test Render sources (owner only)',
         category: 'movie',
     },
+    {
+        names: ['/vv', '/viewonce'],
+        key: 'viewonce',
+        scope: 'any',
+        role: 'anyone',
+        help: 'Reply to a view-once message to reveal it',
+    },
 ];
 
 const nameIndex = new Map();
