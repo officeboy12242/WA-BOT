@@ -61,26 +61,6 @@ function parseCardLabel(raw) {
     };
 }
 
-function episodeFromFilename(raw) {
-    const name = String(raw || '').replace(/\.[^.]+$/, '');
-    const match = name.match(/\bS(\d+)\s*[-–]\s*(\d+)\b/i);
-    if (!match) return '';
-    return `S${match[1]} - ${match[2]}`;
-}
-
-function buildDisplayTitle(cardTitle, rawFilename) {
-    const episode = episodeFromFilename(rawFilename);
-    const fallback = titleFromFilename(rawFilename);
-
-    if (cardTitle && episode) {
-        const episodePattern = new RegExp(`S${episode.split(' - ')[0].replace('S', '')}\\s*[-–]\\s*${episode.split(' - ')[1]}`, 'i');
-        if (episodePattern.test(cardTitle)) return cardTitle;
-        return `${cardTitle} · ${episode}`;
-    }
-    if (cardTitle) return cardTitle;
-    return fallback;
-}
-
 function decodeHtmlEntities(str) {
     return str
         .replace(/&#39;/g, "'")
@@ -111,24 +91,6 @@ function qualityFromFilename(name) {
     if (n.includes('720p')) return '720p';
     if (n.includes('480p')) return '480p';
     return '';
-}
-
-function titleFromFilename(raw) {
-    let name = raw
-        .replace(/^@\S+\s*[-–]\s*/, '')
-        .replace(/\.[^.]+$/, '');
-
-    name = name.replace(/[._]/g, ' ').replace(/\s{2,}/g, ' ').trim();
-
-    const cutPoint = name.search(
-        /\b(1080p|1440p|720p|480p|2160p|4K|HDRip|WEBRip|WEB-DL|BluRay|HDTC|HQRip|HEVC|x264|x265|H 264|H 265|DD|DDP|AAC|Atmos|SONYLIV|AMZN|Youtube)\b/i,
-    );
-    if (cutPoint > 3) {
-        name = name.substring(0, cutPoint).trim();
-    }
-
-    name = name.replace(/[\[\(]\s*$/, '').trim();
-    return name || raw;
 }
 
 class PronoobDriveService {
@@ -317,7 +279,7 @@ class PronoobDriveService {
             const { title: cardTitle, audio: cardAudio } = parseCardLabel(cardLabel);
             files.push({
                 rawFilename,
-                title: buildDisplayTitle(cardTitle, rawFilename),
+                title: rawFilename || cardTitle,
                 quality: qualityFromFilename(rawFilename),
                 size,
                 audio: cardAudio || audioFromFilename(rawFilename),

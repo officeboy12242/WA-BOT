@@ -8,6 +8,7 @@ import { findCommand, findSimilarCommands } from '../commands/registry.js';
 import { logger } from '../utils/logger.js';
 import { sendAndDelete } from '../utils/autoDelete.js';
 import { extractPhoneNumber } from '../utils/permissions.js';
+import { getSafeSendOptions } from '../utils/waMessage.js';
 
 import {
     handlePing,
@@ -193,7 +194,7 @@ class CommandController {
                 const suggestionText = suggestions.map(s => `  • \`${s}\``).join('\n');
                 await sendAndDelete(sock, chatId, {
                     text: `❓ Unknown command: \`${cmd}\`\n\n💡 *Did you mean:*\n${suggestionText}\n\n_Type \`/help\` for all commands_\n_⏰ Auto-deletes in 5 hours_`
-                }, { quoted: originalMsg });
+                }, getSafeSendOptions(originalMsg));
             }
             return;
         }
@@ -202,11 +203,11 @@ class CommandController {
 
         const access = await checkCommandAccess(sock, chatId, senderJid, def, this.groupManager);
         if (!access.ok) {
-            await sock.sendMessage(chatId, { text: access.message }, { quoted: originalMsg });
+            await sock.sendMessage(chatId, { text: access.message }, getSafeSendOptions(originalMsg));
             return;
         }
 
-        const ctx = { ...this._ctx(), originalMsg };
+        const ctx = { ...this._ctx(), originalMsg, replyOpts: getSafeSendOptions(originalMsg) };
 
         switch (def.key) {
             /* ── Core ── */
@@ -274,35 +275,35 @@ class CommandController {
                     if (!sign) {
                         // No sign provided, show list
                         const listMsg = horoscopeService.getSignsList();
-                        await sock.sendMessage(chatId, { text: listMsg }, { quoted: originalMsg });
+                        await sock.sendMessage(chatId, { text: listMsg }, getSafeSendOptions(originalMsg));
                     } else {
                         // Fetch horoscope for the sign
                         const data = await horoscopeService.fetchHoroscope(sign);
                         const msg = horoscopeService.formatMessage(data);
-                        await sock.sendMessage(chatId, { text: msg }, { quoted: originalMsg });
+                        await sock.sendMessage(chatId, { text: msg }, getSafeSendOptions(originalMsg));
                     }
                 } catch (err) {
                     logger.error('Horoscope command error:', err);
-                    await sock.sendMessage(chatId, { text: '⚠️ Failed to fetch horoscope. Please try again.' }, { quoted: originalMsg });
+                    await sock.sendMessage(chatId, { text: '⚠️ Failed to fetch horoscope. Please try again.' }, getSafeSendOptions(originalMsg));
                 }
                 break;
             case 'movie':
                 if (!this.movieController) {
-                    await sock.sendMessage(chatId, { text: '⚠️ Movie search is not available.' }, { quoted: originalMsg });
+                    await sock.sendMessage(chatId, { text: '⚠️ Movie search is not available.' }, getSafeSendOptions(originalMsg));
                 } else {
                     await this.movieController.handleMovieSearch(sock, chatId, senderJid, args, pushName, originalMsg);
                 }
                 break;
             case 'upcoming':
                 if (!this.movieController) {
-                    await sock.sendMessage(chatId, { text: '⚠️ Movie features not available.' }, { quoted: originalMsg });
+                    await sock.sendMessage(chatId, { text: '⚠️ Movie features not available.' }, getSafeSendOptions(originalMsg));
                 } else {
                     await this.movieController.handleUpcoming(sock, chatId, senderJid, originalMsg);
                 }
                 break;
             case 'genre':
                 if (!this.movieController) {
-                    await sock.sendMessage(chatId, { text: '⚠️ Movie features not available.' }, { quoted: originalMsg });
+                    await sock.sendMessage(chatId, { text: '⚠️ Movie features not available.' }, getSafeSendOptions(originalMsg));
                 } else {
                     await this.movieController.handleGenre(sock, chatId, senderJid, args, originalMsg);
                 }
@@ -311,41 +312,41 @@ class CommandController {
             /* ── Sticker Commands (non-blocking — FFmpeg runs in background queue) ── */
             case 'sticker':
                 if (!this.stickerController) {
-                    await sock.sendMessage(chatId, { text: '⚠️ Sticker functionality is not available.' }, { quoted: originalMsg });
+                    await sock.sendMessage(chatId, { text: '⚠️ Sticker functionality is not available.' }, getSafeSendOptions(originalMsg));
                 } else {
                     void this.stickerController.handleSticker(sock, chatId, originalMsg, args, command).catch((err) => {
                         logger.error('Sticker command error:', err);
-                        void sock.sendMessage(chatId, { text: '⚠️ Failed to process sticker command.' }, { quoted: originalMsg });
+                        void sock.sendMessage(chatId, { text: '⚠️ Failed to process sticker command.' }, getSafeSendOptions(originalMsg));
                     });
                 }
                 break;
             case 'steal':
                 if (!this.stickerController) {
-                    await sock.sendMessage(chatId, { text: '⚠️ Sticker functionality is not available.' }, { quoted: originalMsg });
+                    await sock.sendMessage(chatId, { text: '⚠️ Sticker functionality is not available.' }, getSafeSendOptions(originalMsg));
                 } else {
                     void this.stickerController.handleSteal(sock, chatId, originalMsg, args, command).catch((err) => {
                         logger.error('Steal command error:', err);
-                        void sock.sendMessage(chatId, { text: '⚠️ Failed to process steal command.' }, { quoted: originalMsg });
+                        void sock.sendMessage(chatId, { text: '⚠️ Failed to process steal command.' }, getSafeSendOptions(originalMsg));
                     });
                 }
                 break;
             case 'toimg':
                 if (!this.stickerController) {
-                    await sock.sendMessage(chatId, { text: '⚠️ Sticker functionality is not available.' }, { quoted: originalMsg });
+                    await sock.sendMessage(chatId, { text: '⚠️ Sticker functionality is not available.' }, getSafeSendOptions(originalMsg));
                 } else {
                     void this.stickerController.handleToImage(sock, chatId, originalMsg).catch((err) => {
                         logger.error('ToImage command error:', err);
-                        void sock.sendMessage(chatId, { text: '⚠️ Failed to convert sticker to image.' }, { quoted: originalMsg });
+                        void sock.sendMessage(chatId, { text: '⚠️ Failed to convert sticker to image.' }, getSafeSendOptions(originalMsg));
                     });
                 }
                 break;
             case 'rgb':
                 if (!this.stickerController) {
-                    await sock.sendMessage(chatId, { text: '⚠️ Sticker functionality is not available.' }, { quoted: originalMsg });
+                    await sock.sendMessage(chatId, { text: '⚠️ Sticker functionality is not available.' }, getSafeSendOptions(originalMsg));
                 } else {
                     void this.stickerController.handleRgbSticker(sock, chatId, args, originalMsg).catch((err) => {
                         logger.error('RGB sticker error:', err);
-                        void sock.sendMessage(chatId, { text: '⚠️ Failed to generate RGB sticker.' }, { quoted: originalMsg });
+                        void sock.sendMessage(chatId, { text: '⚠️ Failed to generate RGB sticker.' }, getSafeSendOptions(originalMsg));
                     });
                 }
                 break;

@@ -10,6 +10,7 @@ import {
     resolveJidToPhone,
     hasModerationTarget,
     getQuotedPushName,
+    getSafeSendOptions,
 } from '../../utils/waMessage.js';
 
 export const MAX_WARNS = 5;
@@ -102,7 +103,7 @@ async function sendWithMention(sock, chatId, text, mentionJid, quoted) {
     if (mentionJid) {
         payload.mentions = [mentionJid];
     }
-    await sock.sendMessage(chatId, payload, { quoted });
+    await sock.sendMessage(chatId, payload, getSafeSendOptions(quoted));
 }
 
 async function findParticipantRecord(sock, chatId, jid, phone, groupManager) {
