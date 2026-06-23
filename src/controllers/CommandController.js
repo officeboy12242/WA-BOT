@@ -8,7 +8,7 @@ import { findCommand, findSimilarCommands } from '../commands/registry.js';
 import { logger } from '../utils/logger.js';
 import { sendAndDelete } from '../utils/autoDelete.js';
 import { extractPhoneNumber } from '../utils/permissions.js';
-import { getSafeSendOptions, safeSendMessage } from '../utils/waMessage.js';
+import { getSafeSendOptions, safeSendMessage, plainSendMessage } from '../utils/waMessage.js';
 
 import {
     handlePing,
@@ -186,6 +186,7 @@ class CommandController {
         const args = parts.slice(1);
         if (!cmd) return;
 
+        try {
         const def = findCommand(cmd);
         if (!def) {
             // Show suggestions for unknown commands
@@ -352,6 +353,13 @@ class CommandController {
                 break;
 
             default: break;
+        }
+        } catch (err) {
+            logger.error(`Command handler error (${cmd}): ${err?.message || err}`);
+            logger.error(err?.stack);
+            await plainSendMessage(sock, chatId, {
+                text: '⚠️ Something went wrong running that command. Please try again.',
+            });
         }
     }
 }

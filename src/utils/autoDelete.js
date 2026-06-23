@@ -48,7 +48,7 @@ export function scheduleAutoDelete(sock, chatId, messageKey, delayMs = AUTO_DELE
 export async function sendAndDelete(sock, chatId, content, originalMsg = null, deleteAfterMs = AUTO_DELETE_MS) {
     const sent = await safeSendMessage(sock, chatId, content, originalMsg);
     if (sent?.key) {
-        scheduleAutoDelete(sock, chatId, sent.key, deleteAfterMs);
+        scheduleAutoDelete(sock, sent.key.remoteJid || chatId, sent.key, deleteAfterMs);
     }
     return sent;
 }
