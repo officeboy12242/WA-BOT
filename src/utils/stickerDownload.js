@@ -8,7 +8,7 @@ import {
     downloadContentFromMessage,
     downloadMediaMessage,
     normalizeMessageContent,
-} from '@whiskeysockets/baileys';
+} from 'baileys';
 import pino from 'pino';
 import { logger } from './logger.js';
 import { extractStickerFromMessage, isNewsletterChat } from './stickerExtract.js';
@@ -89,14 +89,14 @@ function downloadContext(sock) {
     };
 }
 
-/** @param {import('@whiskeysockets/baileys').WASocket} sock */
+/** @param {import('baileys').WASocket} sock */
 export function createDownloadContext(sock) {
     return downloadContext(sock);
 }
 
 /**
- * @param {import('@whiskeysockets/baileys').WASocket} sock
- * @param {import('@whiskeysockets/baileys').proto.IWebMessageInfo} waMessage
+ * @param {import('baileys').WASocket} sock
+ * @param {import('baileys').proto.IWebMessageInfo} waMessage
  * @returns {Promise<Buffer>}
  */
 async function tryDownloadMediaMessage(sock, waMessage) {
@@ -112,7 +112,7 @@ async function tryDownloadMediaMessage(sock, waMessage) {
 }
 
 /**
- * @param {import('@whiskeysockets/baileys').WASocket} sock
+ * @param {import('baileys').WASocket} sock
  * @param {object} stickerPayload
  * @returns {Promise<Buffer>}
  */
@@ -134,8 +134,8 @@ async function tryDownloadContent(sock, stickerPayload) {
 
 
 /**
- * @param {import('@whiskeysockets/baileys').WASocket} sock
- * @param {import('@whiskeysockets/baileys').proto.IWebMessageInfo} waMessage
+ * @param {import('baileys').WASocket} sock
+ * @param {import('baileys').proto.IWebMessageInfo} waMessage
  * @returns {Promise<Buffer>}
  */
 export async function downloadStickerBuffer(sock, waMessage) {

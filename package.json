@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "start": "node --max-old-space-size=450 bot-new.js",
-    "dev": "node --watch bot-new.js"
+    "dev": "node --watch bot-new.js",
+    "clear-auth": "node scripts/clear-auth.js"
   },
   "engines": {
     "node": ">=20.0.0",
@@ -22,8 +23,8 @@
   "license": "ISC",
   "dependencies": {
     "@napi-rs/canvas": "^1.0.0",
-    "@whiskeysockets/baileys": "^6.7.8",
     "axios": "^1.6.5",
+    "baileys": "7.0.0-rc13",
     "cheerio": "^1.2.0",
     "dotenv": "^16.4.1",
     "ffmpeg-static": "^5.3.0",

@@ -6,15 +6,15 @@
 import makeWASocket, {
     DisconnectReason,
     fetchLatestBaileysVersion,
-    makeCacheableSignalKeyStore,
-} from '@whiskeysockets/baileys';
+} from 'baileys';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import qrcode from 'qrcode-terminal';
 import { logger } from '../utils/logger.js';
 import { useDatabaseAuthState } from '../utils/databaseAuthState.js';
 import { extractInstagramUrl } from '../utils/instagramUrl.js';
-import { getMessageSenderJid, getTextForUrlScan, getTextFromWAMessage } from '../utils/waMessage.js';
+import { getMessageSenderJid, getTextForUrlScan, getTextFromWAMessage, safeSendMessage, resolveConversationChatId } from '../utils/waMessage.js';
+import { rememberLidPnFromMessageKey } from '../utils/lid.js';
 import { resolveChannelSourceEntries } from '../utils/channelResolve.js';
 import { extractStickerFromMessage, isNewsletterChat } from '../utils/stickerExtract.js';
 import { config } from '../config/config.js';
@@ -71,6 +71,10 @@ class WhatsAppService {
         // Prevent reconnect loops during shutdown / deploy handoff
         this._shuttingDown = false;
         this._reconnectTimeout = null;
+
+        /** @type {Map<string, import('baileys').proto.IMessage>} */
+        this._messageCache = new Map();
+        this._messageCacheMax = 180;
         
         // Give admin panel access to auth database for clearing
         if (this.adminPanel && this.authDatabase) {
@@ -187,17 +191,32 @@ class WhatsAppService {
         const { state, saveCreds } = await useDatabaseAuthState(this.authDatabase);
         const { version } = await fetchLatestBaileysVersion();
 
+        const getMessage = async (key) => {
+            if (!key?.remoteJid || !key?.id) return undefined;
+            return this._messageCache.get(`${key.remoteJid}:${key.id}`);
+        };
+
         this.sock = makeWASocket({
             version,
             logger: pino({ level: 'silent' }),
             auth: {
                 creds: state.creds,
-                keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
+                keys: state.keys,
             },
             generateHighQualityLinkPreview: false,
+            getMessage,
             syncFullHistory: false,
-            markOnlineOnConnect: false,
-            options: { timeout: 20000 },
+            shouldSyncHistoryMessage: () => true,
+            markOnlineOnConnect: true,
+            emitOwnEvents: false,
+            connectTimeoutMs: 60000,
+            defaultQueryTimeoutMs: 60000,
+            keepAliveIntervalMs: 30000,
+            retryRequestDelayMs: 150,
+            maxMsgRetryCount: 3,
+            browser: ['Ubuntu', 'Chrome', '20.0.04'],
+            fireInitQueries: true,
+            patchMessageBeforeSending: (msg) => msg,
         });
 
         this.setupEventHandlers(saveCreds);
@@ -281,7 +300,8 @@ class WhatsAppService {
                     }, 3000);
                 }
             } else if (connection === 'open') {
-                logger.info('✅ Connected to WhatsApp!');
+                const me = this.sock?.user;
+                logger.info(`✅ Connected to WhatsApp! me.id=${me?.id} me.lid=${me?.lid}`);
                 this.isReady = true;
                 this._startMessageCleanup();
                 
@@ -347,11 +367,21 @@ class WhatsAppService {
                 return;
             }
             for (const msg of messages) {
+                this._cacheIncomingMessage(msg);
                 void this.processIncomingMessage(msg).catch((err) => {
                     logger.error('Message handling error:', err?.message || err);
                 });
             }
         });
+    }
+
+    _cacheIncomingMessage(msg) {
+        if (!msg?.message || !msg.key?.remoteJid || !msg.key?.id) return;
+        if (this._messageCache.size >= this._messageCacheMax) {
+            const oldest = this._messageCache.keys().next().value;
+            if (oldest) this._messageCache.delete(oldest);
+        }
+        this._messageCache.set(`${msg.key.remoteJid}:${msg.key.id}`, msg.message);
     }
 
     async resolveStickerSourceChannels() {
@@ -409,7 +439,7 @@ class WhatsAppService {
             return;
         }
 
-        const chatId = msg.key.remoteJid;
+        const chatId = resolveConversationChatId(msg.key) || msg.key.remoteJid;
         const messageId = msg.key?.id;
         if (!chatId || !messageId) {
             return;
@@ -535,6 +565,8 @@ class WhatsAppService {
             return;
         }
 
+        rememberLidPnFromMessageKey(this.sock, msg.key);
+
         const senderJid = selfChat
             ? getBotSelfSenderJid(this.sock)
             : getMessageSenderJid(msg.key);
@@ -552,7 +584,8 @@ class WhatsAppService {
         const textForUrls = textForUrlsPreview || getTextForUrlScan(msg.message).trim();
 
         if (messageText.startsWith('/')) {
-            logger.info(`📩 DM/group command: ${messageText.split(/\s+/)[0]} from ${senderJid} in ${chatId}`);
+            const alt = msg.key?.remoteJidAlt || 'n/a';
+            logger.info(`📩 DM/group command: ${messageText.split(/\s+/)[0]} from ${senderJid} in ${chatId} (remoteJidAlt=${alt})`);
         }
 
         if (!messageText.startsWith('/')) {
@@ -575,9 +608,9 @@ class WhatsAppService {
                     logger.error('Command error:', err?.message || err);
                     logger.error('Command error stack:', err?.stack);
                     try {
-                        await this.sock.sendMessage(chatId, {
+                        await safeSendMessage(this.sock, chatId, {
                             text: '⚠️ Bot could not process that command. Try again in a moment.',
-                        }, { linkPreview: false });
+                        }, msg);
                     } catch {}
                 });
             return;

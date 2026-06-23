@@ -4,7 +4,7 @@
  * Compatible with Baileys' useMultiFileAuthState
  */
 
-import { initAuthCreds, BufferJSON, proto } from '@whiskeysockets/baileys';
+import { initAuthCreds, BufferJSON, proto } from 'baileys';
 import { logger } from './logger.js';
 
 /**
@@ -59,12 +59,12 @@ export async function useDatabaseAuthState(authDB) {
                     const writes = [];
                     for (const category in data) {
                         for (const id in data[category]) {
-                            const key = `${category}-${id}`;
                             const value = data[category][id];
-                            if (value) {
-                                writes.push(writeData(value, key));
+                            const key = `${category}-${id}`;
+                            if (value == null) {
+                                writes.push(authDB.delete(key).catch(() => {}));
                             } else {
-                                writes.push(authDB.delete(key));
+                                writes.push(writeData(value, key));
                             }
                         }
                     }

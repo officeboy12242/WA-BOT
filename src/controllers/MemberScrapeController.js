@@ -2,7 +2,7 @@
  * Scrape group participants and prepare member lists for owner broadcasts.
  */
 
-import { jidNormalizedUser } from '@whiskeysockets/baileys';
+import { jidNormalizedUser } from 'baileys';
 import { logger } from '../utils/logger.js';
 import { extractPhoneNumber, normalizePhoneNumber } from '../utils/permissions.js';
 

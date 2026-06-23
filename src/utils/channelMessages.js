@@ -7,7 +7,7 @@ import {
     getAllBinaryNodeChildren,
     getBinaryNodeChild,
     proto,
-} from '@whiskeysockets/baileys';
+} from 'baileys';
 import pino from 'pino';
 import { logger } from './logger.js';
 import { extractStickerFromMessage } from './stickerExtract.js';
@@ -31,10 +31,10 @@ function bufferFromNodeContent(content) {
 }
 
 /**
- * @param {import('@whiskeysockets/baileys').WASocket} sock
+ * @param {import('baileys').WASocket} sock
  * @param {object} node
  * @param {string} channelJid
- * @returns {Promise<import('@whiskeysockets/baileys').proto.IWebMessageInfo | null>}
+ * @returns {Promise<import('baileys').proto.IWebMessageInfo | null>}
  */
 async function parseNewsletterMessageNode(sock, node, channelJid) {
     const plaintextNode = getBinaryNodeChild(node, 'plaintext');
@@ -81,10 +81,10 @@ async function parseNewsletterMessageNode(sock, node, channelJid) {
 }
 
 /**
- * @param {import('@whiskeysockets/baileys').WASocket} sock
+ * @param {import('baileys').WASocket} sock
  * @param {string} channelJid
  * @param {number} count
- * @returns {Promise<import('@whiskeysockets/baileys').proto.IWebMessageInfo[]>}
+ * @returns {Promise<import('baileys').proto.IWebMessageInfo[]>}
  */
 export async function fetchNewsletterMessages(sock, channelJid, count = 20) {
     if (!sock?.newsletterFetchMessages) {
@@ -128,10 +128,10 @@ export async function fetchNewsletterMessages(sock, channelJid, count = 20) {
 
 /**
  * Latest sticker messages from a channel (newest first).
- * @param {import('@whiskeysockets/baileys').WASocket} sock
+ * @param {import('baileys').WASocket} sock
  * @param {string} channelJid
  * @param {number} count
- * @returns {Promise<import('@whiskeysockets/baileys').proto.IWebMessageInfo[]>}
+ * @returns {Promise<import('baileys').proto.IWebMessageInfo[]>}
  */
 export async function fetchNewsletterStickerMessages(sock, channelJid, count = 20) {
     const messages = await fetchNewsletterMessages(sock, channelJid, count);

@@ -34,7 +34,7 @@ export function isChannelInviteEntry(entry) {
 }
 
 /**
- * @param {import('@whiskeysockets/baileys').WASocket} sock
+ * @param {import('baileys').WASocket} sock
  * @param {string} inviteCode
  * @returns {Promise<{ jid: string, name: string } | null>}
  */
@@ -65,7 +65,7 @@ export async function resolveChannelInvite(sock, inviteCode) {
 }
 
 /**
- * @param {import('@whiskeysockets/baileys').WASocket} sock
+ * @param {import('baileys').WASocket} sock
  * @param {string[]} entries STICKER_SOURCE_CHANNELS (.env values)
  * @returns {Promise<{ jids: string[], resolved: Array<{ input: string, jid: string, name: string }> }>}
  */

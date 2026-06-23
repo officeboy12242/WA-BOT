@@ -2,8 +2,10 @@
  * WA incoming message helpers (aligned with Baileys unwrap rules).
  */
 
-import { normalizeMessageContent, jidNormalizedUser } from '@whiskeysockets/baileys';
+import { normalizeMessageContent, jidNormalizedUser } from 'baileys';
 import { extractPhoneNumber, isDirectMessage, normalizePhoneNumber } from './permissions.js';
+import { resolveReplyChatJid } from './lid.js';
+import { messageQueue } from './messageQueue.js';
 import { logger } from './logger.js';
 
 /** Strip linked-device suffix (:0) but keep user@domain intact. */
@@ -11,6 +13,55 @@ function normalizeWaJid(raw) {
     if (!raw) return '';
     const jid = String(raw).replace(/:\d+(?=@)/, '');
     return jidNormalizedUser(jid) || jid;
+}
+
+function isLidJid(jid) {
+    return Boolean(jid && (jid.endsWith('@lid') || jid.endsWith('@hosted.lid')));
+}
+
+/** Baileys DM keys expose phone on senderPn (not remoteJidAlt). */
+function normalizePhoneJid(raw) {
+    if (!raw) return '';
+    const s = String(raw).trim();
+    if (s.includes('@')) return normalizeWaJid(s);
+    const digits = s.replace(/\D/g, '');
+    if (/^\d{10,15}$/.test(digits)) {
+        return `${digits}@s.whatsapp.net`;
+    }
+    return '';
+}
+
+/** DM phone fallback — Baileys 7 puts sender phone on remoteJidAlt for @lid chats. */
+function collectDmPhoneCandidates(key) {
+    if (!key) return [];
+    const out = [];
+    const add = (raw) => {
+        const jid = normalizePhoneJid(raw);
+        if (jid && jid.endsWith('@s.whatsapp.net') && !out.includes(jid)) out.push(jid);
+    };
+    add(key.remoteJidAlt);
+    add(key.senderPn);
+    return out;
+}
+
+function withLinkPreviewDisabled(content) {
+    if (!content || typeof content !== 'object') return content;
+    if (typeof content.text === 'string') {
+        return { ...content, linkPreview: false };
+    }
+    return content;
+}
+
+const SEND_TIMEOUT_MS = 20000;
+const DELETE_TIMEOUT_MS = 5000;
+
+/**
+ * Outbound target — use msg.key.remoteJid directly (reference bot pattern).
+ * Baileys 7 handles LID addressing and encryption internally.
+ */
+export function resolveOutboundJid(key, chatId) {
+    const conversationJid = chatId || resolveConversationChatId(key);
+    return resolveReplyChatJid(key, conversationJid);
 }
 
 function participantToPhone(participant) {
@@ -30,7 +81,7 @@ function participantToPhone(participant) {
 
 /**
  * Text the user actually typed, after unwrapping ephemeral / view-once / edits / document-with-caption, etc.
- * @param {import('@whiskeysockets/baileys').proto.Message | null | undefined} message
+ * @param {import('baileys').proto.Message | null | undefined} message
  * @returns {string}
  */
 export function getTextFromWAMessage(message) {
@@ -62,7 +113,7 @@ export function getTextFromWAMessage(message) {
 /**
  * Broader text extraction for URL detection. Link previews often put the URL in
  * `matchedText` (not `text`), and descriptions/titles can hold link metadata.
- * @param {import('@whiskeysockets/baileys').proto.Message | null | undefined} message
+ * @param {import('baileys').proto.Message | null | undefined} message
  * @returns {string}
  */
 export function getTextForUrlScan(message) {
@@ -104,7 +155,7 @@ export function getTextForUrlScan(message) {
 
 /**
  * Author JID for permission checks. Groups may only set participantLid (LID mode), not participant.
- * @param {import('@whiskeysockets/baileys').WAMessage['key']} key
+ * @param {import('baileys').WAMessage['key']} key
  * @returns {string}
  */
 export function getMessageSenderJid(key) {
@@ -114,20 +165,15 @@ export function getMessageSenderJid(key) {
     if (key.remoteJid.endsWith('@g.us')) {
         return key.participant || key.participantLid || key.participantPn || '';
     }
-    for (const raw of [key.participantPn, key.participantLid, key.participant, key.remoteJidAlt, key.remoteJid]) {
-        if (!raw) continue;
-        const normalized = normalizeWaJid(raw);
-        if (normalized) {
-            return normalized;
-        }
-    }
-    return key.remoteJid;
+    const phone = normalizePhoneJid(key.remoteJidAlt) || normalizePhoneJid(key.senderPn);
+    if (phone) return phone;
+    return normalizeWaJid(key.remoteJid);
 }
 
 /**
  * All sender JIDs from an incoming group message key (LID / phone / legacy participant).
  * Order matches WhatsApp privacy fields — LID and PN are often more reliable than participant alone.
- * @param {import('@whiskeysockets/baileys').WAMessage['key']} key
+ * @param {import('baileys').WAMessage['key']} key
  * @returns {string[]}
  */
 export function collectMessageSenderDmCandidates(key) {
@@ -174,8 +220,8 @@ function getContextInfo(message) {
 
 /**
  * Build a Baileys message object for downloading quoted media (stickers, images, etc.)
- * @param {import('@whiskeysockets/baileys').proto.IWebMessageInfo | null | undefined} waMessage
- * @returns {import('@whiskeysockets/baileys').proto.IWebMessageInfo | null}
+ * @param {import('baileys').proto.IWebMessageInfo | null | undefined} waMessage
+ * @returns {import('baileys').proto.IWebMessageInfo | null}
  */
 export function buildQuotedTargetMessage(waMessage) {
     if (!waMessage?.message) {
@@ -207,7 +253,7 @@ export function buildQuotedTargetMessage(waMessage) {
 }
 
 /**
- * @param {import('@whiskeysockets/baileys').proto.IWebMessageInfo | null | undefined} waMessage
+ * @param {import('baileys').proto.IWebMessageInfo | null | undefined} waMessage
  * @returns {string}
  */
 export function getQuotedParticipantJid(waMessage) {
@@ -217,7 +263,7 @@ export function getQuotedParticipantJid(waMessage) {
 
 /**
  * Get pushName from quoted message
- * @param {import('@whiskeysockets/baileys').proto.IWebMessageInfo | null | undefined} waMessage
+ * @param {import('baileys').proto.IWebMessageInfo | null | undefined} waMessage
  * @returns {string}
  */
 export function getQuotedPushName(waMessage) {
@@ -231,7 +277,7 @@ export function getQuotedPushName(waMessage) {
 }
 
 /**
- * @param {import('@whiskeysockets/baileys').proto.IWebMessageInfo | null | undefined} waMessage
+ * @param {import('baileys').proto.IWebMessageInfo | null | undefined} waMessage
  * @returns {string[]}
  */
 export function getMentionedJids(waMessage) {
@@ -245,7 +291,7 @@ function looksLikePhone(value) {
 
 /**
  * Resolve a participant JID to a phone number using group metadata when needed.
- * @param {import('@whiskeysockets/baileys').WASocket} sock
+ * @param {import('baileys').WASocket} sock
  * @param {string} chatId
  * @param {string} jid
  * @returns {Promise<string>}
@@ -287,10 +333,10 @@ export async function resolveJidToPhone(sock, chatId, jid) {
 
 /**
  * Target user for /addadmin /removeadmin: args, @mention, or reply.
- * @param {import('@whiskeysockets/baileys').WASocket} sock
+ * @param {import('baileys').WASocket} sock
  * @param {string} chatId
  * @param {string[]} args
- * @param {import('@whiskeysockets/baileys').proto.IWebMessageInfo | null} waMessage
+ * @param {import('baileys').proto.IWebMessageInfo | null} waMessage
  * @param {string} senderJid
  * @returns {Promise<string>}
  */
@@ -325,10 +371,10 @@ export async function resolveTargetPhone(sock, chatId, args, waMessage, senderJi
 
 /**
  * Target member for moderation commands: reply, @mention, or phone in args.
- * @param {import('@whiskeysockets/baileys').WASocket} sock
+ * @param {import('baileys').WASocket} sock
  * @param {string} chatId
  * @param {string[]} args
- * @param {import('@whiskeysockets/baileys').proto.IWebMessageInfo | null} waMessage
+ * @param {import('baileys').proto.IWebMessageInfo | null} waMessage
  * @param {string} senderJid
  * @returns {Promise<{ jid: string, phone: string } | null>}
  */
@@ -375,7 +421,7 @@ export async function resolveTargetParticipant(sock, chatId, args, waMessage, se
 
 /**
  * Whether the message targets someone other than the sender (reply / @tag / phone).
- * @param {import('@whiskeysockets/baileys').proto.IWebMessageInfo | null} waMessage
+ * @param {import('baileys').proto.IWebMessageInfo | null} waMessage
  * @param {string} senderJid
  * @param {string[]} [args]
  * @returns {boolean}
@@ -396,7 +442,7 @@ export function hasModerationTarget(waMessage, senderJid, args = []) {
 
 /**
  * Normalize the conversation JID from an incoming message key.
- * @param {import('@whiskeysockets/baileys').WAMessage['key']} key
+ * @param {import('baileys').WAMessage['key']} key
  * @returns {string}
  */
 export function resolveConversationChatId(key) {
@@ -407,139 +453,164 @@ export function resolveConversationChatId(key) {
 }
 
 /**
- * Ordered JIDs to try when replying in a direct chat (LID / phone / alt fields).
- * @param {import('@whiskeysockets/baileys').WAMessage['key'] | null | undefined} key
- * @param {string} chatId
- * @returns {string[]}
+ * DM send targets — @lid first (reference bot pattern), then phone fallback.
+ * Sends to both so we can diagnose which route actually delivers.
  */
 export function collectDirectMessageSendTargets(key, chatId) {
     const seen = new Set();
     const out = [];
     const add = (raw) => {
         if (!raw) return;
-        const jid = normalizeWaJid(raw);
+        const jid = normalizePhoneJid(raw) || normalizeWaJid(raw);
         if (!jid || seen.has(jid)) return;
         seen.add(jid);
         out.push(jid);
     };
 
+    if (key?.remoteJid) add(key.remoteJid);
     add(chatId);
-    if (key) {
-        add(key.remoteJid);
-        add(key.remoteJidAlt);
-        add(key.participantPn);
-        add(key.participantLid);
-        add(key.participant);
-    }
+    if (key?.remoteJidAlt) add(key.remoteJidAlt);
+
     return out;
 }
 
-function isLidJid(jid) {
-    return Boolean(jid && (jid.endsWith('@lid') || jid.endsWith('@hosted.lid')));
+function shouldQuoteReply(waMessage, content) {
+    if (!waMessage?.key?.id || !waMessage?.message) return false;
+    const text = typeof content?.text === 'string' ? content.text : '';
+    const urlCount = (text.match(/https?:\/\//gi) || []).length;
+    if (urlCount > 2) return false;
+    if (text.length > 3500) return false;
+    return true;
+}
+
+async function simulateDmTyping(sock, jid) {
+    if (!sock || jid.endsWith('@g.us')) return;
+    try {
+        await sock.presenceSubscribe(jid);
+        await new Promise((r) => setTimeout(r, 300));
+        await sock.sendPresenceUpdate('composing', jid);
+        await new Promise((r) => setTimeout(r, 500));
+    } catch {
+        // non-fatal
+    }
+}
+
+async function pauseDmTyping(sock, jid) {
+    if (!sock || jid.endsWith('@g.us')) return;
+    try {
+        await sock.sendPresenceUpdate('paused', jid);
+    } catch {
+        // non-fatal
+    }
 }
 
 /**
- * Build sendMessage options, omitting quote when it can hang Baileys (LID chats/users).
- * @param {import('@whiskeysockets/baileys').proto.IWebMessageInfo | null | undefined} waMessage
+ * Build sendMessage options — quote user message when safe (reference bot pattern + getMessage cache).
+ * @param {import('baileys').proto.IWebMessageInfo | null | undefined} waMessage
  * @param {object} [extra]
+ * @param {object} [content]
  * @returns {object}
  */
-export function getSafeSendOptions(waMessage, extra = {}) {
+export function getSafeSendOptions(waMessage, extra = {}, content = null) {
     const opts = { linkPreview: false, ...extra };
-    if (!waMessage?.key) {
-        return opts;
-    }
-
-    const key = waMessage.key;
-    const chatJid = key.remoteJid || '';
-    const isGroup = chatJid.endsWith('@g.us');
-
-    // Quoting in DMs can hang Baileys — never quote private chats.
-    if (!isGroup) {
-        return opts;
-    }
-
-    const senderHint =
-        key.participantPn || key.participantLid || key.participant || key.remoteJidAlt || '';
-    const lidInvolved =
-        isLidJid(senderHint) ||
-        isLidJid(key.remoteJidAlt) ||
-        isLidJid(chatJid);
-
-    if (!lidInvolved) {
+    if (waMessage && shouldQuoteReply(waMessage, content || {})) {
         opts.quoted = waMessage;
     }
     return opts;
 }
 
+async function sendWithTimeout(sock, jid, content, opts) {
+    const payload = withLinkPreviewDisabled(content);
+    const sendOpts = { linkPreview: false, ...opts };
+    return Promise.race([
+        sock.sendMessage(jid, payload, sendOpts),
+        new Promise((_, reject) => {
+            setTimeout(() => reject(new Error(`send timeout (${jid})`)), SEND_TIMEOUT_MS);
+        }),
+    ]);
+}
+
 /**
- * Send a message with DM fallbacks on failure. Groups use a single direct send.
- * @param {import('@whiskeysockets/baileys').WASocket} sock
- * @param {string} chatId
- * @param {object} content
- * @param {import('@whiskeysockets/baileys').proto.IWebMessageInfo | null | undefined} [waMessage]
- * @param {object} [extraOpts]
- * @returns {Promise<object>}
+ * Send a message with DM fallbacks, per-chat queue, and optional quote reply.
  */
 export async function safeSendMessage(sock, chatId, content, waMessage = null, extraOpts = {}) {
     if (!sock?.sendMessage) {
         throw new Error('WhatsApp socket not ready');
     }
 
-    const resolvedChatId = chatId || resolveConversationChatId(waMessage?.key);
-    if (!resolvedChatId) {
+    const key = waMessage?.key;
+    const conversationJid = chatId || resolveConversationChatId(key);
+    const primaryJid = resolveOutboundJid(key, conversationJid);
+    if (!primaryJid) {
         throw new Error('No chat id for reply');
     }
 
-    const primaryOpts = getSafeSendOptions(waMessage, extraOpts);
+    const isDm = isDirectMessage(conversationJid) || isDirectMessage(primaryJid);
 
-    const trySend = async (jid, opts) => {
-        const sent = await sock.sendMessage(jid, content, opts);
-        if (!sent) {
-            throw new Error('sendMessage returned empty result');
+    const doSend = async () => {
+        if (isDm) {
+            const dmJid = key?.remoteJid || conversationJid;
+            const sendOpts = waMessage ? { quoted: waMessage } : {};
+            logger.info(`DM reply → ${dmJid} (conversation=${conversationJid})`);
+            const sent = await sock.sendMessage(dmJid, content, sendOpts);
+            if (sent) {
+                logger.info(`Reply sent to ${dmJid}${sent.key?.id ? ` (id=${sent.key.id})` : ''}`);
+                return sent;
+            }
+            throw new Error(`Send returned empty for ${dmJid}`);
         }
-        return sent;
+
+        const primaryOpts = getSafeSendOptions(waMessage, extraOpts, content);
+        const bareOpts = { linkPreview: false };
+        let lastErr;
+        for (const opts of [primaryOpts, bareOpts]) {
+            try {
+                const sent = await sendWithTimeout(sock, primaryJid, content, opts);
+                if (!sent) {
+                    throw new Error('sendMessage returned empty result');
+                }
+                logger.info(`Reply sent to ${primaryJid}${sent.key?.id ? ` (id=${sent.key.id})` : ''}`);
+                return sent;
+            } catch (err) {
+                lastErr = err;
+                logger.warn(`Send failed for ${primaryJid}: ${err?.message || err}`);
+            }
+        }
+        throw lastErr || new Error(`Send failed for ${primaryJid}`);
     };
 
+    return messageQueue.enqueue(conversationJid || primaryJid, doSend, isDm ? 0 : 1);
+}
+
+/** Best-effort message delete — never blocks the caller for long. */
+export async function safeDeleteMessage(sock, chatId, messageKey) {
+    if (!sock?.sendMessage || !chatId || !messageKey) return;
+    const jid = resolveOutboundJid(messageKey, chatId);
     try {
-        return await trySend(resolvedChatId, primaryOpts);
-    } catch (primaryErr) {
-        logger.warn(`Send failed for ${resolvedChatId}: ${primaryErr?.message || primaryErr}`);
+        await Promise.race([
+            sock.sendMessage(jid, { delete: messageKey }),
+            new Promise((_, reject) => {
+                setTimeout(() => reject(new Error('delete timeout')), DELETE_TIMEOUT_MS);
+            }),
+        ]);
+    } catch {
+        // Message may already be gone or chat unavailable
     }
-
-    if (!isDirectMessage(resolvedChatId)) {
-        throw new Error(`Send failed for ${resolvedChatId}`);
-    }
-
-    const fallbackOpts = { linkPreview: false, ...extraOpts };
-    const alternates = collectDirectMessageSendTargets(waMessage?.key, resolvedChatId)
-        .filter((jid) => jid !== resolvedChatId);
-
-    for (const jid of alternates) {
-        try {
-            const sent = await trySend(jid, fallbackOpts);
-            logger.info(`DM reply delivered via fallback JID ${jid}`);
-            return sent;
-        } catch (err) {
-            logger.warn(`DM fallback send failed for ${jid}: ${err?.message || err}`);
-        }
-    }
-
-    throw new Error(`Send failed for ${resolvedChatId}`);
 }
 
 /**
  * Last-resort plain send — no quotes, no fallbacks. Used for error notices.
- * @param {import('@whiskeysockets/baileys').WASocket} sock
+ * @param {import('baileys').WASocket} sock
  * @param {string} chatId
  * @param {object} content
  */
-export async function plainSendMessage(sock, chatId, content) {
+export async function plainSendMessage(sock, chatId, content, key = null) {
     if (!sock?.sendMessage || !chatId) return null;
+    const jid = resolveOutboundJid(key, chatId);
     try {
-        return await sock.sendMessage(chatId, content, { linkPreview: false });
+        return await sendWithTimeout(sock, jid, content, { linkPreview: false });
     } catch (err) {
-        logger.warn(`plainSendMessage failed for ${chatId}: ${err?.message || err}`);
+        logger.warn(`plainSendMessage failed for ${jid}: ${err?.message || err}`);
         return null;
     }
 }
