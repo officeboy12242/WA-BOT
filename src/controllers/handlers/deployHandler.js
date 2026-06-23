@@ -53,9 +53,6 @@ async function pollDeployStatus(deployId, sock, chatId, deployMsgKey, initialNot
             logger.debug(`Deploy ${deployId} status: ${status}`);
 
             if (status === 'live') {
-                try {
-                    await sock.sendMessage(chatId, { delete: deployMsgKey });
-                } catch { }
                 await initialNotifyCallback({
                     status: 'complete',
                     message: '✅ *Deploy complete!*\n\n🚀 Bot is live with latest code.',
@@ -64,9 +61,6 @@ async function pollDeployStatus(deployId, sock, chatId, deployMsgKey, initialNot
             }
 
             if (status === 'canceled' || status === 'build_failed' || status === 'deploy_failed') {
-                try {
-                    await sock.sendMessage(chatId, { delete: deployMsgKey });
-                } catch { }
                 await initialNotifyCallback({
                     status: 'failed',
                     message: `❌ *Deploy failed* — ${status}`,
@@ -75,9 +69,6 @@ async function pollDeployStatus(deployId, sock, chatId, deployMsgKey, initialNot
             }
 
             if (Date.now() - startTime > MAX_POLL_MS) {
-                try {
-                    await sock.sendMessage(chatId, { delete: deployMsgKey });
-                } catch { }
                 await initialNotifyCallback({
                     status: 'timeout',
                     message: '⏱️ *Deploy timeout* — still building. Check Render dashboard for details.',
@@ -108,30 +99,19 @@ export async function handleDeploy(sock, chatId, senderJid, originalMsg) {
     try {
         const commitMsg = await getLatestCommitMessage();
 
-        const deployMsg = await sock.sendMessage(chatId, {
-            text: '⏳ Triggering Render deploy…',
-        }, { quoted: originalMsg });
-
         const deployId = (await renderFetch(
             `/services/${config.RENDER_SERVICE_ID}/deploys`,
             'POST',
             { clearCache: 'do_not_clear' },
         )).id;
 
-        if (deployMsg) {
-            try {
-                await sock.sendMessage(chatId, {
-                    text:
-                        `📤 *Deploy started*\n\n` +
-                        `💬 *Commit:* ${commitMsg}\n` +
-                        `🔄 *Status:* Building…\n\n` +
-                        `_Polling for completion…_`,
-                    edit: deployMsg.key,
-                });
-            } catch {
-                // If edit fails, just continue — polling will delete and resend
-            }
-        }
+        const deployMsg = await sock.sendMessage(chatId, {
+            text:
+                `📤 *Deploy started*\n\n` +
+                `💬 *Commit:* ${commitMsg}\n` +
+                `🔄 *Status:* Building…\n\n` +
+                `_Polling for completion…_`,
+        }, { quoted: originalMsg });
 
         logger.info(`Render deploy triggered by ${senderJid}: deploy=${deployId} commit=${commitMsg}`);
 
@@ -139,7 +119,8 @@ export async function handleDeploy(sock, chatId, senderJid, originalMsg) {
             try {
                 await sock.sendMessage(chatId, {
                     text: result.message,
-                }, { quoted: originalMsg });
+                    edit: deployMsg?.key,
+                });
             } catch (err) {
                 logger.warn(`Could not send deploy completion notice: ${err.message}`);
             }
