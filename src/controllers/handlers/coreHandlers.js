@@ -9,6 +9,7 @@ import { extractPhoneNumber, isDirectMessage } from '../../utils/permissions.js'
 import { formatHelpText } from '../../commands/registry.js';
 import { sendAndDelete } from '../../utils/autoDelete.js';
 import { safeSendMessage } from '../../utils/waMessage.js';
+import { config } from '../../config/config.js';
 
 function formatUptime(milliseconds) {
     const seconds = Math.floor(milliseconds / 1000);
@@ -47,11 +48,65 @@ function createProgressBar(percent, length = 10) {
     return bar;
 }
 
+function formatBandwidth(mb) {
+    if (!Number.isFinite(mb) || mb < 0) {
+        return 'N/A';
+    }
+    if (mb >= 1024) {
+        return `${(mb / 1024).toFixed(2)} GB`;
+    }
+    return `${mb.toFixed(1)} MB`;
+}
+
+async function fetchRenderBandwidthMonth() {
+    if (!config.RENDER_API_KEY || !config.RENDER_SERVICE_ID) {
+        return null;
+    }
+
+    const startTime = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString();
+    const endTime = new Date().toISOString();
+    const url = new URL('https://api.render.com/v1/metrics/bandwidth');
+    url.searchParams.set('resource', config.RENDER_SERVICE_ID);
+    url.searchParams.set('startTime', startTime);
+    url.searchParams.set('endTime', endTime);
+
+    const res = await fetch(url, {
+        headers: {
+            Accept: 'application/json',
+            Authorization: `Bearer ${config.RENDER_API_KEY}`,
+        },
+    });
+
+    if (!res.ok) {
+        return null;
+    }
+
+    const data = await res.json();
+    if (!Array.isArray(data) || !data.length) {
+        return 0;
+    }
+
+    let totalMB = 0;
+    for (const series of data) {
+        const seriesUnit = String(series.unit || 'mb').toLowerCase();
+        const multiplier = seriesUnit === 'gb' ? 1024 : 1;
+        for (const point of series.values || []) {
+            totalMB += Number(point?.value || 0) * multiplier;
+        }
+    }
+
+    return totalMB;
+}
+
 export async function handlePing(sock, chatId, { botState, botStartTime, originalMsg }) {
     try {
         const uptime = Date.now() - botStartTime;
         const uptimeFormatted = formatUptime(uptime);
         const stats = getSystemStats();
+        const bandwidthMB = await Promise.race([
+            fetchRenderBandwidthMonth(),
+            new Promise((resolve) => setTimeout(() => resolve(null), 5000)),
+        ]).catch(() => null);
         const statusEmoji = botState.isPaused ? '🟡' : '🟢';
         const statusText = botState.isPaused ? 'COURSES PAUSED' : 'ACTIVE';
         
@@ -63,6 +118,7 @@ export async function handlePing(sock, chatId, { botState, botStartTime, origina
 
         const cpuBar = createProgressBar(parseFloat(stats.cpuUsage));
         const memBar = createProgressBar(parseFloat(stats.memUsage));
+        const bandwidthText = bandwidthMB == null ? null : formatBandwidth(bandwidthMB);
 
         let r = `        ⚡ *SASSY BOT TERMINAL* v2.0
         ════════════════════════
@@ -75,6 +131,7 @@ export async function handlePing(sock, chatId, { botState, botStartTime, origina
 > CPU  [${cpuBar}] ${stats.cpuUsage}%
 > MEM  [${memBar}] ${stats.memUsage}%
 > PROC: ${stats.processMemMB} MB | CORES: ${stats.cores}
+${bandwidthText ? `> BW   ${bandwidthText} this month\n` : ''}
 
 *$ info --system*
 > 🖥️ OS: ${stats.platform}/${stats.arch}
