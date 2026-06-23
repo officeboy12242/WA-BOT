@@ -126,6 +126,37 @@ function serializeSources(sources) {
     });
 }
 
+function dedupeSources(sources) {
+    const seen = new Set();
+    return sources.filter((s) => {
+        const url = sourceUrl(s);
+        if (seen.has(url)) return false;
+        seen.add(url);
+        return true;
+    });
+}
+
+/** Fill missing Render credentials from DRIVE_SOURCES_JSON matched by URL. */
+function mergeEnvCredentials(sources) {
+    const envSources = (config.DRIVE_SOURCES || [])
+        .map(normalizeDriveSource)
+        .filter(Boolean);
+    if (!envSources.length) return sources;
+
+    const envByUrl = new Map(envSources.map((s) => [s.url, s]));
+    return sources.map((entry) => {
+        const source = normalizeDriveSource(entry);
+        if (!source) return entry;
+        const env = envByUrl.get(source.url);
+        if (!env) return source;
+        return {
+            ...source,
+            renderServiceId: source.renderServiceId || env.renderServiceId,
+            renderApiKey: source.renderApiKey || env.renderApiKey,
+        };
+    });
+}
+
 function mergeAudioLabels(...parts) {
     const seen = new Set();
     const out = [];
@@ -157,30 +188,27 @@ class PronoobDriveService {
     }
 
     async loadUrls() {
+        let sources = null;
+
         if (this._settings) {
             const stored = (await this._settings.getDriveSources())
                 .map(normalizeDriveSource)
                 .filter(Boolean);
             if (stored.length) {
-                const seen = new Set();
-                this._sources = stored.filter((s) => {
-                    if (seen.has(s.url)) return false;
-                    seen.add(s.url);
-                    return true;
-                });
-                return;
+                sources = dedupeSources(stored);
             }
         }
 
-        const fromEnv = (config.DRIVE_SOURCES || [])
-            .map(normalizeDriveSource)
-            .filter(Boolean);
-        if (fromEnv.length) {
-            this._sources = fromEnv;
-            return;
+        if (!sources) {
+            const fromEnv = (config.DRIVE_SOURCES || [])
+                .map(normalizeDriveSource)
+                .filter(Boolean);
+            sources = fromEnv.length ? fromEnv : [{ url: DEFAULT_BASE_URL }];
+        } else {
+            sources = mergeEnvCredentials(sources);
         }
 
-        this._sources = [{ url: DEFAULT_BASE_URL }];
+        this._sources = sources;
     }
 
     getUrls() {
@@ -201,8 +229,21 @@ class PronoobDriveService {
         const apiKey = String(parsed.renderApiKey || renderApiKey || '').trim();
 
         await this.loadUrls();
-        if (this._sources.some((s) => sourceUrl(s) === url)) {
-            return { added: false, urls: this.getUrls(), sources: this.getSources() };
+        const existing = this._sources.find((s) => sourceUrl(s) === url);
+        if (existing) {
+            let updated = false;
+            if (svcId && existing.renderServiceId !== svcId) {
+                existing.renderServiceId = svcId;
+                updated = true;
+            }
+            if (apiKey && existing.renderApiKey !== apiKey) {
+                existing.renderApiKey = apiKey;
+                updated = true;
+            }
+            if (updated && this._settings) {
+                await this._settings.setDriveSources(serializeSources(this._sources));
+            }
+            return { added: false, updated, urls: this.getUrls(), sources: this.getSources() };
         }
 
         const entry = { url };
