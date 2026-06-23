@@ -143,7 +143,6 @@ export async function downloadStickerBuffer(sock, waMessage) {
     const isChannel = isNewsletterChat(chatId);
     const sticker = extractStickerFromMessage(waMessage.message);
 
-    // Channel stickers - use direct download
     if (isChannel && sticker) {
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             try {
@@ -152,13 +151,26 @@ export async function downloadStickerBuffer(sock, waMessage) {
                     return directBuffer;
                 }
             } catch (err) {
-                logger.debug(`Channel sticker download attempt ${attempt} failed: ${err.message}`);
+                logger.debug(`Channel sticker direct download attempt ${attempt} failed: ${err.message}`);
                 if (attempt < MAX_RETRIES) {
                     await delay(RETRY_DELAY_MS * attempt);
                 }
             }
         }
-        throw new Error('Channel sticker download failed after retries');
+
+        if (hasMediaKey(sticker)) {
+            try {
+                logger.debug('Channel sticker: falling back to encrypted-media download');
+                return await tryDownloadContent(sock, sticker);
+            } catch (err) {
+                logger.debug(`Channel sticker encrypted download failed: ${err.message}`);
+            }
+            try {
+                return await tryDownloadMediaMessage(sock, waMessage);
+            } catch { /* fall through */ }
+        }
+
+        throw new Error('Channel sticker download failed after all methods');
     }
 
     // Group stickers - try multiple methods with retries

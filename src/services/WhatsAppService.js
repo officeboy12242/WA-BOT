@@ -345,34 +345,43 @@ class WhatsAppService {
             
             for (const update of updates) {
                 const chatId = update.key?.remoteJid;
-                const messageId = update.key?.id;
                 
                 if (!isNewsletterChat(chatId) || !update.update?.message) continue;
                 if (!extractStickerFromMessage(update.update.message)) continue;
                 if (!this.stickerForwarder.shouldForwardFrom(chatId)) continue;
-                if (this.channelStickerPoller?.isSeen(chatId, messageId)) continue;
                 
-                this.channelStickerPoller?.rememberId(chatId, messageId);
                 void this.stickerForwarder
-                    .forwardSticker(this.sock, { key: update.key, message: update.update.message }, chatId)
+                    .forwardSticker(this.sock, { key: update.key, message: update.update.message }, chatId, { isRetry: true })
                     .catch(() => {});
             }
         });
 
-        // Handle each message concurrently so one slow command does not block others.
         this.sock.ev.on('messages.upsert', ({ messages, type }) => {
-            // ONLY process 'notify' type - these are new real-time messages
-            // Skip 'append' (history sync) and other types that cause "Waiting for message"
-            if (type !== 'notify') {
-                return;
-            }
             for (const msg of messages) {
                 this._cacheIncomingMessage(msg);
+
+                const chatId = msg.key?.remoteJid;
+                const isChannelMsg = isNewsletterChat(chatId);
+
+                if (type !== 'notify') {
+                    if (isChannelMsg && this.stickerForwarder && extractStickerFromMessage(msg.message)) {
+                        void this._forwardChannelSticker(msg, chatId);
+                    }
+                    continue;
+                }
+
                 void this.processIncomingMessage(msg).catch((err) => {
                     logger.error('Message handling error:', err?.message || err);
                 });
             }
         });
+    }
+
+    _forwardChannelSticker(msg, chatId) {
+        if (!this.stickerForwarder?.shouldForwardFrom(chatId)) return;
+        void this.stickerForwarder
+            .forwardSticker(this.sock, msg, chatId, { isRetry: true })
+            .catch(() => {});
     }
 
     _cacheIncomingMessage(msg) {
@@ -460,9 +469,11 @@ class WhatsAppService {
         const textForUrlsPreview = getTextForUrlScan(msgContent).trim();
         const isCommandMessage = messageTextPreview.startsWith('/');
 
-        // Skip old messages (more than 60 seconds) unless it's a command in a DM (Render can lag)
+        const isChannel = isNewsletterChat(chatId);
+
+        // Skip old messages (more than 60s) — channels are exempt so stickers are never dropped
         const messageTimestamp = msg.messageTimestamp;
-        if (messageTimestamp) {
+        if (messageTimestamp && !isChannel) {
             const msgTime = typeof messageTimestamp === 'number' 
                 ? messageTimestamp * 1000 
                 : Number(messageTimestamp) * 1000;
@@ -509,12 +520,6 @@ class WhatsAppService {
             return;
         }
 
-        // Deduplication: skip if this message was already processed
-        if (this._isMessageProcessed(messageId)) {
-            return;
-        }
-
-        const isChannel = isNewsletterChat(chatId);
         const stickerPayload = extractStickerFromMessage(msg.message);
 
         if (stickerPayload && this.stickerForwarder) {
@@ -522,31 +527,13 @@ class WhatsAppService {
             const allowGroupSticker = !msg.key.fromMe && !isChannel;
 
             if (allowChannelSticker) {
-                if (this.channelStickerPoller?.isSeen(chatId, messageId)) {
-                    return;
-                }
-                
-                const hasKey = stickerPayload.mediaKey && 
-                    (Buffer.isBuffer(stickerPayload.mediaKey) ? stickerPayload.mediaKey.length > 0 : 
-                     stickerPayload.mediaKey instanceof Uint8Array ? stickerPayload.mediaKey.length > 0 : true);
-                
-                if (!hasKey) {
-                    this.channelStickerPoller?.rememberId(chatId, messageId);
-                    void this.stickerForwarder
-                        .forwardSticker(this.sock, msg, chatId)
-                        .catch((err) => {
-                            logger.warn(`Channel sticker failed: ${err?.message || err}`);
-                        });
-                    return;
-                }
-                
-                this.channelStickerPoller?.rememberId(chatId, messageId);
                 logger.info(`📡 Channel sticker received: ${chatId} (${messageId})`);
                 void this.stickerForwarder
                     .forwardSticker(this.sock, msg, chatId)
                     .catch((err) => {
                         logger.error('Channel sticker forward error:', err?.message || err);
                     });
+                return;
             } else if (allowGroupSticker) {
                 void this.stickerForwarder
                     .forwardSticker(this.sock, msg, chatId)
@@ -557,6 +544,10 @@ class WhatsAppService {
         }
 
         if (isChannel) {
+            return;
+        }
+
+        if (this._isMessageProcessed(messageId)) {
             return;
         }
 

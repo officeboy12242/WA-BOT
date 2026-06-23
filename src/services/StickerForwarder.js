@@ -31,11 +31,13 @@ class StickerForwarder {
         this.countQueued = 0;
 
         this.recentStickers = new Map();
+        /** Message IDs whose forward failed — allow the update handler to retry. */
+        this.failedIds = new Set();
         
         // Queue system to prevent skipping stickers
         this.queue = [];
         this.isProcessing = false;
-        this.maxQueueSize = 50; // Prevent memory issues
+        this.maxQueueSize = 200;
     }
 
     setSourceChannels(jids, nameByJid = new Map()) {
@@ -66,7 +68,7 @@ class StickerForwarder {
      * Add sticker to queue for processing (public method)
      * This ensures no stickers are skipped even when they arrive rapidly
      */
-    async forwardSticker(sock, waMessage, fromChat) {
+    async forwardSticker(sock, waMessage, fromChat, { isRetry = false } = {}) {
         if (!this.shouldForwardFrom(fromChat)) {
             return false;
         }
@@ -77,35 +79,35 @@ class StickerForwarder {
                 ? Buffer.from(stickerPayload.fileSha256).toString('hex')
                 : null) || waMessage?.key?.id || null;
 
-        // Check for duplicates before queueing
         if (messageId && this.recentStickers.has(messageId)) {
-            this.countDuplicates++;
-            return false;
+            if (isRetry && this.failedIds.has(messageId)) {
+                this.failedIds.delete(messageId);
+                logger.info(`🔄 Retrying previously-failed sticker ${messageId.slice(0, 12)}…`);
+            } else {
+                this.countDuplicates++;
+                return false;
+            }
         }
 
-        // Mark as seen immediately to prevent duplicate queueing
         if (messageId) {
             this.recentStickers.set(messageId, Date.now());
-            if (this.recentStickers.size > 200) {
+            if (this.recentStickers.size > 500) {
                 const firstKey = this.recentStickers.keys().next().value;
                 this.recentStickers.delete(firstKey);
             }
         }
 
-        // Check queue size limit
         if (this.queue.length >= this.maxQueueSize) {
             logger.warn(`⚠️ Sticker queue full (${this.maxQueueSize}), dropping oldest`);
             this.queue.shift();
         }
 
-        // Add to queue
         this.queue.push({ sock, waMessage, fromChat, messageId });
         this.countQueued++;
         
         const isChannel = isNewsletterChat(fromChat);
-        logger.info(`📥 Sticker queued from ${isChannel ? 'channel' : 'group'} | Queue: ${this.queue.length}`);
+        logger.info(`📥 Sticker queued from ${isChannel ? 'channel' : 'group'} | Queue: ${this.queue.length}${isRetry ? ' (retry)' : ''}`);
 
-        // Start processing if not already running
         this._processQueue();
         
         return true;
@@ -127,10 +129,12 @@ class StickerForwarder {
                 await this._processSticker(item);
             } catch (error) {
                 this.countErrors++;
-                logger.error(`❌ Queue sticker error: ${error.message}`);
+                if (item.messageId) {
+                    this.failedIds.add(item.messageId);
+                }
+                logger.error(`❌ Queue sticker error (${item.messageId?.slice(0, 12) || '?'}): ${error.message}`);
             }
             
-            // Delay between processing to avoid rate limits and allow downloads
             if (this.queue.length > 0) {
                 await new Promise(r => setTimeout(r, 1000));
             }
