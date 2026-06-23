@@ -173,6 +173,25 @@ class MemberScrapeController {
 
         return targets;
     }
+
+    /** Unique DM targets across every scraped group (one message per person). */
+    async getAllDedupedDmTargets(sock) {
+        const groups = await this.getStoredGroupsWithCounts();
+        const seen = new Set();
+        const targets = [];
+
+        for (const group of groups) {
+            const raw = await this.getDmTargets(group.group_id);
+            const filtered = this.filterTargetsForBroadcast(raw, sock);
+            for (const jid of filtered) {
+                if (seen.has(jid)) continue;
+                seen.add(jid);
+                targets.push(jid);
+            }
+        }
+
+        return { groups, targets };
+    }
 }
 
 export default MemberScrapeController;

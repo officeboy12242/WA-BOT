@@ -77,9 +77,15 @@ import {
 
 import { horoscopeService } from '../services/HoroscopeService.js';
 import { handleDriveUrl } from './handlers/driveHandlers.js';
+import {
+    handleWarn,
+    handleMyWarns,
+    handleWarns,
+    handleClearWarns,
+} from './handlers/warnHandlers.js';
 
 class CommandController {
-    constructor(database, botState, groupManager, newsController = null, movieController = null, userManager = null, stickerController = null, botSettings = null, githubTrendingController = null, memberScrapeController = null) {
+    constructor(database, botState, groupManager, newsController = null, movieController = null, userManager = null, stickerController = null, botSettings = null, githubTrendingController = null, memberScrapeController = null, warnDatabase = null) {
         this.database = database;
         this.botState = botState;
         this.groupManager = groupManager;
@@ -90,6 +96,7 @@ class CommandController {
         this.botSettings = botSettings;
         this.githubTrendingController = githubTrendingController;
         this.memberScrapeController = memberScrapeController;
+        this.warnDatabase = warnDatabase;
         this.pendingClearConfirmations = new Map();
         this.pendingScrapSessions = createScrapSessionStore();
         this.pendingGithubPosts = createGithubPostSessionStore();
@@ -134,6 +141,7 @@ class CommandController {
             newsController: this.newsController,
             githubTrendingController: this.githubTrendingController,
             memberScrapeController: this.memberScrapeController,
+            warnDatabase: this.warnDatabase,
             movieController: this.movieController,
             userManager: this.userManager,
             stickerController: this.stickerController,
@@ -224,6 +232,10 @@ class CommandController {
             case 'githuboff':  await handleGithubOff(sock, chatId, senderJid, ctx); break;
             case 'groups':     await handleGroups(sock, chatId, senderJid, ctx); break;
             case 'setwc':      await handleSetWelcome(sock, chatId, senderJid, command.trim(), ctx); break;
+            case 'warn':       await handleWarn(sock, chatId, senderJid, args, originalMsg, ctx); break;
+            case 'mywarns':    await handleMyWarns(sock, chatId, senderJid, ctx); break;
+            case 'warns':      await handleWarns(sock, chatId, senderJid, args, originalMsg, ctx); break;
+            case 'clearwarns': await handleClearWarns(sock, chatId, senderJid, args, originalMsg, ctx); break;
             case 'movieon':    await handleMovieOn(sock, chatId, senderJid, ctx); break;
             case 'movieoff':   await handleMovieOff(sock, chatId, senderJid, ctx); break;
             case 'trending':   await handleTrending(sock, chatId, senderJid, args, ctx); break;
