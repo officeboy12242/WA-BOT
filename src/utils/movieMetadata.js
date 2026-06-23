@@ -1,3 +1,82 @@
+const VIDEO_EXTENSIONS = ['mkv', 'mp4', 'avi', 'mov', 'wmv', 'webm', 'm4v', 'ts', 'flv', 'mpg', 'mpeg', 'm3u', 'm3u8'];
+
+export const LANGUAGE_ALIASES = {
+    jap: 'Japanese',
+    japanese: 'Japanese',
+    jpn: 'Japanese',
+    eng: 'English',
+    english: 'English',
+    hin: 'Hindi',
+    hindi: 'Hindi',
+    h: 'Hindi',
+    tam: 'Tamil',
+    tel: 'Telugu',
+    mal: 'Malayalam',
+    kan: 'Kannada',
+    ben: 'Bengali',
+    pun: 'Punjabi',
+    mar: 'Marathi',
+    guj: 'Gujarati',
+    urd: 'Urdu',
+};
+
+/**
+ * Display title from a release filename — strip file extensions only, keep quality/audio tags intact.
+ * @param {string} raw
+ * @returns {string}
+ */
+export function filenameToDisplayTitle(raw) {
+    if (!raw) return '';
+    let name = String(raw).trim();
+    if (!name) return '';
+
+    let prev;
+    do {
+        prev = name;
+        name = name.replace(new RegExp(`\\.(${VIDEO_EXTENSIONS.join('|')})$`, 'i'), '');
+    } while (name !== prev);
+
+    return name.trim() || String(raw).trim();
+}
+
+/**
+ * @param {string} name
+ * @returns {string}
+ */
+export function qualityFromFilename(name) {
+    const n = String(name || '').toLowerCase();
+    if (n.includes('2160p') || n.includes('4k')) return '4K';
+    if (n.includes('1080p')) return '1080p';
+    if (n.includes('1440p')) return '1440p';
+    if (n.includes('720p') && n.includes('hevc')) return '720p HEVC';
+    if (n.includes('720p')) return '720p';
+    if (n.includes('480p')) return '480p';
+    return '';
+}
+
+function normalizeLanguageToken(token) {
+    const cleaned = String(token || '').trim();
+    if (!cleaned) return '';
+    return LANGUAGE_ALIASES[cleaned.toLowerCase()] || cleaned;
+}
+
+function languagesFromBrackets(filename) {
+    for (const match of String(filename || '').matchAll(/\[([^\]]+)\]/g)) {
+        const inner = match[1];
+        if (!/(?:tam|tel|hin|eng|mal|kan|jap|ben|pun|mar|guj|urd|\+|,)/i.test(inner)) {
+            continue;
+        }
+        const langs = inner
+            .split(/\+|,/)
+            .map(normalizeLanguageToken)
+            .filter(Boolean);
+        if (langs.length) {
+            return langs.join(' + ');
+        }
+    }
+    return '';
+}
+
 const LANGUAGE_PATTERNS = [
     { re: /\bDual[\s._-]?Audio\b/i, label: 'Dual Audio' },
     { re: /\bMulti[\s._-]?Audio\b/i, label: 'Multi Audio' },
@@ -37,15 +116,25 @@ const AUDIO_CODEC_PATTERNS = [
 export function audioFromFilename(filename) {
     if (!filename) return '';
 
+    const fromBrackets = languagesFromBrackets(filename);
+
     const hasDual = /\bDual[\s._-]?Audio\b/i.test(filename);
     const hasMulti = /\bMulti[\s._-]?Audio\b/i.test(filename);
 
     const languages = [];
+    if (fromBrackets) {
+        for (const lang of fromBrackets.split(' + ')) {
+            if (lang && !languages.includes(lang)) {
+                languages.push(lang);
+            }
+        }
+    }
+
     if (hasDual) {
-        languages.push('Dual Audio');
+        if (!languages.includes('Dual Audio')) languages.push('Dual Audio');
     } else if (hasMulti) {
-        languages.push('Multi Audio');
-    } else {
+        if (!languages.includes('Multi Audio')) languages.push('Multi Audio');
+    } else if (!fromBrackets) {
         for (const { re, label } of LANGUAGE_PATTERNS) {
             if (re.test(filename) && !languages.includes(label)) {
                 languages.push(label);

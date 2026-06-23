@@ -4,7 +4,7 @@
  */
 
 import { logger } from './logger.js';
-import { getSafeSendOptions } from './waMessage.js';
+import { safeSendMessage } from './waMessage.js';
 
 const AUTO_DELETE_MS = 5 * 60 * 60 * 1000; // 5 hours default
 const scheduledDeletes = [];
@@ -45,13 +45,8 @@ export function scheduleAutoDelete(sock, chatId, messageKey, delayMs = AUTO_DELE
  * @param {number} deleteAfterMs - Delete after this many ms (default 5 hours)
  * @returns {Promise<object>} - Sent message info
  */
-export async function sendAndDelete(sock, chatId, content, options = {}, deleteAfterMs = AUTO_DELETE_MS) {
-    const sendOpts = options.quoted
-        ? getSafeSendOptions(options.quoted, Object.fromEntries(
-            Object.entries(options).filter(([key]) => key !== 'quoted'),
-        ))
-        : options;
-    const sent = await sock.sendMessage(chatId, content, sendOpts);
+export async function sendAndDelete(sock, chatId, content, originalMsg = null, deleteAfterMs = AUTO_DELETE_MS) {
+    const sent = await safeSendMessage(sock, chatId, content, originalMsg);
     if (sent?.key) {
         scheduleAutoDelete(sock, chatId, sent.key, deleteAfterMs);
     }

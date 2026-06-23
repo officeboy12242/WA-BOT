@@ -13,6 +13,8 @@ import { config } from '../config/config.js';
 import { atozService } from '../services/AtoZService.js';
 import { pronoobDriveService } from '../services/PronoobDriveService.js';
 import { urlShortener } from '../utils/urlShortener.js';
+import { safeSendMessage } from '../utils/waMessage.js';
+import { audioFromFilename, qualityFromFilename } from '../utils/movieMetadata.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const QR_IMAGE_PATH = resolve(__dirname, '../../assets/payment_qr.jpg');
@@ -347,11 +349,15 @@ function formatMovieResultBlock(item, globalIdx) {
 
     if (item.links?.length) {
         item.links.forEach((link) => {
-            const { quality, fileSize } = parseLinkSizeLabel(link.size);
+            const parsed = parseLinkSizeLabel(link.size);
+            const quality = parsed.quality || link.quality || qualityFromFilename(link.rawFilename || title);
+            const fileSize = parsed.fileSize || link.size || '';
+            const audio = link.audio || audioFromFilename(link.rawFilename || title);
             const sizeLine = quality ? `${quality} · ${fileSize}` : fileSize;
+
             block += `┌ ${sizeLine}\n`;
-            if (link.audio) {
-                block += `│ 🔊 ${link.audio}\n`;
+            if (audio) {
+                block += `│ 🔊 ${audio}\n`;
             }
             block += `└ 🔗 ${link.url}\n`;
         });
@@ -1011,7 +1017,7 @@ class MovieController {
                 + `📊 Daily limit: *${DAILY_LIMIT}* free searches\n`
                 + '─────────────────────────────\n'
                 + '_Search Bollywood, Hollywood & more!_ 🍿';
-            await sock.sendMessage(chatId, { text: usage });
+            await safeSendMessage(sock, chatId, { text: usage }, originalMsg);
             return;
         }
 
@@ -1024,15 +1030,15 @@ class MovieController {
 
         if (!unlimited && currentCount >= DAILY_LIMIT) {
             const limitMsg = formatLimitReached();
-            const sent = await sock.sendMessage(chatId, { text: limitMsg });
+            const sent = await safeSendMessage(sock, chatId, { text: limitMsg }, originalMsg);
             this.scheduleDelete(sock, chatId, sent.key);
 
             if (existsSync(QR_IMAGE_PATH)) {
                 try {
-                    const qrSent = await sock.sendMessage(chatId, {
+                    const qrSent = await safeSendMessage(sock, chatId, {
                         image: readFileSync(QR_IMAGE_PATH),
                         caption: `💳 *Scan to pay for unlimited movie searches!*\n\nAfter payment, send screenshot to:\n📱 wa.me/${PAYMENT_CONTACT}`,
-                    });
+                    }, originalMsg);
                     this.scheduleDelete(sock, chatId, qrSent.key);
                 } catch (err) {
                     logger.error(`Failed to send QR image: ${err.message}`);
@@ -1043,7 +1049,7 @@ class MovieController {
 
         const dialogue = getRandomDialogue(SEARCH_DIALOGUES);
         const remaining = unlimited ? '∞' : (DAILY_LIMIT - currentCount - 1);
-        const searchingMsg = await sock.sendMessage(chatId, { text: dialogue });
+        const searchingMsg = await safeSendMessage(sock, chatId, { text: dialogue }, originalMsg);
 
         try {
             const withTimeout = (promise, ms) =>
@@ -1078,7 +1084,7 @@ class MovieController {
                 } catch {}
 
                 const noResult = getRandomDialogue(NO_RESULTS_DIALOGUES);
-                const noSent = await sock.sendMessage(chatId, { text: noResult, linkPreview: false }, movieReplyOptions(originalMsg));
+                const noSent = await safeSendMessage(sock, chatId, { text: noResult }, originalMsg);
                 this.scheduleDelete(sock, chatId, noSent.key);
                 if (!unlimited) await this.incrementSearchCount(normalizedUserId);
                 void this.logSearch(normalizedUserId, query, 0, chatId);
@@ -1098,10 +1104,9 @@ class MovieController {
                 try {
                     await sock.sendMessage(chatId, { delete: searchingMsg.key });
                 } catch {}
-                const errSent = await sock.sendMessage(chatId, {
+                const errSent = await safeSendMessage(sock, chatId, {
                     text: '⚠️ Found movies but could not format results. Try again.',
-                    linkPreview: false,
-                }, movieReplyOptions(originalMsg));
+                }, originalMsg);
                 this.scheduleDelete(sock, chatId, errSent.key);
                 return;
             }
@@ -1119,10 +1124,11 @@ class MovieController {
 
                 try {
                     logger.info(`Sending movie result part ${i + 1}/${resultMessages.length} (${text.length} chars) to ${chatId}...`);
-                    const sent = await sock.sendMessage(
+                    const sent = await safeSendMessage(
+                        sock,
                         chatId,
-                        { text, linkPreview: false },
-                        i === 0 ? movieReplyOptions(originalMsg) : { linkPreview: false },
+                        { text },
+                        i === 0 ? originalMsg : null,
                     );
                     logger.info(`Sent movie result part ${i + 1} OK`);
 
@@ -1158,10 +1164,9 @@ class MovieController {
                 "🎭 _\"Server ne haath khade kar diye!\"_\n\n⚠️ Couldn't reach the movie database. Try again!",
                 "🎭 _\"Not even Doctor Strange saw this error coming...\"_\n\n⚠️ Something went wrong. Try later!",
             ];
-            const errSent = await sock.sendMessage(chatId, {
+            const errSent = await safeSendMessage(sock, chatId, {
                 text: getRandomDialogue(errorDialogues),
-                linkPreview: false,
-            }, movieReplyOptions(originalMsg));
+            }, originalMsg);
             this.scheduleDelete(sock, chatId, errSent.key);
 
             logger.error(`Movie search error for "${query}": ${err.stack || err.message}`);
@@ -1172,7 +1177,7 @@ class MovieController {
         try {
             const movies = await this._fetchUpcoming(10);
             if (!movies) {
-                await sock.sendMessage(chatId, { text: '⚠️ Could not fetch upcoming movies. TMDB API may be unavailable.' }, { quoted: originalMsg || undefined });
+                await safeSendMessage(sock, chatId, { text: '⚠️ Could not fetch upcoming movies. TMDB API may be unavailable.' }, originalMsg);
                 return;
             }
 
@@ -1181,11 +1186,11 @@ class MovieController {
             const dateRange = `${now.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })} - ${twoWeeks.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}`;
 
             const text = formatUpcomingMovies(movies, dateRange);
-            await sock.sendMessage(chatId, { text }, { quoted: originalMsg || undefined });
+            await safeSendMessage(sock, chatId, { text }, originalMsg);
             logger.info(`🎬 Upcoming movies sent to ${chatId}`);
         } catch (err) {
             logger.error(`Upcoming movies error: ${err.message}`);
-            await sock.sendMessage(chatId, { text: '⚠️ Failed to fetch upcoming movies.' }, { quoted: originalMsg || undefined });
+            await safeSendMessage(sock, chatId, { text: '⚠️ Failed to fetch upcoming movies.' }, originalMsg);
         }
     }
 
@@ -1194,7 +1199,7 @@ class MovieController {
 
         if (!genreName || !TMDB_GENRES[genreName]) {
             const available = Object.keys(TMDB_GENRES).filter(g => g !== 'sci-fi').join(', ');
-            await sock.sendMessage(chatId, {
+            await safeSendMessage(sock, chatId, {
                 text: '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'
                     + '🎭 *GENRE RECOMMENDATIONS*\n'
                     + '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n'
@@ -1205,23 +1210,23 @@ class MovieController {
                     + '• `/genre action`\n'
                     + '• `/recommend horror`\n'
                     + '• `/genre comedy`',
-            }, { quoted: originalMsg || undefined });
+            }, originalMsg);
             return;
         }
 
         try {
             const movies = await this._fetchGenreMovies(genreName, 10);
             if (!movies) {
-                await sock.sendMessage(chatId, { text: '⚠️ Could not fetch genre movies. TMDB API may be unavailable.' }, { quoted: originalMsg || undefined });
+                await safeSendMessage(sock, chatId, { text: '⚠️ Could not fetch genre movies. TMDB API may be unavailable.' }, originalMsg);
                 return;
             }
 
             const text = formatGenreMovies(genreName, movies);
-            await sock.sendMessage(chatId, { text }, { quoted: originalMsg || undefined });
+            await safeSendMessage(sock, chatId, { text }, originalMsg);
             logger.info(`🎭 Genre "${genreName}" sent to ${chatId}`);
         } catch (err) {
             logger.error(`Genre movies error: ${err.message}`);
-            await sock.sendMessage(chatId, { text: '⚠️ Failed to fetch genre movies.' }, { quoted: originalMsg || undefined });
+            await safeSendMessage(sock, chatId, { text: '⚠️ Failed to fetch genre movies.' }, originalMsg);
         }
     }
 

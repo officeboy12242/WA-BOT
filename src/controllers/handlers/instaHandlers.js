@@ -7,7 +7,7 @@ import { snapsave } from 'snapsave-media-downloader';
 import { logger } from '../../utils/logger.js';
 import { downloadMediaBuffer } from '../../utils/downloadMediaBuffer.js';
 import { extractInstagramUrl, isSupportedInstagramUrl } from '../../utils/instagramUrl.js';
-import { getSafeSendOptions } from '../../utils/waMessage.js';
+import { safeSendMessage } from '../../utils/waMessage.js';
 
 function formatInstaDownloadStatus(mediaList) {
     const images = mediaList.filter((m) => m.type === 'image').length;
@@ -49,30 +49,31 @@ async function classifyMediaBuffer(buffer) {
     return { kind, mime, ext: type.ext };
 }
 
-async function sendDownloadedMedia(sock, chatId, buffer, sendOpts, index) {
+async function sendDownloadedMedia(sock, chatId, buffer, waMessage, index) {
     const detected = await classifyMediaBuffer(buffer);
     if (detected.kind === 'video') {
-        await sock.sendMessage(chatId, { video: buffer, mimetype: detected.mime }, sendOpts);
+        await safeSendMessage(sock, chatId, { video: buffer, mimetype: detected.mime }, waMessage);
         return true;
     }
     if (detected.kind === 'image') {
-        await sock.sendMessage(chatId, { image: buffer, mimetype: detected.mime }, sendOpts);
+        await safeSendMessage(sock, chatId, { image: buffer, mimetype: detected.mime }, waMessage);
         return true;
     }
-    await sock.sendMessage(
+    await safeSendMessage(
+        sock,
         chatId,
         { document: buffer, mimetype: detected.mime, fileName: `instagram_${index + 1}.${detected.ext || 'bin'}` },
-        sendOpts
+        waMessage,
     );
     return true;
 }
 
 export async function handleInsta(sock, chatId, args, quotedMessage, options = {}) {
     const { requireCommandArgs = true } = options;
-    const replyToCommand = quotedMessage ? getSafeSendOptions(quotedMessage) : {};
 
     if (requireCommandArgs && !args.length) {
-        await sock.sendMessage(
+        await safeSendMessage(
+            sock,
             chatId,
             {
                 text:
@@ -80,36 +81,38 @@ export async function handleInsta(sock, chatId, args, quotedMessage, options = {
                     'Example: `/insta https://www.instagram.com/p/xxxxx/`\n\n' +
                     'In a private chat you can also paste an Instagram link without a command.',
             },
-            replyToCommand
+            quotedMessage,
         );
         return;
     }
 
     let url = extractInstagramUrl(args.join(' ').trim()) || (args[0] || '').trim();
     if (!isSupportedInstagramUrl(url)) {
-        await sock.sendMessage(
+        await safeSendMessage(
+            sock,
             chatId,
             { text: 'Only Instagram post/reel/TV/share links from instagram.com are supported.' },
-            replyToCommand
+            quotedMessage,
         );
         return;
     }
 
     let statusMsg = null;
     try {
-        statusMsg = await sock.sendMessage(chatId, {
+        statusMsg = await safeSendMessage(sock, chatId, {
             text: '⏳ Fetching Instagram media…\n_This may take a few seconds._',
-        });
+        }, quotedMessage);
 
         const result = await snapsave(url, { retry: 2, retryDelay: 800 });
 
         if (!result.success) {
             await safeDeleteChatMessage(sock, chatId, statusMsg);
             statusMsg = null;
-            await sock.sendMessage(
+            await safeSendMessage(
+                sock,
                 chatId,
                 { text: `Could not fetch media. ${result.message || 'Unknown error.'}` },
-                replyToCommand
+                quotedMessage,
             );
             return;
         }
@@ -127,12 +130,12 @@ export async function handleInsta(sock, chatId, args, quotedMessage, options = {
         if (!mediaList.length) {
             await safeDeleteChatMessage(sock, chatId, statusMsg);
             statusMsg = null;
-            await sock.sendMessage(chatId, { text: 'No media URLs in the response.' }, replyToCommand);
+            await safeSendMessage(sock, chatId, { text: 'No media URLs in the response.' }, quotedMessage);
             return;
         }
 
         await safeDeleteChatMessage(sock, chatId, statusMsg);
-        statusMsg = await sock.sendMessage(chatId, { text: formatInstaDownloadStatus(mediaList) });
+        statusMsg = await safeSendMessage(sock, chatId, { text: formatInstaDownloadStatus(mediaList) }, quotedMessage);
 
         const total = mediaList.length;
         let sentCount = 0;
@@ -140,7 +143,7 @@ export async function handleInsta(sock, chatId, args, quotedMessage, options = {
         for (let i = 0; i < total; i++) {
             try {
                 const buffer = await downloadMediaBuffer(mediaList[i].url);
-                await sendDownloadedMedia(sock, chatId, buffer, {}, i);
+                await sendDownloadedMedia(sock, chatId, buffer, null, i);
                 sentCount++;
             } catch (err) {
                 failedCount++;
@@ -153,26 +156,29 @@ export async function handleInsta(sock, chatId, args, quotedMessage, options = {
         statusMsg = null;
 
         if (!sentCount) {
-            await sock.sendMessage(
+            await safeSendMessage(
+                sock,
                 chatId,
                 { text: 'Found media links but could not download any item. Try again later.' },
-                replyToCommand
+                quotedMessage,
             );
             return;
         }
 
-        await sock.sendMessage(
+        await safeSendMessage(
+            sock,
             chatId,
             { text: formatInstaSuccessText(sentCount, total, failedCount) },
-            replyToCommand
+            quotedMessage,
         );
         logger.info(`Insta: sent ${sentCount}/${total} item(s) for ${chatId}`);
     } catch (err) {
         logger.error(`Insta command error: ${err.message}`);
-        await sock.sendMessage(
+        await safeSendMessage(
+            sock,
             chatId,
             { text: 'Something went wrong (private post, bad link, or upstream error). Try another URL.' },
-            replyToCommand
+            quotedMessage,
         );
     } finally {
         if (statusMsg?.key) {
