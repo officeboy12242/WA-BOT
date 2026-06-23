@@ -438,6 +438,13 @@ export const COMMAND_REGISTRY = [
         role: 'anyone',
         help: 'Reply to a view-once message to reveal it',
     },
+    {
+        names: ['/deploy', '/redeploy'],
+        key: 'deploy',
+        scope: 'any',
+        role: 'owner',
+        help: 'Trigger Render redeploy of latest commit (owner only)',
+    },
 ];
 
 const nameIndex = new Map();

@@ -59,4 +59,6 @@ export const config = {
     GITHUB_TRENDING_COUNT: parseInt(process.env.GITHUB_TRENDING_COUNT, 10) || 5,
     /** Public URL for short links (Render sets RENDER_EXTERNAL_URL automatically). */
     PUBLIC_URL: (process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || '').replace(/\/$/, ''),
+    RENDER_API_KEY: process.env.RENDER_API_KEY?.trim() || '',
+    RENDER_SERVICE_ID: process.env.RENDER_SERVICE_ID?.trim() || '',
 };

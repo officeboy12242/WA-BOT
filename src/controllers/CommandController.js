@@ -79,6 +79,7 @@ import {
 import { horoscopeService } from '../services/HoroscopeService.js';
 import { handleDriveUrl } from './handlers/driveHandlers.js';
 import { handleViewOnce } from './handlers/viewOnceHandler.js';
+import { handleDeploy } from './handlers/deployHandler.js';
 import {
     handleWarn,
     handleMyWarns,
@@ -269,6 +270,7 @@ class CommandController {
             case 'grouppost':     await handleGroupPost(sock, chatId, senderJid, args, ctx); break;
             case 'driveurl':      await handleDriveUrl(sock, chatId, senderJid, args, ctx); break;
             case 'viewonce':      await handleViewOnce(sock, chatId, senderJid, originalMsg); break;
+            case 'deploy':        await handleDeploy(sock, chatId, senderJid, originalMsg); break;
 
             /* ── Instagram / News / Movie ── */
             case 'insta': await _handleInsta(sock, chatId, args, originalMsg); break;
