@@ -2,7 +2,7 @@
  * WhatsApp link preview helpers (requires link-preview-js peer dep).
  */
 
-import { getUrlInfo } from '@whiskeysockets/baileys';
+import { getUrlInfo } from 'baileys';
 import { logger } from './logger.js';
 
 const PREVIEW_OPTS = {
@@ -33,7 +33,7 @@ export async function buildLinkPreview(url) {
 
 /**
  * Send text with an explicit link preview card when possible.
- * @param {import('@whiskeysockets/baileys').WASocket} sock
+ * @param {import('baileys').WASocket} sock
  * @param {string} chatId
  * @param {string} text
  * @param {string} url

@@ -2,14 +2,14 @@
  * Owner-only group member scrape and broadcast handlers.
  */
 
+import { jidNormalizedUser } from 'baileys';
 import { logger } from '../../utils/logger.js';
 import { extractPhoneNumber } from '../../utils/permissions.js';
 
 const SCRAP_SESSION_MS = 5 * 60 * 1000;
 const BROADCAST_DELAY_MS = 3500;
 const GROUP_POST_DELAY_MS = 2500;
-const DM_RETRY_DELAY_MS = 1500;
-const DM_MAX_RETRIES = 1;
+const TCTOKEN_RECOVERY_DELAY_MS = 6000;
 
 function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -83,20 +83,46 @@ function formatGroupList(groups, { stored = false } = {}) {
     return text;
 }
 
-async function sendDmWithRetry(sock, targetJid, message) {
-    let lastErr;
-    for (let attempt = 0; attempt <= DM_MAX_RETRIES; attempt++) {
+/**
+ * Check if we already hold a privacy token (tctoken) for the given JID.
+ * Tokens are stored in the auth database under `tctoken-{jid}`.  For phone
+ * JIDs the token is stored under the LID equivalent, so we resolve via the
+ * Baileys LID mapping.
+ */
+async function hasTcToken(authDB, sock, targetJid) {
+    if (!authDB) return false;
+    if (authDB.get(`tctoken-${targetJid}`)) return true;
+
+    if (targetJid.endsWith('@s.whatsapp.net')) {
         try {
-            await sock.sendMessage(targetJid, { text: message });
-            return;
-        } catch (err) {
-            lastErr = err;
-            if (attempt < DM_MAX_RETRIES) {
-                await delay(DM_RETRY_DELAY_MS);
+            const phone = targetJid.split('@')[0];
+            const lid = await sock?.signalRepository?.lidMapping?.getLIDForPN?.(phone);
+            if (lid) {
+                const lidJid = jidNormalizedUser(lid) || lid;
+                if (authDB.get(`tctoken-${lidJid}`)) return true;
             }
-        }
+        } catch { /* ignore */ }
     }
-    throw lastErr;
+
+    return false;
+}
+
+/**
+ * Send a DM for broadcast.  When the target has no tctoken the first
+ * sendMessage triggers a background 463 recovery issuance inside Baileys.
+ * The original message is silently lost, so we wait for the recovery to
+ * complete and then re-send.
+ */
+async function sendDmWithRetry(sock, targetJid, message, authDB) {
+    const hadToken = await hasTcToken(authDB, sock, targetJid);
+
+    await sock.sendMessage(targetJid, { text: message });
+
+    if (!hadToken) {
+        logger.info(`No tctoken for ${targetJid} — waiting for 463 recovery before re-send`);
+        await delay(TCTOKEN_RECOVERY_DELAY_MS);
+        await sock.sendMessage(targetJid, { text: message });
+    }
 }
 
 export async function handleScrap(sock, chatId, senderJid, args, { memberScrapeController, isOwnerFromJid, pendingScrapSessions, originalMsg }) {
@@ -155,7 +181,7 @@ export async function handleScrapMembers(sock, chatId, senderJid, { memberScrape
     await sock.sendMessage(chatId, { text: formatGroupList(groups, { stored: true }) }, { quoted: originalMsg });
 }
 
-export async function handleBroadcast(sock, chatId, senderJid, args, { memberScrapeController, isOwnerFromJid, getSock, originalMsg }) {
+export async function handleBroadcast(sock, chatId, senderJid, args, { memberScrapeController, isOwnerFromJid, getSock, originalMsg, authDatabase }) {
     try {
         const isOwner = await isOwnerFromJid(sock, chatId, senderJid);
         if (!isOwner) {
@@ -203,7 +229,7 @@ export async function handleBroadcast(sock, chatId, senderJid, args, { memberScr
                     '_Running in background — other bot commands keep working._',
             }, { quoted: originalMsg });
 
-            void runBroadcastAllJob(getSock, sock, chatId, groups.length, message, targets).catch((err) => {
+            void runBroadcastAllJob(getSock, sock, chatId, groups.length, message, targets, authDatabase).catch((err) => {
                 logger.error(`Broadcast-all job error: ${formatError(err)}`);
             });
             return;
@@ -252,7 +278,7 @@ export async function handleBroadcast(sock, chatId, senderJid, args, { memberScr
                 '_Running in background — other bot commands keep working._',
         }, { quoted: originalMsg });
 
-        void runBroadcastJob(getSock, sock, chatId, selected, message, targets).catch((err) => {
+        void runBroadcastJob(getSock, sock, chatId, selected, message, targets, authDatabase).catch((err) => {
             logger.error(`Broadcast job error: ${formatError(err)}`);
         });
     } catch (err) {
@@ -263,7 +289,7 @@ export async function handleBroadcast(sock, chatId, senderJid, args, { memberScr
     }
 }
 
-async function runBroadcastAllJob(getSock, fallbackSock, chatId, groupCount, message, targets) {
+async function runBroadcastAllJob(getSock, fallbackSock, chatId, groupCount, message, targets, authDB) {
     let sent = 0;
     let failed = 0;
 
@@ -275,7 +301,7 @@ async function runBroadcastAllJob(getSock, fallbackSock, chatId, groupCount, mes
             }
 
             try {
-                await sendDmWithRetry(sock, targetJid, message);
+                await sendDmWithRetry(sock, targetJid, message, authDB);
                 sent++;
             } catch (err) {
                 failed++;
@@ -314,7 +340,7 @@ async function runBroadcastAllJob(getSock, fallbackSock, chatId, groupCount, mes
     }
 }
 
-async function runBroadcastJob(getSock, fallbackSock, chatId, selected, message, targets) {
+async function runBroadcastJob(getSock, fallbackSock, chatId, selected, message, targets, authDB) {
     let sent = 0;
     let failed = 0;
 
@@ -326,7 +352,7 @@ async function runBroadcastJob(getSock, fallbackSock, chatId, selected, message,
             }
 
             try {
-                await sendDmWithRetry(sock, targetJid, message);
+                await sendDmWithRetry(sock, targetJid, message, authDB);
                 sent++;
             } catch (err) {
                 failed++;

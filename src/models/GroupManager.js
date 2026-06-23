@@ -131,7 +131,7 @@ class GroupManager {
 
     /**
      * Member counts for all groups the bot participates in (one WA fetch).
-     * @param {import('@whiskeysockets/baileys').WASocket} sock
+     * @param {import('baileys').WASocket} sock
      * @returns {Promise<Map<string, number>>}
      */
     async getParticipatingGroupMemberCounts(sock) {
@@ -227,7 +227,7 @@ class GroupManager {
 
     /**
      * Live WhatsApp group admins across all participating groups.
-     * @param {import('@whiskeysockets/baileys').WASocket} sock
+     * @param {import('baileys').WASocket} sock
      */
     async fetchAllWhatsAppGroupAdmins(sock) {
         const byPhone = new Map();

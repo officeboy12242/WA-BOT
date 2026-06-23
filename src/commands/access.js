@@ -5,7 +5,7 @@
 import { isGroupMessage, extractPhoneNumber } from '../utils/permissions.js';
 
 /**
- * @param {import('@whiskeysockets/baileys').WASocket} sock
+ * @param {import('baileys').WASocket} sock
  * @param {string} chatId
  * @param {string} senderJid
  * @param {import('./registry.js').CommandDefinition} def

@@ -2,7 +2,7 @@
  * Group warning handlers: /warn, /mywarns, /warns, /clearwarns
  */
 
-import { jidNormalizedUser } from '@whiskeysockets/baileys';
+import { jidNormalizedUser } from 'baileys';
 import { logger } from '../../utils/logger.js';
 import { extractPhoneNumber, normalizePhoneNumber } from '../../utils/permissions.js';
 import {

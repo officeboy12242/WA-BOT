@@ -13,7 +13,7 @@ import { config } from '../config/config.js';
 import { atozService } from '../services/AtoZService.js';
 import { pronoobDriveService } from '../services/PronoobDriveService.js';
 import { urlShortener } from '../utils/urlShortener.js';
-import { safeSendMessage } from '../utils/waMessage.js';
+import { safeSendMessage, safeDeleteMessage } from '../utils/waMessage.js';
 import { audioFromFilename, qualityFromFilename } from '../utils/movieMetadata.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -1079,12 +1079,10 @@ class MovieController {
             const sources = [...new Set(results.map((r) => r.source).filter(Boolean))];
 
             if (!results?.length) {
-                try {
-                    await sock.sendMessage(chatId, { delete: searchingMsg.key });
-                } catch {}
+                void safeDeleteMessage(sock, chatId, searchingMsg.key);
 
                 const noResult = getRandomDialogue(NO_RESULTS_DIALOGUES);
-                const noSent = await safeSendMessage(sock, chatId, { text: noResult }, originalMsg);
+                const noSent = await safeSendMessage(sock, chatId, { text: noResult, linkPreview: false }, originalMsg);
                 this.scheduleDelete(sock, chatId, noSent.key);
                 if (!unlimited) await this.incrementSearchCount(normalizedUserId);
                 void this.logSearch(normalizedUserId, query, 0, chatId);
@@ -1101,9 +1099,7 @@ class MovieController {
             logger.info(`Formatted ${resultMessages.length} message(s) for "${query}" (${resultMessages.reduce((a, m) => a + m.length, 0)} chars)`);
 
             if (!resultMessages.length) {
-                try {
-                    await sock.sendMessage(chatId, { delete: searchingMsg.key });
-                } catch {}
+                void safeDeleteMessage(sock, chatId, searchingMsg.key);
                 const errSent = await safeSendMessage(sock, chatId, {
                     text: '⚠️ Found movies but could not format results. Try again.',
                 }, originalMsg);
@@ -1127,8 +1123,8 @@ class MovieController {
                     const sent = await safeSendMessage(
                         sock,
                         chatId,
-                        { text },
-                        i === 0 ? originalMsg : null,
+                        { text, linkPreview: false },
+                        null,
                     );
                     logger.info(`Sent movie result part ${i + 1} OK`);
 
@@ -1148,16 +1144,12 @@ class MovieController {
                 }
             }
 
-            try {
-                await sock.sendMessage(chatId, { delete: searchingMsg.key });
-            } catch {}
+            void safeDeleteMessage(sock, chatId, searchingMsg.key);
 
             logger.info(`🎬 Movie search "${query}" by ${userId} → ${results.length} results from [${sources.join(', ')}] (${sentCount}/${resultMessages.length} msg(s), ${remaining} left)`);
             void this._notifySearchLog(sock, normalizedUserId, query, results.length, chatId, pushName);
         } catch (err) {
-            try {
-                await sock.sendMessage(chatId, { delete: searchingMsg.key });
-            } catch {}
+            void safeDeleteMessage(sock, chatId, searchingMsg.key);
 
             const errorDialogues = [
                 "🎭 _\"Technical difficulties... even JARVIS needs a break!\"_\n\n⚠️ Search failed. Try again in a moment!",

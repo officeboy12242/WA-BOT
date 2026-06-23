@@ -31,7 +31,7 @@ function planNextMorningSend(startStr, endStr, timezone, fromMs = Date.now()) {
 
 /**
  * @param {object} options
- * @param {() => import('@whiskeysockets/baileys').WASocket | null} options.getSock
+ * @param {() => import('baileys').WASocket | null} options.getSock
  * @param {object} options.botState
  * @param {{ sendDailyMorning: Function }} options.morningController
  * @param {object} options.config

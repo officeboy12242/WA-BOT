@@ -3,7 +3,7 @@
  * Helper functions for permission checks
  */
 
-import { jidNormalizedUser } from '@whiskeysockets/baileys';
+import { jidNormalizedUser } from 'baileys';
 
 /**
  * Extract phone number from WhatsApp JID
@@ -92,7 +92,7 @@ function getBotLinkedLid(sock) {
 
 /**
  * Best-effort phone number for the connected bot account.
- * @param {import('@whiskeysockets/baileys').WASocket | null | undefined} sock
+ * @param {import('baileys').WASocket | null | undefined} sock
  * @returns {string}
  */
 export function getBotAccountPhone(sock) {
@@ -116,7 +116,7 @@ export function getBotAccountPhone(sock) {
 
 /**
  * True when jid is the connected bot account (phone or LID) — DMs to self won't show up.
- * @param {import('@whiskeysockets/baileys').WASocket | null | undefined} sock
+ * @param {import('baileys').WASocket | null | undefined} sock
  * @param {string} jid
  */
 export function isBotSelfTarget(sock, jid) {
@@ -165,7 +165,7 @@ export function getBotSelfChatJid(sock) {
 
 /**
  * Pick a DM JID for notifications that is not the bot's own account.
- * @param {import('@whiskeysockets/baileys').WASocket | null | undefined} sock
+ * @param {import('baileys').WASocket | null | undefined} sock
  * @param {string[]} preferredNumbers
  * @returns {string | null}
  */

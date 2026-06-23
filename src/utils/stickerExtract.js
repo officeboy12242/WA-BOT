@@ -2,7 +2,7 @@
  * Extract sticker payloads from WhatsApp messages (groups, DMs, channels).
  */
 
-import { normalizeMessageContent } from '@whiskeysockets/baileys';
+import { normalizeMessageContent } from 'baileys';
 
 /**
  * @param {string | null | undefined} chatId
@@ -14,7 +14,7 @@ export function isNewsletterChat(chatId) {
 
 /**
  * Map a webp document to a sticker-shaped object for downloadContentFromMessage.
- * @param {import('@whiskeysockets/baileys').proto.IDocumentMessage} doc
+ * @param {import('baileys').proto.IDocumentMessage} doc
  */
 function mediaAsSticker(media) {
     return {
@@ -29,7 +29,7 @@ function mediaAsSticker(media) {
 }
 
 /**
- * @param {import('@whiskeysockets/baileys').proto.Message | null | undefined} message
+ * @param {import('baileys').proto.Message | null | undefined} message
  * @returns {object | null}
  */
 export function extractStickerFromMessage(message) {

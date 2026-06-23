@@ -3,7 +3,7 @@
  * Handles sticker creation, conversion, and metadata management
  */
 
-import { downloadMediaMessage, downloadContentFromMessage, normalizeMessageContent } from '@whiskeysockets/baileys';
+import { downloadMediaMessage, downloadContentFromMessage, normalizeMessageContent } from 'baileys';
 import { getTextFromWAMessage, buildQuotedTargetMessage } from '../utils/waMessage.js';
 import { downloadStickerBuffer, createDownloadContext } from '../utils/stickerDownload.js';
 import { extractStickerFromMessage } from '../utils/stickerExtract.js';
@@ -51,7 +51,7 @@ class StickerController {
         this._ensureTempDir();
     }
 
-    /** @param {{ getSock: () => import('@whiskeysockets/baileys').WASocket, getIsReady: () => boolean }} provider */
+    /** @param {{ getSock: () => import('baileys').WASocket, getIsReady: () => boolean }} provider */
     setConnectionProvider(provider) {
         this._connectionProvider = provider;
     }

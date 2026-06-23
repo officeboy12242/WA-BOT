@@ -172,7 +172,8 @@ class WhatsAppCourseBot {
                 this.botSettings,
                 this.githubTrendingController,
                 this.memberScrapeController,
-                this.warnDatabase
+                this.warnDatabase,
+                this.authDatabase
             );
             this.courseController = new CourseController(this.database, this.courseAPI, config, this.groupManager);
             const morningScraper = new MorningMessageScraper(this.morningDatabase);

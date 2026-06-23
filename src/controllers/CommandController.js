@@ -86,7 +86,7 @@ import {
 } from './handlers/warnHandlers.js';
 
 class CommandController {
-    constructor(database, botState, groupManager, newsController = null, movieController = null, userManager = null, stickerController = null, botSettings = null, githubTrendingController = null, memberScrapeController = null, warnDatabase = null) {
+    constructor(database, botState, groupManager, newsController = null, movieController = null, userManager = null, stickerController = null, botSettings = null, githubTrendingController = null, memberScrapeController = null, warnDatabase = null, authDatabase = null) {
         this.database = database;
         this.botState = botState;
         this.groupManager = groupManager;
@@ -98,6 +98,7 @@ class CommandController {
         this.githubTrendingController = githubTrendingController;
         this.memberScrapeController = memberScrapeController;
         this.warnDatabase = warnDatabase;
+        this.authDatabase = authDatabase;
         this.pendingClearConfirmations = new Map();
         this.pendingScrapSessions = createScrapSessionStore();
         this.pendingGithubPosts = createGithubPostSessionStore();
@@ -147,6 +148,7 @@ class CommandController {
             userManager: this.userManager,
             stickerController: this.stickerController,
             botSettings: this.botSettings,
+            authDatabase: this.authDatabase,
             pendingClearConfirmations: this.pendingClearConfirmations,
             pendingScrapSessions: this.pendingScrapSessions,
             pendingGithubPosts: this.pendingGithubPosts,
@@ -359,7 +361,7 @@ class CommandController {
             logger.error(err?.stack);
             await plainSendMessage(sock, chatId, {
                 text: '⚠️ Something went wrong running that command. Please try again.',
-            });
+            }, originalMsg?.key);
         }
     }
 }

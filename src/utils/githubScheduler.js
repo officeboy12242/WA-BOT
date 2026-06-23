@@ -14,7 +14,7 @@ export { parsePostTimesFromConfig };
 
 /**
  * @param {object} options
- * @param {() => import('@whiskeysockets/baileys').WASocket | null} options.getSock
+ * @param {() => import('baileys').WASocket | null} options.getSock
  * @param {object} options.botState
  * @param {{ checkAndPostRepo: Function }} options.githubController
  * @param {{ GITHUB_TRENDING_ENABLED: boolean, GITHUB_TRENDING_TIMES: string[], GITHUB_TRENDING_TIMEZONE: string }} options.config

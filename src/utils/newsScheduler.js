@@ -72,7 +72,7 @@ export function getCurrentDueSlot(postTimes, timezone, now = new Date()) {
 
 /**
  * @param {object} options
- * @param {() => import('@whiskeysockets/baileys').WASocket | null} options.getSock
+ * @param {() => import('baileys').WASocket | null} options.getSock
  * @param {object} options.botState
  * @param {{ checkAndPostNews: Function, scrapeAndQueueOnly: Function }} options.newsController
  * @param {{ NEWS_POST_TIMES: string[], NEWS_TIMEZONE: string, NEWS_SCRAPE_INTERVAL: number }} options.config
