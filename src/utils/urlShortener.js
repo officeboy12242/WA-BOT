@@ -61,18 +61,24 @@ class UrlShortener {
 
     async shorten(url) {
         if (!this.needsShortening(url)) return url;
-        if (this._cache.has(url)) return this._cache.get(url);
         if (!this._service) return url;
 
         try {
+            // Always resolve via DB first — expired /d/:code rows get a new code.
             const expiringLink = await this._service.shorten(url);
+
+            const cached = this._cache.get(url);
+            if (cached?.expiringLink === expiringLink) {
+                return cached.finalUrl;
+            }
+
             const tiny = await this._toTinyUrl(expiringLink);
             const finalUrl = tiny || expiringLink;
 
             if (this._cache.size >= MAX_CACHE_SIZE) {
                 this._cache.delete(this._cache.keys().next().value);
             }
-            this._cache.set(url, finalUrl);
+            this._cache.set(url, { expiringLink, finalUrl });
             return finalUrl;
         } catch (err) {
             logger.warn(`URL shorten failed: ${err.message}`);

@@ -180,6 +180,36 @@ class GroupManager {
         }
     }
 
+    /** WhatsApp group admin/superadmin in a specific group (supports LID senders). */
+    async isSenderGroupAdmin(sock, groupId, senderJid) {
+        if (!groupId?.endsWith('@g.us') || !senderJid) {
+            return false;
+        }
+        try {
+            const groupMetadata = await this.getGroupMetadataCached(sock, groupId);
+            const senderPhone = normalizePhoneNumber(extractPhoneNumber(senderJid));
+            for (const p of groupMetadata.participants || []) {
+                const matchesJid =
+                    p.id === senderJid ||
+                    p.lid === senderJid ||
+                    p.pn === senderJid ||
+                    p.phoneNumber === senderJid;
+                const pPhone = normalizePhoneNumber(participantToPhone(p));
+                const matchesPhone = senderPhone && pPhone && pPhone === senderPhone;
+                if (matchesJid || matchesPhone) {
+                    return p.admin === 'admin' || p.admin === 'superadmin';
+                }
+            }
+        } catch {
+            return false;
+        }
+        return false;
+    }
+
+    async isSenderGroupAdminAsync(sock, groupId, senderJid) {
+        return this.isSenderGroupAdmin(sock, groupId, senderJid);
+    }
+
     /** Owners, moderators (env + dynamic), or DB bot admins — can manually post /news */
     async canManualPostNews(senderJid) {
         const phoneNumber = extractPhoneNumber(senderJid);

@@ -3,7 +3,22 @@
  */
 
 import { normalizeMessageContent, jidNormalizedUser } from '@whiskeysockets/baileys';
-import { extractPhoneNumber } from './permissions.js';
+import { extractPhoneNumber, normalizePhoneNumber } from './permissions.js';
+
+function participantToPhone(participant) {
+    if (!participant) {
+        return '';
+    }
+    const fromPn = extractPhoneNumber(participant.phoneNumber || participant.pn || '');
+    if (/^\d{10,15}$/.test(fromPn)) {
+        return fromPn;
+    }
+    const fromId = extractPhoneNumber(participant.id || '');
+    if (/^\d{10,15}$/.test(fromId)) {
+        return fromId;
+    }
+    return fromId || fromPn;
+}
 
 /**
  * Text the user actually typed, after unwrapping ephemeral / view-once / edits / document-with-caption, etc.
@@ -182,7 +197,7 @@ export function buildQuotedTargetMessage(waMessage) {
  */
 export function getQuotedParticipantJid(waMessage) {
     const ctx = getContextInfo(waMessage?.message);
-    return ctx?.participant || ctx?.participantPn || '';
+    return ctx?.participantPn || ctx?.participantLid || ctx?.participant || '';
 }
 
 /**
@@ -234,7 +249,12 @@ export async function resolveJidToPhone(sock, chatId, jid) {
     try {
         const meta = await sock.groupMetadata(chatId);
         const hit = meta.participants.find(
-            (p) => p.id === jid || p.id?.includes(direct) || p.phoneNumber === jid
+            (p) =>
+                p.id === jid ||
+                p.lid === jid ||
+                p.phoneNumber === jid ||
+                p.pn === jid ||
+                p.id?.includes(direct),
         );
         if (!hit) {
             return direct;
@@ -286,4 +306,75 @@ export async function resolveTargetPhone(sock, chatId, args, waMessage, senderJi
     }
 
     return '';
+}
+
+/**
+ * Target member for moderation commands: reply, @mention, or phone in args.
+ * @param {import('@whiskeysockets/baileys').WASocket} sock
+ * @param {string} chatId
+ * @param {string[]} args
+ * @param {import('@whiskeysockets/baileys').proto.IWebMessageInfo | null} waMessage
+ * @param {string} senderJid
+ * @returns {Promise<{ jid: string, phone: string } | null>}
+ */
+export async function resolveTargetParticipant(sock, chatId, args, waMessage, senderJid) {
+    if (waMessage) {
+        const quoted = getQuotedParticipantJid(waMessage);
+        if (quoted && quoted !== senderJid) {
+            const phone = (await resolveJidToPhone(sock, chatId, quoted)).replace(/\D/g, '');
+            return { jid: quoted, phone };
+        }
+
+        for (const jid of getMentionedJids(waMessage)) {
+            if (!jid || jid === senderJid) {
+                continue;
+            }
+            const phone = (await resolveJidToPhone(sock, chatId, jid)).replace(/\D/g, '');
+            return { jid, phone };
+        }
+    }
+
+    const fromArgs = args.join('').replace(/\D/g, '');
+    if (fromArgs.length >= 10 && chatId?.endsWith('@g.us') && sock) {
+        try {
+            const meta = await sock.groupMetadata(chatId);
+            for (const p of meta.participants || []) {
+                const pPhone = participantToPhone(p);
+                const normalized = normalizePhoneNumber(pPhone);
+                if (
+                    normalized === normalizePhoneNumber(fromArgs) ||
+                    p.id.includes(fromArgs) ||
+                    (p.lid && p.lid.includes(fromArgs))
+                ) {
+                    return { jid: p.id, phone: normalized || fromArgs };
+                }
+            }
+        } catch {
+            // fall through
+        }
+        return { jid: `${fromArgs}@s.whatsapp.net`, phone: fromArgs };
+    }
+
+    return null;
+}
+
+/**
+ * Whether the message targets someone other than the sender (reply / @tag / phone).
+ * @param {import('@whiskeysockets/baileys').proto.IWebMessageInfo | null} waMessage
+ * @param {string} senderJid
+ * @param {string[]} [args]
+ * @returns {boolean}
+ */
+export function hasModerationTarget(waMessage, senderJid, args = []) {
+    if (args.join('').replace(/\D/g, '').length >= 10) {
+        return true;
+    }
+    if (!waMessage) {
+        return false;
+    }
+    const quoted = getQuotedParticipantJid(waMessage);
+    if (quoted && quoted !== senderJid) {
+        return true;
+    }
+    return getMentionedJids(waMessage).some((jid) => jid && jid !== senderJid);
 }

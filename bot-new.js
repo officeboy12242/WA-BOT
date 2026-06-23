@@ -30,6 +30,7 @@ import MovieController from './src/controllers/MovieController.js';
 import GitHubTrendingController from './src/controllers/GitHubTrendingController.js';
 import GitHubTrendingDatabase from './src/models/GitHubTrendingDatabase.js';
 import GroupMemberDatabase from './src/models/GroupMemberDatabase.js';
+import WarnDatabase from './src/models/WarnDatabase.js';
 import MemberScrapeController from './src/controllers/MemberScrapeController.js';
 import UserManager from './src/models/UserManager.js';
 import StickerController from './src/controllers/StickerController.js';
@@ -93,6 +94,7 @@ class WhatsAppCourseBot {
             this.newsDatabase = new NewsDatabase(mongoDb);
             this.githubTrendingDatabase = new GitHubTrendingDatabase(mongoDb);
             this.groupMemberDatabase = new GroupMemberDatabase(mongoDb);
+            this.warnDatabase = new WarnDatabase(mongoDb);
             this.morningDatabase = new MorningMessageDatabase(mongoDb);
             this.groupManager = new GroupManager(mongoDb);
             this.userManager = new UserManager(mongoDb);
@@ -102,6 +104,7 @@ class WhatsAppCourseBot {
                 this.newsDatabase.init(),
                 this.githubTrendingDatabase.init(),
                 this.groupMemberDatabase.init(),
+                this.warnDatabase.init(),
                 this.morningDatabase.init(),
                 this.groupManager.init(),
                 this.authDatabase.init(),
@@ -168,7 +171,8 @@ class WhatsAppCourseBot {
                 this.stickerController,
                 this.botSettings,
                 this.githubTrendingController,
-                this.memberScrapeController
+                this.memberScrapeController,
+                this.warnDatabase
             );
             this.courseController = new CourseController(this.database, this.courseAPI, config, this.groupManager);
             const morningScraper = new MorningMessageScraper(this.morningDatabase);

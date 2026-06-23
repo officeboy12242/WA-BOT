@@ -2,7 +2,7 @@
  * Central permission checks for registry-defined commands.
  */
 
-import { isGroupMessage } from '../utils/permissions.js';
+import { isGroupMessage, extractPhoneNumber } from '../utils/permissions.js';
 
 /**
  * @param {import('@whiskeysockets/baileys').WASocket} sock
@@ -82,6 +82,20 @@ export async function checkCommandAccess(sock, chatId, senderJid, def, groupMana
         }
     }
 
+    if (def.role === 'group_admins') {
+        const allowed = await groupManager.isSenderGroupAdminAsync(sock, chatId, senderJid);
+        if (!allowed) {
+            return {
+                ok: false,
+                message:
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
+                    '🔒 *PERMISSION DENIED* 🔒\n' +
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                    'Only WhatsApp group admins in this group can use this command.',
+            };
+        }
+    }
+
     if (def.role === 'admins') {
         const allowed = await groupManager.isPrivilegedAsync(sock, chatId, senderJid);
         if (!allowed) {
@@ -92,6 +106,35 @@ export async function checkCommandAccess(sock, chatId, senderJid, def, groupMana
                     '🔒 *PERMISSION DENIED* 🔒\n' +
                     '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
                     'Only owners, bot admins, or WhatsApp group admins (in this group) can use this command.',
+            };
+        }
+    }
+
+    if (def.role === 'owner') {
+        const senderPhone = extractPhoneNumber(senderJid);
+        if (!groupManager.isOwner(senderPhone) && senderJid?.includes('@lid') && chatId?.endsWith('@g.us')) {
+            try {
+                const meta = await sock.groupMetadata(chatId);
+                for (const p of meta.participants || []) {
+                    if (p.lid === senderJid || p.id === senderJid) {
+                        const phone = String(p.id || '').replace(/\D/g, '').split('@')[0];
+                        if (groupManager.isOwner(phone)) {
+                            return { ok: true };
+                        }
+                    }
+                }
+            } catch {
+                // fall through
+            }
+        }
+        if (!groupManager.isOwner(senderPhone)) {
+            return {
+                ok: false,
+                message:
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
+                    '🔒 *OWNER ONLY* 🔒\n' +
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                    'Only bot owners can use this command.',
             };
         }
     }

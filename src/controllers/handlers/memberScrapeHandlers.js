@@ -7,6 +7,7 @@ import { extractPhoneNumber } from '../../utils/permissions.js';
 
 const SCRAP_SESSION_MS = 5 * 60 * 1000;
 const BROADCAST_DELAY_MS = 3500;
+const GROUP_POST_DELAY_MS = 2500;
 const DM_RETRY_DELAY_MS = 1500;
 const DM_MAX_RETRIES = 1;
 
@@ -75,8 +76,8 @@ function formatGroupList(groups, { stored = false } = {}) {
         text += '⏰ Expires in 5 minutes.';
     } else {
         text += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-        text += '💡 `/broadcast <number> <message>` — DM members\n';
-        text += '💡 `/grouppost <number> <message>` — post in the group';
+        text += '💡 `/broadcast <#> <message>` or `/broadcast all <message>` — DM members\n';
+        text += '💡 `/grouppost <#> <message>` or `/grouppost all <message>` — post in group(s)';
     }
 
     return text;
@@ -167,13 +168,55 @@ export async function handleBroadcast(sock, chatId, senderJid, args, { memberScr
             return;
         }
 
-        const groupIndex = parseInt(args[0], 10);
+        const firstArg = args[0]?.toLowerCase();
+        const isAll = firstArg === 'all';
         const message = args.slice(1).join(' ').trim();
+
+        if (isAll) {
+            if (!message) {
+                await sock.sendMessage(chatId, {
+                    text:
+                        '❌ Usage: `/broadcast all <message>`\n\n' +
+                        'DMs every unique member from *all* scraped groups (one message per person).\n' +
+                        'Run `/scrap` on each group first, then `/scrapmembers` to verify.',
+                }, { quoted: originalMsg });
+                return;
+            }
+
+            const { groups, targets } = await memberScrapeController.getAllDedupedDmTargets(sock);
+            if (!groups.length) {
+                await sock.sendMessage(chatId, {
+                    text: '❌ No scraped groups yet. Run `/scrap` on your groups first.',
+                }, { quoted: originalMsg });
+                return;
+            }
+            if (!targets.length) {
+                await sock.sendMessage(chatId, {
+                    text: '📭 No DM targets across scraped groups. Re-run `/scrap` on your groups.',
+                }, { quoted: originalMsg });
+                return;
+            }
+
+            await sock.sendMessage(chatId, {
+                text:
+                    `📤 Broadcasting to *${targets.length}* unique member(s) across *${groups.length}* scraped group(s)...\n\n` +
+                    '_Running in background — other bot commands keep working._',
+            }, { quoted: originalMsg });
+
+            void runBroadcastAllJob(getSock, sock, chatId, groups.length, message, targets).catch((err) => {
+                logger.error(`Broadcast-all job error: ${formatError(err)}`);
+            });
+            return;
+        }
+
+        const groupIndex = parseInt(args[0], 10);
 
         if (!Number.isFinite(groupIndex) || groupIndex < 1 || !message) {
             await sock.sendMessage(chatId, {
                 text:
-                    '❌ Usage: `/broadcast <group#> <message>`\n\n' +
+                    '❌ Usage:\n' +
+                    '• `/broadcast <group#> <message>`\n' +
+                    '• `/broadcast all <message>`\n\n' +
                     'Use `/scrapmembers` to see group numbers from scraped data.',
             }, { quoted: originalMsg });
             return;
@@ -217,6 +260,57 @@ export async function handleBroadcast(sock, chatId, senderJid, args, { memberScr
         await sock.sendMessage(chatId, {
             text: `❌ Broadcast failed: ${formatError(err)}`,
         }, { quoted: originalMsg });
+    }
+}
+
+async function runBroadcastAllJob(getSock, fallbackSock, chatId, groupCount, message, targets) {
+    let sent = 0;
+    let failed = 0;
+
+    try {
+        for (const targetJid of targets) {
+            const sock = resolveSock(getSock, fallbackSock);
+            if (!sock) {
+                throw new Error('WhatsApp disconnected during broadcast');
+            }
+
+            try {
+                await sendDmWithRetry(sock, targetJid, message);
+                sent++;
+            } catch (err) {
+                failed++;
+                logger.warn(`Broadcast-all failed for ${targetJid}: ${formatError(err)}`);
+            }
+
+            await delay(BROADCAST_DELAY_MS);
+        }
+
+        const notifySock = resolveSock(getSock, fallbackSock);
+        if (notifySock) {
+            await notifySock.sendMessage(chatId, {
+                text:
+                    `✅ Broadcast-all done\n\n` +
+                    `📢 Groups scraped: *${groupCount}*\n` +
+                    `📤 Sent: *${sent}*\n` +
+                    `❌ Failed: *${failed}*`,
+            });
+        }
+
+        logger.info(`Broadcast-all: groups=${groupCount}, sent=${sent}, failed=${failed}`);
+    } catch (err) {
+        logger.error(`Broadcast-all job failed: ${formatError(err)}`);
+        try {
+            const notifySock = resolveSock(getSock, fallbackSock);
+            await notifySock?.sendMessage(chatId, {
+                text:
+                    `❌ Broadcast-all stopped\n\n` +
+                    `📤 Sent: *${sent}*\n` +
+                    `❌ Failed: *${failed}*\n` +
+                    `⚠️ Error: ${formatError(err)}`,
+            });
+        } catch (notifyErr) {
+            logger.error(`Could not send broadcast-all failure notice: ${formatError(notifyErr)}`);
+        }
     }
 }
 
@@ -270,7 +364,7 @@ async function runBroadcastJob(getSock, fallbackSock, chatId, selected, message,
     }
 }
 
-export async function handleGroupPost(sock, chatId, senderJid, args, { memberScrapeController, isOwnerFromJid, originalMsg }) {
+export async function handleGroupPost(sock, chatId, senderJid, args, { memberScrapeController, isOwnerFromJid, getSock, originalMsg }) {
     try {
         const isOwner = await isOwnerFromJid(sock, chatId, senderJid);
         if (!isOwner) {
@@ -283,14 +377,47 @@ export async function handleGroupPost(sock, chatId, senderJid, args, { memberScr
             return;
         }
 
-        const groupIndex = parseInt(args[0], 10);
+        const firstArg = args[0]?.toLowerCase();
+        const isAll = firstArg === 'all';
         const message = args.slice(1).join(' ').trim();
+
+        if (isAll) {
+            if (!message) {
+                await sock.sendMessage(chatId, {
+                    text:
+                        '❌ Usage: `/grouppost all <message>`\n\n' +
+                        'Posts the same message in every group the bot is in.',
+                }, { quoted: originalMsg });
+                return;
+            }
+
+            const groups = await memberScrapeController.fetchParticipatingGroups(sock);
+            if (!groups.length) {
+                await sock.sendMessage(chatId, { text: '📭 No groups found that the bot is in.' }, { quoted: originalMsg });
+                return;
+            }
+
+            await sock.sendMessage(chatId, {
+                text:
+                    `📤 Posting to *${groups.length}* group(s)...\n\n` +
+                    '_Running in background — other bot commands keep working._',
+            }, { quoted: originalMsg });
+
+            void runGroupPostAllJob(getSock, sock, chatId, groups, message).catch((err) => {
+                logger.error(`Grouppost-all job error: ${formatError(err)}`);
+            });
+            return;
+        }
+
+        const groupIndex = parseInt(args[0], 10);
 
         if (!Number.isFinite(groupIndex) || groupIndex < 1 || !message) {
             await sock.sendMessage(chatId, {
                 text:
-                    '❌ Usage: `/grouppost <group#> <message>`\n\n' +
-                    'Posts one message in the WhatsApp group (reaches everyone including LID users).\n' +
+                    '❌ Usage:\n' +
+                    '• `/grouppost <group#> <message>`\n' +
+                    '• `/grouppost all <message>`\n\n' +
+                    'Posts in the WhatsApp group (everyone including LID users).\n' +
                     'Use `/scrapmembers` for group numbers.',
             }, { quoted: originalMsg });
             return;
@@ -321,6 +448,60 @@ export async function handleGroupPost(sock, chatId, senderJid, args, { memberScr
     }
 }
 
+async function runGroupPostAllJob(getSock, fallbackSock, chatId, groups, message) {
+    let sent = 0;
+    let failed = 0;
+    const failedNames = [];
+
+    try {
+        for (const group of groups) {
+            const sock = resolveSock(getSock, fallbackSock);
+            if (!sock) {
+                throw new Error('WhatsApp disconnected during group post');
+            }
+
+            try {
+                await sock.sendMessage(group.group_id, { text: message });
+                sent++;
+                logger.info(`Grouppost-all sent to ${group.group_name}`);
+            } catch (err) {
+                failed++;
+                failedNames.push(group.group_name);
+                logger.warn(`Grouppost-all failed for ${group.group_name}: ${formatError(err)}`);
+            }
+
+            await delay(GROUP_POST_DELAY_MS);
+        }
+
+        const notifySock = resolveSock(getSock, fallbackSock);
+        if (notifySock) {
+            let text =
+                `✅ Grouppost-all done\n\n` +
+                `📤 Posted: *${sent}* / ${groups.length}\n` +
+                `❌ Failed: *${failed}*`;
+            if (failedNames.length) {
+                text += `\n\n_Failed:_ ${failedNames.slice(0, 8).join(', ')}`;
+                if (failedNames.length > 8) text += ` +${failedNames.length - 8} more`;
+            }
+            await notifySock.sendMessage(chatId, { text });
+        }
+    } catch (err) {
+        logger.error(`Grouppost-all job failed: ${formatError(err)}`);
+        try {
+            const notifySock = resolveSock(getSock, fallbackSock);
+            await notifySock?.sendMessage(chatId, {
+                text:
+                    `❌ Grouppost-all stopped\n\n` +
+                    `📤 Posted: *${sent}*\n` +
+                    `❌ Failed: *${failed}*\n` +
+                    `⚠️ Error: ${formatError(err)}`,
+            });
+        } catch (notifyErr) {
+            logger.error(`Could not send grouppost-all failure notice: ${formatError(notifyErr)}`);
+        }
+    }
+}
+
 async function runScrapeJob(getSock, fallbackSock, chatId, memberScrapeController, selected) {
     try {
         const sock = resolveSock(getSock, fallbackSock);
@@ -345,8 +526,8 @@ async function runScrapeJob(getSock, fallbackSock, chatId, memberScrapeControlle
                     `📱 *DM-able:* ${dmStats.dm_count} (${dmStats.phone_dm_count} phone · ${dmStats.lid_dm_count} LID)\n\n` +
                     '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
                     '💡 `/scrapmembers` — view saved groups\n' +
-                    '💡 `/broadcast <#> <message>` — DM all members\n' +
-                    '💡 `/grouppost <#> <message>` — post in the group',
+                    '💡 `/broadcast <#> <message>` or `/broadcast all <message>`\n' +
+                    '💡 `/grouppost <#> <message>` or `/grouppost all <message>`',
             });
         }
 
