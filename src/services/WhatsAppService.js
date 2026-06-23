@@ -14,7 +14,7 @@ import qrcode from 'qrcode-terminal';
 import { logger } from '../utils/logger.js';
 import { useDatabaseAuthState } from '../utils/databaseAuthState.js';
 import { extractInstagramUrl } from '../utils/instagramUrl.js';
-import { getMessageSenderJid, getTextForUrlScan, getTextFromWAMessage, resolveConversationChatId } from '../utils/waMessage.js';
+import { getMessageSenderJid, getTextForUrlScan, getTextFromWAMessage } from '../utils/waMessage.js';
 import { resolveChannelSourceEntries } from '../utils/channelResolve.js';
 import { extractStickerFromMessage, isNewsletterChat } from '../utils/stickerExtract.js';
 import { config } from '../config/config.js';
@@ -409,7 +409,7 @@ class WhatsAppService {
             return;
         }
 
-        const chatId = resolveConversationChatId(msg.key) || msg.key.remoteJid;
+        const chatId = msg.key.remoteJid;
         const messageId = msg.key?.id;
         if (!chatId || !messageId) {
             return;
@@ -571,9 +571,14 @@ class WhatsAppService {
         if (messageText.startsWith('/')) {
             void this.commandController
                 .handleCommand(this.sock, chatId, messageText, senderJid, msg, msg.pushName)
-                .catch((err) => {
+                .catch(async (err) => {
                     logger.error('Command error:', err?.message || err);
                     logger.error('Command error stack:', err?.stack);
+                    try {
+                        await this.sock.sendMessage(chatId, {
+                            text: '⚠️ Bot could not process that command. Try again in a moment.',
+                        }, { linkPreview: false });
+                    } catch {}
                 });
             return;
         }

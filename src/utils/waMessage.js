@@ -6,7 +6,12 @@ import { normalizeMessageContent, jidNormalizedUser } from '@whiskeysockets/bail
 import { extractPhoneNumber, isDirectMessage, normalizePhoneNumber } from './permissions.js';
 import { logger } from './logger.js';
 
-const DM_SEND_TIMEOUT_MS = 15000;
+/** Strip linked-device suffix (:0) but keep user@domain intact. */
+function normalizeWaJid(raw) {
+    if (!raw) return '';
+    const jid = String(raw).replace(/:\d+(?=@)/, '');
+    return jidNormalizedUser(jid) || jid;
+}
 
 function participantToPhone(participant) {
     if (!participant) {
@@ -111,7 +116,7 @@ export function getMessageSenderJid(key) {
     }
     for (const raw of [key.participantPn, key.participantLid, key.participant, key.remoteJidAlt, key.remoteJid]) {
         if (!raw) continue;
-        const normalized = jidNormalizedUser(String(raw).split(':')[0]) || String(raw).split(':')[0];
+        const normalized = normalizeWaJid(raw);
         if (normalized) {
             return normalized;
         }
@@ -134,7 +139,7 @@ export function collectMessageSenderDmCandidates(key) {
     const out = [];
     for (const raw of [key.participantPn, key.participantLid, key.participant]) {
         if (!raw) continue;
-        const normalized = jidNormalizedUser(raw.split(':')[0]) || raw.split(':')[0];
+        const normalized = normalizeWaJid(raw);
         if (!normalized || seen.has(normalized)) continue;
         seen.add(normalized);
         out.push(normalized);
@@ -398,8 +403,7 @@ export function resolveConversationChatId(key) {
     if (!key?.remoteJid) {
         return '';
     }
-    const bare = String(key.remoteJid).split(':')[0];
-    return jidNormalizedUser(bare) || bare;
+    return normalizeWaJid(key.remoteJid);
 }
 
 /**
@@ -413,7 +417,7 @@ export function collectDirectMessageSendTargets(key, chatId) {
     const out = [];
     const add = (raw) => {
         if (!raw) return;
-        const jid = jidNormalizedUser(String(raw).split(':')[0]) || String(raw).split(':')[0];
+        const jid = normalizeWaJid(raw);
         if (!jid || seen.has(jid)) return;
         seen.add(jid);
         out.push(jid);
@@ -469,7 +473,7 @@ export function getSafeSendOptions(waMessage, extra = {}) {
 }
 
 /**
- * Send a message with DM fallbacks (multiple JIDs + timeout). Groups use a single send.
+ * Send a message with DM fallbacks on failure. Groups use a single direct send.
  * @param {import('@whiskeysockets/baileys').WASocket} sock
  * @param {string} chatId
  * @param {object} content
@@ -478,41 +482,64 @@ export function getSafeSendOptions(waMessage, extra = {}) {
  * @returns {Promise<object>}
  */
 export async function safeSendMessage(sock, chatId, content, waMessage = null, extraOpts = {}) {
-    const sendOpts = getSafeSendOptions(waMessage, extraOpts);
+    if (!sock?.sendMessage) {
+        throw new Error('WhatsApp socket not ready');
+    }
+
     const resolvedChatId = chatId || resolveConversationChatId(waMessage?.key);
+    if (!resolvedChatId) {
+        throw new Error('No chat id for reply');
+    }
 
-    const sendOnce = (jid) =>
-        Promise.race([
-            sock.sendMessage(jid, content, sendOpts),
-            new Promise((_, reject) => {
-                setTimeout(() => reject(new Error(`send timeout (${jid})`)), DM_SEND_TIMEOUT_MS);
-            }),
-        ]);
+    const primaryOpts = getSafeSendOptions(waMessage, extraOpts);
 
-    if (!isDirectMessage(resolvedChatId)) {
-        const sent = await sendOnce(resolvedChatId);
-        if (!sent?.key?.id) {
-            throw new Error('sendMessage returned no message id');
+    const trySend = async (jid, opts) => {
+        const sent = await sock.sendMessage(jid, content, opts);
+        if (!sent) {
+            throw new Error('sendMessage returned empty result');
         }
         return sent;
+    };
+
+    try {
+        return await trySend(resolvedChatId, primaryOpts);
+    } catch (primaryErr) {
+        logger.warn(`Send failed for ${resolvedChatId}: ${primaryErr?.message || primaryErr}`);
     }
 
-    const targets = collectDirectMessageSendTargets(waMessage?.key, resolvedChatId);
-    let lastErr;
-    for (const jid of targets) {
+    if (!isDirectMessage(resolvedChatId)) {
+        throw new Error(`Send failed for ${resolvedChatId}`);
+    }
+
+    const fallbackOpts = { linkPreview: false, ...extraOpts };
+    const alternates = collectDirectMessageSendTargets(waMessage?.key, resolvedChatId)
+        .filter((jid) => jid !== resolvedChatId);
+
+    for (const jid of alternates) {
         try {
-            const sent = await sendOnce(jid);
-            if (!sent?.key?.id) {
-                throw new Error('sendMessage returned no message id');
-            }
-            if (jid !== resolvedChatId) {
-                logger.info(`DM reply delivered via fallback JID ${jid} (chat ${resolvedChatId})`);
-            }
+            const sent = await trySend(jid, fallbackOpts);
+            logger.info(`DM reply delivered via fallback JID ${jid}`);
             return sent;
         } catch (err) {
-            lastErr = err;
-            logger.warn(`DM send failed for ${jid}: ${err?.message || err}`);
+            logger.warn(`DM fallback send failed for ${jid}: ${err?.message || err}`);
         }
     }
-    throw lastErr || new Error('DM send failed');
+
+    throw new Error(`Send failed for ${resolvedChatId}`);
+}
+
+/**
+ * Last-resort plain send — no quotes, no fallbacks. Used for error notices.
+ * @param {import('@whiskeysockets/baileys').WASocket} sock
+ * @param {string} chatId
+ * @param {object} content
+ */
+export async function plainSendMessage(sock, chatId, content) {
+    if (!sock?.sendMessage || !chatId) return null;
+    try {
+        return await sock.sendMessage(chatId, content, { linkPreview: false });
+    } catch (err) {
+        logger.warn(`plainSendMessage failed for ${chatId}: ${err?.message || err}`);
+        return null;
+    }
 }
