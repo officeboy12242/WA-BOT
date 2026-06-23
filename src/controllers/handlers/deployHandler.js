@@ -40,7 +40,7 @@ async function getLatestCommitMessage() {
     }
 }
 
-async function pollDeployStatus(deployId, initialNotifyCallback) {
+async function pollDeployStatus(deployId, sock, chatId, deployMsgKey, initialNotifyCallback) {
     const startTime = Date.now();
 
     const poll = async () => {
@@ -53,6 +53,9 @@ async function pollDeployStatus(deployId, initialNotifyCallback) {
             logger.debug(`Deploy ${deployId} status: ${status}`);
 
             if (status === 'live') {
+                try {
+                    await sock.sendMessage(chatId, { delete: deployMsgKey });
+                } catch { }
                 await initialNotifyCallback({
                     status: 'complete',
                     message: '✅ *Deploy complete!*\n\n🚀 Bot is live with latest code.',
@@ -61,6 +64,9 @@ async function pollDeployStatus(deployId, initialNotifyCallback) {
             }
 
             if (status === 'canceled' || status === 'build_failed' || status === 'deploy_failed') {
+                try {
+                    await sock.sendMessage(chatId, { delete: deployMsgKey });
+                } catch { }
                 await initialNotifyCallback({
                     status: 'failed',
                     message: `❌ *Deploy failed* — ${status}`,
@@ -69,6 +75,9 @@ async function pollDeployStatus(deployId, initialNotifyCallback) {
             }
 
             if (Date.now() - startTime > MAX_POLL_MS) {
+                try {
+                    await sock.sendMessage(chatId, { delete: deployMsgKey });
+                } catch { }
                 await initialNotifyCallback({
                     status: 'timeout',
                     message: '⏱️ *Deploy timeout* — still building. Check Render dashboard for details.',
@@ -96,41 +105,41 @@ export async function handleDeploy(sock, chatId, senderJid, originalMsg) {
         return;
     }
 
-    await sock.sendMessage(chatId, {
-        text: '⏳ Checking latest commit…',
-    }, { quoted: originalMsg });
-
     try {
         const commitMsg = await getLatestCommitMessage();
 
-        await sock.sendMessage(chatId, {
+        const deployMsg = await sock.sendMessage(chatId, {
             text: '⏳ Triggering Render deploy…',
         }, { quoted: originalMsg });
 
-        const deploy = await renderFetch(
+        const deployId = (await renderFetch(
             `/services/${config.RENDER_SERVICE_ID}/deploys`,
             'POST',
             { clearCache: 'do_not_clear' },
-        );
+        )).id;
 
-        const deployId = deploy.id || '?';
-        const status = deploy.status || 'created';
-
-        await sock.sendMessage(chatId, {
-            text:
-                `📤 *Deploy started*\n\n` +
-                `💬 *Commit:* ${commitMsg}\n` +
-                `📊 *Status:* ${status}\n\n` +
-                `_Polling for completion… Will notify when done._`,
-        }, { quoted: originalMsg });
+        if (deployMsg) {
+            try {
+                await sock.sendMessage(chatId, {
+                    text:
+                        `📤 *Deploy started*\n\n` +
+                        `💬 *Commit:* ${commitMsg}\n` +
+                        `🔄 *Status:* Building…\n\n` +
+                        `_Polling for completion…_`,
+                    edit: deployMsg.key,
+                });
+            } catch {
+                // If edit fails, just continue — polling will delete and resend
+            }
+        }
 
         logger.info(`Render deploy triggered by ${senderJid}: deploy=${deployId} commit=${commitMsg}`);
 
-        pollDeployStatus(deployId, async (result) => {
+        pollDeployStatus(deployId, sock, chatId, deployMsg?.key, async (result) => {
             try {
                 await sock.sendMessage(chatId, {
                     text: result.message,
-                });
+                }, { quoted: originalMsg });
             } catch (err) {
                 logger.warn(`Could not send deploy completion notice: ${err.message}`);
             }
