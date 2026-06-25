@@ -19,6 +19,7 @@ import { resolveChannelSourceEntries } from '../utils/channelResolve.js';
 import { extractStickerFromMessage, isNewsletterChat } from '../utils/stickerExtract.js';
 import { isStickerDownloadReady } from '../utils/stickerDownload.js';
 import { groupMessageTracker } from '../utils/groupMessageTracker.js';
+import { groupParticipantSnapshot } from '../utils/groupParticipantSnapshot.js';
 import { config } from '../config/config.js';
 import { resolveNotificationJid, extractPhoneNumber, isBotSelfChat, getBotSelfSenderJid } from '../utils/permissions.js';
 import os from 'os';
@@ -321,6 +322,24 @@ class WhatsAppService {
                         logger.info(`  - ${chat.subject}: ${chat.id}`);
                     });
                     await this.resolveStickerSourceChannels();
+
+                    if (this.groupManager) {
+                        try {
+                            const welcomeGroups = await this.groupManager.getWelcomeEnabledGroups();
+                            for (const row of welcomeGroups) {
+                                await groupParticipantSnapshot.seedGroup(this.sock, row.group_id);
+                            }
+                            if (welcomeGroups.length) {
+                                logger.info(`👋 Pre-seeded ${welcomeGroups.length} welcome-enabled group(s)`);
+                            }
+                        } catch (err) {
+                            logger.warn(`Welcome group pre-seed failed: ${err.message}`);
+                        }
+                    }
+
+                    void groupParticipantSnapshot.seedAllGroups(this.sock).catch((err) => {
+                        logger.warn(`Participant snapshot seed failed: ${err.message}`);
+                    });
                     
                     // Send startup notification
                     await this._sendStartupNotification();
@@ -368,6 +387,16 @@ class WhatsAppService {
                 this._cacheIncomingMessage(msg);
 
                 const chatId = msg.key?.remoteJid;
+
+                // Join stubs often arrive as type=append with no message body
+                if (chatId?.endsWith('@g.us') && msg.messageStubType != null) {
+                    void this.commandController
+                        .handleJoinStubMessage(this.sock, msg)
+                        .catch((err) => {
+                            logger.error('Join stub welcome error:', err?.message || err);
+                        });
+                }
+
                 const stickerPayload = extractStickerFromMessage(msg.message);
 
                 if (type !== 'notify') {
@@ -458,11 +487,7 @@ class WhatsAppService {
     }
 
     async processIncomingMessage(msg) {
-        if (!msg?.message) {
-            return;
-        }
-
-        const chatId = resolveConversationChatId(msg.key) || msg.key.remoteJid;
+        const chatId = resolveConversationChatId(msg.key) || msg.key?.remoteJid;
         const messageId = msg.key?.id;
         if (!chatId || !messageId) {
             return;
@@ -473,8 +498,12 @@ class WhatsAppService {
             return;
         }
 
-        // Skip system/stub messages (joins, leaves, subject changes, etc.)
+        // System/stub messages — join welcome handled in messages.upsert
         if (msg.messageStubType !== undefined && msg.messageStubType !== null) {
+            return;
+        }
+
+        if (!msg?.message) {
             return;
         }
 
