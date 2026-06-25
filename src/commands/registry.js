@@ -234,6 +234,20 @@ export const COMMAND_REGISTRY = [
         help: 'Clear all warnings for a member (reply/@tag/phone)',
     },
     {
+        names: ['/dellast', '/del'],
+        key: 'dellast',
+        scope: 'group_only',
+        role: 'admins',
+        help: 'Delete messages — `/dellast 20`, reply + `/del`, or `/delall` (bot must be admin)',
+    },
+    {
+        names: ['/delall'],
+        key: 'delall',
+        scope: 'group_only',
+        role: 'admins',
+        help: 'Delete all tracked messages in group (up to 500)',
+    },
+    {
         names: ['/groups'],
         key: 'groups',
         scope: 'any',
