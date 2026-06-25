@@ -87,6 +87,8 @@ import {
     handleClearWarns,
 } from './handlers/warnHandlers.js';
 
+import { handleDelLast } from './handlers/deleteHandlers.js';
+
 class CommandController {
     constructor(database, botState, groupManager, newsController = null, movieController = null, userManager = null, stickerController = null, botSettings = null, githubTrendingController = null, memberScrapeController = null, warnDatabase = null, authDatabase = null) {
         this.database = database;
@@ -242,6 +244,10 @@ class CommandController {
             case 'mywarns':    await handleMyWarns(sock, chatId, senderJid, ctx); break;
             case 'warns':      await handleWarns(sock, chatId, senderJid, args, originalMsg, ctx); break;
             case 'clearwarns': await handleClearWarns(sock, chatId, senderJid, args, originalMsg, ctx); break;
+            case 'dellast':
+            case 'delall':
+                await handleDelLast(sock, chatId, args, originalMsg, ctx);
+                break;
             case 'movieon':    await handleMovieOn(sock, chatId, senderJid, ctx); break;
             case 'movieoff':   await handleMovieOff(sock, chatId, senderJid, ctx); break;
             case 'trending':   await handleTrending(sock, chatId, senderJid, args, ctx); break;

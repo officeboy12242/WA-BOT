@@ -18,6 +18,7 @@ import { rememberLidPnFromMessageKey } from '../utils/lid.js';
 import { resolveChannelSourceEntries } from '../utils/channelResolve.js';
 import { extractStickerFromMessage, isNewsletterChat } from '../utils/stickerExtract.js';
 import { isStickerDownloadReady } from '../utils/stickerDownload.js';
+import { groupMessageTracker } from '../utils/groupMessageTracker.js';
 import { config } from '../config/config.js';
 import { resolveNotificationJid, extractPhoneNumber, isBotSelfChat, getBotSelfSenderJid } from '../utils/permissions.js';
 import os from 'os';
@@ -398,6 +399,7 @@ class WhatsAppService {
 
     _cacheIncomingMessage(msg) {
         if (!msg?.message || !msg.key?.remoteJid || !msg.key?.id) return;
+        groupMessageTracker.track(msg);
         if (this._messageCache.size >= this._messageCacheMax) {
             const oldest = this._messageCache.keys().next().value;
             if (oldest) this._messageCache.delete(oldest);
