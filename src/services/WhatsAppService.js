@@ -342,16 +342,26 @@ class WhatsAppService {
 
         this.sock.ev.on('messages.update', (updates) => {
             if (!this.stickerForwarder) return;
-            
+
             for (const update of updates) {
                 const chatId = update.key?.remoteJid;
-                
-                if (!isNewsletterChat(chatId) || !update.update?.message) continue;
+                if (!chatId || !update.update?.message) continue;
                 if (!extractStickerFromMessage(update.update.message)) continue;
                 if (!this.stickerForwarder.shouldForwardFrom(chatId)) continue;
-                
+
+                const cacheKey = `${chatId}:${update.key.id}`;
+                const cached = this._messageCache.get(cacheKey);
+                const mergedMessage = cached
+                    ? { ...cached, ...update.update.message }
+                    : update.update.message;
+
                 void this.stickerForwarder
-                    .forwardSticker(this.sock, { key: update.key, message: update.update.message }, chatId, { isRetry: true })
+                    .forwardSticker(
+                        this.sock,
+                        { key: update.key, message: mergedMessage },
+                        chatId,
+                        { isRetry: true },
+                    )
                     .catch(() => {});
             }
         });
@@ -361,11 +371,13 @@ class WhatsAppService {
                 this._cacheIncomingMessage(msg);
 
                 const chatId = msg.key?.remoteJid;
-                const isChannelMsg = isNewsletterChat(chatId);
+                const stickerPayload = extractStickerFromMessage(msg.message);
 
                 if (type !== 'notify') {
-                    if (isChannelMsg && this.stickerForwarder && extractStickerFromMessage(msg.message)) {
-                        void this._forwardChannelSticker(msg, chatId);
+                    if (stickerPayload && this.stickerForwarder?.shouldForwardFrom(chatId)) {
+                        void this.stickerForwarder
+                            .forwardSticker(this.sock, msg, chatId, { isRetry: true })
+                            .catch(() => {});
                     }
                     continue;
                 }
@@ -470,10 +482,11 @@ class WhatsAppService {
         const isCommandMessage = messageTextPreview.startsWith('/');
 
         const isChannel = isNewsletterChat(chatId);
+        const stickerPayloadEarly = extractStickerFromMessage(msg.message);
 
-        // Skip old messages (more than 60s) — channels are exempt so stickers are never dropped
+        // Skip old messages — stickers are exempt (history sync / delayed decrypt)
         const messageTimestamp = msg.messageTimestamp;
-        if (messageTimestamp && !isChannel) {
+        if (messageTimestamp && !isChannel && !stickerPayloadEarly) {
             const msgTime = typeof messageTimestamp === 'number' 
                 ? messageTimestamp * 1000 
                 : Number(messageTimestamp) * 1000;
@@ -520,7 +533,7 @@ class WhatsAppService {
             return;
         }
 
-        const stickerPayload = extractStickerFromMessage(msg.message);
+        const stickerPayload = stickerPayloadEarly;
 
         if (stickerPayload && this.stickerForwarder) {
             const allowChannelSticker = isChannel && this.stickerForwarder.shouldForwardFrom(chatId);

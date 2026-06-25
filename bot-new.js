@@ -191,6 +191,7 @@ class WhatsAppCourseBot {
                     config.STICKER_PACK_AUTHOR,
                     config.STICKER_SOURCE_CHANNELS
                 );
+                this.stickerForwarder.startBackgroundWorkers();
                 this.channelStickerPoller = new ChannelStickerPoller(this.stickerForwarder);
                 const channelNote = config.STICKER_SOURCE_CHANNELS.length
                     ? `${config.STICKER_SOURCE_CHANNELS.length} channel(s)`

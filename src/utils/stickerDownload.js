@@ -173,22 +173,30 @@ export async function downloadStickerBuffer(sock, waMessage) {
         throw new Error('Channel sticker download failed after all methods');
     }
 
-    // Group stickers - try multiple methods with retries
+    // Group stickers — try multiple methods with retries
     let lastError = null;
-    
+
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         try {
-            // Method 1: downloadMediaMessage (preferred)
+            if (sticker) {
+                try {
+                    const directBuffer = await tryDirectDownload(sticker.url, sticker.directPath);
+                    if (directBuffer?.length > 100) {
+                        return directBuffer;
+                    }
+                } catch (err) {
+                    lastError = err;
+                }
+            }
+
             if (sticker && hasMediaKey(sticker)) {
                 try {
                     return await tryDownloadMediaMessage(sock, waMessage);
                 } catch (err) {
-                    // Fall through to method 2
                     lastError = err;
                 }
             }
-            
-            // Method 2: downloadContentFromMessage
+
             if (sticker) {
                 try {
                     return await tryDownloadContent(sock, sticker);
@@ -196,8 +204,7 @@ export async function downloadStickerBuffer(sock, waMessage) {
                     lastError = err;
                 }
             }
-            
-            // Method 3: Try downloadMediaMessage without mediaKey check
+
             if (sticker) {
                 return await tryDownloadMediaMessage(sock, waMessage);
             }
@@ -205,7 +212,7 @@ export async function downloadStickerBuffer(sock, waMessage) {
             lastError = err;
             logger.debug(`Sticker download attempt ${attempt} failed: ${err.message}`);
         }
-        
+
         if (attempt < MAX_RETRIES) {
             logger.debug(`Retrying sticker download in ${RETRY_DELAY_MS * attempt}ms...`);
             await delay(RETRY_DELAY_MS * attempt);
