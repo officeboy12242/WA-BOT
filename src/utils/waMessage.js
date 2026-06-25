@@ -277,6 +277,73 @@ export function getQuotedPushName(waMessage) {
 }
 
 /**
+ * Text from a quoted/replied message (preserves newlines).
+ * @param {import('baileys').proto.IWebMessageInfo | null | undefined} waMessage
+ * @returns {string}
+ */
+export function getQuotedMessageText(waMessage) {
+    const quoted = buildQuotedTargetMessage(waMessage);
+    if (!quoted?.message) {
+        return '';
+    }
+    return getTextFromWAMessage(quoted.message);
+}
+
+/**
+ * Extract command body after the command name and optional first arg, preserving newlines.
+ * @param {string} fullCommand raw message text e.g. "/grouppost all\\nLine1\\nLine2"
+ * @param {string|string[]} commandNames without leading slash
+ * @param {{ skipAllToken?: boolean, skipFirstToken?: boolean }} opts
+ * @returns {string}
+ */
+export function extractCommandPayload(fullCommand, commandNames, opts = {}) {
+    let rest = String(fullCommand || '').trim();
+    const names = (Array.isArray(commandNames) ? commandNames : [commandNames])
+        .map((n) => String(n).replace(/^\//, ''));
+
+    const cmdPattern = names.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+    const cmdRe = new RegExp(`^(?:\\/(?:${cmdPattern}))(?:\\s+|$)`, 'i');
+    if (!cmdRe.test(rest)) {
+        return '';
+    }
+    rest = rest.replace(cmdRe, '');
+
+    if (opts.skipAllToken) {
+        rest = rest.replace(/^all(?:\s+|$)/i, '');
+    } else if (opts.skipFirstToken) {
+        rest = rest.replace(/^\S+(?:\s+|$)/, '');
+    }
+
+    return rest.replace(/^\s+/, '');
+}
+
+/**
+ * Message body for /broadcast and /grouppost — inline text (multiline) or replied message.
+ * @param {string} fullCommand
+ * @param {string|string[]} commandNames
+ * @param {{ type: 'all' | 'index' }} mode
+ * @param {import('baileys').proto.IWebMessageInfo | null | undefined} originalMsg
+ * @returns {string}
+ */
+export function resolvePostMessage(fullCommand, commandNames, mode, originalMsg) {
+    const extractOpts = mode.type === 'all'
+        ? { skipAllToken: true }
+        : { skipFirstToken: true };
+
+    const inline = extractCommandPayload(fullCommand, commandNames, extractOpts);
+    if (inline.trim()) {
+        return inline;
+    }
+
+    const quoted = getQuotedMessageText(originalMsg);
+    if (quoted.trim()) {
+        return quoted;
+    }
+
+    return inline;
+}
+
+/**
  * @param {import('baileys').proto.IWebMessageInfo | null | undefined} waMessage
  * @returns {string[]}
  */

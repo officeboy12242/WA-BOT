@@ -5,6 +5,10 @@
 import { jidNormalizedUser } from 'baileys';
 import { logger } from '../../utils/logger.js';
 import { extractPhoneNumber } from '../../utils/permissions.js';
+import { resolvePostMessage } from '../../utils/waMessage.js';
+
+const BROADCAST_CMDS = ['broadcast'];
+const GROUPPOST_CMDS = ['grouppost', 'groupmsg'];
 
 const SCRAP_SESSION_MS = 5 * 60 * 1000;
 const BROADCAST_DELAY_MS = 3500;
@@ -181,7 +185,7 @@ export async function handleScrapMembers(sock, chatId, senderJid, { memberScrape
     await sock.sendMessage(chatId, { text: formatGroupList(groups, { stored: true }) }, { quoted: originalMsg });
 }
 
-export async function handleBroadcast(sock, chatId, senderJid, args, { memberScrapeController, isOwnerFromJid, getSock, originalMsg, authDatabase }) {
+export async function handleBroadcast(sock, chatId, senderJid, args, { memberScrapeController, isOwnerFromJid, getSock, originalMsg, authDatabase, fullCommand }) {
     try {
         const isOwner = await isOwnerFromJid(sock, chatId, senderJid);
         if (!isOwner) {
@@ -196,7 +200,12 @@ export async function handleBroadcast(sock, chatId, senderJid, args, { memberScr
 
         const firstArg = args[0]?.toLowerCase();
         const isAll = firstArg === 'all';
-        const message = args.slice(1).join(' ').trim();
+        const message = resolvePostMessage(
+            fullCommand || '',
+            BROADCAST_CMDS,
+            isAll ? { type: 'all' } : { type: 'index' },
+            originalMsg,
+        ).trim();
 
         if (isAll) {
             if (!message) {
@@ -204,6 +213,7 @@ export async function handleBroadcast(sock, chatId, senderJid, args, { memberScr
                     text:
                         '❌ Usage: `/broadcast all <message>`\n\n' +
                         'DMs every unique member from *all* scraped groups (one message per person).\n' +
+                        'Multiline messages are preserved. Or *reply* to a message with `/broadcast all`.\n' +
                         'Run `/scrap` on each group first, then `/scrapmembers` to verify.',
                 }, { quoted: originalMsg });
                 return;
@@ -243,6 +253,7 @@ export async function handleBroadcast(sock, chatId, senderJid, args, { memberScr
                     '❌ Usage:\n' +
                     '• `/broadcast <group#> <message>`\n' +
                     '• `/broadcast all <message>`\n\n' +
+                    'Multiline format is kept. Or *reply* to a message with `/broadcast <#>`.\n' +
                     'Use `/scrapmembers` to see group numbers from scraped data.',
             }, { quoted: originalMsg });
             return;
@@ -390,7 +401,7 @@ async function runBroadcastJob(getSock, fallbackSock, chatId, selected, message,
     }
 }
 
-export async function handleGroupPost(sock, chatId, senderJid, args, { memberScrapeController, isOwnerFromJid, getSock, originalMsg }) {
+export async function handleGroupPost(sock, chatId, senderJid, args, { memberScrapeController, isOwnerFromJid, getSock, originalMsg, fullCommand }) {
     try {
         const isOwner = await isOwnerFromJid(sock, chatId, senderJid);
         if (!isOwner) {
@@ -405,14 +416,20 @@ export async function handleGroupPost(sock, chatId, senderJid, args, { memberScr
 
         const firstArg = args[0]?.toLowerCase();
         const isAll = firstArg === 'all';
-        const message = args.slice(1).join(' ').trim();
+        const message = resolvePostMessage(
+            fullCommand || '',
+            GROUPPOST_CMDS,
+            isAll ? { type: 'all' } : { type: 'index' },
+            originalMsg,
+        ).trim();
 
         if (isAll) {
             if (!message) {
                 await sock.sendMessage(chatId, {
                     text:
                         '❌ Usage: `/grouppost all <message>`\n\n' +
-                        'Posts the same message in every group the bot is in.',
+                        'Posts the same message in every group the bot is in.\n' +
+                        'Multiline format is kept. Or *reply* to a message with `/grouppost all`.',
                 }, { quoted: originalMsg });
                 return;
             }
@@ -443,6 +460,7 @@ export async function handleGroupPost(sock, chatId, senderJid, args, { memberScr
                     '❌ Usage:\n' +
                     '• `/grouppost <group#> <message>`\n' +
                     '• `/grouppost all <message>`\n\n' +
+                    'Multiline format is kept. Or *reply* to a message with `/grouppost <#>`.\n' +
                     'Posts in the WhatsApp group (everyone including LID users).\n' +
                     'Use `/scrapmembers` for group numbers.',
             }, { quoted: originalMsg });
