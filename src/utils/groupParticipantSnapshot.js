@@ -21,6 +21,15 @@ function participantKeys(p) {
     return keys;
 }
 
+function keysForMemberEntry(entry) {
+    const keys = new Set();
+    const jid = normalizeParticipantEntry(entry);
+    if (jid) keys.add(jid);
+    const phone = normalizePhoneNumber(extractPhoneNumber(jid || ''));
+    if (phone) keys.add(phone);
+    return keys;
+}
+
 class GroupParticipantSnapshot {
     constructor() {
         /** @type {Map<string, Set<string>>} */
@@ -116,6 +125,36 @@ class GroupParticipantSnapshot {
      */
     async refresh(sock, groupId) {
         await this.seedGroup(sock, groupId);
+    }
+
+    /**
+     * @param {object[]} participants
+     * @returns {Set<string>}
+     */
+    buildMemberKeySet(participants) {
+        const keys = new Set();
+        for (const p of participants || []) {
+            for (const k of participantKeys(p)) {
+                keys.add(k);
+            }
+        }
+        return keys;
+    }
+
+    /**
+     * @param {string | object} entry
+     * @param {Set<string>} memberKeys
+     */
+    isKeyInMemberSet(entry, memberKeys) {
+        if (!memberKeys?.size) {
+            return false;
+        }
+        for (const k of keysForMemberEntry(entry)) {
+            if (memberKeys.has(k)) {
+                return true;
+            }
+        }
+        return false;
     }
 }
 
