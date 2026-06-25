@@ -414,14 +414,14 @@ export const COMMAND_REGISTRY = [
         key: 'broadcast',
         scope: 'any',
         role: 'owner',
-        help: 'DM scraped members — `/broadcast <#> <msg>` or `/broadcast all <msg>` (owner only)',
+        help: 'DM scraped members — multiline/reply supported — `/broadcast <#> <msg>` or `/broadcast all <msg>` (owner only)',
     },
     {
         names: ['/grouppost', '/groupmsg'],
         key: 'grouppost',
         scope: 'any',
         role: 'owner',
-        help: 'Post in group(s) — `/grouppost <#> <msg>` or `/grouppost all <msg>` (owner only)',
+        help: 'Post in group(s) — multiline/reply supported — `/grouppost <#> <msg>` or `/grouppost all <msg>` (owner only)',
     },
     {
         names: ['/driveurl', '/drivesource'],

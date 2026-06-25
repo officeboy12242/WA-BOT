@@ -212,7 +212,7 @@ class CommandController {
             return;
         }
 
-        const ctx = { ...this._ctx(), originalMsg, replyOpts: getSafeSendOptions(originalMsg) };
+        const ctx = { ...this._ctx(), originalMsg, replyOpts: getSafeSendOptions(originalMsg), fullCommand: command.trim() };
 
         switch (def.key) {
             /* ── Core ── */
