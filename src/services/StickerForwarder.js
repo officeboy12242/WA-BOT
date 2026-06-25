@@ -1,13 +1,33 @@
 /**
  * Sticker Forwarder Service
  * Forwards stickers from groups and joined channels to target groups.
- * Uses a queue to ensure no stickers are skipped when they arrive rapidly.
+ * Queue + retry loop — stickers are only marked done after a successful send.
  */
 
 import { Sticker } from 'wa-sticker-formatter';
 import { logger } from '../utils/logger.js';
 import { downloadStickerBuffer } from '../utils/stickerDownload.js';
 import { extractStickerFromMessage, isNewsletterChat } from '../utils/stickerExtract.js';
+
+const MAX_QUEUE_SIZE = 500;
+const MAX_COMPLETED = 2000;
+const MAX_RETRIES = 6;
+const RETRY_DELAYS_MS = [2000, 5000, 10000, 20000, 45000, 90000];
+const INTER_SEND_DELAY_MS = 400;
+const RETRY_TICK_MS = 3000;
+
+function stickerKeys(waMessage, fromChat) {
+    const stickerPayload = extractStickerFromMessage(waMessage?.message);
+    const msgId = waMessage?.key?.id || null;
+    const contentHash = stickerPayload?.fileSha256
+        ? Buffer.from(stickerPayload.fileSha256).toString('hex')
+        : null;
+
+    return {
+        trackId: msgId ? `${fromChat}:${msgId}` : null,
+        contentHash,
+    };
+}
 
 class StickerForwarder {
     /**
@@ -29,15 +49,38 @@ class StickerForwarder {
         this.countDuplicates = 0;
         this.countFromChannels = 0;
         this.countQueued = 0;
+        this.countRetried = 0;
 
-        this.recentStickers = new Map();
-        /** Message IDs whose forward failed — allow the update handler to retry. */
-        this.failedIds = new Set();
-        
-        // Queue system to prevent skipping stickers
+        /** Successfully forwarded message keys */
+        this.completedTrackIds = new Set();
+        /** Successfully forwarded sticker content (fileSha256) */
+        this.completedContentHashes = new Set();
+        /** Currently being processed */
+        this.inFlightTrackIds = new Set();
+        /** trackId -> { item, attempts, nextRetryAt } */
+        this.retryLater = new Map();
+
         this.queue = [];
         this.isProcessing = false;
-        this.maxQueueSize = 200;
+        this._retryTimer = null;
+    }
+
+    startBackgroundWorkers() {
+        if (this._retryTimer) return;
+        this._retryTimer = setInterval(() => {
+            void this._drainRetryLater();
+        }, RETRY_TICK_MS);
+        if (this._retryTimer.unref) {
+            this._retryTimer.unref();
+        }
+        logger.info('🔄 Sticker forward retry worker started');
+    }
+
+    stopBackgroundWorkers() {
+        if (this._retryTimer) {
+            clearInterval(this._retryTimer);
+            this._retryTimer = null;
+        }
     }
 
     setSourceChannels(jids, nameByJid = new Map()) {
@@ -64,58 +107,83 @@ class StickerForwarder {
         return false;
     }
 
+    wasForwarded(trackId, contentHash) {
+        if (trackId && this.completedTrackIds.has(trackId)) {
+            return true;
+        }
+        if (contentHash && this.completedContentHashes.has(contentHash)) {
+            return true;
+        }
+        return false;
+    }
+
     /**
-     * Add sticker to queue for processing (public method)
-     * This ensures no stickers are skipped even when they arrive rapidly
+     * Queue a sticker for forwarding. Dedupes only completed forwards, not failures.
      */
-    async forwardSticker(sock, waMessage, fromChat, { isRetry = false } = {}) {
+    async forwardSticker(sock, waMessage, fromChat, { isRetry = false, isBackfill = false } = {}) {
         if (!this.shouldForwardFrom(fromChat)) {
             return false;
         }
 
-        const stickerPayload = extractStickerFromMessage(waMessage?.message);
-        const messageId =
-            (stickerPayload?.fileSha256
-                ? Buffer.from(stickerPayload.fileSha256).toString('hex')
-                : null) || waMessage?.key?.id || null;
+        const { trackId, contentHash } = stickerKeys(waMessage, fromChat);
 
-        if (messageId && this.recentStickers.has(messageId)) {
-            if (isRetry && this.failedIds.has(messageId)) {
-                this.failedIds.delete(messageId);
-                logger.info(`🔄 Retrying previously-failed sticker ${messageId.slice(0, 12)}…`);
-            } else {
-                this.countDuplicates++;
-                return false;
-            }
+        if (!trackId && !contentHash) {
+            return false;
         }
 
-        if (messageId) {
-            this.recentStickers.set(messageId, Date.now());
-            if (this.recentStickers.size > 500) {
-                const firstKey = this.recentStickers.keys().next().value;
-                this.recentStickers.delete(firstKey);
-            }
+        if (this.wasForwarded(trackId, contentHash)) {
+            this.countDuplicates++;
+            return false;
         }
 
-        if (this.queue.length >= this.maxQueueSize) {
-            logger.warn(`⚠️ Sticker queue full (${this.maxQueueSize}), dropping oldest`);
-            this.queue.shift();
+        if (trackId && this.inFlightTrackIds.has(trackId) && !isRetry) {
+            return false;
         }
 
-        this.queue.push({ sock, waMessage, fromChat, messageId });
+        if (trackId && this.retryLater.has(trackId) && !isRetry) {
+            const pending = this.retryLater.get(trackId);
+            pending.item = { sock, waMessage, fromChat, trackId, contentHash };
+            return true;
+        }
+
+        if (this.queue.length >= MAX_QUEUE_SIZE) {
+            logger.warn(`⚠️ Sticker queue at ${MAX_QUEUE_SIZE} — processing immediately`);
+            void this._processQueue();
+        }
+
+        this.queue.push({ sock, waMessage, fromChat, trackId, contentHash, isBackfill });
         this.countQueued++;
-        
-        const isChannel = isNewsletterChat(fromChat);
-        logger.info(`📥 Sticker queued from ${isChannel ? 'channel' : 'group'} | Queue: ${this.queue.length}${isRetry ? ' (retry)' : ''}`);
 
-        this._processQueue();
-        
+        const isChannel = isNewsletterChat(fromChat);
+        logger.info(
+            `📥 Sticker queued from ${isChannel ? 'channel' : 'group'} | ` +
+                `Queue: ${this.queue.length}${isRetry ? ' (retry)' : ''}${isBackfill ? ' (backfill)' : ''}`
+        );
+
+        void this._processQueue();
         return true;
     }
 
-    /**
-     * Process queue one at a time to prevent race conditions
-     */
+    async _drainRetryLater() {
+        if (!this.retryLater.size) return;
+
+        const now = Date.now();
+        for (const [trackId, entry] of this.retryLater) {
+            if (entry.nextRetryAt > now) continue;
+            if (this.inFlightTrackIds.has(trackId)) continue;
+
+            this.retryLater.delete(trackId);
+            this.countRetried++;
+            logger.info(`🔄 Auto-retry sticker ${trackId.slice(-16)} (attempt ${entry.attempts + 1})`);
+            await this.forwardSticker(
+                entry.item.sock,
+                entry.item.waMessage,
+                entry.item.fromChat,
+                { isRetry: true },
+            );
+        }
+    }
+
     async _processQueue() {
         if (this.isProcessing || this.queue.length === 0) {
             return;
@@ -125,37 +193,95 @@ class StickerForwarder {
 
         while (this.queue.length > 0) {
             const item = this.queue.shift();
+            if (item.trackId) {
+                this.inFlightTrackIds.add(item.trackId);
+            }
+
             try {
-                await this._processSticker(item);
+                const ok = await this._processSticker(item);
+                if (ok && item.trackId) {
+                    this.retryLater.delete(item.trackId);
+                }
             } catch (error) {
                 this.countErrors++;
-                if (item.messageId) {
-                    this.failedIds.add(item.messageId);
+                this._scheduleRetry(item, error);
+            } finally {
+                if (item.trackId) {
+                    this.inFlightTrackIds.delete(item.trackId);
                 }
-                logger.error(`❌ Queue sticker error (${item.messageId?.slice(0, 12) || '?'}): ${error.message}`);
             }
-            
+
             if (this.queue.length > 0) {
-                await new Promise(r => setTimeout(r, 1000));
+                await new Promise((r) => setTimeout(r, INTER_SEND_DELAY_MS));
             }
         }
 
         this.isProcessing = false;
     }
 
+    _scheduleRetry(item, error) {
+        const trackId = item.trackId;
+        if (!trackId) {
+            logger.error(`❌ Sticker error (no track id): ${error.message}`);
+            return;
+        }
+
+        const prev = this.retryLater.get(trackId);
+        const attempts = (prev?.attempts ?? 0) + 1;
+
+        if (attempts >= MAX_RETRIES) {
+            this.retryLater.delete(trackId);
+            logger.error(`❌ Sticker gave up after ${MAX_RETRIES} tries (${trackId.slice(-16)}): ${error.message}`);
+            return;
+        }
+
+        const delay = RETRY_DELAYS_MS[Math.min(attempts - 1, RETRY_DELAYS_MS.length - 1)];
+        this.retryLater.set(trackId, {
+            item,
+            attempts,
+            nextRetryAt: Date.now() + delay,
+        });
+        logger.warn(
+            `⏳ Sticker retry ${attempts}/${MAX_RETRIES} in ${Math.round(delay / 1000)}s ` +
+                `(${trackId.slice(-16)}): ${error.message}`
+        );
+    }
+
+    _markCompleted(trackId, contentHash) {
+        if (trackId) {
+            this.completedTrackIds.add(trackId);
+            if (this.completedTrackIds.size > MAX_COMPLETED) {
+                const oldest = this.completedTrackIds.values().next().value;
+                this.completedTrackIds.delete(oldest);
+            }
+        }
+        if (contentHash) {
+            this.completedContentHashes.add(contentHash);
+            if (this.completedContentHashes.size > MAX_COMPLETED) {
+                const oldest = this.completedContentHashes.values().next().value;
+                this.completedContentHashes.delete(oldest);
+            }
+        }
+    }
+
     /**
-     * Actually process and forward a single sticker
+     * @returns {Promise<boolean>} true when at least one target received the sticker
      */
-    async _processSticker({ sock, waMessage, fromChat, messageId }) {
+    async _processSticker({ sock, waMessage, fromChat, trackId, contentHash }) {
         this.countReceived++;
         const isChannel = isNewsletterChat(fromChat);
-        
+
         if (isChannel) {
             this.countFromChannels++;
         }
 
+        if (this.wasForwarded(trackId, contentHash)) {
+            this.countDuplicates++;
+            return true;
+        }
+
         const buffer = await downloadStickerBuffer(sock, waMessage);
-        if (!buffer) {
+        if (!buffer?.length) {
             throw new Error('Failed to download sticker buffer');
         }
 
@@ -179,7 +305,7 @@ class StickerForwarder {
                     { sticker: stickerBuffer },
                     {
                         ephemeralExpiration: 86400,
-                        mediaUploadTimeoutMs: 60000,
+                        mediaUploadTimeoutMs: 90000,
                     }
                 )
             )
@@ -192,15 +318,19 @@ class StickerForwarder {
             }
         }
 
-        if (successCount > 0) {
-            this.countSent++;
-            const sourceLabel = isChannel ? 'channel' : 'group';
-            logger.info(
-                `✅ Sticker from ${sourceLabel} → ${successCount}/${this.targetGroups.length} groups | ` +
-                    `Sent: ${this.countSent}, Queued: ${this.countQueued}, Queue: ${this.queue.length}, ` +
-                    `Channels: ${this.countFromChannels}, Err: ${this.countErrors}`
-            );
+        if (successCount === 0) {
+            throw new Error(`Send failed to all ${this.targetGroups.length} target group(s)`);
         }
+
+        this._markCompleted(trackId, contentHash);
+        this.countSent++;
+        const sourceLabel = isChannel ? 'channel' : 'group';
+        logger.info(
+            `✅ Sticker from ${sourceLabel} → ${successCount}/${this.targetGroups.length} groups | ` +
+                `Sent: ${this.countSent}, Queue: ${this.queue.length}, Retries pending: ${this.retryLater.size}, ` +
+                `Channels: ${this.countFromChannels}, Err: ${this.countErrors}`
+        );
+        return true;
     }
 
     getStats() {
@@ -209,6 +339,8 @@ class StickerForwarder {
             received: this.countReceived,
             queued: this.countQueued,
             queueLength: this.queue.length,
+            retriesPending: this.retryLater.size,
+            retried: this.countRetried,
             fromChannels: this.countFromChannels,
             errors: this.countErrors,
             duplicates: this.countDuplicates,
@@ -223,6 +355,7 @@ class StickerForwarder {
         this.countFromChannels = 0;
         this.countErrors = 0;
         this.countDuplicates = 0;
+        this.countRetried = 0;
         logger.info('📊 Sticker stats reset');
     }
 }
