@@ -2,7 +2,6 @@
  * Tracks group participant sets to detect new joins (welcome messages).
  */
 
-import { jidNormalizedUser } from 'baileys';
 import { logger } from './logger.js';
 import { extractPhoneNumber, normalizePhoneNumber } from './permissions.js';
 import { normalizeParticipantEntry } from './welcomeMessage.js';
@@ -85,16 +84,23 @@ class GroupParticipantSnapshot {
     }
 
     /**
+     * @param {string} groupId
+     * @returns {Set<string>}
+     */
+    cloneGroupKeys(groupId) {
+        const keys = this._snapshots.get(groupId);
+        return keys?.size ? new Set(keys) : new Set();
+    }
+
+    /**
+     * Diff current group members against a frozen pre-join snapshot.
      * @param {import('baileys').WASocket} sock
      * @param {string} groupId
-     * @returns {Promise<object[]>} new participant records
+     * @param {Set<string>} baselineKeys
+     * @returns {Promise<object[]>}
      */
-    async detectNewParticipants(sock, groupId) {
-        if (!groupId?.endsWith('@g.us')) return [];
-
-        const prev = this._snapshots.get(groupId);
-        if (!prev || prev.size === 0) {
-            await this.seedGroup(sock, groupId);
+    async detectNewSince(sock, groupId, baselineKeys) {
+        if (!groupId?.endsWith('@g.us') || !baselineKeys?.size) {
             return [];
         }
 
@@ -108,7 +114,7 @@ class GroupParticipantSnapshot {
 
             if (!keys.size) continue;
 
-            const alreadyKnown = [...keys].some((k) => prev.has(k));
+            const alreadyKnown = [...keys].some((k) => baselineKeys.has(k));
             if (!alreadyKnown) {
                 newOnes.push(p);
             }
@@ -116,6 +122,23 @@ class GroupParticipantSnapshot {
 
         this._snapshots.set(groupId, current);
         return newOnes;
+    }
+
+    /**
+     * @param {import('baileys').WASocket} sock
+     * @param {string} groupId
+     * @returns {Promise<object[]>} new participant records
+     */
+    async detectNewParticipants(sock, groupId) {
+        if (!groupId?.endsWith('@g.us')) return [];
+
+        const prev = this._snapshots.get(groupId);
+        if (!prev || prev.size === 0) {
+            await this.seedGroup(sock, groupId);
+            return [];
+        }
+
+        return this.detectNewSince(sock, groupId, prev);
     }
 
     /**
@@ -161,15 +184,23 @@ class GroupParticipantSnapshot {
 export const groupParticipantSnapshot = new GroupParticipantSnapshot();
 
 /**
- * Resolve hint strings/objects to participant entries for welcome.
- * @param {Array<string | object>} hints
- * @returns {string[]}
+ * @param {object[]} participants
+ * @returns {object[]}
  */
-export function resolveJoinHints(hints) {
-    const out = [];
-    for (const hint of hints || []) {
-        const jid = normalizeParticipantEntry(hint);
-        if (jid) out.push(jid);
+export function dedupeParticipantRecords(participants) {
+    const byKey = new Map();
+
+    for (const p of participants || []) {
+        const jid = normalizeParticipantEntry(p);
+        if (!jid) {
+            continue;
+        }
+        const phone = normalizePhoneNumber(extractPhoneNumber(jid));
+        const key = phone ? `p:${phone}` : `j:${jid}`;
+        if (!byKey.has(key)) {
+            byKey.set(key, p);
+        }
     }
-    return [...new Set(out)];
+
+    return [...byKey.values()];
 }

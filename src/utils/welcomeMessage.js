@@ -12,6 +12,8 @@ import { jidNormalizedUser } from 'baileys';
 const USERNAME_PLACEHOLDER = '@username';
 const GROUP_PLACEHOLDER = '{group}';
 
+const JID_DOMAIN_RE = /@(s\.whatsapp\.net|lid(?:\.\w+)?|g\.us)$/i;
+
 export const DEFAULT_HEADER_TEMPLATE = `hey ${USERNAME_PLACEHOLDER} , welcome to "${GROUP_PLACEHOLDER}"`;
 
 /**
@@ -46,7 +48,42 @@ export function normalizeCustomWelcomePart(input) {
 }
 
 /**
+ * @param {string} jid
+ * @returns {boolean}
+ */
+export function isValidParticipantJid(jid) {
+    const normalized = typeof jid === 'string' ? jid.replace(/:\d+(?=@)/, '').trim() : '';
+    if (!normalized || !normalized.includes('@')) {
+        return false;
+    }
+    return JID_DOMAIN_RE.test(normalized);
+}
+
+function parseEmbeddedParticipantId(raw) {
+    if (typeof raw !== 'string') {
+        return '';
+    }
+    const trimmed = raw.trim();
+    if (!trimmed.startsWith('{') || !trimmed.includes('id')) {
+        return '';
+    }
+    try {
+        const parsed = JSON.parse(trimmed.replace(/'/g, '"'));
+        if (parsed?.id) {
+            return normalizeParticipantEntry(parsed.id);
+        }
+    } catch {
+        const match = trimmed.match(/['"]?id['"]?\s*[:=]\s*['"]?([^'"},\s]+)/i);
+        if (match?.[1]) {
+            return normalizeParticipantEntry(match[1]);
+        }
+    }
+    return '';
+}
+
+/**
  * Normalize Baileys participant entry (string JID or { id, lid, ... } object).
+ * Rejects display names and other non-JID strings.
  * @param {string | object | null | undefined} entry
  * @returns {string}
  */
@@ -56,18 +93,35 @@ export function normalizeParticipantEntry(entry) {
     }
     if (typeof entry === 'string') {
         let cleaned = entry.replace(/:\d+(?=@)/, '').trim();
+        if (!cleaned) {
+            return '';
+        }
+
+        const embedded = parseEmbeddedParticipantId(cleaned);
+        if (embedded) {
+            return embedded;
+        }
+
         if (!cleaned.includes('@')) {
             const digits = cleaned.replace(/\D/g, '');
             if (/^\d{10,15}$/.test(digits)) {
                 cleaned = `${digits}@s.whatsapp.net`;
+            } else {
+                return '';
             }
         }
-        return jidNormalizedUser(cleaned) || cleaned;
+
+        const normalized = jidNormalizedUser(cleaned) || cleaned;
+        return isValidParticipantJid(normalized) ? normalized : '';
     }
     if (typeof entry === 'object') {
-        const raw = entry.id || entry.jid || entry.lid || entry.phoneNumber || entry.pn || '';
+        const raw = entry.id || entry.jid || entry.lid || entry.phoneNumber || entry.pn;
         if (typeof raw === 'string' && raw) {
             return normalizeParticipantEntry(raw);
+        }
+        if (raw && typeof raw === 'object' && raw.user) {
+            const server = raw.server || 's.whatsapp.net';
+            return normalizeParticipantEntry(`${raw.user}@${server}`);
         }
     }
     return '';
@@ -78,7 +132,7 @@ export function normalizeParticipantEntry(entry) {
  * @returns {string}
  */
 export function mentionDisplayToken(jid) {
-    if (!jid) {
+    if (!jid || !isValidParticipantJid(jid)) {
         return '@member';
     }
     const user = String(jid).split('@')[0].split(':')[0];
@@ -94,7 +148,8 @@ export function mentionDisplayToken(jid) {
 export function renderWelcomeMessage(customPart, groupName, memberJid) {
     const safeGroup = groupName || 'this group';
     const template = buildWelcomeTemplate(customPart);
-    const mentionToken = mentionDisplayToken(memberJid);
+    const safeJid = isValidParticipantJid(memberJid) ? memberJid : '';
+    const mentionToken = mentionDisplayToken(safeJid);
 
     let text = template
         .split(USERNAME_PLACEHOLDER)
@@ -104,7 +159,7 @@ export function renderWelcomeMessage(customPart, groupName, memberJid) {
         .split('"Group Name"')
         .join(safeGroup);
 
-    return { text, mentions: memberJid ? [memberJid] : [] };
+    return { text, mentions: safeJid ? [safeJid] : [] };
 }
 
 /**
