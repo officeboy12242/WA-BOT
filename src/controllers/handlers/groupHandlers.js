@@ -2,15 +2,236 @@
  * Group handlers: activate, deactivate, instaon, instaoff, groups, setwc, welcome event
  */
 
+import { jidNormalizedUser } from 'baileys';
 import { logger } from '../../utils/logger.js';
 import { extractPhoneNumber } from '../../utils/permissions.js';
+import { scheduleAutoDelete, AUTO_DELETE_2_MIN } from '../../utils/autoDelete.js';
 import {
     DEFAULT_HEADER_TEMPLATE,
     formatWelcomeStatus,
     normalizeCustomWelcomePart,
+    normalizeParticipantEntry,
     previewWelcomeMessage,
     renderWelcomeMessage,
 } from '../../utils/welcomeMessage.js';
+import {
+    groupParticipantSnapshot,
+    resolveJoinHints,
+} from '../../utils/groupParticipantSnapshot.js';
+
+/** Dedupe welcome when both stub message + participants.update fire */
+const recentWelcomes = new Map();
+const WELCOME_DEDUPE_MS = 45_000;
+const WELCOME_JOIN_DELAY_MS = 2500;
+
+/** WhatsApp stub types that indicate someone joined */
+const JOIN_STUB_TYPES = new Set([
+    27, // GROUP_PARTICIPANT_ADD
+    31, // GROUP_PARTICIPANT_INVITE
+    32, // GROUP_PARTICIPANT_ADD_REQUEST
+    172, // GROUP_MEMBERSHIP_JOIN_APPROVAL
+]);
+
+const JOIN_ACTIONS = new Set(['add', 'linked', 'invite']);
+
+/** @type {Map<string, { timer: NodeJS.Timeout, hints: Array<string | object> }>} */
+const pendingWelcomeJobs = new Map();
+
+function delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isBotAccountJid(sock, memberJid) {
+    const botRaw = sock?.user?.id;
+    if (!botRaw || !memberJid) {
+        return false;
+    }
+    const botNorm = jidNormalizedUser(String(botRaw).replace(/:\d+(?=@)/, '')) || '';
+    const memberNorm = normalizeParticipantEntry(memberJid);
+    if (botNorm && memberNorm === botNorm) {
+        return true;
+    }
+    const botPhone = extractPhoneNumber(botNorm);
+    const memberPhone = extractPhoneNumber(memberNorm);
+    return Boolean(botPhone && memberPhone && botPhone === memberPhone);
+}
+
+function shouldSendWelcome(groupId, memberJid) {
+    const key = `${groupId}:${memberJid}`;
+    const now = Date.now();
+    const until = recentWelcomes.get(key);
+    if (until && until > now) {
+        return false;
+    }
+    recentWelcomes.set(key, now + WELCOME_DEDUPE_MS);
+    if (recentWelcomes.size > 500) {
+        for (const [k, exp] of recentWelcomes) {
+            if (exp <= now) recentWelcomes.delete(k);
+        }
+    }
+    return true;
+}
+
+async function resolveWelcomeMentionJid(sock, groupId, memberJid) {
+    const normalized = normalizeParticipantEntry(memberJid);
+    if (!normalized) {
+        return '';
+    }
+
+    try {
+        const meta = await sock.groupMetadata(groupId);
+        const targetPhone = extractPhoneNumber(normalized);
+        for (const p of meta.participants || []) {
+            const candidates = [
+                normalizeParticipantEntry(p.id),
+                normalizeParticipantEntry(p.lid),
+                normalizeParticipantEntry(p.phoneNumber),
+            ].filter(Boolean);
+
+            if (candidates.includes(normalized)) {
+                return candidates[0] || normalized;
+            }
+            if (targetPhone && candidates.some((c) => extractPhoneNumber(c) === targetPhone)) {
+                return normalizeParticipantEntry(p.id) || normalizeParticipantEntry(p.lid) || normalized;
+            }
+        }
+    } catch (err) {
+        logger.debug(`Welcome mention resolve failed: ${err.message}`);
+    }
+
+    return normalized;
+}
+
+async function sendWelcomeForMember(sock, groupManager, groupId, rawParticipant, config) {
+    const memberJid = normalizeParticipantEntry(rawParticipant);
+    if (!memberJid || isBotAccountJid(sock, memberJid)) {
+        return;
+    }
+    if (!shouldSendWelcome(groupId, memberJid)) {
+        return;
+    }
+
+    if (!config) {
+        config = await groupManager.getWelcomeConfig(groupId);
+        if (!config) {
+            return;
+        }
+    }
+
+    let groupName = config.group_name || 'this group';
+    try {
+        const meta = await groupManager.getGroupMetadataCached(sock, groupId);
+        groupName = meta.subject || groupName;
+    } catch (err) {
+        logger.warn(`Welcome: could not fetch group name for ${groupId}: ${err.message}`);
+    }
+
+    const mentionJid = await resolveWelcomeMentionJid(sock, groupId, memberJid);
+    const { text, mentions } = renderWelcomeMessage(
+        config.welcome_message || '',
+        groupName,
+        mentionJid,
+    );
+
+    const sent = await sock.sendMessage(groupId, {
+        text,
+        mentions: mentions.length ? mentions : undefined,
+    });
+
+    if (sent?.key) {
+        scheduleAutoDelete(sock, sent.key.remoteJid || groupId, sent.key, AUTO_DELETE_2_MIN);
+    }
+
+    logger.info(`👋 Welcome sent in ${groupName} to ${mentionJid} (auto-delete in 2m)`);
+}
+
+/**
+ * Send welcome to one or more new members.
+ */
+export async function handleParticipantJoin(sock, groupId, participants, { groupManager }) {
+    if (!groupId?.endsWith('@g.us') || !participants?.length) {
+        return;
+    }
+
+    const config = await groupManager.getWelcomeConfig(groupId);
+    if (!config) {
+        logger.debug(`Welcome skipped for ${groupId} — not enabled (use /setwc on)`);
+        return;
+    }
+
+    for (const entry of participants) {
+        try {
+            await sendWelcomeForMember(sock, groupManager, groupId, entry, config);
+        } catch (err) {
+            logger.error(`Welcome failed for ${groupId}: ${err.message}`);
+        }
+        await delay(400);
+    }
+}
+
+async function runWelcomeAfterJoin(sock, groupManager, groupId, hints = []) {
+    const config = await groupManager.getWelcomeConfig(groupId);
+    if (!config) {
+        return;
+    }
+
+    const hintJids = resolveJoinHints(hints);
+    let newParticipants = [];
+
+    try {
+        newParticipants = await groupParticipantSnapshot.detectNewParticipants(sock, groupId);
+    } catch (err) {
+        logger.warn(`Welcome participant diff failed for ${groupId}: ${err.message}`);
+    }
+
+    const toWelcome = [];
+    const seen = new Set();
+
+    for (const hint of hintJids) {
+        if (!seen.has(hint)) {
+            seen.add(hint);
+            toWelcome.push(hint);
+        }
+    }
+    for (const p of newParticipants) {
+        const jid = normalizeParticipantEntry(p);
+        if (jid && !seen.has(jid)) {
+            seen.add(jid);
+            toWelcome.push(p);
+        }
+    }
+
+    if (!toWelcome.length) {
+        logger.debug(`Welcome: no new members resolved for ${groupId} (hints=${hintJids.length}, diff=${newParticipants.length})`);
+        return;
+    }
+
+    logger.info(`👋 Welcoming ${toWelcome.length} member(s) in ${groupId}`);
+    await handleParticipantJoin(sock, groupId, toWelcome, { groupManager });
+}
+
+export function scheduleWelcomeAfterJoin(sock, groupManager, groupId, hints = []) {
+    if (!groupId?.endsWith('@g.us')) {
+        return;
+    }
+
+    void groupParticipantSnapshot.ensureSeeded(sock, groupId).catch(() => {});
+
+    const prev = pendingWelcomeJobs.get(groupId);
+    if (prev?.timer) {
+        clearTimeout(prev.timer);
+    }
+
+    const mergedHints = [...(prev?.hints || []), ...(hints || [])];
+    const timer = setTimeout(() => {
+        pendingWelcomeJobs.delete(groupId);
+        void runWelcomeAfterJoin(sock, groupManager, groupId, mergedHints).catch((err) => {
+            logger.error(`Welcome after join failed for ${groupId}: ${err.message}`);
+        });
+    }, WELCOME_JOIN_DELAY_MS);
+
+    pendingWelcomeJobs.set(groupId, { timer, hints: mergedHints });
+}
 
 export async function handleActivate(sock, chatId, senderJid, { groupManager, originalMsg }) {
     try {
@@ -357,6 +578,7 @@ export async function handleSetWelcome(sock, chatId, senderJid, fullCommand, { g
 
         const customPart = body.toLowerCase() === 'on' ? '' : normalizeCustomWelcomePart(body);
         await groupManager.setWelcomeMessage(chatId, groupName, customPart, senderPhone);
+        await groupParticipantSnapshot.seedGroup(sock, chatId);
         const preview = previewWelcomeMessage(customPart, groupName);
 
         let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
@@ -370,7 +592,8 @@ export async function handleSetWelcome(sock, chatId, senderJid, fullCommand, { g
         r += '*New members will see:*\n';
         r += `${preview}\n\n`;
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-        r += '💡 `/setwc off` to disable · `/setwc` for status';
+        r += '💡 `/setwc off` to disable · `/setwc` for status\n';
+        r += '_Welcome messages auto-delete after 2 minutes._';
 
         await sock.sendMessage(chatId, { text: r });
         logger.info(`👋 Welcome set for ${groupName} (${chatId}) by ${senderPhone}`);
@@ -382,39 +605,59 @@ export async function handleSetWelcome(sock, chatId, senderJid, fullCommand, { g
 
 export async function handleGroupParticipantsUpdate(sock, update, { groupManager }) {
     try {
-        const { id: groupId, participants, action } = update;
-        if (action !== 'add' || !groupId?.endsWith('@g.us') || !participants?.length) return;
+        const groupId = update?.id || update?.jid || update?.groupId;
+        const action = String(update?.action || '').toLowerCase();
+        const participants = update?.participants;
 
-        const config = await groupManager.getWelcomeConfig(groupId);
-        if (!config) return;
-
-        let groupName = config.group_name || 'this group';
-        try {
-            const meta = await groupManager.getGroupMetadataCached(sock, groupId);
-            groupName = meta.subject || groupName;
-        } catch (err) {
-            logger.warn(`Welcome: could not fetch group name for ${groupId}: ${err.message}`);
+        if (!groupId?.endsWith('@g.us')) {
+            return;
         }
 
-        const botJid = sock.user?.id;
-        for (const memberJid of participants) {
-            if (!memberJid || memberJid === botJid) continue;
+        logger.info(`👋 group-participants.update ${action} in ${groupId} (${participants?.length ?? 0})`);
 
-            const { text, mentions } = renderWelcomeMessage(
-                config.welcome_message || '',
-                groupName,
-                memberJid
-            );
+        if (action === 'remove' || action === 'promote' || action === 'demote') {
+            await groupParticipantSnapshot.refresh(sock, groupId);
+            return;
+        }
 
-            await sock.sendMessage(groupId, {
-                text,
-                mentions: mentions.length ? mentions : undefined,
-            });
-            logger.info(`👋 Welcome sent in ${groupName} to ${memberJid}`);
-            await new Promise((resolve) => setTimeout(resolve, 400));
+        if (JOIN_ACTIONS.has(action)) {
+            scheduleWelcomeAfterJoin(sock, groupManager, groupId, participants || []);
         }
     } catch (error) {
         logger.error(`Welcome message error: ${error.message}`);
+    }
+}
+
+/**
+ * Fallback when join arrives as a system stub message instead of participants.update.
+ */
+export async function handleJoinStubMessage(sock, msg, { groupManager }) {
+    try {
+        const groupId = msg?.key?.remoteJid;
+        if (!groupId?.endsWith('@g.us')) {
+            return;
+        }
+
+        const stubType = Number(msg.messageStubType);
+        if (!JOIN_STUB_TYPES.has(stubType)) {
+            return;
+        }
+
+        const hints = [];
+        for (const param of msg.messageStubParameters || []) {
+            if (typeof param === 'string') {
+                hints.push(param);
+            }
+        }
+
+        for (const key of [msg.key?.participant, msg.key?.participantPn, msg.key?.participantLid]) {
+            if (key) hints.push(key);
+        }
+
+        logger.info(`👋 Join stub type ${stubType} in ${groupId} (hints=${hints.length})`);
+        scheduleWelcomeAfterJoin(sock, groupManager, groupId, hints);
+    } catch (error) {
+        logger.error(`Join stub welcome error: ${error.message}`);
     }
 }
 

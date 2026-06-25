@@ -7,6 +7,8 @@
  * Custom text from /setwc is appended on the next line.
  */
 
+import { jidNormalizedUser } from 'baileys';
+
 const USERNAME_PLACEHOLDER = '@username';
 const GROUP_PLACEHOLDER = '{group}';
 
@@ -44,6 +46,46 @@ export function normalizeCustomWelcomePart(input) {
 }
 
 /**
+ * Normalize Baileys participant entry (string JID or { id, lid, ... } object).
+ * @param {string | object | null | undefined} entry
+ * @returns {string}
+ */
+export function normalizeParticipantEntry(entry) {
+    if (!entry) {
+        return '';
+    }
+    if (typeof entry === 'string') {
+        let cleaned = entry.replace(/:\d+(?=@)/, '').trim();
+        if (!cleaned.includes('@')) {
+            const digits = cleaned.replace(/\D/g, '');
+            if (/^\d{10,15}$/.test(digits)) {
+                cleaned = `${digits}@s.whatsapp.net`;
+            }
+        }
+        return jidNormalizedUser(cleaned) || cleaned;
+    }
+    if (typeof entry === 'object') {
+        const raw = entry.id || entry.jid || entry.lid || entry.phoneNumber || entry.pn || '';
+        if (typeof raw === 'string' && raw) {
+            return normalizeParticipantEntry(raw);
+        }
+    }
+    return '';
+}
+
+/**
+ * @param {string} jid
+ * @returns {string}
+ */
+export function mentionDisplayToken(jid) {
+    if (!jid) {
+        return '@member';
+    }
+    const user = String(jid).split('@')[0].split(':')[0];
+    return `@${user}`;
+}
+
+/**
  * @param {string} customPart
  * @param {string} groupName
  * @param {string} memberJid
@@ -52,7 +94,7 @@ export function normalizeCustomWelcomePart(input) {
 export function renderWelcomeMessage(customPart, groupName, memberJid) {
     const safeGroup = groupName || 'this group';
     const template = buildWelcomeTemplate(customPart);
-    const mentionToken = `@${memberJid.split('@')[0]}`;
+    const mentionToken = mentionDisplayToken(memberJid);
 
     let text = template
         .split(USERNAME_PLACEHOLDER)
@@ -62,7 +104,7 @@ export function renderWelcomeMessage(customPart, groupName, memberJid) {
         .split('"Group Name"')
         .join(safeGroup);
 
-    return { text, mentions: [memberJid] };
+    return { text, mentions: memberJid ? [memberJid] : [] };
 }
 
 /**

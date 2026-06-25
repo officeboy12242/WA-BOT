@@ -3,8 +3,9 @@
  * Handles active groups and admin management
  */
 
+import { jidNormalizedUser } from 'baileys';
 import { logger } from '../utils/logger.js';
-import { extractPhoneNumber, normalizePhoneNumber } from '../utils/permissions.js';
+import { extractPhoneNumber, normalizePhoneNumber, getBotAccountPhone } from '../utils/permissions.js';
 
 function participantToPhone(participant) {
     if (!participant) {
@@ -204,6 +205,99 @@ class GroupManager {
             return false;
         }
         return false;
+    }
+
+    /**
+     * Find a group participant by JID and/or phone (Baileys 7 phone + LID).
+     * @param {import('baileys').WASocket} sock
+     * @param {string} groupId
+     * @param {string} [jid]
+     * @param {string} [phone]
+     */
+    async findParticipant(sock, groupId, jid = '', phone = '') {
+        if (!groupId?.endsWith('@g.us')) {
+            return null;
+        }
+        try {
+            const groupMetadata = await sock.groupMetadata(groupId);
+            const normalizedPhone = normalizePhoneNumber(phone || extractPhoneNumber(jid));
+            const normalizedJid = jid ? jidNormalizedUser(jid.replace(/:\d+(?=@)/, '')) || jid : '';
+
+            for (const p of groupMetadata.participants || []) {
+                const pPhone = normalizePhoneNumber(participantToPhone(p));
+                const pId = jidNormalizedUser(String(p.id || '').replace(/:\d+(?=@)/, ''));
+                const pLid = p.lid ? jidNormalizedUser(String(p.lid).replace(/:\d+(?=@)/, '')) : '';
+
+                const matchJid =
+                    (normalizedJid &&
+                        (p.id === jid ||
+                            p.lid === jid ||
+                            p.pn === jid ||
+                            p.phoneNumber === jid ||
+                            pId === normalizedJid ||
+                            pLid === normalizedJid)) ||
+                    false;
+                const matchPhone = normalizedPhone && pPhone && pPhone === normalizedPhone;
+
+                if (matchJid || matchPhone) {
+                    return p;
+                }
+            }
+        } catch (err) {
+            logger.debug(`findParticipant failed for ${groupId}: ${err.message}`);
+        }
+        return null;
+    }
+
+    /** Whether the connected bot account is admin/superadmin in this group. */
+    async isBotGroupAdmin(sock, groupId) {
+        if (!groupId?.endsWith('@g.us') || !sock?.user?.id) {
+            return false;
+        }
+
+        try {
+            const groupMetadata = await sock.groupMetadata(groupId);
+            const botPhone = getBotAccountPhone(sock);
+            const botRaw = String(sock.user.id).replace(/:\d+(?=@)/, '');
+            const botJid = jidNormalizedUser(botRaw) || botRaw;
+
+            const jidCandidates = new Set([botJid, botRaw].filter(Boolean));
+            if (botPhone) {
+                jidCandidates.add(`${botPhone}@s.whatsapp.net`);
+            }
+            const botLid = sock.authState?.creds?.me?.lid || sock.user?.lid;
+            if (botLid) {
+                jidCandidates.add(jidNormalizedUser(String(botLid).replace(/:\d+(?=@)/, '')));
+            }
+
+            for (const p of groupMetadata.participants || []) {
+                const pPhone = normalizePhoneNumber(participantToPhone(p));
+                const pId = jidNormalizedUser(String(p.id || '').replace(/:\d+(?=@)/, ''));
+                const pLid = p.lid ? jidNormalizedUser(String(p.lid).replace(/:\d+(?=@)/, '')) : '';
+
+                const matchJid =
+                    jidCandidates.has(p.id) ||
+                    jidCandidates.has(p.lid) ||
+                    jidCandidates.has(p.pn) ||
+                    jidCandidates.has(p.phoneNumber) ||
+                    jidCandidates.has(pId) ||
+                    (pLid && jidCandidates.has(pLid));
+
+                const matchPhone = botPhone && pPhone && pPhone === botPhone;
+
+                if ((matchJid || matchPhone) && (p.admin === 'admin' || p.admin === 'superadmin')) {
+                    return true;
+                }
+            }
+        } catch (err) {
+            logger.debug(`isBotGroupAdmin failed for ${groupId}: ${err.message}`);
+        }
+
+        return false;
+    }
+
+    async isBotGroupAdminAsync(sock, groupId) {
+        return this.isBotGroupAdmin(sock, groupId);
     }
 
     async isSenderGroupAdminAsync(sock, groupId, senderJid) {

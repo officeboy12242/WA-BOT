@@ -204,7 +204,7 @@ export const COMMAND_REGISTRY = [
         key: 'setwc',
         scope: 'group_only',
         role: 'welcome_setters',
-        help: 'Set welcome extra line; default header auto-added',
+        help: 'Set welcome extra line; auto-deletes after 2 min — `/setwc on` to enable',
     },
     {
         names: ['/warn'],

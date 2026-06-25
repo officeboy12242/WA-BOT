@@ -35,6 +35,7 @@ import {
     handleGroups,
     handleSetWelcome,
     handleGroupParticipantsUpdate as _handleGroupParticipantsUpdate,
+    handleJoinStubMessage as _handleJoinStubMessage,
     handleMovieOn,
     handleMovieOff,
     handleTrending,
@@ -180,6 +181,10 @@ class CommandController {
 
     async handleGroupParticipantsUpdate(sock, update) {
         await _handleGroupParticipantsUpdate(sock, update, this._ctx());
+    }
+
+    async handleJoinStubMessage(sock, msg) {
+        await _handleJoinStubMessage(sock, msg, this._ctx());
     }
 
     async handleInsta(sock, chatId, args, quotedMessage, options = {}) {

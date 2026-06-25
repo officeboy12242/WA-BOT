@@ -2,12 +2,12 @@
  * Admin group message deletion: /dellast, /del, /delall
  */
 
-import { jidNormalizedUser } from 'baileys';
 import { logger } from '../../utils/logger.js';
 import {
     buildQuotedTargetMessage,
-    safeDeleteMessage,
     getSafeSendOptions,
+    resolveOutboundJid,
+    safeDeleteMessage,
 } from '../../utils/waMessage.js';
 import { groupMessageTracker } from '../../utils/groupMessageTracker.js';
 
@@ -18,24 +18,19 @@ function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function isBotGroupAdmin(sock, chatId) {
-    try {
-        const meta = await sock.groupMetadata(chatId);
-        const botId = jidNormalizedUser(sock.user?.id || '');
-        if (!botId) {
-            return false;
-        }
-        for (const p of meta.participants || []) {
-            const pid = jidNormalizedUser(p.id || '');
-            const lid = p.lid ? jidNormalizedUser(p.lid) : '';
-            if (pid === botId || lid === botId) {
-                return p.admin === 'admin' || p.admin === 'superadmin';
-            }
-        }
-    } catch (err) {
-        logger.warn(`Bot admin check failed: ${err.message}`);
+function buildDeleteKey(chatId, key) {
+    const deleteKey = {
+        remoteJid: key.remoteJid || chatId,
+        id: key.id,
+        fromMe: Boolean(key.fromMe),
+    };
+
+    const participant = key.participant || key.participantLid;
+    if (participant && !deleteKey.fromMe) {
+        deleteKey.participant = participant;
     }
-    return false;
+
+    return deleteKey;
 }
 
 function usageText() {
@@ -56,11 +51,15 @@ async function tryDelete(sock, chatId, key) {
     if (!sock?.sendMessage || !key?.id) {
         return false;
     }
+
+    const deleteKey = buildDeleteKey(chatId, key);
+    const targetJid = resolveOutboundJid(deleteKey, chatId);
+
     try {
-        await sock.sendMessage(chatId, { delete: key });
+        await sock.sendMessage(targetJid, { delete: deleteKey });
         return true;
     } catch (err) {
-        logger.debug(`Delete failed for ${key.id}: ${err.message}`);
+        logger.debug(`Delete failed for ${deleteKey.id}: ${err.message}`);
         return false;
     }
 }
@@ -88,7 +87,7 @@ async function deleteKeys(sock, chatId, entries) {
     return { deleted, failed };
 }
 
-export async function handleDelLast(sock, chatId, args, originalMsg, { fullCommand } = {}) {
+export async function handleDelLast(sock, chatId, args, originalMsg, { fullCommand, groupManager } = {}) {
     const sendOpts = getSafeSendOptions(originalMsg);
 
     if (!chatId?.endsWith('@g.us')) {
@@ -96,12 +95,12 @@ export async function handleDelLast(sock, chatId, args, originalMsg, { fullComma
         return;
     }
 
-    const botAdmin = await isBotGroupAdmin(sock, chatId);
+    const botAdmin = groupManager
+        ? await groupManager.isBotGroupAdminAsync(sock, chatId)
+        : false;
+
     if (!botAdmin) {
-        await sock.sendMessage(chatId, {
-            text: '❌ The bot must be a *group admin* to delete other members\' messages.\n\n_Promote the bot to admin in group settings._',
-        }, sendOpts);
-        return;
+        logger.warn(`Bot admin check negative for ${chatId} — attempting delete anyway`);
     }
 
     const quoted = buildQuotedTargetMessage(originalMsg);
@@ -112,7 +111,9 @@ export async function handleDelLast(sock, chatId, args, originalMsg, { fullComma
             await sock.sendMessage(chatId, { text: '🗑️ Message deleted.' }, sendOpts);
         } else {
             await sock.sendMessage(chatId, {
-                text: '❌ Could not delete that message.\n\n_Is the bot a group admin?_',
+                text:
+                    '❌ Could not delete that message.\n\n' +
+                    '_Ensure the bot is promoted to group admin and has permission to delete messages._',
             }, sendOpts);
         }
         return;
@@ -167,6 +168,9 @@ export async function handleDelLast(sock, chatId, args, originalMsg, { fullComma
         `✅ Deleted: *${deleted}*\n`;
     if (failed) {
         result += `❌ Failed: *${failed}*\n`;
+        if (!botAdmin) {
+            result += '\n_If nothing deleted, promote the bot to group admin._';
+        }
     }
     if (isAll && tracked > entries.length) {
         result += `\n_Note: only messages tracked since bot was online are removed._`;
@@ -179,5 +183,5 @@ export async function handleDelLast(sock, chatId, args, originalMsg, { fullComma
     } catch { /* ignore */ }
 
     await sock.sendMessage(chatId, { text: result }, sendOpts);
-    logger.info(`DelLast in ${chatId}: requested=${take}, deleted=${deleted}, failed=${failed}`);
+    logger.info(`DelLast in ${chatId}: requested=${take}, deleted=${deleted}, failed=${failed}, botAdmin=${botAdmin}`);
 }

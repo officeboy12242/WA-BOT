@@ -67,3 +67,4 @@ export function clearAllScheduledDeletes() {
 export const AUTO_DELETE_5_HOURS = AUTO_DELETE_MS;
 export const AUTO_DELETE_1_HOUR = 60 * 60 * 1000;
 export const AUTO_DELETE_30_MIN = 30 * 60 * 1000;
+export const AUTO_DELETE_2_MIN = 2 * 60 * 1000;
