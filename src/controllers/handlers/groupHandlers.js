@@ -9,14 +9,15 @@ import { scheduleAutoDelete, AUTO_DELETE_2_MIN } from '../../utils/autoDelete.js
 import {
     DEFAULT_HEADER_TEMPLATE,
     formatWelcomeStatus,
+    isValidParticipantJid,
     normalizeCustomWelcomePart,
     normalizeParticipantEntry,
     previewWelcomeMessage,
     renderWelcomeMessage,
 } from '../../utils/welcomeMessage.js';
 import {
+    dedupeParticipantRecords,
     groupParticipantSnapshot,
-    resolveJoinHints,
 } from '../../utils/groupParticipantSnapshot.js';
 
 /** Dedupe welcome when both stub message + participants.update fire */
@@ -42,7 +43,7 @@ const LEAVE_STUB_TYPES = new Set([
 
 const LEAVE_ACTIONS = new Set(['remove', 'leave', 'left']);
 
-/** @type {Map<string, { timer: NodeJS.Timeout, hints: Array<string | object> }>} */
+/** @type {Map<string, { timer: NodeJS.Timeout, baseline: { keys: Set<string>, memberCount: number } }>} */
 const pendingWelcomeJobs = new Map();
 
 function delay(ms) {
@@ -64,8 +65,16 @@ function isBotAccountJid(sock, memberJid) {
     return Boolean(botPhone && memberPhone && botPhone === memberPhone);
 }
 
+function welcomeDedupeKey(groupId, memberJid) {
+    const phone = extractPhoneNumber(memberJid);
+    if (phone) {
+        return `${groupId}:p:${phone}`;
+    }
+    return `${groupId}:j:${memberJid}`;
+}
+
 function shouldSendWelcome(groupId, memberJid) {
-    const key = `${groupId}:${memberJid}`;
+    const key = welcomeDedupeKey(groupId, memberJid);
     const now = Date.now();
     const until = recentWelcomes.get(key);
     if (until && until > now) {
@@ -110,9 +119,27 @@ async function resolveWelcomeMentionJid(sock, groupId, memberJid) {
     return normalized;
 }
 
+async function captureWelcomeBaseline(sock, groupId) {
+    let keys = groupParticipantSnapshot.cloneGroupKeys(groupId);
+    if (!keys.size) {
+        await groupParticipantSnapshot.seedGroup(sock, groupId);
+        keys = groupParticipantSnapshot.cloneGroupKeys(groupId);
+    }
+
+    let memberCount = 0;
+    try {
+        const meta = await sock.groupMetadata(groupId);
+        memberCount = meta.participants?.length || 0;
+    } catch (err) {
+        logger.warn(`Welcome baseline count failed for ${groupId}: ${err.message}`);
+    }
+
+    return { keys, memberCount };
+}
+
 async function sendWelcomeForMember(sock, groupManager, groupId, rawParticipant, config) {
     const memberJid = normalizeParticipantEntry(rawParticipant);
-    if (!memberJid || isBotAccountJid(sock, memberJid)) {
+    if (!memberJid || !isValidParticipantJid(memberJid) || isBotAccountJid(sock, memberJid)) {
         return;
     }
 
@@ -142,6 +169,11 @@ async function sendWelcomeForMember(sock, groupManager, groupId, rawParticipant,
     }
 
     const mentionJid = await resolveWelcomeMentionJid(sock, groupId, memberJid);
+    if (!isValidParticipantJid(mentionJid)) {
+        logger.debug(`Welcome skipped — invalid mention JID for ${groupId}`);
+        return;
+    }
+
     const { text, mentions } = renderWelcomeMessage(
         config.welcome_message || '',
         groupName,
@@ -174,7 +206,8 @@ export async function handleParticipantJoin(sock, groupId, participants, { group
         return;
     }
 
-    for (const entry of participants) {
+    const unique = dedupeParticipantRecords(participants);
+    for (const entry of unique) {
         try {
             await sendWelcomeForMember(sock, groupManager, groupId, entry, config);
         } catch (err) {
@@ -223,48 +256,40 @@ async function filterCurrentGroupMembers(sock, groupId, entries) {
     return verified;
 }
 
-async function runWelcomeAfterJoin(sock, groupManager, groupId, hints = []) {
+async function runWelcomeAfterJoin(sock, groupManager, groupId, baseline) {
     const config = await groupManager.getWelcomeConfig(groupId);
-    if (!config) {
+    if (!config || !baseline?.keys?.size) {
+        return;
+    }
+
+    let meta;
+    try {
+        meta = await sock.groupMetadata(groupId);
+    } catch (err) {
+        logger.warn(`Welcome metadata fetch failed for ${groupId}: ${err.message}`);
+        return;
+    }
+
+    const currentCount = meta.participants?.length || 0;
+    if (currentCount <= baseline.memberCount) {
+        logger.debug(
+            `Welcome skipped for ${groupId} — member count did not increase (${baseline.memberCount} → ${currentCount})`,
+        );
+        await groupParticipantSnapshot.refresh(sock, groupId);
         return;
     }
 
     let newParticipants = [];
-
     try {
-        newParticipants = await groupParticipantSnapshot.detectNewParticipants(sock, groupId);
+        newParticipants = await groupParticipantSnapshot.detectNewSince(sock, groupId, baseline.keys);
     } catch (err) {
         logger.warn(`Welcome participant diff failed for ${groupId}: ${err.message}`);
+        return;
     }
 
-    const toWelcome = [];
-    const seen = new Set();
-
-    for (const p of newParticipants) {
-        const jid = normalizeParticipantEntry(p);
-        if (jid && !seen.has(jid)) {
-            seen.add(jid);
-            toWelcome.push(p);
-        }
-    }
-
-    const hintJids = resolveJoinHints(hints);
-    if (hintJids.length) {
-        const hintEntries = hintJids.filter((jid) => !seen.has(jid));
-        const verifiedHints = await filterCurrentGroupMembers(sock, groupId, hintEntries);
-        for (const entry of verifiedHints) {
-            const jid = normalizeParticipantEntry(entry);
-            if (jid && !seen.has(jid)) {
-                seen.add(jid);
-                toWelcome.push(entry);
-            }
-        }
-    }
-
+    const toWelcome = dedupeParticipantRecords(newParticipants);
     if (!toWelcome.length) {
-        logger.debug(
-            `Welcome: no verified new members for ${groupId} (diff=${newParticipants.length}, hints=${hintJids.length})`,
-        );
+        logger.debug(`Welcome: no new members detected for ${groupId}`);
         return;
     }
 
@@ -272,8 +297,10 @@ async function runWelcomeAfterJoin(sock, groupManager, groupId, hints = []) {
     await handleParticipantJoin(sock, groupId, toWelcome, { groupManager });
 }
 
-export function scheduleWelcomeAfterJoin(sock, groupManager, groupId, hints = []) {
-    if (!groupId?.endsWith('@g.us')) {
+async function captureAndScheduleWelcome(sock, groupManager, groupId) {
+    const baseline = await captureWelcomeBaseline(sock, groupId);
+    if (!baseline.keys.size) {
+        logger.debug(`Welcome skipped for ${groupId} — no participant baseline`);
         return;
     }
 
@@ -282,15 +309,24 @@ export function scheduleWelcomeAfterJoin(sock, groupManager, groupId, hints = []
         clearTimeout(prev.timer);
     }
 
-    const mergedHints = [...(prev?.hints || []), ...(hints || [])];
     const timer = setTimeout(() => {
         pendingWelcomeJobs.delete(groupId);
-        void runWelcomeAfterJoin(sock, groupManager, groupId, mergedHints).catch((err) => {
+        void runWelcomeAfterJoin(sock, groupManager, groupId, baseline).catch((err) => {
             logger.error(`Welcome after join failed for ${groupId}: ${err.message}`);
         });
     }, WELCOME_JOIN_DELAY_MS);
 
-    pendingWelcomeJobs.set(groupId, { timer, hints: mergedHints });
+    pendingWelcomeJobs.set(groupId, { timer, baseline });
+}
+
+export function scheduleWelcomeAfterJoin(sock, groupManager, groupId) {
+    if (!groupId?.endsWith('@g.us')) {
+        return;
+    }
+
+    void captureAndScheduleWelcome(sock, groupManager, groupId).catch((err) => {
+        logger.error(`Welcome schedule failed for ${groupId}: ${err.message}`);
+    });
 }
 
 export async function handleActivate(sock, chatId, senderJid, { groupManager, originalMsg }) {
@@ -682,7 +718,7 @@ export async function handleGroupParticipantsUpdate(sock, update, { groupManager
         }
 
         if (JOIN_ACTIONS.has(action)) {
-            scheduleWelcomeAfterJoin(sock, groupManager, groupId, participants || []);
+            scheduleWelcomeAfterJoin(sock, groupManager, groupId);
         }
     } catch (error) {
         logger.error(`Welcome message error: ${error.message}`);
@@ -701,7 +737,7 @@ export async function handleJoinStubMessage(sock, msg, { groupManager }) {
 
         const stubType = Number(msg.messageStubType);
 
-        if (LEAVE_STUB_TYPES.has(stubType)) {
+        if (LEAVE_STUB_TYPES.has(stubType) || isLeaveStubMessage(msg)) {
             logger.debug(`Leave stub type ${stubType} in ${groupId} — refreshing snapshot`);
             cancelPendingWelcome(groupId);
             await groupParticipantSnapshot.refresh(sock, groupId);
@@ -712,22 +748,31 @@ export async function handleJoinStubMessage(sock, msg, { groupManager }) {
             return;
         }
 
-        const hints = [];
-        for (const param of msg.messageStubParameters || []) {
-            if (typeof param === 'string') {
-                hints.push(param);
-            }
-        }
-
-        for (const key of [msg.key?.participant, msg.key?.participantPn, msg.key?.participantLid]) {
-            if (key) hints.push(key);
-        }
-
-        logger.info(`👋 Join stub type ${stubType} in ${groupId} (hints=${hints.length})`);
-        scheduleWelcomeAfterJoin(sock, groupManager, groupId, hints);
+        logger.info(`👋 Join stub type ${stubType} in ${groupId}`);
+        scheduleWelcomeAfterJoin(sock, groupManager, groupId);
     } catch (error) {
         logger.error(`Join stub welcome error: ${error.message}`);
     }
+}
+
+function isLeaveStubMessage(msg) {
+    const stubType = Number(msg.messageStubType);
+    if (JOIN_STUB_TYPES.has(stubType)) {
+        return false;
+    }
+
+    const params = (msg.messageStubParameters || [])
+        .filter((p) => typeof p === 'string')
+        .join(' ')
+        .toLowerCase();
+
+    return (
+        params.includes(' left')
+        || params.endsWith(' left')
+        || params.includes('removed')
+        || params.includes('was removed')
+        || params.includes('left the group')
+    );
 }
 
 export async function handleNewsOn(sock, chatId, senderJid, { groupManager, originalMsg }) {
