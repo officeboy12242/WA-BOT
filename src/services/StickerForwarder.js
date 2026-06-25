@@ -6,7 +6,7 @@
 
 import { Sticker } from 'wa-sticker-formatter';
 import { logger } from '../utils/logger.js';
-import { downloadStickerBuffer } from '../utils/stickerDownload.js';
+import { downloadStickerBuffer, isValidWebpBuffer } from '../utils/stickerDownload.js';
 import { extractStickerFromMessage, isNewsletterChat } from '../utils/stickerExtract.js';
 
 const MAX_QUEUE_SIZE = 500;
@@ -281,8 +281,8 @@ class StickerForwarder {
         }
 
         const buffer = await downloadStickerBuffer(sock, waMessage);
-        if (!buffer?.length) {
-            throw new Error('Failed to download sticker buffer');
+        if (!isValidWebpBuffer(buffer)) {
+            throw new Error('Downloaded sticker is not valid WebP');
         }
 
         let stickerBuffer = buffer;
@@ -293,7 +293,12 @@ class StickerForwarder {
                 type: 'default',
                 quality: 50,
             });
-            stickerBuffer = await sticker.toBuffer();
+            const repacked = await sticker.toBuffer();
+            if (isValidWebpBuffer(repacked)) {
+                stickerBuffer = repacked;
+            } else {
+                logger.warn('Sticker re-pack produced invalid WebP, sending original');
+            }
         } catch (formatError) {
             logger.warn(`Sticker re-pack failed, sending original: ${formatError.message}`);
         }

@@ -29,6 +29,25 @@ function delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+/** Valid WebP files start with RIFF....WEBP */
+export function isValidWebpBuffer(buf) {
+    if (!Buffer.isBuffer(buf) || buf.length < 16) {
+        return false;
+    }
+    return buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP';
+}
+
+export function isStickerDownloadReady(sticker) {
+    return hasMediaKey(sticker);
+}
+
+function assertValidWebp(buffer, context) {
+    if (!isValidWebpBuffer(buffer)) {
+        throw new Error(`${context}: not valid WebP (encrypted or incomplete media)`);
+    }
+    return buffer;
+}
+
 async function tryDirectDownload(url, directPath) {
     const downloadUrl = url || (directPath ? `https://mmg.whatsapp.net${directPath}` : null);
     if (!downloadUrl) return null;
@@ -147,7 +166,7 @@ export async function downloadStickerBuffer(sock, waMessage) {
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             try {
                 const directBuffer = await tryDirectDownload(sticker.url, sticker.directPath);
-                if (directBuffer?.length > 100) {
+                if (isValidWebpBuffer(directBuffer)) {
                     return directBuffer;
                 }
             } catch (err) {
@@ -161,37 +180,30 @@ export async function downloadStickerBuffer(sock, waMessage) {
         if (hasMediaKey(sticker)) {
             try {
                 logger.debug('Channel sticker: falling back to encrypted-media download');
-                return await tryDownloadContent(sock, sticker);
+                return assertValidWebp(await tryDownloadContent(sock, sticker), 'channel encrypted');
             } catch (err) {
                 logger.debug(`Channel sticker encrypted download failed: ${err.message}`);
             }
             try {
-                return await tryDownloadMediaMessage(sock, waMessage);
+                return assertValidWebp(await tryDownloadMediaMessage(sock, waMessage), 'channel media');
             } catch { /* fall through */ }
         }
 
         throw new Error('Channel sticker download failed after all methods');
     }
 
-    // Group stickers — try multiple methods with retries
+    if (!isStickerDownloadReady(sticker)) {
+        throw new Error('Sticker media not ready (missing mediaKey)');
+    }
+
+    // Group stickers — encrypted download only (direct URLs are encrypted)
     let lastError = null;
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         try {
-            if (sticker) {
-                try {
-                    const directBuffer = await tryDirectDownload(sticker.url, sticker.directPath);
-                    if (directBuffer?.length > 100) {
-                        return directBuffer;
-                    }
-                } catch (err) {
-                    lastError = err;
-                }
-            }
-
             if (sticker && hasMediaKey(sticker)) {
                 try {
-                    return await tryDownloadMediaMessage(sock, waMessage);
+                    return assertValidWebp(await tryDownloadMediaMessage(sock, waMessage), 'group media');
                 } catch (err) {
                     lastError = err;
                 }
@@ -199,14 +211,14 @@ export async function downloadStickerBuffer(sock, waMessage) {
 
             if (sticker) {
                 try {
-                    return await tryDownloadContent(sock, sticker);
+                    return assertValidWebp(await tryDownloadContent(sock, sticker), 'group content');
                 } catch (err) {
                     lastError = err;
                 }
             }
 
             if (sticker) {
-                return await tryDownloadMediaMessage(sock, waMessage);
+                return assertValidWebp(await tryDownloadMediaMessage(sock, waMessage), 'group media fallback');
             }
         } catch (err) {
             lastError = err;
