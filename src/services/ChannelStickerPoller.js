@@ -5,6 +5,7 @@
 import { logger } from '../utils/logger.js';
 import { fetchNewsletterStickerMessages } from '../utils/channelMessages.js';
 import { extractStickerFromMessage } from '../utils/stickerExtract.js';
+import { isStickerDownloadReady } from '../utils/stickerDownload.js';
 
 const POLL_INTERVAL_MS = 90_000;
 const STICKERS_PER_FETCH = 10;
@@ -90,8 +91,12 @@ class ChannelStickerPoller {
 
             let queued = 0;
             for (const msg of stickers) {
-                const trackId = msg?.key?.id ? `${channelJid}:${msg.key.id}` : null;
                 const payload = extractStickerFromMessage(msg.message);
+                if (!payload || !isStickerDownloadReady(payload)) {
+                    continue;
+                }
+
+                const trackId = msg?.key?.id ? `${channelJid}:${msg.key.id}` : null;
                 const contentHash = payload?.fileSha256
                     ? Buffer.from(payload.fileSha256).toString('hex')
                     : null;
