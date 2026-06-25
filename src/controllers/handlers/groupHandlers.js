@@ -34,6 +34,14 @@ const JOIN_STUB_TYPES = new Set([
 
 const JOIN_ACTIONS = new Set(['add', 'linked', 'invite']);
 
+/** WhatsApp stub types for leave/remove — never welcome these */
+const LEAVE_STUB_TYPES = new Set([
+    28, // GROUP_PARTICIPANT_REMOVE
+    29, // GROUP_PARTICIPANT_LEAVE
+]);
+
+const LEAVE_ACTIONS = new Set(['remove', 'leave', 'left']);
+
 /** @type {Map<string, { timer: NodeJS.Timeout, hints: Array<string | object> }>} */
 const pendingWelcomeJobs = new Map();
 
@@ -107,6 +115,13 @@ async function sendWelcomeForMember(sock, groupManager, groupId, rawParticipant,
     if (!memberJid || isBotAccountJid(sock, memberJid)) {
         return;
     }
+
+    const [verified] = await filterCurrentGroupMembers(sock, groupId, [rawParticipant]);
+    if (!verified) {
+        logger.debug(`Welcome skipped — ${memberJid} is not in ${groupId}`);
+        return;
+    }
+
     if (!shouldSendWelcome(groupId, memberJid)) {
         return;
     }
@@ -169,13 +184,51 @@ export async function handleParticipantJoin(sock, groupId, participants, { group
     }
 }
 
+export function cancelPendingWelcome(groupId) {
+    const prev = pendingWelcomeJobs.get(groupId);
+    if (prev?.timer) {
+        clearTimeout(prev.timer);
+    }
+    pendingWelcomeJobs.delete(groupId);
+}
+
+async function filterCurrentGroupMembers(sock, groupId, entries) {
+    if (!entries?.length) {
+        return [];
+    }
+
+    let meta;
+    try {
+        meta = await sock.groupMetadata(groupId);
+    } catch (err) {
+        logger.warn(`Welcome member filter failed for ${groupId}: ${err.message}`);
+        return [];
+    }
+
+    const memberKeys = groupParticipantSnapshot.buildMemberKeySet(meta.participants || []);
+    const verified = [];
+
+    for (const entry of entries) {
+        const jid = normalizeParticipantEntry(entry);
+        if (!jid) {
+            continue;
+        }
+        if (groupParticipantSnapshot.isKeyInMemberSet(jid, memberKeys)) {
+            verified.push(entry);
+        } else {
+            logger.debug(`Welcome skipped non-member ${jid} in ${groupId}`);
+        }
+    }
+
+    return verified;
+}
+
 async function runWelcomeAfterJoin(sock, groupManager, groupId, hints = []) {
     const config = await groupManager.getWelcomeConfig(groupId);
     if (!config) {
         return;
     }
 
-    const hintJids = resolveJoinHints(hints);
     let newParticipants = [];
 
     try {
@@ -187,12 +240,6 @@ async function runWelcomeAfterJoin(sock, groupManager, groupId, hints = []) {
     const toWelcome = [];
     const seen = new Set();
 
-    for (const hint of hintJids) {
-        if (!seen.has(hint)) {
-            seen.add(hint);
-            toWelcome.push(hint);
-        }
-    }
     for (const p of newParticipants) {
         const jid = normalizeParticipantEntry(p);
         if (jid && !seen.has(jid)) {
@@ -201,8 +248,23 @@ async function runWelcomeAfterJoin(sock, groupManager, groupId, hints = []) {
         }
     }
 
+    const hintJids = resolveJoinHints(hints);
+    if (hintJids.length) {
+        const hintEntries = hintJids.filter((jid) => !seen.has(jid));
+        const verifiedHints = await filterCurrentGroupMembers(sock, groupId, hintEntries);
+        for (const entry of verifiedHints) {
+            const jid = normalizeParticipantEntry(entry);
+            if (jid && !seen.has(jid)) {
+                seen.add(jid);
+                toWelcome.push(entry);
+            }
+        }
+    }
+
     if (!toWelcome.length) {
-        logger.debug(`Welcome: no new members resolved for ${groupId} (hints=${hintJids.length}, diff=${newParticipants.length})`);
+        logger.debug(
+            `Welcome: no verified new members for ${groupId} (diff=${newParticipants.length}, hints=${hintJids.length})`,
+        );
         return;
     }
 
@@ -214,8 +276,6 @@ export function scheduleWelcomeAfterJoin(sock, groupManager, groupId, hints = []
     if (!groupId?.endsWith('@g.us')) {
         return;
     }
-
-    void groupParticipantSnapshot.ensureSeeded(sock, groupId).catch(() => {});
 
     const prev = pendingWelcomeJobs.get(groupId);
     if (prev?.timer) {
@@ -615,7 +675,8 @@ export async function handleGroupParticipantsUpdate(sock, update, { groupManager
 
         logger.info(`👋 group-participants.update ${action} in ${groupId} (${participants?.length ?? 0})`);
 
-        if (action === 'remove' || action === 'promote' || action === 'demote') {
+        if (LEAVE_ACTIONS.has(action) || action === 'promote' || action === 'demote') {
+            cancelPendingWelcome(groupId);
             await groupParticipantSnapshot.refresh(sock, groupId);
             return;
         }
@@ -639,6 +700,14 @@ export async function handleJoinStubMessage(sock, msg, { groupManager }) {
         }
 
         const stubType = Number(msg.messageStubType);
+
+        if (LEAVE_STUB_TYPES.has(stubType)) {
+            logger.debug(`Leave stub type ${stubType} in ${groupId} — refreshing snapshot`);
+            cancelPendingWelcome(groupId);
+            await groupParticipantSnapshot.refresh(sock, groupId);
+            return;
+        }
+
         if (!JOIN_STUB_TYPES.has(stubType)) {
             return;
         }
