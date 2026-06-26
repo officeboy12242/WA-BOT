@@ -2,7 +2,11 @@
  * Ring buffer of recent group message keys for admin bulk-delete.
  */
 
+import { getTextFromWAMessage } from './waMessage.js';
+
 const MAX_PER_GROUP = 500;
+
+const DELETE_CMD_RE = /^\/(dellast|delall|del)\b/i;
 
 class GroupMessageTracker {
     constructor() {
@@ -16,6 +20,11 @@ class GroupMessageTracker {
     track(msg) {
         const chatId = msg?.key?.remoteJid;
         if (!chatId?.endsWith('@g.us') || !msg.key?.id || !msg.message) {
+            return;
+        }
+
+        const text = getTextFromWAMessage(msg.message).trim();
+        if (DELETE_CMD_RE.test(text)) {
             return;
         }
 
@@ -52,6 +61,52 @@ class GroupMessageTracker {
             return [...list];
         }
         return list.slice(-count);
+    }
+
+    /**
+     * Messages eligible for bulk delete: only tracked entries strictly before the
+     * admin command, optionally limited to the oldest N (backlog cleanup).
+     *
+     * @param {string} chatId
+     * @param {number} count
+     * @param {string} [beforeMessageId] — exclude this message and anything after it
+     * @returns {Array<{ key: import('baileys').proto.IMessageKey, ts: number }>}
+     */
+    getOldestBefore(chatId, count, beforeMessageId) {
+        let list = this._groups.get(chatId) || [];
+
+        if (beforeMessageId) {
+            const cut = list.findIndex((entry) => entry.key.id === beforeMessageId);
+            if (cut >= 0) {
+                list = list.slice(0, cut);
+            }
+        }
+
+        if (!list.length) {
+            return [];
+        }
+
+        if (!count || count >= list.length) {
+            return [...list];
+        }
+
+        return list.slice(0, count);
+    }
+
+    /**
+     * @param {string} chatId
+     * @param {string} [beforeMessageId]
+     * @returns {number}
+     */
+    countBefore(chatId, beforeMessageId) {
+        let list = this._groups.get(chatId) || [];
+        if (beforeMessageId) {
+            const cut = list.findIndex((entry) => entry.key.id === beforeMessageId);
+            if (cut >= 0) {
+                list = list.slice(0, cut);
+            }
+        }
+        return list.length;
     }
 
     count(chatId) {
