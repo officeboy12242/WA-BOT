@@ -6,6 +6,7 @@ import { logger } from '../../utils/logger.js';
 import {
     buildQuotedTargetMessage,
     getSafeSendOptions,
+    resolveConversationChatId,
     resolveOutboundJid,
     safeDeleteMessage,
 } from '../../utils/waMessage.js';
@@ -44,7 +45,7 @@ function usageText() {
         '• `/dellast all` or `/delall` — delete all tracked backlog (up to 500)\n' +
         '• Reply to a message + `/del` — delete that message\n\n' +
         '_Bot must be a WhatsApp group admin._\n' +
-        '_Tracks messages since bot was online (max 500 per group)._'
+        '_Tracks up to 500 messages per group since the last bot restart._'
     );
 }
 
@@ -90,14 +91,15 @@ async function deleteKeys(sock, chatId, entries) {
 
 export async function handleDelLast(sock, chatId, args, originalMsg, { fullCommand, groupManager } = {}) {
     const sendOpts = getSafeSendOptions(originalMsg);
+    const trackerChatId = resolveConversationChatId(originalMsg?.key) || chatId;
 
-    if (!chatId?.endsWith('@g.us')) {
+    if (!trackerChatId?.endsWith('@g.us')) {
         await sock.sendMessage(chatId, { text: '❌ This command works only in groups.' }, sendOpts);
         return;
     }
 
     const botAdmin = groupManager
-        ? await groupManager.isBotGroupAdminAsync(sock, chatId)
+        ? await groupManager.isBotGroupAdminAsync(sock, trackerChatId)
         : false;
 
     if (!botAdmin) {
@@ -106,9 +108,9 @@ export async function handleDelLast(sock, chatId, args, originalMsg, { fullComma
 
     const quoted = buildQuotedTargetMessage(originalMsg);
     if (quoted?.key?.id) {
-        const ok = await tryDelete(sock, chatId, quoted.key);
+        const ok = await tryDelete(sock, trackerChatId, quoted.key);
         if (ok) {
-            groupMessageTracker.removeByIds(chatId, [quoted.key.id]);
+            groupMessageTracker.removeByIds(trackerChatId, [quoted.key.id]);
             await sock.sendMessage(chatId, { text: '🗑️ Message deleted.' }, sendOpts);
         } else {
             await sock.sendMessage(chatId, {
@@ -132,11 +134,17 @@ export async function handleDelLast(sock, chatId, args, originalMsg, { fullComma
 
     const isAll = rawArg === 'all';
     const commandMsgId = originalMsg?.key?.id;
-    const tracked = groupMessageTracker.countBefore(chatId, commandMsgId);
+    const tracked = groupMessageTracker.countBefore(trackerChatId, commandMsgId);
 
     if (!tracked) {
+        logger.warn(
+            `DelLast: no tracked messages for ${trackerChatId} ` +
+            `(raw=${originalMsg?.key?.remoteJid || 'n/a'}, total=${groupMessageTracker.count(trackerChatId)})`
+        );
         await sock.sendMessage(chatId, {
-            text: '📭 No older tracked messages to delete.\n\n_Messages are tracked while the bot is online._',
+            text:
+                '📭 No tracked messages to delete in this group.\n\n' +
+                '_The bot only tracks messages received after it starts/restarts (up to 500)._',
         }, sendOpts);
         return;
     }
@@ -153,7 +161,7 @@ export async function handleDelLast(sock, chatId, args, originalMsg, { fullComma
         take = Math.min(take, MAX_BATCH);
     }
 
-    const entries = groupMessageTracker.getOldestBefore(chatId, take, commandMsgId);
+    const entries = groupMessageTracker.getOldestBefore(trackerChatId, take, commandMsgId);
     if (!entries.length) {
         await sock.sendMessage(chatId, { text: '📭 Nothing to delete.' }, sendOpts);
         return;
@@ -163,7 +171,7 @@ export async function handleDelLast(sock, chatId, args, originalMsg, { fullComma
         text: `⏳ Deleting *${entries.length}* older message(s)...`,
     }, sendOpts);
 
-    const { deleted, failed } = await deleteKeys(sock, chatId, entries);
+    const { deleted, failed } = await deleteKeys(sock, trackerChatId, entries);
 
     let result =
         `🗑️ *Delete done*\n\n` +
@@ -175,7 +183,7 @@ export async function handleDelLast(sock, chatId, args, originalMsg, { fullComma
         }
     }
     if (isAll && tracked > entries.length) {
-        result += `\n_Note: only messages tracked since bot was online are removed._`;
+        result += `\n_Note: only messages tracked since the last bot restart are removed._`;
     }
 
     try {
@@ -185,5 +193,5 @@ export async function handleDelLast(sock, chatId, args, originalMsg, { fullComma
     } catch { /* ignore */ }
 
     await sock.sendMessage(chatId, { text: result }, sendOpts);
-    logger.info(`DelLast in ${chatId}: requested=${take}, deleted=${deleted}, failed=${failed}, botAdmin=${botAdmin}`);
+    logger.info(`DelLast in ${trackerChatId}: requested=${take}, deleted=${deleted}, failed=${failed}, botAdmin=${botAdmin}`);
 }
