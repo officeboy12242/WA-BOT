@@ -39,8 +39,8 @@ function usageText() {
         '🗑️ *DELETE MESSAGES* 🗑️\n' +
         '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
         '*Commands (group admins):*\n' +
-        '• `/dellast 20` — delete last 20 tracked messages\n' +
-        '• `/dellast all` or `/delall` — delete all tracked (up to 500)\n' +
+        '• `/dellast 20` — delete oldest 20 tracked messages (before your command)\n' +
+        '• `/dellast all` or `/delall` — delete all tracked backlog (up to 500)\n' +
         '• Reply to a message + `/del` — delete that message\n\n' +
         '_Bot must be a WhatsApp group admin._\n' +
         '_Tracks messages since bot was online (max 500 per group)._'
@@ -130,11 +130,12 @@ export async function handleDelLast(sock, chatId, args, originalMsg, { fullComma
     }
 
     const isAll = rawArg === 'all';
-    const tracked = groupMessageTracker.count(chatId);
+    const commandMsgId = originalMsg?.key?.id;
+    const tracked = groupMessageTracker.countBefore(chatId, commandMsgId);
 
     if (!tracked) {
         await sock.sendMessage(chatId, {
-            text: '📭 No tracked messages in this group yet.\n\n_Messages are tracked while the bot is online._',
+            text: '📭 No older tracked messages to delete.\n\n_Messages are tracked while the bot is online._',
         }, sendOpts);
         return;
     }
@@ -151,17 +152,17 @@ export async function handleDelLast(sock, chatId, args, originalMsg, { fullComma
         take = Math.min(take, MAX_BATCH);
     }
 
-    const entries = groupMessageTracker.getLast(chatId, take);
+    const entries = groupMessageTracker.getOldestBefore(chatId, take, commandMsgId);
     if (!entries.length) {
         await sock.sendMessage(chatId, { text: '📭 Nothing to delete.' }, sendOpts);
         return;
     }
 
     const status = await sock.sendMessage(chatId, {
-        text: `⏳ Deleting *${entries.length}* message(s)...`,
+        text: `⏳ Deleting *${entries.length}* older message(s)...`,
     }, sendOpts);
 
-    const { deleted, failed } = await deleteKeys(sock, chatId, [...entries].reverse());
+    const { deleted, failed } = await deleteKeys(sock, chatId, entries);
 
     let result =
         `🗑️ *Delete done*\n\n` +
