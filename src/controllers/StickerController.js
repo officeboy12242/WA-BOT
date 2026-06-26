@@ -220,12 +220,24 @@ class StickerController {
         }
 
         if (isVideo) {
-            const webpBuf = await this._convertToWebpViaFfmpeg(mediaPath, buf);
+            let webpBuf;
+            try {
+                webpBuf = await this._convertToWebpViaFfmpeg(mediaPath, buf);
+            } catch (convErr) {
+                logger.warn(`FFmpeg video→webp conversion failed: ${convErr.message}, trying direct FFmpeg circle`);
+                await this._ffmpegCircleFallback(mediaPath, outputPath);
+                return;
+            }
             await this._circleAnimatedFrames(sharp, webpBuf, CIRCLE_MASK, outputPath);
             return;
         }
 
-        await this._circleAnimatedFrames(sharp, buf, CIRCLE_MASK, outputPath);
+        try {
+            await this._circleAnimatedFrames(sharp, buf, CIRCLE_MASK, outputPath);
+        } catch (animErr) {
+            logger.warn(`Sharp animated circle failed: ${animErr.message}, trying FFmpeg fallback`);
+            await this._ffmpegCircleFallback(mediaPath, outputPath);
+        }
     }
 
     async _circleAnimatedFrames(sharp, buf, mask, outputPath) {
@@ -289,6 +301,39 @@ class StickerController {
         await writeFile(outputPath, out);
     }
 
+    async _ffmpegCircleFallback(mediaPath, outputPath) {
+        await this._enqueueFfmpeg(() => new Promise((resolve, reject) => {
+            const circleFilter = [
+                "crop=w='min(iw,ih)':h='min(iw,ih)'",
+                'scale=512:512',
+                'format=rgba',
+                "geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(lte(hypot(X-(W/2),Y-(H/2)),W/2-2),255,0)'",
+                'fps=10',
+            ].join(',');
+
+            const cmd = ffmpeg(mediaPath)
+                .addOutputOptions([
+                    '-vcodec', 'libwebp',
+                    '-vf', circleFilter,
+                    '-loop', '0',
+                    '-ss', '0',
+                    '-t', '00:00:06',
+                    '-preset', 'default',
+                    '-an',
+                    '-vsync', '0',
+                ])
+                .toFormat('webp')
+                .on('end', resolve)
+                .on('error', reject)
+                .save(outputPath);
+
+            setTimeout(() => {
+                try { cmd.kill('SIGKILL'); } catch {}
+                reject(new Error('FFmpeg circle fallback timed out'));
+            }, 45000);
+        }));
+    }
+
     async _convertToWebpViaFfmpeg(mediaPath, buf) {
         const inputPath = /\.(mp4|gif|webp|mov|avi|mkv|3gp)$/i.test(mediaPath)
             ? mediaPath
@@ -296,21 +341,29 @@ class StickerController {
         const outPath = this._generateTempFileName('.webp');
 
         try {
-            await this._enqueueFfmpeg(() => this._runFfmpegWithTimeout(
-                ffmpeg(inputPath)
-                    .addOutputOptions([
-                        '-vcodec', 'libwebp',
-                        '-vf', "scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:-1:-1:color=0x00000000,fps=12",
-                        '-loop', '0',
-                        '-t', '8',
-                        '-preset', 'default',
-                        '-an',
-                        '-pix_fmt', 'yuva420p',
-                    ])
-                    .toFormat('webp')
-                    .save(outPath),
-                30000
-            ));
+            await this._enqueueFfmpeg(() => {
+                return new Promise((resolve, reject) => {
+                    const cmd = ffmpeg(inputPath)
+                        .addOutputOptions([
+                            '-vcodec', 'libwebp',
+                            '-vf', "scale=512:512:force_original_aspect_ratio=decrease,fps=12,pad=512:512:-1:-1:color=0x00000000",
+                            '-loop', '0',
+                            '-t', '00:00:08',
+                            '-preset', 'default',
+                            '-an',
+                            '-vsync', '0',
+                        ])
+                        .toFormat('webp')
+                        .on('end', resolve)
+                        .on('error', reject)
+                        .save(outPath);
+
+                    setTimeout(() => {
+                        try { cmd.kill('SIGKILL'); } catch {}
+                        reject(new Error('FFmpeg convert timed out'));
+                    }, 30000);
+                });
+            });
             return fs.readFileSync(outPath);
         } finally {
             if (inputPath !== mediaPath) this._safeUnlink(inputPath);
@@ -333,31 +386,34 @@ class StickerController {
             return;
         }
 
-        const outputOptions = shape === 'crop'
-            ? [
-                '-vcodec', 'libwebp',
-                '-vf', "crop=w='min(min(iw,ih),512)':h='min(min(iw,ih),512)',scale=512:512,setsar=1,fps=12",
-                '-loop', '0',
-                '-t', '8',
-                '-preset', 'default',
-                '-an',
-                '-pix_fmt', 'yuva420p',
-                '-s', '512:512',
-            ]
-            : [
-                '-vcodec', 'libwebp',
-                '-vf', "scale=512:512:force_original_aspect_ratio=decrease,fps=12,pad=512:512:-1:-1:color=0x00000000",
-                '-loop', '0',
-                '-t', '8',
-                '-preset', 'default',
-                '-an',
-                '-pix_fmt', 'yuva420p',
-            ];
+        const vf = shape === 'crop'
+            ? "crop=w='min(min(iw\\,ih)\\,512)':h='min(min(iw\\,ih)\\,512)',scale=512:512,setsar=1,fps=15"
+            : "scale=512:512:force_original_aspect_ratio=decrease,fps=15,pad=512:512:-1:-1:color=0x00000000";
 
-        await this._enqueueFfmpeg(() => this._runFfmpegWithTimeout(
-            ffmpeg(mediaPath).addOutputOptions(outputOptions).toFormat('webp').save(outputPath),
-            30000
-        ));
+        await this._enqueueFfmpeg(() => {
+            return new Promise((resolve, reject) => {
+                const cmd = ffmpeg(mediaPath)
+                    .addOutputOptions([
+                        '-vcodec', 'libwebp',
+                        '-vf', vf,
+                        '-loop', '0',
+                        '-ss', '0',
+                        '-t', '00:00:08',
+                        '-preset', 'default',
+                        '-an',
+                        '-vsync', '0',
+                    ])
+                    .toFormat('webp')
+                    .on('end', resolve)
+                    .on('error', reject)
+                    .save(outputPath);
+
+                setTimeout(() => {
+                    try { cmd.kill('SIGKILL'); } catch {}
+                    reject(new Error('FFmpeg sticker timed out'));
+                }, 30000);
+            });
+        });
     }
 
     async _sendStickerFromPath(sock, chatId, stickerPath, packName, authorName, noMetadata, quotedMsg) {
@@ -436,8 +492,7 @@ class StickerController {
                 }
             }
 
-            const ext = isImage ? '.png' : (isGifPlayback ? '.gif' : '.mp4');
-            const mediaPath = this._generateTempFileName(ext);
+            const mediaPath = this._generateTempFileName(isImage ? '.png' : '.mp4');
             
             try {
                 const activeSock = await this._activeSock(sock);
@@ -679,10 +734,13 @@ class StickerController {
 
             await writeFile(stickerPath, buffer);
 
-            await this._enqueueFfmpeg(() => this._runFfmpegWithTimeout(
-                ffmpeg(stickerPath).fromFormat('webp_pipe').save(imagePath),
-                15000
-            ));
+            await this._enqueueFfmpeg(() => new Promise((resolve, reject) => {
+                ffmpeg(stickerPath)
+                    .fromFormat('webp_pipe')
+                    .on('end', resolve)
+                    .on('error', reject)
+                    .save(imagePath);
+            }));
 
             if (!fs.existsSync(imagePath)) {
                 throw new Error('Output image file not created');
@@ -866,7 +924,7 @@ class StickerController {
                     .toBuffer();
             } catch (sharpAnimErr) {
                 logger.warn(`Sharp animated WebP assembly failed, falling back to FFmpeg: ${sharpAnimErr.message}`);
-                await this._enqueueFfmpeg(() => this._runFfmpegWithTimeout(
+                await this._enqueueFfmpeg(() => new Promise((resolve, reject) => {
                     ffmpeg()
                         .input(concatFile)
                         .inputOptions(['-f', 'concat', '-safe', '0'])
@@ -879,9 +937,10 @@ class StickerController {
                             '-an',
                             '-vsync', '0',
                         ])
-                        .save(outputPath),
-                    15000
-                ));
+                        .on('end', resolve)
+                        .on('error', reject)
+                        .save(outputPath);
+                }));
                 buffer = fs.readFileSync(outputPath);
             }
             try {
