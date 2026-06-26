@@ -45,7 +45,7 @@ function usageText() {
         '• `/dellast all` or `/delall` — delete all tracked backlog (up to 500)\n' +
         '• Reply to a message + `/del` — delete that message\n\n' +
         '_Bot must be a WhatsApp group admin._\n' +
-        '_Tracks up to 500 messages per group since the last bot restart._'
+        '_Tracks member + bot messages since the last restart (up to 500 per group)._'
     );
 }
 

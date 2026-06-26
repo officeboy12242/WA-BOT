@@ -49,9 +49,55 @@ class GroupMessageTracker {
     }
 
     /**
-     * @param {import('baileys').proto.IWebMessageInfo} msg
+     * Track a message the bot just sent (emitOwnEvents is off, so upsert won't include it).
+     * @param {string} chatId
+     * @param {import('baileys').proto.IWebMessageInfo | { key?: import('baileys').proto.IMessageKey, message?: import('baileys').proto.IMessage }} sent
+     * @param {object} [content]
      */
-    track(msg) {
+    trackOutgoingSend(chatId, sent, content = null) {
+        if (!sent?.key?.id || content?.delete) {
+            return;
+        }
+
+        const remoteJid = this._normalizeGroupId(sent.key.remoteJid || chatId);
+        if (!remoteJid) {
+            return;
+        }
+
+        const text = typeof content?.text === 'string' ? content.text.trim() : '';
+        if (DELETE_CMD_RE.test(text)) {
+            return;
+        }
+
+        let message = sent.message;
+        if (!message) {
+            if (content?.text) {
+                message = { conversation: content.text };
+            } else if (content?.image) {
+                message = { imageMessage: {} };
+            } else if (content?.video) {
+                message = { videoMessage: {} };
+            } else if (content?.sticker) {
+                message = { stickerMessage: {} };
+            } else if (content?.audio) {
+                message = { audioMessage: {} };
+            } else if (content?.document) {
+                message = { documentMessage: {} };
+            } else {
+                message = { conversation: '' };
+            }
+        }
+
+        this.track({
+            key: {
+                remoteJid,
+                id: sent.key.id,
+                fromMe: true,
+            },
+            message,
+        });
+    }
+
         const chatId = this._normalizeGroupId(msg?.key?.remoteJid);
         if (!chatId || !msg.key?.id || !msg.message) {
             return;
