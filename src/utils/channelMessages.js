@@ -93,6 +93,10 @@ export async function fetchNewsletterMessages(sock, channelJid, count = 20) {
 
     try {
         const result = await sock.newsletterFetchMessages(channelJid, count);
+        if (!result || typeof result !== 'object') {
+            return [];
+        }
+
         const roots = [];
 
         const updatesNode =
@@ -121,7 +125,7 @@ export async function fetchNewsletterMessages(sock, channelJid, count = 20) {
 
         return parsed;
     } catch (error) {
-        logger.warn(`fetchNewsletterMessages failed for ${channelJid}: ${error.message}`);
+        logger.debug(`fetchNewsletterMessages skipped for ${channelJid}: ${error.message}`);
         return [];
     }
 }

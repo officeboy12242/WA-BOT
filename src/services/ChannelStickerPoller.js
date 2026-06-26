@@ -11,6 +11,8 @@ const POLL_INTERVAL_MS = 60_000;
 const STICKERS_PER_FETCH = 25;
 const CHANNEL_POLL_CONCURRENCY = 4;
 
+const MAX_CONSECUTIVE_FAILURES = 5;
+
 class ChannelStickerPoller {
     constructor(stickerForwarder) {
         this.stickerForwarder = stickerForwarder;
@@ -18,6 +20,7 @@ class ChannelStickerPoller {
         this._timer = null;
         this._sock = null;
         this._running = false;
+        this._failCounts = new Map();
     }
 
     setChannels(jids) {
@@ -78,12 +81,20 @@ class ChannelStickerPoller {
             return;
         }
 
+        const fails = this._failCounts.get(channelJid) || 0;
+        if (fails >= MAX_CONSECUTIVE_FAILURES) {
+            return;
+        }
+
         try {
             const stickers = await fetchNewsletterStickerMessages(
                 this._sock,
                 channelJid,
                 STICKERS_PER_FETCH,
             );
+
+            this._failCounts.set(channelJid, 0);
+
             if (!stickers.length) {
                 return;
             }
@@ -117,7 +128,11 @@ class ChannelStickerPoller {
                 logger.info(`📡 Channel backfill queued ${queued} sticker(s) from ${channelJid}`);
             }
         } catch (err) {
-            logger.debug(`Channel backfill skipped for ${channelJid}: ${err.message}`);
+            const newFails = fails + 1;
+            this._failCounts.set(channelJid, newFails);
+            if (newFails >= MAX_CONSECUTIVE_FAILURES) {
+                logger.warn(`📡 Channel ${channelJid} disabled after ${newFails} consecutive failures: ${err.message}`);
+            }
         }
     }
 }
