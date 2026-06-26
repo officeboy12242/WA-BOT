@@ -12,7 +12,8 @@ import {
 import { groupMessageTracker } from '../../utils/groupMessageTracker.js';
 
 const DELETE_DELAY_MS = 350;
-const MAX_BATCH = 100;
+/** Max messages deleted per `/dellast N` (matches tracker capacity). */
+const MAX_BATCH = 500;
 
 function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -39,7 +40,7 @@ function usageText() {
         '🗑️ *DELETE MESSAGES* 🗑️\n' +
         '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
         '*Commands (group admins):*\n' +
-        '• `/dellast 20` — delete oldest 20 tracked messages (before your command)\n' +
+        '• `/dellast <number>` — delete oldest N tracked messages (e.g. `/dellast 50`, `/dellast 200`)\n' +
         '• `/dellast all` or `/delall` — delete all tracked backlog (up to 500)\n' +
         '• Reply to a message + `/del` — delete that message\n\n' +
         '_Bot must be a WhatsApp group admin._\n' +

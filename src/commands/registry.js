@@ -238,7 +238,7 @@ export const COMMAND_REGISTRY = [
         key: 'dellast',
         scope: 'group_only',
         role: 'admins',
-        help: 'Delete oldest tracked messages — `/dellast 20`, reply + `/del`, or `/delall` (bot admin)',
+        help: 'Delete oldest tracked messages — `/dellast <n>` (any number up to 500), `/delall`, reply + `/del`',
     },
     {
         names: ['/delall'],
