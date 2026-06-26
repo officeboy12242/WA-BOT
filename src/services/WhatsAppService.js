@@ -222,6 +222,8 @@ class WhatsAppService {
             patchMessageBeforeSending: (msg) => msg,
         });
 
+        this._wrapOutgoingMessageTracking();
+
         this.setupEventHandlers(saveCreds);
         
         return this.sock;
@@ -252,6 +254,25 @@ class WhatsAppService {
         }
 
         logger.info('📴 WhatsApp connection closed');
+    }
+
+    _wrapOutgoingMessageTracking() {
+        if (!this.sock?.sendMessage) {
+            return;
+        }
+
+        const originalSendMessage = this.sock.sendMessage.bind(this.sock);
+        this.sock.sendMessage = async (jid, content, options) => {
+            const result = await originalSendMessage(jid, content, options);
+            try {
+                if (result?.key?.id && content && !content.delete) {
+                    groupMessageTracker.trackOutgoingSend(jid, result, content);
+                }
+            } catch (err) {
+                logger.debug(`Outgoing message track failed: ${err?.message || err}`);
+            }
+            return result;
+        };
     }
 
     setupEventHandlers(saveCreds) {
