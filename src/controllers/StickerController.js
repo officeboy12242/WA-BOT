@@ -96,6 +96,22 @@ class StickerController {
         });
     }
 
+    _runFfmpegWithTimeout(command, timeoutMs = 30000) {
+        return new Promise((resolve, reject) => {
+            let settled = false;
+            const timer = setTimeout(() => {
+                if (settled) return;
+                settled = true;
+                try { command.kill('SIGKILL'); } catch {}
+                reject(new Error(`FFmpeg timed out after ${timeoutMs}ms`));
+            }, timeoutMs);
+
+            command
+                .on('end', () => { if (!settled) { settled = true; clearTimeout(timer); resolve(); } })
+                .on('error', (err) => { if (!settled) { settled = true; clearTimeout(timer); reject(err); } });
+        });
+    }
+
     _enqueueFfmpeg(task) {
         return new Promise((resolve, reject) => {
             this._ffmpegQueue.push({ task, resolve, reject });
@@ -172,91 +188,192 @@ class StickerController {
         return Buffer.isBuffer(buffer) && buffer.includes(Buffer.from('ANIM'));
     }
 
-    async _renderCircleStickerSharp(inputBuffer, outputPath) {
-        const { default: sharp } = await import('sharp');
-        const mask = Buffer.from('<svg width="512" height="512"><circle cx="256" cy="256" r="252" fill="white"/></svg>');
-        const out = await sharp(inputBuffer, { animated: true })
-            .resize(512, 512, { fit: 'cover' })
-            .composite([{ input: mask, blend: 'dest-in' }])
-            .webp({ quality: 90 })
-            .toBuffer();
-        await writeFile(outputPath, out);
+    async _getSharp() {
+        if (!this._sharp) {
+            const mod = await import('sharp');
+            this._sharp = mod.default;
+        }
+        return this._sharp;
     }
 
     async _renderCircleSticker(mediaPath, outputPath, { animated = false, inputBuffer = null } = {}) {
-        if (animated && /\.webp$/i.test(mediaPath)) {
-            await this._renderCircleStickerSharp(inputBuffer || fs.readFileSync(mediaPath), outputPath);
+        const sharp = await this._getSharp();
+        const buf = inputBuffer || fs.readFileSync(mediaPath);
+
+        const isWebp = /\.webp$/i.test(mediaPath) || (buf[0] === 0x52 && buf[1] === 0x49);
+        const isGif = /\.gif$/i.test(mediaPath) || (buf[0] === 0x47 && buf[1] === 0x49);
+        const isVideo = /\.(mp4|mov|avi|mkv|3gp)$/i.test(mediaPath);
+        const isAnim = animated || this._isAnimatedWebp(buf) || isGif;
+
+        const CIRCLE_MASK = Buffer.from(
+            '<svg width="512" height="512"><circle cx="256" cy="256" r="252" fill="white"/></svg>'
+        );
+
+        if (!isAnim) {
+            const out = await sharp(buf)
+                .resize(512, 512, { fit: 'cover' })
+                .composite([{ input: CIRCLE_MASK, blend: 'dest-in' }])
+                .webp({ quality: 90 })
+                .toBuffer();
+            await writeFile(outputPath, out);
             return;
         }
 
-        const circleFilter = [
-            "crop=w='min(iw,ih)':h='min(iw,ih)'",
-            'scale=512:512',
-            'format=rgba',
-            "geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(lte(hypot(X-(W/2),Y-(H/2)),W/2-2),255,0)'",
-            'fps=15',
-        ].join(',');
-
-        const command = ffmpeg(mediaPath);
-        if (/\.gif$/i.test(mediaPath)) {
-            command.inputOptions(['-ignore_loop', '0']);
+        if (isVideo) {
+            const webpBuf = await this._convertToWebpViaFfmpeg(mediaPath, buf);
+            await this._circleAnimatedFrames(sharp, webpBuf, CIRCLE_MASK, outputPath);
+            return;
         }
 
-        await this._enqueueFfmpeg(() => this._runFfmpeg(
-            command
-                .addOutputOptions([
-                    '-vcodec', 'libwebp',
-                    '-vf', circleFilter,
-                    '-loop', '0',
-                    '-ss', '00:00:00.0',
-                    '-t', '00:00:09.0',
-                    '-preset', 'default',
-                    '-an',
-                    '-fps_mode', 'passthrough',
-                    '-threads', '0',
-                ])
-                .toFormat('webp')
-                .save(outputPath)
-        ));
+        await this._circleAnimatedFrames(sharp, buf, CIRCLE_MASK, outputPath);
     }
 
-    async _renderStandardSticker(mediaPath, outputPath, shape) {
+    async _circleAnimatedFrames(sharp, buf, mask, outputPath) {
+        const meta = await sharp(buf, { animated: true }).metadata();
+        const pages = meta.pages || 1;
+
+        if (pages <= 1) {
+            const out = await sharp(buf)
+                .resize(512, 512, { fit: 'cover' })
+                .composite([{ input: mask, blend: 'dest-in' }])
+                .webp({ quality: 90 })
+                .toBuffer();
+            await writeFile(outputPath, out);
+            return;
+        }
+
+        const MAX_FRAMES = 50;
+        const frameSkip = pages > MAX_FRAMES ? Math.ceil(pages / MAX_FRAMES) : 1;
+        const baseDelay = meta.delay?.[0] || 100;
+        const frameDelay = Math.max(50, Math.round(baseDelay * frameSkip));
+
+        const pngFrames = [];
+        for (let i = 0; i < pages && pngFrames.length < MAX_FRAMES; i += frameSkip) {
+            const png = await sharp(buf, { animated: false, page: i })
+                .resize(512, 512, { fit: 'cover' })
+                .composite([{ input: mask, blend: 'dest-in' }])
+                .ensureAlpha()
+                .png()
+                .toBuffer();
+            pngFrames.push(png);
+        }
+
+        const frameHeight = 512;
+        const totalHeight = frameHeight * pngFrames.length;
+
+        let strip = await sharp({
+            create: { width: 512, height: totalHeight, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } },
+        }).png().toBuffer();
+
+        const composites = pngFrames.map((png, idx) => ({
+            input: png,
+            top: idx * frameHeight,
+            left: 0,
+        }));
+
+        strip = await sharp(strip)
+            .composite(composites)
+            .png()
+            .toBuffer();
+
+        const out = await sharp(strip, { animated: false })
+            .resize(512, totalHeight, { fit: 'fill' })
+            .webp({
+                quality: 65,
+                loop: 0,
+                delay: pngFrames.map(() => frameDelay),
+                pageHeight: frameHeight,
+            })
+            .toBuffer();
+
+        await writeFile(outputPath, out);
+    }
+
+    async _convertToWebpViaFfmpeg(mediaPath, buf) {
+        const inputPath = /\.(mp4|gif|webp|mov|avi|mkv|3gp)$/i.test(mediaPath)
+            ? mediaPath
+            : (() => { const p = this._generateTempFileName('.mp4'); fs.writeFileSync(p, buf); return p; })();
+        const outPath = this._generateTempFileName('.webp');
+
+        try {
+            await this._enqueueFfmpeg(() => this._runFfmpegWithTimeout(
+                ffmpeg(inputPath)
+                    .addOutputOptions([
+                        '-vcodec', 'libwebp',
+                        '-vf', "scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:-1:-1:color=0x00000000,fps=12",
+                        '-loop', '0',
+                        '-t', '8',
+                        '-preset', 'default',
+                        '-an',
+                        '-pix_fmt', 'yuva420p',
+                    ])
+                    .toFormat('webp')
+                    .save(outPath),
+                30000
+            ));
+            return fs.readFileSync(outPath);
+        } finally {
+            if (inputPath !== mediaPath) this._safeUnlink(inputPath);
+            this._safeUnlink(outPath);
+        }
+    }
+
+    async _renderStandardSticker(mediaPath, outputPath, shape, { animated = false, inputBuffer = null } = {}) {
+        const isVideoFile = /\.(mp4|mov|avi|mkv|3gp)$/i.test(mediaPath);
+
+        if (!isVideoFile && !animated) {
+            const sharp = await this._getSharp();
+            const buf = inputBuffer || fs.readFileSync(mediaPath);
+            const resizeOpts = shape === 'crop'
+                ? { width: 512, height: 512, fit: 'cover' }
+                : { width: 512, height: 512, fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } };
+
+            const out = await sharp(buf).resize(resizeOpts).webp({ quality: 90 }).toBuffer();
+            await writeFile(outputPath, out);
+            return;
+        }
+
         const outputOptions = shape === 'crop'
             ? [
                 '-vcodec', 'libwebp',
-                '-vf', "crop=w='min(min(iw,ih),500)':h='min(min(iw,ih),500)',scale=500:500,setsar=1,fps=15",
+                '-vf', "crop=w='min(min(iw,ih),512)':h='min(min(iw,ih),512)',scale=512:512,setsar=1,fps=12",
                 '-loop', '0',
-                '-ss', '00:00:00.0',
-                '-t', '00:00:09.0',
+                '-t', '8',
                 '-preset', 'default',
                 '-an',
-                '-vsync', '0',
+                '-pix_fmt', 'yuva420p',
                 '-s', '512:512',
             ]
             : [
                 '-vcodec', 'libwebp',
-                '-vf', "scale='min(220,iw)':min'(220,ih)':force_original_aspect_ratio=decrease,fps=15, pad=220:220:-1:-1:color=white@0.0, split [a][b]; [a] palettegen=reserve_transparent=on:transparency_color=ffffff [p]; [b][p] paletteuse",
+                '-vf', "scale=512:512:force_original_aspect_ratio=decrease,fps=12,pad=512:512:-1:-1:color=0x00000000",
+                '-loop', '0',
+                '-t', '8',
+                '-preset', 'default',
+                '-an',
+                '-pix_fmt', 'yuva420p',
             ];
 
-        await this._enqueueFfmpeg(() => this._runFfmpeg(
-            ffmpeg(mediaPath).addOutputOptions(outputOptions).toFormat('webp').save(outputPath)
+        await this._enqueueFfmpeg(() => this._runFfmpegWithTimeout(
+            ffmpeg(mediaPath).addOutputOptions(outputOptions).toFormat('webp').save(outputPath),
+            30000
         ));
     }
 
     async _sendStickerFromPath(sock, chatId, stickerPath, packName, authorName, noMetadata, quotedMsg) {
         const activeSock = await this._activeSock(sock);
-        let stickerBuffer = fs.readFileSync(stickerPath);
+        const rawBuffer = fs.readFileSync(stickerPath);
+        let stickerBuffer = rawBuffer;
 
         if (!noMetadata) {
             try {
                 const exif = new StickerExif({ pack: packName, author: authorName });
-                stickerBuffer = await exif.add(stickerBuffer);
+                stickerBuffer = await exif.add(rawBuffer);
             } catch (metaErr) {
                 logger.warn(`Sticker metadata injection failed: ${metaErr?.message || metaErr}`);
             }
         }
 
-        const rawBuffer = fs.readFileSync(stickerPath);
         try {
             await activeSock.sendMessage(chatId, { sticker: stickerBuffer }, { quoted: quotedMsg });
         } catch (wsError) {
@@ -285,18 +402,18 @@ class StickerController {
             const messageType = Object.keys(normalized)[0];
             const isImage = messageType === 'imageMessage';
             const isVideo = messageType === 'videoMessage';
+            const isGifPlayback = isVideo && normalized.videoMessage?.gifPlayback;
 
             if (!isImage && !isVideo) {
                 await sock.sendMessage(chatId, {
-                    text: '❌ Please reply to an image or video (max 10 seconds).'
+                    text: '❌ Please reply to an image or video/GIF (max 15 seconds).'
                 });
                 return;
             }
 
-            // Check video duration
-            if (isVideo && normalized.videoMessage?.seconds > 10) {
+            if (isVideo && !isGifPlayback && normalized.videoMessage?.seconds > 15) {
                 await sock.sendMessage(chatId, {
-                    text: '❌ Video must be less than 10 seconds.'
+                    text: '❌ Video must be less than 15 seconds.'
                 });
                 return;
             }
@@ -319,8 +436,8 @@ class StickerController {
                 }
             }
 
-            // Download media
-            const mediaPath = this._generateTempFileName(isImage ? '.png' : '.mp4');
+            const ext = isImage ? '.png' : (isGifPlayback ? '.gif' : '.mp4');
+            const mediaPath = this._generateTempFileName(ext);
             
             try {
                 const activeSock = await this._activeSock(sock);
@@ -346,8 +463,7 @@ class StickerController {
                     return;
                 }
 
-                // Create sticker
-                await this._buildSticker(sock, chatId, mediaPath, packName, authorName, shape, noMetadata, waMessage, isVideo);
+                await this._buildSticker(sock, chatId, mediaPath, packName, authorName, shape, noMetadata, waMessage, isVideo || isGifPlayback);
             } catch (error) {
                 logger.error('Media download error:', error);
                 await sock.sendMessage(chatId, {
@@ -373,11 +489,22 @@ class StickerController {
             if (shape === 'circle') {
                 await this._renderCircleSticker(mediaPath, stickerPath, { animated: isAnimated });
             } else {
-                await this._renderStandardSticker(mediaPath, stickerPath, shape);
+                await this._renderStandardSticker(mediaPath, stickerPath, shape, { animated: isAnimated });
             }
 
             if (!fs.existsSync(stickerPath)) {
                 throw new Error('Output sticker file not created');
+            }
+
+            const stat = fs.statSync(stickerPath);
+            if (stat.size > 1_000_000) {
+                logger.warn(`Sticker exceeds 1MB (${(stat.size / 1024).toFixed(0)}KB), re-encoding at lower quality`);
+                const sharp = await this._getSharp();
+                const reEncoded = await sharp(fs.readFileSync(stickerPath), { animated: isAnimated })
+                    .resize(512, 512, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+                    .webp({ quality: 40 })
+                    .toBuffer();
+                await writeFile(stickerPath, reEncoded);
             }
 
             await this._sendStickerFromPath(sock, chatId, stickerPath, packName, authorName, noMetadata, quotedMsg);
@@ -453,13 +580,6 @@ class StickerController {
             }
 
             const isAnimated = Boolean(stickerPayload.isAnimated) || this._isAnimatedWebp(buffer);
-            
-            if (shape === 'circle' && isAnimated) {
-                await sock.sendMessage(chatId, {
-                    text: '⚠️ Circle mode only works on static stickers.\n\n💡 _Tip:_ Reply to an image or video with `/stk c` to create your own circle sticker!',
-                });
-                return;
-            }
 
             logger.info(`Steal: shape=${shape} animated=${isAnimated} bytes=${buffer.length} args=${args.join(' ') || '(none)'}`);
 
@@ -559,14 +679,10 @@ class StickerController {
 
             await writeFile(stickerPath, buffer);
 
-            await this._enqueueFfmpeg(() => new Promise((resolve, reject) => {
-                const ffmpegProcess = ffmpeg(stickerPath)
-                    .fromFormat('webp_pipe')
-                    .save(imagePath);
-
-                ffmpegProcess.on('error', reject);
-                ffmpegProcess.on('end', resolve);
-            }));
+            await this._enqueueFfmpeg(() => this._runFfmpegWithTimeout(
+                ffmpeg(stickerPath).fromFormat('webp_pipe').save(imagePath),
+                15000
+            ));
 
             if (!fs.existsSync(imagePath)) {
                 throw new Error('Output image file not created');
@@ -721,28 +837,53 @@ class StickerController {
 
             outputPath = this._generateTempFileName('.webp');
 
-            // Combine frames → animated WebP
-            await new Promise((resolve, reject) => {
-                ffmpeg()
-                    .input(concatFile)
-                    .inputOptions(['-f', 'concat', '-safe', '0'])
-                    .outputOptions([
-                        '-vcodec', 'libwebp',
-                        '-vf', 'scale=512:512',
-                        '-loop', '0',
-                        '-preset', 'default',
-                        '-pix_fmt', 'yuva420p',
-                        '-an',
-                        '-vsync', '0',
-                    ])
-                    .output(outputPath)
-                    .on('end', resolve)
-                    .on('error', reject)
-                    .run();
-            });
+            const sharp = await this._getSharp();
+            const framePngs = frameFiles.map(f => fs.readFileSync(f));
+            let buffer;
 
-            // Read WebP buffer and inject metadata via Exif
-            let buffer = fs.readFileSync(outputPath);
+            try {
+                const totalHeight = SIZE * framePngs.length;
+                let strip = await sharp({
+                    create: { width: SIZE, height: totalHeight, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } },
+                }).png().toBuffer();
+
+                const composites = framePngs.map((png, idx) => ({
+                    input: png,
+                    top: idx * SIZE,
+                    left: 0,
+                }));
+
+                strip = await sharp(strip).composite(composites).png().toBuffer();
+
+                buffer = await sharp(strip, { animated: false })
+                    .resize(SIZE, totalHeight, { fit: 'fill' })
+                    .webp({
+                        quality: 80,
+                        loop: 0,
+                        delay: framePngs.map(() => 100),
+                        pageHeight: SIZE,
+                    })
+                    .toBuffer();
+            } catch (sharpAnimErr) {
+                logger.warn(`Sharp animated WebP assembly failed, falling back to FFmpeg: ${sharpAnimErr.message}`);
+                await this._enqueueFfmpeg(() => this._runFfmpegWithTimeout(
+                    ffmpeg()
+                        .input(concatFile)
+                        .inputOptions(['-f', 'concat', '-safe', '0'])
+                        .outputOptions([
+                            '-vcodec', 'libwebp',
+                            '-vf', 'scale=512:512',
+                            '-loop', '0',
+                            '-preset', 'default',
+                            '-pix_fmt', 'yuva420p',
+                            '-an',
+                            '-vsync', '0',
+                        ])
+                        .save(outputPath),
+                    15000
+                ));
+                buffer = fs.readFileSync(outputPath);
+            }
             try {
                 const exif = new StickerExif({ pack: this.defaultPack, author: this.defaultAuthor });
                 buffer = await exif.add(buffer);
