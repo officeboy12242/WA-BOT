@@ -7,9 +7,9 @@ import { fetchNewsletterStickerMessages } from '../utils/channelMessages.js';
 import { extractStickerFromMessage } from '../utils/stickerExtract.js';
 import { isStickerDownloadReady } from '../utils/stickerDownload.js';
 
-const POLL_INTERVAL_MS = 90_000;
-const STICKERS_PER_FETCH = 10;
-const CHANNEL_STAGGER_MS = 4000;
+const POLL_INTERVAL_MS = 60_000;
+const STICKERS_PER_FETCH = 25;
+const CHANNEL_POLL_CONCURRENCY = 4;
 
 class ChannelStickerPoller {
     constructor(stickerForwarder) {
@@ -34,7 +34,10 @@ class ChannelStickerPoller {
             return;
         }
 
-        logger.info(`📡 Channel sticker backfill active (${this.channelJids.length} channel(s), every ${POLL_INTERVAL_MS / 1000}s)`);
+        logger.info(
+            `📡 Channel sticker backfill active (${this.channelJids.length} channel(s), ` +
+                `every ${POLL_INTERVAL_MS / 1000}s, ${CHANNEL_POLL_CONCURRENCY} parallel)`
+        );
         this._timer = setInterval(() => {
             void this._pollAll();
         }, POLL_INTERVAL_MS);
@@ -42,7 +45,6 @@ class ChannelStickerPoller {
             this._timer.unref();
         }
 
-        // First backfill shortly after connect
         setTimeout(() => void this._pollAll(), 15_000);
     }
 
@@ -62,12 +64,9 @@ class ChannelStickerPoller {
 
         this._running = true;
         try {
-            for (let i = 0; i < this.channelJids.length; i++) {
-                const jid = this.channelJids[i];
-                await this._pollChannel(jid);
-                if (i < this.channelJids.length - 1) {
-                    await new Promise((r) => setTimeout(r, CHANNEL_STAGGER_MS));
-                }
+            for (let i = 0; i < this.channelJids.length; i += CHANNEL_POLL_CONCURRENCY) {
+                const batch = this.channelJids.slice(i, i + CHANNEL_POLL_CONCURRENCY);
+                await Promise.allSettled(batch.map((jid) => this._pollChannel(jid)));
             }
         } finally {
             this._running = false;
