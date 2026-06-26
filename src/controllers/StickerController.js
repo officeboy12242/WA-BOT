@@ -200,9 +200,8 @@ class StickerController {
         const sharp = await this._getSharp();
         const buf = inputBuffer || fs.readFileSync(mediaPath);
 
-        const isWebp = /\.webp$/i.test(mediaPath) || (buf[0] === 0x52 && buf[1] === 0x49);
-        const isGif = /\.gif$/i.test(mediaPath) || (buf[0] === 0x47 && buf[1] === 0x49);
         const isVideo = /\.(mp4|mov|avi|mkv|3gp)$/i.test(mediaPath);
+        const isGif = /\.gif$/i.test(mediaPath) || (buf[0] === 0x47 && buf[1] === 0x49);
         const isAnim = animated || this._isAnimatedWebp(buf) || isGif;
 
         const CIRCLE_MASK = Buffer.from(
@@ -220,85 +219,35 @@ class StickerController {
         }
 
         if (isVideo) {
-            let webpBuf;
             try {
-                webpBuf = await this._convertToWebpViaFfmpeg(mediaPath, buf);
-            } catch (convErr) {
-                logger.warn(`FFmpeg video→webp conversion failed: ${convErr.message}, trying direct FFmpeg circle`);
+                const webpBuf = await this._convertToWebpViaFfmpeg(mediaPath, buf);
+                const out = await sharp(webpBuf, { animated: true, limitInputPixels: false })
+                    .resize(512, 512, { fit: 'cover' })
+                    .composite([{ input: CIRCLE_MASK, blend: 'dest-in', tile: true }])
+                    .webp({ quality: 65, loop: 0 })
+                    .toBuffer();
+                await writeFile(outputPath, out);
+            } catch (err) {
+                logger.warn(`Sharp circle on converted video failed: ${err.message}, trying FFmpeg fallback`);
                 await this._ffmpegCircleFallback(mediaPath, outputPath);
-                return;
             }
-            await this._circleAnimatedFrames(sharp, webpBuf, CIRCLE_MASK, outputPath);
             return;
         }
 
         try {
-            await this._circleAnimatedFrames(sharp, buf, CIRCLE_MASK, outputPath);
+            const meta = await sharp(buf, { animated: true }).metadata();
+            const maxPages = Math.min(meta.pages || 1, 60);
+
+            const out = await sharp(buf, { animated: true, pages: maxPages, limitInputPixels: false })
+                .resize(512, 512, { fit: 'cover' })
+                .composite([{ input: CIRCLE_MASK, blend: 'dest-in', tile: true }])
+                .webp({ quality: 65, loop: 0 })
+                .toBuffer();
+            await writeFile(outputPath, out);
         } catch (animErr) {
             logger.warn(`Sharp animated circle failed: ${animErr.message}, trying FFmpeg fallback`);
             await this._ffmpegCircleFallback(mediaPath, outputPath);
         }
-    }
-
-    async _circleAnimatedFrames(sharp, buf, mask, outputPath) {
-        const meta = await sharp(buf, { animated: true }).metadata();
-        const pages = meta.pages || 1;
-
-        if (pages <= 1) {
-            const out = await sharp(buf)
-                .resize(512, 512, { fit: 'cover' })
-                .composite([{ input: mask, blend: 'dest-in' }])
-                .webp({ quality: 90 })
-                .toBuffer();
-            await writeFile(outputPath, out);
-            return;
-        }
-
-        const MAX_FRAMES = 50;
-        const frameSkip = pages > MAX_FRAMES ? Math.ceil(pages / MAX_FRAMES) : 1;
-        const baseDelay = meta.delay?.[0] || 100;
-        const frameDelay = Math.max(50, Math.round(baseDelay * frameSkip));
-
-        const pngFrames = [];
-        for (let i = 0; i < pages && pngFrames.length < MAX_FRAMES; i += frameSkip) {
-            const png = await sharp(buf, { animated: false, page: i })
-                .resize(512, 512, { fit: 'cover' })
-                .composite([{ input: mask, blend: 'dest-in' }])
-                .ensureAlpha()
-                .png()
-                .toBuffer();
-            pngFrames.push(png);
-        }
-
-        const frameHeight = 512;
-        const totalHeight = frameHeight * pngFrames.length;
-
-        let strip = await sharp({
-            create: { width: 512, height: totalHeight, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } },
-        }).png().toBuffer();
-
-        const composites = pngFrames.map((png, idx) => ({
-            input: png,
-            top: idx * frameHeight,
-            left: 0,
-        }));
-
-        strip = await sharp(strip)
-            .composite(composites)
-            .png()
-            .toBuffer();
-
-        const out = await sharp(strip, { animated: false })
-            .resize(512, totalHeight, { fit: 'fill' })
-            .webp({
-                quality: 65,
-                loop: 0,
-                delay: pngFrames.map(() => frameDelay),
-                pageHeight: frameHeight,
-            })
-            .toBuffer();
-
-        await writeFile(outputPath, out);
     }
 
     async _ffmpegCircleFallback(mediaPath, outputPath) {
@@ -895,54 +844,25 @@ class StickerController {
 
             outputPath = this._generateTempFileName('.webp');
 
-            const sharp = await this._getSharp();
-            const framePngs = frameFiles.map(f => fs.readFileSync(f));
-            let buffer;
+            await this._enqueueFfmpeg(() => new Promise((resolve, reject) => {
+                ffmpeg()
+                    .input(concatFile)
+                    .inputOptions(['-f', 'concat', '-safe', '0'])
+                    .outputOptions([
+                        '-vcodec', 'libwebp',
+                        '-vf', 'scale=512:512',
+                        '-loop', '0',
+                        '-preset', 'default',
+                        '-pix_fmt', 'yuva420p',
+                        '-an',
+                        '-vsync', '0',
+                    ])
+                    .on('end', resolve)
+                    .on('error', reject)
+                    .save(outputPath);
+            }));
 
-            try {
-                const totalHeight = SIZE * framePngs.length;
-                let strip = await sharp({
-                    create: { width: SIZE, height: totalHeight, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } },
-                }).png().toBuffer();
-
-                const composites = framePngs.map((png, idx) => ({
-                    input: png,
-                    top: idx * SIZE,
-                    left: 0,
-                }));
-
-                strip = await sharp(strip).composite(composites).png().toBuffer();
-
-                buffer = await sharp(strip, { animated: false })
-                    .resize(SIZE, totalHeight, { fit: 'fill' })
-                    .webp({
-                        quality: 80,
-                        loop: 0,
-                        delay: framePngs.map(() => 100),
-                        pageHeight: SIZE,
-                    })
-                    .toBuffer();
-            } catch (sharpAnimErr) {
-                logger.warn(`Sharp animated WebP assembly failed, falling back to FFmpeg: ${sharpAnimErr.message}`);
-                await this._enqueueFfmpeg(() => new Promise((resolve, reject) => {
-                    ffmpeg()
-                        .input(concatFile)
-                        .inputOptions(['-f', 'concat', '-safe', '0'])
-                        .outputOptions([
-                            '-vcodec', 'libwebp',
-                            '-vf', 'scale=512:512',
-                            '-loop', '0',
-                            '-preset', 'default',
-                            '-pix_fmt', 'yuva420p',
-                            '-an',
-                            '-vsync', '0',
-                        ])
-                        .on('end', resolve)
-                        .on('error', reject)
-                        .save(outputPath);
-                }));
-                buffer = fs.readFileSync(outputPath);
-            }
+            let buffer = fs.readFileSync(outputPath);
             try {
                 const exif = new StickerExif({ pack: this.defaultPack, author: this.defaultAuthor });
                 buffer = await exif.add(buffer);
