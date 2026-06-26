@@ -48,6 +48,9 @@ export const config = {
         : [],
     STICKER_PACK_NAME: process.env.STICKER_PACK_NAME?.trim() || '',
     STICKER_PACK_AUTHOR: process.env.STICKER_PACK_AUTHOR?.trim() || '',
+    /** Parallel sticker download/send workers (1–8, default 3). */
+    STICKER_FORWARD_CONCURRENCY: Math.max(1, Math.min(8, parseInt(process.env.STICKER_FORWARD_CONCURRENCY, 10) || 3)),
+    STICKER_INTER_SEND_DELAY_MS: Math.max(50, parseInt(process.env.STICKER_INTER_SEND_DELAY_MS, 10) || 150),
     TMDB_API_KEY: process.env.TMDB_API_KEY?.trim() || '',
     BOT_LOG_NUMBER: process.env.BOT_LOG_NUMBER?.trim() || '',
     GITHUB_TRENDING_ENABLED: process.env.GITHUB_TRENDING_ENABLED !== 'false',

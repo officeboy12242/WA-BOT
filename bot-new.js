@@ -183,23 +183,30 @@ class WhatsAppCourseBot {
                 config
             );
 
-            // Initialize sticker forwarder if target groups are configured
-            if (config.STICKER_TARGET_GROUPS.length > 0) {
-                this.stickerForwarder = new StickerForwarder(
-                    config.STICKER_TARGET_GROUPS,
-                    config.STICKER_PACK_NAME,
-                    config.STICKER_PACK_AUTHOR,
-                    config.STICKER_SOURCE_CHANNELS
-                );
-                this.stickerForwarder.startBackgroundWorkers();
-                this.channelStickerPoller = new ChannelStickerPoller(this.stickerForwarder);
-                const channelNote = config.STICKER_SOURCE_CHANNELS.length
-                    ? `${config.STICKER_SOURCE_CHANNELS.length} channel(s)`
-                    : 'all joined channels';
-                logger.info(
-                    `🎨 Sticker forwarding → ${config.STICKER_TARGET_GROUPS.length} group(s) | sources: groups + ${channelNote}`
-                );
-            }
+            // Sticker forwarder (channels/groups → target groups with /stickeron)
+            this.stickerForwarder = new StickerForwarder({
+                groupManager: this.groupManager,
+                envTargetGroups: config.STICKER_TARGET_GROUPS,
+                packName: config.STICKER_PACK_NAME,
+                packAuthor: config.STICKER_PACK_AUTHOR,
+                sourceChannels: config.STICKER_SOURCE_CHANNELS,
+                concurrency: config.STICKER_FORWARD_CONCURRENCY,
+                interSendDelayMs: config.STICKER_INTER_SEND_DELAY_MS,
+            });
+            await this.groupManager.ensureStickerTargetsFromEnv(config.STICKER_TARGET_GROUPS);
+            this.stickerForwarder.startBackgroundWorkers();
+            this.channelStickerPoller = new ChannelStickerPoller(this.stickerForwarder);
+            const channelNote = config.STICKER_SOURCE_CHANNELS.length
+                ? `${config.STICKER_SOURCE_CHANNELS.length} channel(s)`
+                : 'all joined channels';
+            const targetNote = config.STICKER_TARGET_GROUPS.length
+                ? `${config.STICKER_TARGET_GROUPS.length} env target(s)`
+                : 'use /stickeron in groups';
+            logger.info(
+                `🎨 Sticker forwarding | targets: ${targetNote} | sources: groups + ${channelNote} | ` +
+                    `${config.STICKER_FORWARD_CONCURRENCY} parallel workers`
+            );
+            this.commandController.setStickerForwarder(this.stickerForwarder);
             
             this.whatsappService = new WhatsAppService(
                 this.commandController,

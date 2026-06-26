@@ -200,6 +200,20 @@ export const COMMAND_REGISTRY = [
         help: 'Stop auto Instagram download in this group',
     },
     {
+        names: ['/stickeron'],
+        key: 'stickeron',
+        scope: 'group_only',
+        role: 'staff',
+        help: 'Enable auto sticker forwarding into this group (from channels/source groups)',
+    },
+    {
+        names: ['/stickeroff'],
+        key: 'stickeroff',
+        scope: 'group_only',
+        role: 'staff',
+        help: 'Stop auto sticker forwarding into this group',
+    },
+    {
         names: ['/setwc'],
         key: 'setwc',
         scope: 'group_only',

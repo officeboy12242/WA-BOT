@@ -28,6 +28,8 @@ import {
     handleDeactivate,
     handleInstaOn,
     handleInstaOff,
+    handleStickerOn,
+    handleStickerOff,
     handleNewsOn,
     handleNewsOff,
     handleGithubOn,
@@ -109,8 +111,13 @@ class CommandController {
         this.pendingGithubPosts = createGithubPostSessionStore();
         this.getSock = null;
         this.botStartTime = Date.now();
+        this.stickerForwarder = null;
 
         this._isOwnerFromJid = this._isOwnerFromJid.bind(this);
+    }
+
+    setStickerForwarder(stickerForwarder) {
+        this.stickerForwarder = stickerForwarder;
     }
 
     setGetSock(getSock) {
@@ -152,6 +159,7 @@ class CommandController {
             movieController: this.movieController,
             userManager: this.userManager,
             stickerController: this.stickerController,
+            stickerForwarder: this.stickerForwarder,
             botSettings: this.botSettings,
             authDatabase: this.authDatabase,
             pendingClearConfirmations: this.pendingClearConfirmations,
@@ -239,6 +247,8 @@ class CommandController {
             case 'deactivate': await handleDeactivate(sock, chatId, senderJid, ctx); break;
             case 'instaon':    await handleInstaOn(sock, chatId, senderJid, ctx); break;
             case 'instaoff':   await handleInstaOff(sock, chatId, senderJid, ctx); break;
+            case 'stickeron':  await handleStickerOn(sock, chatId, senderJid, ctx); break;
+            case 'stickeroff': await handleStickerOff(sock, chatId, senderJid, ctx); break;
             case 'newson':     await handleNewsOn(sock, chatId, senderJid, ctx); break;
             case 'newsoff':    await handleNewsOff(sock, chatId, senderJid, ctx); break;
             case 'githubon':   await handleGithubOn(sock, chatId, senderJid, ctx); break;

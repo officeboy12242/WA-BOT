@@ -581,6 +581,56 @@ class GroupManager {
             .toArray();
     }
 
+    // ─── Sticker auto-forward to groups ───────────────────────────────────────
+
+    async setStickerAuto(groupId, groupName, enabled, setBy) {
+        await this.groups.updateOne(
+            { group_id: groupId },
+            {
+                $set: {
+                    group_name: groupName,
+                    sticker_auto: enabled,
+                    sticker_auto_by: setBy,
+                    sticker_auto_at: new Date(),
+                },
+                $setOnInsert: {
+                    group_id: groupId,
+                    is_active: false,
+                    insta_auto: false,
+                },
+            },
+            { upsert: true }
+        );
+        logger.info(
+            `${enabled ? '🎨 Sticker auto ON' : '🎨 Sticker auto OFF'}: ${groupName} (${groupId}) by ${setBy}`
+        );
+    }
+
+    async isStickerAutoEnabled(groupId) {
+        const row = await this.groups.findOne(
+            { group_id: groupId },
+            { projection: { sticker_auto: 1 } }
+        );
+        return row?.sticker_auto === true;
+    }
+
+    async getStickerAutoGroups() {
+        return this.groups
+            .find({ sticker_auto: true }, { projection: { _id: 0 } })
+            .sort({ sticker_auto_at: -1 })
+            .toArray();
+    }
+
+    /** Enable sticker forwarding for groups listed in STICKER_TARGET_GROUPS env. */
+    async ensureStickerTargetsFromEnv(groupIds = []) {
+        for (const groupId of groupIds) {
+            if (!groupId?.endsWith('@g.us')) continue;
+            const existing = await this.isStickerAutoEnabled(groupId);
+            if (existing) continue;
+            await this.setStickerAuto(groupId, 'Unknown Group', true, 'env');
+        }
+    }
+
     async deactivateGroup(groupId) {
         const result = await this.groups.updateOne(
             { group_id: groupId },

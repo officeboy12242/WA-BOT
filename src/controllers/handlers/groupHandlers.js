@@ -455,16 +455,89 @@ export async function handleInstaOff(sock, chatId, senderJid, { groupManager, or
     }
 }
 
+export async function handleStickerOn(sock, chatId, senderJid, { groupManager, stickerForwarder, originalMsg }) {
+    try {
+        const senderPhone = extractPhoneNumber(senderJid);
+        let groupName = 'Unknown Group';
+        try {
+            const groupMetadata = await sock.groupMetadata(chatId);
+            groupName = groupMetadata.subject;
+        } catch (err) {
+            logger.error(`Error fetching group metadata: ${err.message}`);
+        }
+
+        await groupManager.setStickerAuto(chatId, groupName, true, senderPhone);
+        if (stickerForwarder) {
+            await stickerForwarder.refreshTargetGroups();
+        }
+
+        let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        r += '✅ *STICKER AUTO ON* ✅\n';
+        r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+        r += `📢 *Group:* ${groupName}\n\n`;
+        r += '🎨 Stickers from configured channels & source groups will be posted here automatically.\n\n';
+        r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        r += '💡 Use `/stickeroff` to turn this off';
+
+        await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
+        logger.info(`🎨 Sticker auto enabled: ${groupName} (${chatId}) by ${senderPhone}`);
+    } catch (error) {
+        logger.error(`Error enabling sticker auto: ${error.message}`);
+    }
+}
+
+export async function handleStickerOff(sock, chatId, senderJid, { groupManager, stickerForwarder, originalMsg }) {
+    try {
+        const senderPhone = extractPhoneNumber(senderJid);
+        const wasEnabled = await groupManager.isStickerAutoEnabled(chatId);
+        if (!wasEnabled) {
+            await sock.sendMessage(chatId, {
+                text:
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\nℹ️ *STICKER AUTO OFF* ℹ️\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                    'Auto sticker forwarding is not enabled in this group.\n\nUse `/stickeron` to enable it.',
+            }, { quoted: originalMsg });
+            return;
+        }
+
+        let groupName = 'Unknown Group';
+        try {
+            const groupMetadata = await sock.groupMetadata(chatId);
+            groupName = groupMetadata.subject;
+        } catch (err) {
+            logger.error(`Error fetching group metadata: ${err.message}`);
+        }
+
+        await groupManager.setStickerAuto(chatId, groupName, false, senderPhone);
+        if (stickerForwarder) {
+            await stickerForwarder.refreshTargetGroups();
+        }
+
+        let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        r += '🛑 *STICKER AUTO OFF* 🛑\n';
+        r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+        r += `📢 *Group:* ${groupName}\n\n`;
+        r += 'This group will no longer receive auto-forwarded stickers.\n\n';
+        r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        r += '💡 Use `/stickeron` to enable again';
+
+        await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
+        logger.info(`🎨 Sticker auto disabled: ${chatId} by ${senderPhone}`);
+    } catch (error) {
+        logger.error(`Error disabling sticker auto: ${error.message}`);
+    }
+}
+
 export async function handleGroups(sock, chatId, senderJid, { groupManager }) {
     try {
         const senderPhone = extractPhoneNumber(senderJid);
 
-        const [activeGroups, newsGroups, githubGroups, instaAutoGroups, welcomeGroups, movieGroups, trendingGroups, groupCount, memberCounts] =
+        const [activeGroups, newsGroups, githubGroups, instaAutoGroups, stickerAutoGroups, welcomeGroups, movieGroups, trendingGroups, groupCount, memberCounts] =
             await Promise.all([
                 groupManager.getActiveGroups(),
                 groupManager.getNewsEnabledGroups(),
                 groupManager.getGithubTrendingGroups(),
                 groupManager.getInstaAutoGroups(),
+                groupManager.getStickerAutoGroups(),
                 groupManager.getWelcomeEnabledGroups(),
                 groupManager.getMovieEnabledGroups(),
                 groupManager.getWeeklyTrendingGroups(),
@@ -479,6 +552,7 @@ export async function handleGroups(sock, chatId, senderJid, { groupManager }) {
         r += `📰 *Tech news:* ${newsGroups.length} ON\n`;
         r += `🐙 *GitHub trending:* ${githubGroups.length} ON\n`;
         r += `📸 *Insta auto:* ${instaAutoGroups.length} group(s)\n`;
+        r += `🎨 *Sticker auto:* ${stickerAutoGroups.length} group(s)\n`;
         r += `🎬 *Movie:* ${movieGroups.length} ON\n`;
         r += `🔥 *Trending:* ${trendingGroups.length} ON\n`;
         r += `👋 *Welcome:* ${welcomeGroups.length} ON\n\n`;
@@ -552,6 +626,23 @@ export async function handleGroups(sock, chatId, senderJid, { groupManager }) {
             });
         }
 
+        r += '🎨 *Sticker auto ON — groups*\n';
+        r += '_(channel/source stickers via `/stickeron`)_\n\n';
+
+        if (!stickerAutoGroups.length) {
+            r += '📭 None yet. Use `/stickeron` in a group.\n\n';
+        } else {
+            stickerAutoGroups.forEach((group, index) => {
+                const members = groupManager.formatMemberCount(memberCounts, group.group_id);
+                r += `${index + 1}. *${group.group_name}*\n`;
+                r += `   👥 Members: ${members}\n`;
+                if (group.sticker_auto_at) {
+                    r += `   🎨 Since: ${new Date(group.sticker_auto_at).toLocaleDateString()}\n`;
+                }
+                r += '\n';
+            });
+        }
+
         r += '👋 *Welcome ON — groups*\n';
         r += '_(new member greeting via `/setwc`)_\n\n';
 
@@ -590,7 +681,7 @@ export async function handleGroups(sock, chatId, senderJid, { groupManager }) {
 
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
         r += '💡 `/activate` `/deactivate` · `/newson` `/newsoff`\n';
-        r += '💡 `/githubon` `/githuboff` · `/instaon` `/instaoff` · `/movieon` `/movieoff` · `/trending on/off` · `/setwc`';
+        r += '💡 `/githubon` `/githuboff` · `/instaon` `/instaoff` · `/stickeron` `/stickeroff` · `/movieon` `/movieoff` · `/trending on/off` · `/setwc`';
 
         await sock.sendMessage(chatId, { text: r });
         logger.info(`📋 Group list sent to ${senderPhone}`);
