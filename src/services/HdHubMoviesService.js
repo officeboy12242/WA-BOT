@@ -40,6 +40,7 @@ function formatLinkEntry(link) {
     }
 
     return {
+        label,
         size: sizeLine,
         audio: link?.audio || audioFromFilename(label || quality),
         quality: quality || undefined,

@@ -354,9 +354,22 @@ function formatMovieResultBlock(item, globalIdx) {
             const quality = parsed.quality || link.quality || qualityFromFilename(link.rawFilename || title);
             const fileSize = parsed.fileSize || link.size || '';
             const audio = link.audio || audioFromFilename(link.rawFilename || title);
-            const sizeLine = quality ? `${quality} · ${fileSize}` : fileSize;
+            const label = String(link.label || '').trim();
+            const detailLine = quality && fileSize && fileSize !== quality
+                ? `${quality} · ${fileSize}`
+                : (quality || fileSize);
 
-            block += `┌ ${sizeLine}\n`;
+            if (label) {
+                block += `┌ 📌 ${label}\n`;
+                if (detailLine && detailLine !== label) {
+                    block += `│ 📦 ${detailLine}\n`;
+                }
+            } else if (detailLine) {
+                block += `┌ ${detailLine}\n`;
+            } else {
+                block += '┌ Download\n';
+            }
+
             if (audio) {
                 block += `│ 🔊 ${audio}\n`;
             }
