@@ -3,13 +3,13 @@
  * Each result groups all quality/download links under one title (like AtoZ).
  */
 
-import https from 'https';
+import axios from 'axios';
 import { logger } from '../utils/logger.js';
 import { audioFromFilename } from '../utils/movieMetadata.js';
 import { config } from '../config/config.js';
 
 const DEFAULT_API_URL = 'https://free-udemy-courses-bot.onrender.com/api/movies';
-const REQUEST_TIMEOUT = 20000;
+const REQUEST_TIMEOUT_MS = 45000;
 
 function sourceLabel(raw) {
     const s = String(raw || 'hdhub4u').trim();
@@ -59,39 +59,16 @@ class HdHubMoviesService {
         return String(raw).replace(/\/$/, '');
     }
 
-    _fetchJson(urlStr) {
-        return new Promise((resolve, reject) => {
-            const url = new URL(urlStr);
-            const req = https.request({
-                hostname: url.hostname,
-                path: url.pathname + url.search,
-                method: 'GET',
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (compatible; SassyBot/1.0)',
-                    Accept: 'application/json',
-                },
-            }, (res) => {
-                let data = '';
-                res.on('data', (chunk) => { data += chunk; });
-                res.on('end', () => {
-                    if (res.statusCode !== 200) {
-                        reject(new Error(`HTTP ${res.statusCode}`));
-                        return;
-                    }
-                    try {
-                        resolve(JSON.parse(data));
-                    } catch (err) {
-                        reject(new Error(`Invalid JSON: ${err.message}`));
-                    }
-                });
-            });
-            req.on('error', reject);
-            req.setTimeout(REQUEST_TIMEOUT, () => {
-                req.destroy();
-                reject(new Error('Request timeout'));
-            });
-            req.end();
+    async _fetchJson(urlStr) {
+        const { data } = await axios.get(urlStr, {
+            timeout: REQUEST_TIMEOUT_MS,
+            headers: {
+                Accept: 'application/json',
+                'User-Agent': 'Mozilla/5.0 (compatible; SassyBot/1.0)',
+            },
+            validateStatus: (status) => status >= 200 && status < 300,
         });
+        return data;
     }
 
     _normalizeResults(payload) {
@@ -126,46 +103,42 @@ class HdHubMoviesService {
         const q = String(query || '').trim();
         if (!q) return [];
 
-        try {
-            const apiUrl = `${this._apiBase()}?q=${encodeURIComponent(q)}`;
-            const payload = await this._fetchJson(apiUrl);
-            return this._normalizeResults(payload).slice(0, maxResults);
-        } catch (err) {
-            logger.warn(`HDHub movies API error: ${err.message}`);
-            return [];
+        const apiUrl = `${this._apiBase()}?q=${encodeURIComponent(q)}`;
+        let lastErr = null;
+
+        for (let attempt = 1; attempt <= 2; attempt++) {
+            try {
+                const started = Date.now();
+                const payload = await this._fetchJson(apiUrl);
+                const results = this._normalizeResults(payload).slice(0, maxResults);
+                logger.info(
+                    `HDHub API: ${results.length} result(s) for "${q}" in ${Date.now() - started}ms (attempt ${attempt})`,
+                );
+                return results;
+            } catch (err) {
+                lastErr = err;
+                const msg = err?.response?.status
+                    ? `HTTP ${err.response.status}`
+                    : (err?.message || String(err));
+                logger.warn(`HDHub movies API attempt ${attempt} failed (${apiUrl}): ${msg}`);
+                if (attempt < 2) {
+                    await new Promise((r) => setTimeout(r, 1500));
+                }
+            }
         }
+
+        logger.warn(`HDHub movies API gave up for "${q}": ${lastErr?.message || lastErr}`);
+        return [];
     }
 
-    _headCheck() {
-        return new Promise((resolve) => {
-            let settled = false;
-            const finish = (ok) => {
-                if (!settled) {
-                    settled = true;
-                    resolve(ok);
-                }
-            };
-
-            try {
-                const base = this._apiBase().replace(/\/api\/movies$/, '') || 'https://free-udemy-courses-bot.onrender.com';
-                const url = new URL(base);
-                const req = https.request(
-                    { hostname: url.hostname, path: url.pathname || '/', method: 'HEAD' },
-                    (res) => {
-                        res.resume();
-                        finish(res.statusCode >= 200 && res.statusCode < 400);
-                    },
-                );
-                req.on('error', () => finish(false));
-                req.setTimeout(8000, () => {
-                    req.destroy();
-                    finish(false);
-                });
-                req.end();
-            } catch {
-                finish(false);
-            }
-        });
+    async _headCheck() {
+        try {
+            const base = this._apiBase().replace(/\/api\/movies$/, '') || 'https://free-udemy-courses-bot.onrender.com';
+            const res = await axios.head(base, { timeout: 8000, validateStatus: () => true });
+            return res.status >= 200 && res.status < 400;
+        } catch {
+            return false;
+        }
     }
 
     startKeepAlive(intervalMs = 4 * 60 * 1000) {
