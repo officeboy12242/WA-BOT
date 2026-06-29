@@ -11,6 +11,7 @@ import { logger } from '../utils/logger.js';
 import { extractPhoneNumber, isGroupMessage, normalizePhoneNumber, resolveNotificationJid } from '../utils/permissions.js';
 import { config } from '../config/config.js';
 import { atozService } from '../services/AtoZService.js';
+import { hdHubMoviesService } from '../services/HdHubMoviesService.js';
 import { pronoobDriveService } from '../services/PronoobDriveService.js';
 import { urlShortener } from '../utils/urlShortener.js';
 import { safeSendMessage, safeDeleteMessage } from '../utils/waMessage.js';
@@ -510,11 +511,13 @@ class MovieController {
     _startKeepAlive() {
         pronoobDriveService.startKeepAlive();
         atozService.startKeepAlive();
+        hdHubMoviesService.startKeepAlive();
     }
 
     stopKeepAlive() {
         pronoobDriveService.stopKeepAlive();
         atozService.stopKeepAlive();
+        hdHubMoviesService.stopKeepAlive();
     }
 
     async logSearch(userId, query, resultCount, chatId) {
@@ -1055,12 +1058,20 @@ class MovieController {
             const withTimeout = (promise, ms) =>
                 Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
 
-            const [driveResults, atozResults] = await Promise.allSettled([
+            const [hdHubResults, driveResults, atozResults] = await Promise.allSettled([
+                withTimeout(hdHubMoviesService.searchMovies(query, 5), 12000),
                 withTimeout(pronoobDriveService.searchMovies(query, 5), 8000),
                 withTimeout(atozService.searchMovies(query, 3), 8000),
             ]);
 
             let results = [];
+
+            if (hdHubResults.status === 'fulfilled' && hdHubResults.value?.length > 0) {
+                results.push(...hdHubResults.value);
+                logger.info(`HDHub: ${hdHubResults.value.length} results for "${query}"`);
+            } else {
+                logger.warn(`HDHub: ${hdHubResults.status === 'rejected' ? hdHubResults.reason?.message : 'no results'} for "${query}"`);
+            }
 
             if (driveResults.status === 'fulfilled' && driveResults.value?.length > 0) {
                 results.push(...driveResults.value);

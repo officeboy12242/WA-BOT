@@ -52,6 +52,8 @@ export const config = {
     STICKER_FORWARD_CONCURRENCY: Math.max(1, Math.min(8, parseInt(process.env.STICKER_FORWARD_CONCURRENCY, 10) || 3)),
     STICKER_INTER_SEND_DELAY_MS: Math.max(50, parseInt(process.env.STICKER_INTER_SEND_DELAY_MS, 10) || 150),
     TMDB_API_KEY: process.env.TMDB_API_KEY?.trim() || '',
+    /** HDHub4u movie search API (free-udemy-courses-bot). */
+    MOVIES_API_URL: process.env.MOVIES_API_URL?.trim() || 'https://free-udemy-courses-bot.onrender.com/api/movies',
     BOT_LOG_NUMBER: process.env.BOT_LOG_NUMBER?.trim() || '',
     GITHUB_TRENDING_ENABLED: process.env.GITHUB_TRENDING_ENABLED !== 'false',
     GITHUB_TRENDING_TIMES: (process.env.GITHUB_TRENDING_TIMES || '09:00,11:30,14:00,16:30,19:00')
