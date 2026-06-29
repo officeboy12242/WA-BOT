@@ -6,9 +6,14 @@ import https from 'https';
 import { logger } from './logger.js';
 
 const TINYURL_API = 'https://tinyurl.com/api-create.php?url=';
-const TINYURL_TIMEOUT_MS = 4000;
-const MAX_WAIT_MS = 10000;
+const TINYURL_TIMEOUT_MS = 6000;
 const MAX_CACHE_SIZE = 500;
+const SHORTEN_CONCURRENCY = 4;
+const BATCH_PAUSE_MS = 250;
+
+function delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 class UrlShortener {
     constructor() {
@@ -47,46 +52,61 @@ class UrlShortener {
         });
     }
 
-    async _toTinyUrl(url) {
-        try {
-            const { status, data } = await this._fetchTinyUrl(url);
-            if (status === 200 && data.startsWith('https://tinyurl.com/')) {
-                return data;
+    async _toTinyUrl(url, attempts = 2) {
+        let lastErr = null;
+        for (let i = 0; i < attempts; i++) {
+            try {
+                const { status, data } = await this._fetchTinyUrl(url);
+                if (status === 200 && data.startsWith('https://tinyurl.com/')) {
+                    return data;
+                }
+                lastErr = new Error(`TinyURL HTTP ${status}`);
+            } catch (err) {
+                lastErr = err;
+                if (i < attempts - 1) {
+                    await delay(400);
+                }
             }
-        } catch (err) {
-            logger.warn(`TinyURL failed: ${err.message}`);
+        }
+        if (lastErr) {
+            logger.warn(`TinyURL failed for ${url.slice(0, 60)}…: ${lastErr.message}`);
         }
         return null;
     }
 
     async shorten(url) {
         if (!this.needsShortening(url)) return url;
-        if (!this._service) return url;
 
-        try {
-            // Always resolve via DB first — expired /d/:code rows get a new code.
-            const expiringLink = await this._service.shorten(url);
-
-            const cached = this._cache.get(url);
-            if (cached?.expiringLink === expiringLink) {
-                return cached.finalUrl;
-            }
-
-            const tiny = await this._toTinyUrl(expiringLink);
-            const finalUrl = tiny || expiringLink;
-
-            if (this._cache.size >= MAX_CACHE_SIZE) {
-                this._cache.delete(this._cache.keys().next().value);
-            }
-            this._cache.set(url, { expiringLink, finalUrl });
-            return finalUrl;
-        } catch (err) {
-            logger.warn(`URL shorten failed: ${err.message}`);
-            return url;
+        const cached = this._cache.get(url);
+        if (cached) {
+            return cached.finalUrl;
         }
+
+        let expiringLink = url;
+        if (this._service) {
+            try {
+                expiringLink = await this._service.shorten(url);
+            } catch (err) {
+                logger.warn(`Expiring link failed: ${err.message}`);
+            }
+        }
+
+        let tiny = await this._toTinyUrl(expiringLink);
+        if (!tiny && expiringLink !== url) {
+            tiny = await this._toTinyUrl(url);
+        }
+
+        const finalUrl = tiny || expiringLink;
+
+        if (this._cache.size >= MAX_CACHE_SIZE) {
+            this._cache.delete(this._cache.keys().next().value);
+        }
+        this._cache.set(url, { expiringLink, finalUrl });
+
+        return finalUrl;
     }
 
-    async shortenMovieResults(results, maxWaitMs = MAX_WAIT_MS) {
+    async shortenMovieResults(results) {
         const links = [];
         for (const item of results) {
             for (const link of item.links || []) {
@@ -97,17 +117,36 @@ class UrlShortener {
         }
         if (!links.length) return results;
 
-        const shortenAll = Promise.allSettled(
-            links.map(async (link) => {
-                link.url = await this.shorten(link.url);
-            }),
-        );
+        let shortened = 0;
+        let failed = 0;
 
-        await Promise.race([
-            shortenAll,
-            new Promise((resolve) => setTimeout(resolve, maxWaitMs)),
-        ]);
+        for (let i = 0; i < links.length; i += SHORTEN_CONCURRENCY) {
+            const batch = links.slice(i, i + SHORTEN_CONCURRENCY);
+            const outcomes = await Promise.allSettled(
+                batch.map(async (link) => {
+                    const original = link.url;
+                    link.url = await this.shorten(original);
+                    if (link.url.includes('tinyurl.com/')) {
+                        shortened++;
+                    } else if (this.needsShortening(link.url)) {
+                        failed++;
+                    }
+                }),
+            );
 
+            for (const outcome of outcomes) {
+                if (outcome.status === 'rejected') {
+                    failed++;
+                    logger.warn(`Link shorten rejected: ${outcome.reason?.message || outcome.reason}`);
+                }
+            }
+
+            if (i + SHORTEN_CONCURRENCY < links.length) {
+                await delay(BATCH_PAUSE_MS);
+            }
+        }
+
+        logger.info(`URL shorten done: ${shortened}/${links.length} tinyurl, ${failed} kept long`);
         return results;
     }
 }
