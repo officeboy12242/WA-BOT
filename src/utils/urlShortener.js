@@ -106,7 +106,7 @@ class UrlShortener {
         return finalUrl;
     }
 
-    async shortenMovieResults(results) {
+    async shortenMovieResults(results, maxMs = 60000) {
         const links = [];
         for (const item of results) {
             for (const link of item.links || []) {
@@ -117,10 +117,18 @@ class UrlShortener {
         }
         if (!links.length) return results;
 
+        const deadline = Date.now() + maxMs;
         let shortened = 0;
         let failed = 0;
+        let skipped = 0;
 
         for (let i = 0; i < links.length; i += SHORTEN_CONCURRENCY) {
+            if (Date.now() >= deadline) {
+                skipped = links.length - i;
+                logger.warn(`URL shorten time budget reached — ${skipped} link(s) left unshortened`);
+                break;
+            }
+
             const batch = links.slice(i, i + SHORTEN_CONCURRENCY);
             const outcomes = await Promise.allSettled(
                 batch.map(async (link) => {
@@ -146,7 +154,7 @@ class UrlShortener {
             }
         }
 
-        logger.info(`URL shorten done: ${shortened}/${links.length} tinyurl, ${failed} kept long`);
+        logger.info(`URL shorten done: ${shortened}/${links.length} tinyurl, ${failed} long, ${skipped} skipped`);
         return results;
     }
 }
