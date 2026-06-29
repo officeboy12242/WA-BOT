@@ -41,6 +41,29 @@ export function isStickerDownloadReady(sticker) {
     return hasMediaKey(sticker);
 }
 
+function hasDirectMediaUrl(sticker) {
+    return Boolean(sticker?.url || sticker?.directPath);
+}
+
+/** Channel stickers often ship with a CDN url before mediaKey is available. */
+export function isChannelStickerReady(sticker) {
+    if (!sticker) {
+        return false;
+    }
+    return hasMediaKey(sticker) || hasDirectMediaUrl(sticker);
+}
+
+/** Gate sticker forwarding — channels accept url/directPath; groups need mediaKey. */
+export function isStickerForwardReady(chatId, sticker) {
+    if (!sticker) {
+        return false;
+    }
+    if (isNewsletterChat(chatId)) {
+        return isChannelStickerReady(sticker);
+    }
+    return isStickerDownloadReady(sticker);
+}
+
 function assertValidWebp(buffer, context) {
     if (!isValidWebpBuffer(buffer)) {
         throw new Error(`${context}: not valid WebP (encrypted or incomplete media)`);

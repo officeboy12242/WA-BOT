@@ -4,6 +4,7 @@
  * Parallel workers + retry loop — stickers only marked done after successful send.
  */
 
+import { jidNormalizedUser } from 'baileys';
 import { Sticker } from 'wa-sticker-formatter';
 import { logger } from '../utils/logger.js';
 import { downloadStickerBuffer, isValidWebpBuffer } from '../utils/stickerDownload.js';
@@ -15,6 +16,13 @@ const MAX_RETRIES = 6;
 const RETRY_DELAYS_MS = [2000, 5000, 10000, 20000, 45000, 90000];
 const RETRY_TICK_MS = 3000;
 const TARGET_REFRESH_MS = 5000;
+
+function normalizeNewsletterJid(jid) {
+    if (!jid) {
+        return jid;
+    }
+    return jidNormalizedUser(String(jid).replace(/:\d+(?=@)/, '')) || jid;
+}
 
 function stickerKeys(waMessage, fromChat) {
     const stickerPayload = extractStickerFromMessage(waMessage?.message);
@@ -141,7 +149,8 @@ class StickerForwarder {
             if (!this.sourceChannels.length) {
                 return true;
             }
-            return this.sourceChannels.includes(chatId);
+            const normalized = normalizeNewsletterJid(chatId);
+            return this.sourceChannels.some((ch) => normalizeNewsletterJid(ch) === normalized);
         }
 
         if (chatId.endsWith('@g.us')) {

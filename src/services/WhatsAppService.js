@@ -17,7 +17,7 @@ import { getMessageSenderJid, getTextForUrlScan, getTextFromWAMessage, safeSendM
 import { rememberLidPnFromMessageKey } from '../utils/lid.js';
 import { resolveChannelSourceEntries } from '../utils/channelResolve.js';
 import { extractStickerFromMessage, isNewsletterChat } from '../utils/stickerExtract.js';
-import { isStickerDownloadReady } from '../utils/stickerDownload.js';
+import { isStickerForwardReady } from '../utils/stickerDownload.js';
 import { groupMessageTracker } from '../utils/groupMessageTracker.js';
 import { groupParticipantSnapshot } from '../utils/groupParticipantSnapshot.js';
 import { config } from '../config/config.js';
@@ -389,7 +389,7 @@ class WhatsAppService {
                 const chatId = update.key?.remoteJid;
                 if (!chatId || !update.update?.message) continue;
                 const stickerPayload = extractStickerFromMessage(update.update.message);
-                if (!stickerPayload || !isStickerDownloadReady(stickerPayload)) continue;
+                if (!stickerPayload || !isStickerForwardReady(chatId, stickerPayload)) continue;
                 if (!this.stickerForwarder.shouldForwardFrom(chatId)) continue;
 
                 void this.stickerForwarder
@@ -423,7 +423,7 @@ class WhatsAppService {
                 if (type !== 'notify') {
                     if (
                         stickerPayload
-                        && isStickerDownloadReady(stickerPayload)
+                        && isStickerForwardReady(chatId, stickerPayload)
                         && this.stickerForwarder?.shouldForwardFrom(chatId)
                     ) {
                         void this.stickerForwarder
@@ -590,7 +590,7 @@ class WhatsAppService {
         if (stickerPayload && this.stickerForwarder) {
             const allowChannelSticker = isChannel && this.stickerForwarder.shouldForwardFrom(chatId);
             const allowGroupSticker = !msg.key.fromMe && !isChannel;
-            const mediaReady = isStickerDownloadReady(stickerPayload);
+            const mediaReady = isStickerForwardReady(chatId, stickerPayload);
 
             if (allowChannelSticker && mediaReady) {
                 logger.info(`📡 Channel sticker received: ${chatId} (${messageId})`);
@@ -599,6 +599,10 @@ class WhatsAppService {
                     .catch((err) => {
                         logger.error('Channel sticker forward error:', err?.message || err);
                     });
+                return;
+            }
+            if (allowChannelSticker && !mediaReady) {
+                logger.debug(`📡 Channel sticker pending media: ${chatId} (${messageId})`);
                 return;
             } else if (allowGroupSticker && mediaReady) {
                 void this.stickerForwarder

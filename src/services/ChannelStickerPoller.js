@@ -5,13 +5,14 @@
 import { logger } from '../utils/logger.js';
 import { fetchNewsletterStickerMessages } from '../utils/channelMessages.js';
 import { extractStickerFromMessage } from '../utils/stickerExtract.js';
-import { isStickerDownloadReady } from '../utils/stickerDownload.js';
+import { isChannelStickerReady } from '../utils/stickerDownload.js';
 
 const POLL_INTERVAL_MS = 60_000;
 const STICKERS_PER_FETCH = 25;
 const CHANNEL_POLL_CONCURRENCY = 4;
 
-const MAX_CONSECUTIVE_FAILURES = 5;
+const MAX_CONSECUTIVE_FAILURES = 20;
+const FAIL_COUNT_RESET_MS = 30 * 60_000;
 
 class ChannelStickerPoller {
     constructor(stickerForwarder) {
@@ -21,6 +22,7 @@ class ChannelStickerPoller {
         this._sock = null;
         this._running = false;
         this._failCounts = new Map();
+        this._failCountResetTimer = null;
     }
 
     setChannels(jids) {
@@ -35,6 +37,18 @@ class ChannelStickerPoller {
 
         if (this._timer) {
             return;
+        }
+
+        if (!this._failCountResetTimer) {
+            this._failCountResetTimer = setInterval(() => {
+                if (this._failCounts.size) {
+                    logger.debug('📡 Resetting channel poll failure counts');
+                    this._failCounts.clear();
+                }
+            }, FAIL_COUNT_RESET_MS);
+            if (this._failCountResetTimer.unref) {
+                this._failCountResetTimer.unref();
+            }
         }
 
         logger.info(
@@ -55,6 +69,10 @@ class ChannelStickerPoller {
         if (this._timer) {
             clearInterval(this._timer);
             this._timer = null;
+        }
+        if (this._failCountResetTimer) {
+            clearInterval(this._failCountResetTimer);
+            this._failCountResetTimer = null;
         }
         this._running = false;
         this._sock = null;
@@ -102,7 +120,7 @@ class ChannelStickerPoller {
             let queued = 0;
             for (const msg of stickers) {
                 const payload = extractStickerFromMessage(msg.message);
-                if (!payload || !isStickerDownloadReady(payload)) {
+                if (!payload || !isChannelStickerReady(payload)) {
                     continue;
                 }
 
@@ -131,7 +149,12 @@ class ChannelStickerPoller {
             const newFails = fails + 1;
             this._failCounts.set(channelJid, newFails);
             if (newFails >= MAX_CONSECUTIVE_FAILURES) {
-                logger.warn(`📡 Channel ${channelJid} disabled after ${newFails} consecutive failures: ${err.message}`);
+                logger.warn(
+                    `📡 Channel ${channelJid} poll paused after ${newFails} failures ` +
+                        `(resets in ≤${FAIL_COUNT_RESET_MS / 60_000}m): ${err.message}`
+                );
+            } else {
+                logger.debug(`📡 Channel poll error ${channelJid} (${newFails}/${MAX_CONSECUTIVE_FAILURES}): ${err.message}`);
             }
         }
     }
