@@ -98,6 +98,10 @@ class GroupMessageTracker {
         });
     }
 
+    /**
+     * @param {import('baileys').proto.IWebMessageInfo} msg
+     */
+    track(msg) {
         const chatId = this._normalizeGroupId(msg?.key?.remoteJid);
         if (!chatId || !msg.key?.id || !msg.message) {
             return;
