@@ -110,6 +110,7 @@ class CommandController {
         this.pendingScrapSessions = createScrapSessionStore();
         this.pendingGithubPosts = createGithubPostSessionStore();
         this.getSock = null;
+        this.whatsappService = null;
         this.botStartTime = Date.now();
         this.stickerForwarder = null;
 
@@ -118,6 +119,10 @@ class CommandController {
 
     setStickerForwarder(stickerForwarder) {
         this.stickerForwarder = stickerForwarder;
+    }
+
+    setWhatsAppService(whatsappService) {
+        this.whatsappService = whatsappService;
     }
 
     setGetSock(getSock) {
@@ -166,6 +171,7 @@ class CommandController {
             pendingScrapSessions: this.pendingScrapSessions,
             pendingGithubPosts: this.pendingGithubPosts,
             getSock: this.getSock,
+            whatsappService: this.whatsappService,
             botStartTime: this.botStartTime,
             isOwnerFromJid: this._isOwnerFromJid,
         };
@@ -216,7 +222,7 @@ class CommandController {
                     text: `❓ Unknown command: \`${cmd}\`\n\n💡 *Did you mean:*\n${suggestionText}\n\n_Type \`/help\` for all commands_\n_⏰ Auto-deletes in 5 hours_`
                 }, originalMsg);
             }
-            return;
+                return;
         }
 
         logger.info(`📝 Command received: ${def.key} from ${senderJid} in ${chatId}`);
@@ -224,8 +230,8 @@ class CommandController {
         const access = await checkCommandAccess(sock, chatId, senderJid, def, this.groupManager);
         if (!access.ok) {
             await safeSendMessage(sock, chatId, { text: access.message }, originalMsg);
-            return;
-        }
+                return;
+            }
 
         const ctx = { ...this._ctx(), originalMsg, replyOpts: getSafeSendOptions(originalMsg), fullCommand: command.trim() };
 
@@ -304,7 +310,7 @@ class CommandController {
                         // No sign provided, show list
                         const listMsg = horoscopeService.getSignsList();
                         await safeSendMessage(sock, chatId, { text: listMsg }, originalMsg);
-                    } else {
+            } else {
                         // Fetch horoscope for the sign
                         const data = await horoscopeService.fetchHoroscope(sign);
                         const msg = horoscopeService.formatMessage(data);

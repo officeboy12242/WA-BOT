@@ -179,7 +179,7 @@ export async function handleRemoveMod(sock, chatId, senderJid, args, quotedMessa
     }
 }
 
-export async function handleAddChannel(sock, chatId, args, senderJid, { groupManager, isOwnerFromJid }) {
+export async function handleAddChannel(sock, chatId, args, senderJid, { groupManager, isOwnerFromJid, whatsappService }) {
     const senderPhone = extractPhoneNumber(senderJid);
     const isOwner = await isOwnerFromJid(sock, chatId, senderJid);
     if (!isOwner) {
@@ -220,7 +220,11 @@ export async function handleAddChannel(sock, chatId, args, senderJid, { groupMan
 
     const result = await groupManager.addStickerChannel(channelJid, channelName, senderPhone);
     if (result.ok) {
-        try { await sock.subscribeNewsletterUpdates(channelJid); } catch {}
+        if (whatsappService?.resolveStickerSourceChannels) {
+            await whatsappService.resolveStickerSourceChannels();
+        } else {
+            try { await sock.subscribeNewsletterUpdates(channelJid); } catch {}
+        }
         await sock.sendMessage(chatId, {
             text: `✅ *Channel Added*\n\n📡 ${channelName}\n🆔 ${channelJid}\n\n_Stickers from this channel will be forwarded._`,
         });
@@ -229,7 +233,7 @@ export async function handleAddChannel(sock, chatId, args, senderJid, { groupMan
     }
 }
 
-export async function handleRemoveChannel(sock, chatId, args, senderJid, { groupManager, isOwnerFromJid }) {
+export async function handleRemoveChannel(sock, chatId, args, senderJid, { groupManager, isOwnerFromJid, whatsappService }) {
     const isOwner = await isOwnerFromJid(sock, chatId, senderJid);
     if (!isOwner) {
         await sock.sendMessage(chatId, { text: '❌ Only owners can remove sticker channels.' });
@@ -262,6 +266,9 @@ export async function handleRemoveChannel(sock, chatId, args, senderJid, { group
 
     const result = await groupManager.removeStickerChannel(targetJid);
     if (result.ok) {
+        if (whatsappService?.resolveStickerSourceChannels) {
+            await whatsappService.resolveStickerSourceChannels();
+        }
         await sock.sendMessage(chatId, { text: `✅ Channel removed: ${targetJid}` });
     } else {
         await sock.sendMessage(chatId, { text: `❌ ${result.reason}` });
