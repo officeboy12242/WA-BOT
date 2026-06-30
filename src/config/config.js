@@ -54,6 +54,18 @@ export const config = {
     TMDB_API_KEY: process.env.TMDB_API_KEY?.trim() || '',
     /** HDHub4u movie search API (free-udemy-courses-bot). */
     MOVIES_API_URL: process.env.MOVIES_API_URL?.trim() || 'https://free-udemy-courses-bot.onrender.com/api/movies',
+    /** Daily group chat recap (/summaryon groups). */
+    GROUP_SUMMARY_ENABLED: process.env.GROUP_SUMMARY_ENABLED !== 'false',
+    /** When recap is sent — default 00:00 = midnight IST (end of calendar day). */
+    GROUP_SUMMARY_TIME: (process.env.GROUP_SUMMARY_TIME || '00:00').trim(),
+    GROUP_SUMMARY_TIMEZONE: process.env.GROUP_SUMMARY_TIMEZONE || 'Asia/Kolkata',
+    /** Min member messages that day before a full recap; below this = short quiet note or skip. */
+    GROUP_SUMMARY_MIN_MESSAGES: parseInt(process.env.GROUP_SUMMARY_MIN_MESSAGES, 10) || 3,
+    GROUP_SUMMARY_MAX_MESSAGES: parseInt(process.env.GROUP_SUMMARY_MAX_MESSAGES, 10) || 400,
+    NVIDIA_API_KEY: process.env.NVIDIA_API_KEY?.trim() || '',
+    NVIDIA_MODEL: process.env.NVIDIA_MODEL?.trim() || 'deepseek-ai/deepseek-v4-flash',
+    NVIDIA_API_BASE_URL: process.env.NVIDIA_API_BASE_URL?.trim() || 'https://integrate.api.nvidia.com/v1/chat/completions',
+    NVIDIA_TIMEOUT_MS: parseInt(process.env.NVIDIA_TIMEOUT_MS, 10) || 90000,
     BOT_LOG_NUMBER: process.env.BOT_LOG_NUMBER?.trim() || '',
     GITHUB_TRENDING_ENABLED: process.env.GITHUB_TRENDING_ENABLED !== 'false',
     GITHUB_TRENDING_TIMES: (process.env.GITHUB_TRENDING_TIMES || '09:00,11:30,14:00,16:30,19:00')

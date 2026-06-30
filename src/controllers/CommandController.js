@@ -40,6 +40,8 @@ import {
     handleJoinStubMessage as _handleJoinStubMessage,
     handleMovieOn,
     handleMovieOff,
+    handleSummaryOn,
+    handleSummaryOff,
     handleTrending,
 } from './handlers/groupHandlers.js';
 
@@ -111,6 +113,7 @@ class CommandController {
         this.pendingGithubPosts = createGithubPostSessionStore();
         this.getSock = null;
         this.whatsappService = null;
+        this.groupChatLogService = null;
         this.botStartTime = Date.now();
         this.stickerForwarder = null;
 
@@ -123,6 +126,10 @@ class CommandController {
 
     setWhatsAppService(whatsappService) {
         this.whatsappService = whatsappService;
+    }
+
+    setGroupChatLogService(groupChatLogService) {
+        this.groupChatLogService = groupChatLogService;
     }
 
     setGetSock(getSock) {
@@ -172,6 +179,7 @@ class CommandController {
             pendingGithubPosts: this.pendingGithubPosts,
             getSock: this.getSock,
             whatsappService: this.whatsappService,
+            groupChatLogService: this.groupChatLogService,
             botStartTime: this.botStartTime,
             isOwnerFromJid: this._isOwnerFromJid,
         };
@@ -271,6 +279,8 @@ class CommandController {
                 break;
             case 'movieon':    await handleMovieOn(sock, chatId, senderJid, ctx); break;
             case 'movieoff':   await handleMovieOff(sock, chatId, senderJid, ctx); break;
+            case 'summaryon':  await handleSummaryOn(sock, chatId, senderJid, ctx); break;
+            case 'summaryoff': await handleSummaryOff(sock, chatId, senderJid, ctx); break;
             case 'trending':   await handleTrending(sock, chatId, senderJid, args, ctx); break;
 
             /* ── Admin management ── */

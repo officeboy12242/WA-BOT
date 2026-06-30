@@ -341,6 +341,22 @@ export const COMMAND_REGISTRY = [
         category: 'movie',
     },
     {
+        names: ['/summaryon'],
+        key: 'summaryon',
+        scope: 'group_only',
+        role: 'staff',
+        help: 'Enable daily end-of-day group chat recap in this group',
+        category: 'movie',
+    },
+    {
+        names: ['/summaryoff'],
+        key: 'summaryoff',
+        scope: 'group_only',
+        role: 'staff',
+        help: 'Disable daily group chat recap in this group',
+        category: 'movie',
+    },
+    {
         names: ['/trending'],
         key: 'trending',
         scope: 'group_only',

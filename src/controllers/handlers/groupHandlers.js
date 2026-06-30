@@ -19,6 +19,7 @@ import {
     dedupeParticipantRecords,
     groupParticipantSnapshot,
 } from '../../utils/groupParticipantSnapshot.js';
+import { config } from '../../config/config.js';
 
 /** Dedupe welcome when both stub message + participants.update fire */
 const recentWelcomes = new Map();
@@ -1099,6 +1100,75 @@ export async function handleMovieOff(sock, chatId, senderJid, { groupManager }) 
         logger.info(`🎬 Movie disabled: ${chatId} by ${senderPhone}`);
     } catch (error) {
         logger.error(`Error disabling movie: ${error.message}`);
+    }
+}
+
+export async function handleSummaryOn(sock, chatId, senderJid, { groupManager, groupChatLogService }) {
+    try {
+        const senderPhone = extractPhoneNumber(senderJid);
+        let groupName = 'Unknown Group';
+        try {
+            const meta = await sock.groupMetadata(chatId);
+            groupName = meta.subject;
+        } catch {}
+
+        await groupManager.setSummaryEnabled(chatId, groupName, true, senderPhone);
+        if (groupChatLogService) {
+            await groupChatLogService.refreshEnabledGroups();
+        }
+
+        const recapTime = config.GROUP_SUMMARY_TIME || '00:00';
+        const recapLabel = recapTime === '00:00' ? '12:00 AM (midnight)' : recapTime;
+        let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        r += '✅ *GROUP DAY RECAP ON* ✅\n';
+        r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+        r += `📢 *Group:* ${groupName}\n\n`;
+        r += '🗓️ Member messages are logged through the day (IST).\n';
+        r += `🕐 Recap posts at *${recapLabel}* — covers that calendar day.\n\n`;
+        r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        r += '💡 Use `/summaryoff` to disable\n';
+        r += '💡 Movie search recap (`/movieon`) is separate';
+
+        await sock.sendMessage(chatId, { text: r });
+        logger.info(`🗓️ Group recap enabled: ${groupName} (${chatId}) by ${senderPhone}`);
+    } catch (error) {
+        logger.error(`Error enabling group recap: ${error.message}`);
+    }
+}
+
+export async function handleSummaryOff(sock, chatId, senderJid, { groupManager, groupChatLogService }) {
+    try {
+        const senderPhone = extractPhoneNumber(senderJid);
+        const wasEnabled = await groupManager.isSummaryEnabled(chatId);
+        if (!wasEnabled) {
+            await sock.sendMessage(chatId, {
+                text:
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\nℹ️ *GROUP RECAP OFF* ℹ️\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                    'Daily group recap is not enabled here.\nUse `/summaryon` to enable.',
+            });
+            return;
+        }
+
+        let groupName = 'Unknown Group';
+        try {
+            const meta = await sock.groupMetadata(chatId);
+            groupName = meta.subject;
+        } catch {}
+
+        await groupManager.setSummaryEnabled(chatId, groupName, false, senderPhone);
+        if (groupChatLogService) {
+            await groupChatLogService.refreshEnabledGroups();
+        }
+
+        await sock.sendMessage(chatId, {
+            text:
+                '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🛑 *GROUP DAY RECAP OFF* 🛑\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                `📢 *Group:* ${groupName}\n\n` +
+                'No more daily chat recaps will be posted here.\nUse `/summaryon` to enable again.',
+        });
+        logger.info(`🗓️ Group recap disabled: ${chatId} by ${senderPhone}`);
+    } catch (error) {
+        logger.error(`Error disabling group recap: ${error.message}`);
     }
 }
 

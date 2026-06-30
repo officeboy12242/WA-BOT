@@ -39,6 +39,9 @@ import { InstanceLock } from './src/utils/instanceLock.js';
 import { shortLinkService } from './src/services/ShortLinkService.js';
 import { urlShortener } from './src/utils/urlShortener.js';
 import { pronoobDriveService } from './src/services/PronoobDriveService.js';
+import GroupChatLogService from './src/services/GroupChatLogService.js';
+import GroupSummaryController from './src/controllers/GroupSummaryController.js';
+import { startGroupSummaryScheduler } from './src/utils/groupSummaryScheduler.js';
 
 // Bot state
 const botState = {
@@ -51,6 +54,7 @@ const botState = {
     lastGithubPostSlots: {},
     lastGithubCheckTime: null,
     githubTrendingCache: null,
+    lastGroupSummarySlot: null,
 };
 
 // ─── Main Application ─────────────────────────────────────────────────────────
@@ -72,6 +76,9 @@ class WhatsAppCourseBot {
         this.newsScheduler = null;
         this.githubScheduler = null;
         this.morningScheduler = null;
+        this.groupSummaryScheduler = null;
+        this.groupChatLogService = null;
+        this.groupSummaryController = null;
         this.morningDatabase = null;
         this.stickerController = null;
         this.adminPanel = null;
@@ -158,6 +165,14 @@ class WhatsAppCourseBot {
             );
             this.movieController = new MovieController(mongoDb, this.groupManager);
             await this.movieController.init();
+
+            this.groupChatLogService = new GroupChatLogService(mongoDb, this.groupManager, config);
+            await this.groupChatLogService.init();
+            this.groupSummaryController = new GroupSummaryController(
+                this.groupChatLogService,
+                this.groupManager,
+                config
+            );
             
             this.stickerController = new StickerController(config);
 
@@ -207,6 +222,7 @@ class WhatsAppCourseBot {
                     `${config.STICKER_FORWARD_CONCURRENCY} parallel workers`
             );
             this.commandController.setStickerForwarder(this.stickerForwarder);
+            this.commandController.setGroupChatLogService(this.groupChatLogService);
             
             this.whatsappService = new WhatsAppService(
                 this.commandController,
@@ -216,7 +232,8 @@ class WhatsAppCourseBot {
                 config.STICKER_SOURCE_CHANNELS,
                 this.channelStickerPoller,
                 this.userManager,
-                this.adminPanel
+                this.adminPanel,
+                this.groupChatLogService
             );
             this.commandController.setWhatsAppService(this.whatsappService);
             
@@ -249,6 +266,9 @@ class WhatsAppCourseBot {
             if (this.movieController) {
                 this.movieController.setSock(sock);
             }
+            if (this.groupSummaryController) {
+                this.groupSummaryController.setSock(sock);
+            }
             if (this.stickerController) this.stickerController.setConnectionProvider(this.whatsappService);
             this.commandController.setGetSock(() => this.whatsappService.getSock());
 
@@ -272,6 +292,13 @@ class WhatsAppCourseBot {
                 getSock: () => this.whatsappService.getSock(),
                 botState,
                 morningController: this.morningController,
+                config,
+            });
+
+            this.groupSummaryScheduler = startGroupSummaryScheduler({
+                getSock: () => this.whatsappService.getSock(),
+                botState,
+                groupSummaryController: this.groupSummaryController,
                 config,
             });
 
@@ -310,6 +337,12 @@ class WhatsAppCourseBot {
         }
         if (this.morningScheduler) {
             this.morningScheduler.stop();
+        }
+        if (this.groupSummaryScheduler) {
+            this.groupSummaryScheduler.stop();
+        }
+        if (this.groupChatLogService) {
+            this.groupChatLogService.stop();
         }
         if (this.logManager) {
             this.logManager.stop();
