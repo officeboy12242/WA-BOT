@@ -51,7 +51,8 @@ class WhatsAppService {
         stickerSourceChannelEntries = [],
         channelStickerPoller = null,
         userManager = null,
-        adminPanel = null
+        adminPanel = null,
+        groupChatLogService = null
     ) {
         this.sock = null;
         this.isReady = false;
@@ -63,6 +64,7 @@ class WhatsAppService {
         this.channelStickerPoller = channelStickerPoller;
         this.userManager = userManager;
         this.adminPanel = adminPanel;
+        this.groupChatLogService = groupChatLogService;
         
         // Message deduplication to prevent double processing
         this._processedMessages = new Set();
@@ -675,6 +677,10 @@ class WhatsAppService {
                     } catch {}
                 });
             return;
+        }
+
+        if (chatId.endsWith('@g.us') && this.groupChatLogService) {
+            void this.groupChatLogService.maybeLogMessage(msg, senderJid, chatId).catch(() => {});
         }
 
         if (textForUrls.length > 0) {

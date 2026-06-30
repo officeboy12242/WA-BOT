@@ -789,6 +789,39 @@ class GroupManager {
             .toArray();
     }
 
+    async setSummaryEnabled(groupId, groupName, enabled, setBy) {
+        await this.groups.updateOne(
+            { group_id: groupId },
+            {
+                $set: {
+                    group_name: groupName,
+                    summary_enabled: enabled,
+                    summary_set_by: setBy,
+                    summary_set_at: new Date(),
+                },
+                $setOnInsert: { group_id: groupId, is_active: false },
+            },
+            { upsert: true }
+        );
+        logger.info(
+            `${enabled ? '🗓️ Group recap ON' : '🗓️ Group recap OFF'}: ${groupName} (${groupId}) by ${setBy}`
+        );
+    }
+
+    async isSummaryEnabled(groupId) {
+        const row = await this.groups.findOne(
+            { group_id: groupId },
+            { projection: { summary_enabled: 1 } }
+        );
+        return row?.summary_enabled === true;
+    }
+
+    async getSummaryEnabledGroups() {
+        return this.groups
+            .find({ summary_enabled: true }, { projection: { _id: 0 } })
+            .toArray();
+    }
+
     async setWeeklyTrendingEnabled(groupId, groupName, enabled, setBy) {
         await this.groups.updateOne(
             { group_id: groupId },
