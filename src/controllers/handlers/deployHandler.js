@@ -1,22 +1,28 @@
 /**
  * Owner-only /deploy command — triggers a Render redeploy of the latest commit.
- * Polls deploy status and notifies when complete.
+ * Status message is persisted and edited after the new instance starts.
  */
 
 import { logger } from '../../utils/logger.js';
 import { config } from '../../config/config.js';
+import { resolveNotificationJid } from '../../utils/permissions.js';
+import {
+    deployNotificationService,
+    serializeMessageKey,
+    buildFailedText,
+} from '../../services/DeployNotificationService.js';
 
 const RENDER_API = 'https://api.render.com/v1';
-const POLL_INTERVAL_MS = 5000; // Check every 5 seconds
-const MAX_POLL_MS = 30 * 60 * 1000; // Max 30 minutes
+const POLL_INTERVAL_MS = 5000;
+const MAX_POLL_MS = 30 * 60 * 1000;
 
 async function renderFetch(path, method = 'GET', body = undefined) {
     const res = await fetch(`${RENDER_API}${path}`, {
         method,
         headers: {
-            'Accept': 'application/json',
+            Accept: 'application/json',
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${config.RENDER_API_KEY}`,
+            Authorization: `Bearer ${config.RENDER_API_KEY}`,
         },
         body: body ? JSON.stringify(body) : undefined,
     });
@@ -40,7 +46,7 @@ async function getLatestCommitMessage() {
     }
 }
 
-async function pollDeployStatus(deployId, sock, chatId, deployMsgKey, initialNotifyCallback) {
+async function pollDeployStatus(deployId, sock, commitMsg) {
     const startTime = Date.now();
 
     const poll = async () => {
@@ -53,26 +59,19 @@ async function pollDeployStatus(deployId, sock, chatId, deployMsgKey, initialNot
             logger.debug(`Deploy ${deployId} status: ${status}`);
 
             if (status === 'live') {
-                await initialNotifyCallback({
-                    status: 'complete',
-                    message: '✅ *Deploy complete!*\n\n🚀 Bot is live with latest code.',
-                });
+                // New instance will handle the edit on startup — old process is dying.
                 return;
             }
 
             if (status === 'canceled' || status === 'build_failed' || status === 'deploy_failed') {
-                await initialNotifyCallback({
-                    status: 'failed',
-                    message: `❌ *Deploy failed* — ${status}`,
-                });
+                const text = buildFailedText(commitMsg, deployId, status);
+                await deployNotificationService.completePendingNow(sock, deployId, commitMsg, text, 'failed');
                 return;
             }
 
             if (Date.now() - startTime > MAX_POLL_MS) {
-                await initialNotifyCallback({
-                    status: 'timeout',
-                    message: '⏱️ *Deploy timeout* — still building. Check Render dashboard for details.',
-                });
+                const text = buildFailedText(commitMsg, deployId, 'timeout — check Render dashboard');
+                await deployNotificationService.completePendingNow(sock, deployId, commitMsg, text, 'failed');
                 return;
             }
 
@@ -105,26 +104,46 @@ export async function handleDeploy(sock, chatId, senderJid, originalMsg) {
             { clearCache: 'do_not_clear' },
         )).id;
 
-        const deployMsg = await sock.sendMessage(chatId, {
-            text:
-                `📤 *Deploy started*\n\n` +
-                `💬 *Commit:* ${commitMsg}\n` +
-                `🔄 *Status:* Building…\n\n` +
-                `_Polling for completion…_`,
-        }, { quoted: originalMsg });
+        const startedText = deployNotificationService.buildStartedText(commitMsg, deployId);
+        const deployMsg = await sock.sendMessage(chatId, { text: startedText }, { quoted: originalMsg });
+
+        const targets = [];
+        const primaryKey = serializeMessageKey(deployMsg?.key);
+        if (primaryKey) {
+            targets.push({ chat_id: chatId, message_key: primaryKey, label: 'request_chat' });
+        }
+
+        const logJid = resolveNotificationJid(sock, [
+            config.BOT_LOG_NUMBER,
+            ...config.OWNER_NUMBERS,
+        ].filter(Boolean));
+
+        if (logJid && logJid !== chatId && primaryKey) {
+            try {
+                const logMsg = await sock.sendMessage(logJid, {
+                    text:
+                        `${startedText}\n\n` +
+                        `📍 _Requested from:_ \`${chatId}\``,
+                });
+                const logKey = serializeMessageKey(logMsg?.key);
+                if (logKey) {
+                    targets.push({ chat_id: logJid, message_key: logKey, label: 'bot_log' });
+                }
+            } catch (err) {
+                logger.warn(`Deploy log copy failed: ${err.message}`);
+            }
+        }
+
+        await deployNotificationService.savePending({
+            deployId,
+            commitMsg,
+            triggeredBy: senderJid,
+            targets,
+        });
 
         logger.info(`Render deploy triggered by ${senderJid}: deploy=${deployId} commit=${commitMsg}`);
 
-        pollDeployStatus(deployId, sock, chatId, deployMsg?.key, async (result) => {
-            try {
-                await sock.sendMessage(chatId, {
-                    text: result.message,
-                    edit: deployMsg?.key,
-                });
-            } catch (err) {
-                logger.warn(`Could not send deploy completion notice: ${err.message}`);
-            }
-        });
+        pollDeployStatus(deployId, sock, commitMsg);
     } catch (err) {
         logger.error(`Render deploy failed: ${err.message}`);
         await sock.sendMessage(chatId, {

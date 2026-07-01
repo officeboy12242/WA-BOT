@@ -44,6 +44,7 @@ import GroupSummaryController from './src/controllers/GroupSummaryController.js'
 import { startGroupSummaryScheduler } from './src/utils/groupSummaryScheduler.js';
 import TradeAlertController from './src/controllers/TradeAlertController.js';
 import { startTradeAlertScheduler } from './src/utils/tradeAlertScheduler.js';
+import { deployNotificationService } from './src/services/DeployNotificationService.js';
 
 // Bot state
 const botState = {
@@ -133,6 +134,7 @@ class WhatsAppCourseBot {
 
             this.botSettings = new BotSettings(mongoDb);
             await this.botSettings.init();
+            deployNotificationService.init(mongoDb);
             pronoobDriveService.setSettings(this.botSettings);
             await pronoobDriveService.loadUrls();
             botState.isPaused = await this.botSettings.getCoursesPaused();
@@ -279,6 +281,7 @@ class WhatsAppCourseBot {
             );
 
             const sock = this.whatsappService.getSock();
+            await deployNotificationService.completePendingOnStartup(sock);
             if (this.movieController) {
                 this.movieController.setSock(sock);
             }
