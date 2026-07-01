@@ -666,6 +666,33 @@ export async function safeDeleteMessage(sock, chatId, messageKey) {
 }
 
 /**
+ * Edit a bot message in place (e.g. loading → result). Falls back to a new send if edit fails.
+ * @param {import('baileys').WASocket} sock
+ * @param {string} chatId
+ * @param {import('baileys').proto.IMessageKey} messageKey
+ * @param {string} text
+ */
+export async function editMessageText(sock, chatId, messageKey, text) {
+    if (!sock?.sendMessage || !messageKey?.id) {
+        return plainSendMessage(sock, chatId, { text });
+    }
+    const jid = resolveOutboundJid(messageKey, chatId);
+    try {
+        const sent = await Promise.race([
+            sock.sendMessage(jid, { text, edit: messageKey, linkPreview: false }),
+            new Promise((_, reject) => {
+                setTimeout(() => reject(new Error('edit timeout')), SEND_TIMEOUT_MS);
+            }),
+        ]);
+        if (sent) return sent;
+        throw new Error('edit returned empty');
+    } catch (err) {
+        logger.warn(`Message edit failed for ${jid}, sending new: ${err?.message || err}`);
+        return plainSendMessage(sock, chatId, { text }, messageKey);
+    }
+}
+
+/**
  * Last-resort plain send — no quotes, no fallbacks. Used for error notices.
  * @param {import('baileys').WASocket} sock
  * @param {string} chatId

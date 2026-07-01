@@ -5,6 +5,7 @@
 import { logger } from '../../utils/logger.js';
 import { extractPhoneNumber } from '../../utils/permissions.js';
 import { config } from '../../config/config.js';
+import { editMessageText } from '../../utils/waMessage.js';
 
 function parseSymbolList(raw) {
     return String(raw || '')
@@ -146,16 +147,22 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
                 await sock.sendMessage(chatId, { text: '❌ `NVIDIA_API_KEY` required for AI scan.' });
                 return;
             }
-            await sock.sendMessage(chatId, { text: '📡 _Running live market scan + AI discovery… (~60–90s)_' });
-            const preview = await tradeAlertController.previewDiscovery();
-            let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-            r += '📡 *AI WATCHLIST PREVIEW* 📡\n';
-            r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
-            r += `📈 *Picks:* ${preview.symbols.join(', ')}\n\n`;
-            r += `📊 *Movers*\n${preview.moversBrief}\n\n`;
-            r += `📰 *Market news*\n${preview.marketNews}\n\n`;
-            r += '_Full analysis runs at daily alert time; only BUY ≥70% gets posted._';
-            await sock.sendMessage(chatId, { text: r });
+            const loading = await sock.sendMessage(chatId, {
+                text: '📡 _Running live market scan + AI discovery… (~60–90s)_',
+            });
+            try {
+                const preview = await tradeAlertController.previewDiscovery();
+                let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+                r += '📡 *AI WATCHLIST PREVIEW* 📡\n';
+                r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+                r += `📈 *Picks:* ${preview.symbols.join(', ')}\n\n`;
+                r += `📊 *Movers*\n${preview.moversBrief}\n\n`;
+                r += `📰 *Market news*\n${preview.marketNews}\n\n`;
+                r += '_Full analysis runs at daily alert time; only BUY ≥70% gets posted._';
+                await editMessageText(sock, chatId, loading?.key, r);
+            } catch (err) {
+                await editMessageText(sock, chatId, loading?.key, `❌ Scan failed: ${err.message}`);
+            }
             return;
         }
 
@@ -218,18 +225,23 @@ export async function handleTradenow(sock, chatId, senderJid, args, { tradeAlert
             return;
         }
 
-        await sock.sendMessage(chatId, {
+        const loading = await sock.sendMessage(chatId, {
             text: `📊 _Analyzing ${symbol}…\n🌐 Fetching live price + news… (~45–90s)_`,
         });
 
-        const text = await tradeAlertController.analyzeSymbol(symbol, { mode: 'live' });
-        await sock.sendMessage(chatId, { text });
-        logger.info(`📈 Tradenow ${symbol} in ${chatId} by ${senderPhone}`);
+        try {
+            const text = await tradeAlertController.analyzeSymbol(symbol, { mode: 'live' });
+            await editMessageText(sock, chatId, loading?.key, text);
+            logger.info(`📈 Tradenow ${symbol} in ${chatId} by ${senderPhone}`);
+        } catch (error) {
+            logger.error(`Error in tradenow: ${error.message}`);
+            const msg = /timeout/i.test(error.message)
+                ? '❌ Analysis timed out. Try again in a moment.'
+                : `❌ Analysis failed: ${error.message}`;
+            await editMessageText(sock, chatId, loading?.key, msg);
+        }
     } catch (error) {
-        logger.error(`Error in tradenow: ${error.message}`);
-        const msg = /timeout/i.test(error.message)
-            ? '❌ Analysis timed out. Try again in a moment.'
-            : `❌ Analysis failed: ${error.message}`;
-        await sock.sendMessage(chatId, { text: msg }).catch(() => {});
+        logger.error(`Error in tradenow handler: ${error.message}`);
+        await sock.sendMessage(chatId, { text: `❌ ${error.message}` }).catch(() => {});
     }
 }
