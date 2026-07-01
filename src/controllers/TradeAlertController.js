@@ -5,7 +5,7 @@
 import { logger } from '../utils/logger.js';
 import { formatDateLabelIST, getTodayDateStrIST } from '../utils/dateIST.js';
 import NvidiaDeepSeekService from '../services/NvidiaDeepSeekService.js';
-import { stockIntelligenceService } from '../services/StockIntelligenceService.js';
+import { createTradeResearchService } from '../services/TradeResearchService.js';
 import { marketScanService } from '../services/MarketScanService.js';
 import {
     TRADE_ANALYSIS_SYSTEM_PROMPT,
@@ -30,6 +30,8 @@ class TradeAlertController {
         this.config = config;
         this.mongoDb = mongoDb;
         this.nvidia = new NvidiaDeepSeekService(config);
+        this.research = createTradeResearchService(config);
+        this.twoStepResearch = config.TRADE_TWO_STEP_RESEARCH !== false;
         this.enabled = config.TRADE_ALERT_ENABLED !== false;
         const { hour, minute } = parseAlertTime(config.TRADE_ALERT_TIME);
         this.alertHour = hour;
@@ -68,20 +70,29 @@ class TradeAlertController {
     }
 
     async _runAnalysis(symbol, { mode = 'live', includeMarketBrief = false } = {}) {
-        const intel = await stockIntelligenceService.gatherForSymbol(symbol, { includeMarketBrief });
+        const intel = await this.research.gatherIntel(symbol, { includeMarketBrief });
+
+        let researchBrief = null;
+        if (this.twoStepResearch) {
+            researchBrief = await this.research.runResearchBrief(intel);
+        }
+
         const userPrompt = buildTradeUserPrompt({
             symbol: intel.symbol,
             displayName: intel.displayName,
             quoteContext: intel.quoteContext,
             quote: intel.quote,
             newsContext: intel.newsContext,
+            optionsNewsContext: intel.optionsNewsContext,
+            optionChainContext: intel.optionChainContext,
+            researchBrief,
             marketBrief: intel.marketBrief,
             mode,
         });
 
         let body = await this.nvidia.complete(TRADE_ANALYSIS_SYSTEM_PROMPT, userPrompt, {
-            maxTokens: 2200,
-            timeoutMs: 110_000,
+            maxTokens: 2400,
+            timeoutMs: 120_000,
         });
 
         body = enforceLiveSpotPrice(body, intel.quote);

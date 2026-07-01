@@ -10,7 +10,7 @@ Analyze the symbol and provide BOTH sides — CALL (CE) and PUT (PE) — every t
 Analyze ALL of the following before deciding:
 
 1. PRICE ACTION — intraday + daily trend; breakouts; support/resistance; volume
-2. OPTIONS DATA — Call/Put OI, PCR, COI, unusual strikes, premium momentum
+2. OPTIONS DATA — use LIVE NSE OPTION CHAIN when provided (PCR, CE/PE OI, COI, IV, top strikes). Do NOT invent OI numbers.
 3. VOLATILITY — IV level, spike/crush vs historical
 4. MARKET SENTIMENT — NIFTY/BANKNIFTY bias
 5. NEWS & FUNDAMENTALS — earnings, results, sector/macro (use LIVE NEWS when provided)
@@ -50,6 +50,8 @@ Primary Confidence: <0–100>%
 
 RULES:
 • ALWAYS fill both CE and PE sections — even if one side is AVOID
+• CE section must cite Call OI/PCR/IV evidence; PE section must cite Put OI/PCR/IV evidence
+• When AI RESEARCH BRIEF is provided, use it but verify against live chain data
 • Primary Pick = best side only if confidence ≥70%; else NO TRADE
 • Only mark ✅ BUY CE or ✅ BUY PE when that side's confidence ≥70%
 • Use WEAK for 50–69%, AVOID for <50% or poor setup
@@ -65,6 +67,9 @@ export function buildTradeUserPrompt({
     quoteContext,
     quote,
     newsContext,
+    optionsNewsContext,
+    optionChainContext,
+    researchBrief,
     marketBrief,
     mode = 'live',
 }) {
@@ -104,9 +109,31 @@ export function buildTradeUserPrompt({
         lines.push('');
     }
 
+    if (optionChainContext) {
+        lines.push('=== LIVE NSE OPTION CHAIN (CE + PE) ===');
+        lines.push(optionChainContext);
+        lines.push('');
+    } else {
+        lines.push('=== LIVE NSE OPTION CHAIN ===');
+        lines.push('Unavailable — use price + news only; note missing OI in Why bullets.');
+        lines.push('');
+    }
+
     if (newsContext) {
         lines.push('=== LIVE NEWS (Google News RSS) ===');
         lines.push(newsContext);
+        lines.push('');
+    }
+
+    if (optionsNewsContext) {
+        lines.push('=== OPTIONS / F&O NEWS ===');
+        lines.push(optionsNewsContext);
+        lines.push('');
+    }
+
+    if (researchBrief) {
+        lines.push('=== AI RESEARCH BRIEF (Step 1 — CE + PE) ===');
+        lines.push(researchBrief);
         lines.push('');
     }
 
