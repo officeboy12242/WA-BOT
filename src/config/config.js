@@ -65,7 +65,14 @@ export const config = {
     NVIDIA_API_KEY: process.env.NVIDIA_API_KEY?.trim() || '',
     NVIDIA_MODEL: process.env.NVIDIA_MODEL?.trim() || 'deepseek-ai/deepseek-v4-flash',
     NVIDIA_API_BASE_URL: process.env.NVIDIA_API_BASE_URL?.trim() || 'https://integrate.api.nvidia.com/v1/chat/completions',
-    NVIDIA_TIMEOUT_MS: parseInt(process.env.NVIDIA_TIMEOUT_MS, 10) || 90000,
+    /** Capped at 120s — avoid huge env values (e.g. 900000) that hang recaps. */
+    NVIDIA_TIMEOUT_MS: (() => {
+        const n = parseInt(process.env.NVIDIA_TIMEOUT_MS, 10);
+        if (!Number.isFinite(n) || n <= 0) return 60_000;
+        return Math.min(120_000, Math.max(20_000, n));
+    })(),
+    /** Max chat lines sent to the LLM per recap (rest are sampled). */
+    GROUP_SUMMARY_LLM_MAX_MESSAGES: parseInt(process.env.GROUP_SUMMARY_LLM_MAX_MESSAGES, 10) || 100,
     BOT_LOG_NUMBER: process.env.BOT_LOG_NUMBER?.trim() || '',
     GITHUB_TRENDING_ENABLED: process.env.GITHUB_TRENDING_ENABLED !== 'false',
     GITHUB_TRENDING_TIMES: (process.env.GITHUB_TRENDING_TIMES || '09:00,11:30,14:00,16:30,19:00')
