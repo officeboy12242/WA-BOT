@@ -1071,11 +1071,11 @@ class MovieController {
             const withTimeout = (promise, ms) =>
                 Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
 
-            const HDHUB_TIMEOUT_MS = 50000;
-            const OTHER_TIMEOUT_MS = 10000;
+            const HDHUB_TIMEOUT_MS = 90000;
+            const OTHER_TIMEOUT_MS = 12000;
 
             const [hdHubResults, driveResults, atozResults] = await Promise.allSettled([
-                withTimeout(hdHubMoviesService.searchMovies(query, 5), HDHUB_TIMEOUT_MS),
+                withTimeout(hdHubMoviesService.searchMovies(query, 6), HDHUB_TIMEOUT_MS),
                 withTimeout(pronoobDriveService.searchMovies(query, 5), OTHER_TIMEOUT_MS),
                 withTimeout(atozService.searchMovies(query, 3), OTHER_TIMEOUT_MS),
             ]);
@@ -1121,7 +1121,10 @@ class MovieController {
             void this.logSearch(normalizedUserId, query, results.length, chatId);
 
             try {
-                await urlShortener.shortenMovieResults(results, 60000);
+                await Promise.race([
+                    urlShortener.shortenMovieResults(results, 20000),
+                    new Promise((resolve) => setTimeout(() => resolve(results), 20000)),
+                ]);
             } catch (err) {
                 logger.warn(`URL shorten skipped (sending results anyway): ${err?.message || err}`);
             }
