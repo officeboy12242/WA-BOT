@@ -16,12 +16,18 @@ function zonedParts(date, timezone) {
     });
     const parts = formatter.formatToParts(date);
     const get = (type) => parts.find((p) => p.type === type)?.value;
+    let hour = Number(get('hour'));
+    const minute = Number(get('minute'));
+    // en-CA + hour12:false uses 24 for midnight — normalize so 00:00 slots match
+    if (hour === 24) {
+        hour = 0;
+    }
     return {
         year: Number(get('year')),
         month: Number(get('month')),
         day: Number(get('day')),
-        hour: Number(get('hour')),
-        minute: Number(get('minute')),
+        hour,
+        minute,
     };
 }
 
@@ -39,11 +45,11 @@ export function parsePostTimesFromConfig(times) {
 }
 
 export function msUntilTimeInTimezone(hour, minute, timezone, fromMs = Date.now()) {
-    for (let addMin = 1; addMin <= 48 * 60; addMin++) {
+    for (let addMin = 0; addMin <= 48 * 60; addMin++) {
         const candidate = new Date(fromMs + addMin * 60_000);
         const p = zonedParts(candidate, timezone);
         if (p.hour === hour && p.minute === minute) {
-            return addMin * 60_000;
+            return Math.max(addMin, 1) * 60_000;
         }
     }
     return 24 * 60 * 60 * 1000;

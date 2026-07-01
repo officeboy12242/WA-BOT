@@ -357,6 +357,14 @@ export const COMMAND_REGISTRY = [
         category: 'movie',
     },
     {
+        names: ['/summarynow'],
+        key: 'summarynow',
+        scope: 'group_only',
+        role: 'staff',
+        help: 'Send group recap now for yesterday (test / catch-up)',
+        category: 'movie',
+    },
+    {
         names: ['/trending'],
         key: 'trending',
         scope: 'group_only',

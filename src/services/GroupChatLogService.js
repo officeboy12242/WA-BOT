@@ -2,13 +2,21 @@
  * Persist member messages per group/day for end-of-day recap.
  */
 
-import { normalizeMessageContent } from 'baileys';
+import { normalizeMessageContent, jidNormalizedUser } from 'baileys';
 import { logger } from '../utils/logger.js';
-import { getTextFromWAMessage } from '../utils/waMessage.js';
+import { getTextFromWAMessage, resolveConversationChatId } from '../utils/waMessage.js';
 import { extractPhoneNumber } from '../utils/permissions.js';
 import { getTodayDateStrIST } from '../utils/dateIST.js';
 
 const REFRESH_MS = 5 * 60_000;
+
+function normalizeGroupId(chatId) {
+    if (!chatId?.endsWith('@g.us')) {
+        return '';
+    }
+    const resolved = resolveConversationChatId({ remoteJid: chatId }) || chatId;
+    return jidNormalizedUser(String(resolved).replace(/:\d+(?=@)/, '')) || resolved;
+}
 
 function describeMessageContent(message) {
     const content = normalizeMessageContent(message);
@@ -94,11 +102,14 @@ class GroupChatLogService {
             return;
         }
         const groups = await this.groupManager.getSummaryEnabledGroups();
-        this._enabledGroups = new Set(groups.map((g) => g.group_id).filter(Boolean));
+        this._enabledGroups = new Set(
+            groups.map((g) => normalizeGroupId(g.group_id)).filter(Boolean)
+        );
     }
 
     isLoggingEnabled(groupId) {
-        return Boolean(groupId?.endsWith('@g.us') && this._enabledGroups.has(groupId));
+        const normalized = normalizeGroupId(groupId);
+        return Boolean(normalized && this._enabledGroups.has(normalized));
     }
 
     /**
@@ -116,6 +127,11 @@ class GroupChatLogService {
             return;
         }
 
+        const storageGroupId = normalizeGroupId(chatId);
+        if (!storageGroupId) {
+            return;
+        }
+
         const date = getTodayDateStrIST();
         const messageId = msg.key?.id;
         if (!messageId) {
@@ -129,16 +145,16 @@ class GroupChatLogService {
             : Date.now();
 
         try {
-            const count = await this.collection.countDocuments({ group_id: chatId, date });
+            const count = await this.collection.countDocuments({ group_id: storageGroupId, date });
             if (count >= this.maxPerDay) {
                 return;
             }
 
             await this.collection.updateOne(
-                { group_id: chatId, date, message_id: messageId },
+                { group_id: storageGroupId, date, message_id: messageId },
                 {
                     $setOnInsert: {
-                        group_id: chatId,
+                        group_id: storageGroupId,
                         date,
                         message_id: messageId,
                         sender_name: senderName.slice(0, 64),
@@ -165,10 +181,19 @@ class GroupChatLogService {
         if (!this.collection) {
             return [];
         }
+        const normalized = normalizeGroupId(groupId) || groupId;
         return this.collection
-            .find({ group_id: groupId, date: dateStr })
+            .find({ group_id: normalized, date: dateStr })
             .sort({ ts: 1 })
             .toArray();
+    }
+
+    async countMessagesForDay(groupId, dateStr) {
+        if (!this.collection) {
+            return 0;
+        }
+        const normalized = normalizeGroupId(groupId) || groupId;
+        return this.collection.countDocuments({ group_id: normalized, date: dateStr });
     }
 
     /**
@@ -249,7 +274,8 @@ class GroupChatLogService {
         if (!this.collection) {
             return;
         }
-        await this.collection.deleteMany({ group_id: groupId, date: dateStr });
+        const normalized = normalizeGroupId(groupId) || groupId;
+        await this.collection.deleteMany({ group_id: normalized, date: dateStr });
     }
 }
 
