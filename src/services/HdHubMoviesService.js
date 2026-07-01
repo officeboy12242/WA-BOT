@@ -9,7 +9,7 @@ import { audioFromFilename } from '../utils/movieMetadata.js';
 import { config } from '../config/config.js';
 
 const DEFAULT_API_URL = 'https://free-udemy-courses-bot.onrender.com/api/movies';
-const REQUEST_TIMEOUT_MS = 45000;
+const REQUEST_TIMEOUT_MS = 55_000;
 
 function sourceLabel(raw) {
     const s = String(raw || 'hdhub4u').trim();
@@ -88,7 +88,7 @@ class HdHubMoviesService {
     _normalizeResults(payload) {
         const rows = Array.isArray(payload?.results) ? payload.results : [];
         const results = [];
-        const maxLinksPerResult = 10;
+        const maxLinksPerResult = 12;
 
         for (const row of rows) {
             const title = String(row?.title || '').trim();

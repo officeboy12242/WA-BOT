@@ -13,8 +13,7 @@ import { config } from '../config/config.js';
 import { atozService } from '../services/AtoZService.js';
 import { hdHubMoviesService } from '../services/HdHubMoviesService.js';
 import { pronoobDriveService } from '../services/PronoobDriveService.js';
-import { urlShortener } from '../utils/urlShortener.js';
-import { safeSendMessage, safeDeleteMessage } from '../utils/waMessage.js';
+import { safeSendMessage, safeDeleteMessage, plainSendMessage } from '../utils/waMessage.js';
 import { audioFromFilename, qualityFromFilename } from '../utils/movieMetadata.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -314,6 +313,32 @@ function getRandomDialogue(arr) {
 
 function cleanTitle(raw) {
     return raw.replace(/^\*+|\*+$/g, '').trim();
+}
+
+/** Prefer titles that match more query words (e.g. "dragon tattoo" over "girl next door"). */
+function rankMovieResults(results, query) {
+    const words = String(query || '')
+        .toLowerCase()
+        .split(/\s+/)
+        .map((w) => w.replace(/[^a-z0-9]/g, ''))
+        .filter((w) => w.length > 2);
+
+    if (!words.length) {
+        return results;
+    }
+
+    const score = (title) => {
+        const t = String(title || '').toLowerCase();
+        let hits = 0;
+        for (const w of words) {
+            if (t.includes(w)) {
+                hits++;
+            }
+        }
+        return hits / words.length;
+    };
+
+    return [...results].sort((a, b) => score(b.title) - score(a.title));
 }
 
 /** Quoting @lid senders in groups can hang Baileys — skip quote in that case. */
@@ -1071,37 +1096,38 @@ class MovieController {
             const withTimeout = (promise, ms) =>
                 Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
 
-            const HDHUB_TIMEOUT_MS = 90000;
             const OTHER_TIMEOUT_MS = 12000;
-
-            const [hdHubResults, driveResults, atozResults] = await Promise.allSettled([
-                withTimeout(hdHubMoviesService.searchMovies(query, 6), HDHUB_TIMEOUT_MS),
-                withTimeout(pronoobDriveService.searchMovies(query, 5), OTHER_TIMEOUT_MS),
-                withTimeout(atozService.searchMovies(query, 3), OTHER_TIMEOUT_MS),
-            ]);
-
             let results = [];
 
-            if (hdHubResults.status === 'fulfilled' && hdHubResults.value?.length > 0) {
-                results.push(...hdHubResults.value);
-                logger.info(`HDHub: ${hdHubResults.value.length} results for "${query}"`);
-            } else {
-                logger.warn(`HDHub: ${hdHubResults.status === 'rejected' ? hdHubResults.reason?.message : 'no results'} for "${query}"`);
+            // HDHub first — no outer timeout (service has its own retries; outer 90s was killing retry)
+            try {
+                results = await hdHubMoviesService.searchMovies(query, 8);
+                if (results.length) {
+                    logger.info(`HDHub: ${results.length} result(s) for "${query}"`);
+                } else {
+                    logger.warn(`HDHub: no results for "${query}"`);
+                }
+            } catch (err) {
+                logger.warn(`HDHub failed for "${query}": ${err.message}`);
             }
 
-            if (driveResults.status === 'fulfilled' && driveResults.value?.length > 0) {
-                results.push(...driveResults.value);
-                logger.info(`Drive: ${driveResults.value.length} results for "${query}"`);
-            } else {
-                logger.warn(`Drive: ${driveResults.status === 'rejected' ? driveResults.reason?.message : 'no results'} for "${query}"`);
+            if (!results.length) {
+                const [driveResults, atozResults] = await Promise.allSettled([
+                    withTimeout(pronoobDriveService.searchMovies(query, 5), OTHER_TIMEOUT_MS),
+                    withTimeout(atozService.searchMovies(query, 3), OTHER_TIMEOUT_MS),
+                ]);
+
+                if (driveResults.status === 'fulfilled' && driveResults.value?.length > 0) {
+                    results.push(...driveResults.value);
+                    logger.info(`Drive: ${driveResults.value.length} results for "${query}"`);
+                }
+                if (atozResults.status === 'fulfilled' && atozResults.value?.length > 0) {
+                    results.push(...atozResults.value);
+                    logger.info(`AtoZ: ${atozResults.value.length} results for "${query}"`);
+                }
             }
 
-            if (atozResults.status === 'fulfilled' && atozResults.value?.length > 0) {
-                results.push(...atozResults.value);
-                logger.info(`AtoZ: ${atozResults.value.length} results for "${query}"`);
-            } else {
-                logger.warn(`AtoZ: ${atozResults.status === 'rejected' ? atozResults.reason?.message : 'no results'} for "${query}"`);
-            }
+            results = rankMovieResults(results, query);
 
             const sources = [...new Set(results.map((r) => r.source).filter(Boolean))];
 
@@ -1119,15 +1145,6 @@ class MovieController {
 
             if (!unlimited) await this.incrementSearchCount(normalizedUserId);
             void this.logSearch(normalizedUserId, query, results.length, chatId);
-
-            try {
-                await Promise.race([
-                    urlShortener.shortenMovieResults(results, 20000),
-                    new Promise((resolve) => setTimeout(() => resolve(results), 20000)),
-                ]);
-            } catch (err) {
-                logger.warn(`URL shorten skipped (sending results anyway): ${err?.message || err}`);
-            }
 
             const resultMessages = formatMovieResults(query, results, pushName, sources);
             logger.info(`Formatted ${resultMessages.length} message(s) for "${query}" (${resultMessages.reduce((a, m) => a + m.length, 0)} chars)`);
@@ -1154,12 +1171,15 @@ class MovieController {
 
                 try {
                     logger.info(`Sending movie result part ${i + 1}/${resultMessages.length} (${text.length} chars) to ${chatId}...`);
-                    const sent = await safeSendMessage(
-                        sock,
-                        chatId,
-                        { text, linkPreview: false },
-                        null,
-                    );
+                    let sent = await plainSendMessage(sock, chatId, { text, linkPreview: false });
+                    if (!sent?.key) {
+                        sent = await safeSendMessage(
+                            sock,
+                            chatId,
+                            { text, linkPreview: false },
+                            originalMsg,
+                        );
+                    }
                     logger.info(`Sent movie result part ${i + 1} OK`);
 
                     if (sent?.key) {
