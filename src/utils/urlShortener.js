@@ -122,7 +122,7 @@ class UrlShortener {
         return finalUrl;
     }
 
-    async shortenMovieResults(results, maxMs = 20000) {
+    async shortenMovieResults(results, maxMs = 45000) {
         const links = [];
         for (const item of results) {
             for (const link of item.links || []) {
@@ -150,7 +150,7 @@ class UrlShortener {
                 batch.map(async (link) => {
                     const original = link.url;
                     link.url = await this.shorten(original);
-                    if (link.url.includes('tinyurl.com/')) {
+                    if (link.url.includes('tinyurl.com/') || link.url.includes('/d/')) {
                         shortened++;
                     } else if (this.needsShortening(link.url)) {
                         failed++;
@@ -170,7 +170,7 @@ class UrlShortener {
             }
         }
 
-        logger.info(`URL shorten done: ${shortened}/${links.length} tinyurl, ${failed} long, ${skipped} skipped`);
+        logger.info(`URL shorten done: ${shortened}/${links.length} short, ${failed} long, ${skipped} skipped`);
         return results;
     }
 }

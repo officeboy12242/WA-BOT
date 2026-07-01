@@ -13,6 +13,7 @@ import { config } from '../config/config.js';
 import { atozService } from '../services/AtoZService.js';
 import { hdHubMoviesService } from '../services/HdHubMoviesService.js';
 import { pronoobDriveService } from '../services/PronoobDriveService.js';
+import { urlShortener } from '../utils/urlShortener.js';
 import { safeSendMessage, safeDeleteMessage, plainSendMessage } from '../utils/waMessage.js';
 import { audioFromFilename, qualityFromFilename } from '../utils/movieMetadata.js';
 
@@ -1096,35 +1097,41 @@ class MovieController {
             const withTimeout = (promise, ms) =>
                 Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
 
-            const OTHER_TIMEOUT_MS = 12000;
+            const OTHER_TIMEOUT_MS = 15000;
+            const SHORTEN_BUDGET_MS = 45000;
             let results = [];
 
-            // HDHub first — no outer timeout (service has its own retries; outer 90s was killing retry)
-            try {
-                results = await hdHubMoviesService.searchMovies(query, 8);
-                if (results.length) {
-                    logger.info(`HDHub: ${results.length} result(s) for "${query}"`);
-                } else {
-                    logger.warn(`HDHub: no results for "${query}"`);
-                }
-            } catch (err) {
-                logger.warn(`HDHub failed for "${query}": ${err.message}`);
+            const [hdHubResults, driveResults, atozResults] = await Promise.allSettled([
+                hdHubMoviesService.searchMovies(query, 8),
+                withTimeout(pronoobDriveService.searchMovies(query, 5), OTHER_TIMEOUT_MS),
+                withTimeout(atozService.searchMovies(query, 3), OTHER_TIMEOUT_MS),
+            ]);
+
+            if (hdHubResults.status === 'fulfilled' && hdHubResults.value?.length > 0) {
+                results.push(...hdHubResults.value);
+                logger.info(`HDHub: ${hdHubResults.value.length} results for "${query}"`);
+            } else {
+                logger.warn(
+                    `HDHub: ${hdHubResults.status === 'rejected' ? hdHubResults.reason?.message : 'no results'} for "${query}"`,
+                );
             }
 
-            if (!results.length) {
-                const [driveResults, atozResults] = await Promise.allSettled([
-                    withTimeout(pronoobDriveService.searchMovies(query, 5), OTHER_TIMEOUT_MS),
-                    withTimeout(atozService.searchMovies(query, 3), OTHER_TIMEOUT_MS),
-                ]);
+            if (driveResults.status === 'fulfilled' && driveResults.value?.length > 0) {
+                results.push(...driveResults.value);
+                logger.info(`Drive: ${driveResults.value.length} results for "${query}"`);
+            } else {
+                logger.warn(
+                    `Drive: ${driveResults.status === 'rejected' ? driveResults.reason?.message : 'no results'} for "${query}"`,
+                );
+            }
 
-                if (driveResults.status === 'fulfilled' && driveResults.value?.length > 0) {
-                    results.push(...driveResults.value);
-                    logger.info(`Drive: ${driveResults.value.length} results for "${query}"`);
-                }
-                if (atozResults.status === 'fulfilled' && atozResults.value?.length > 0) {
-                    results.push(...atozResults.value);
-                    logger.info(`AtoZ: ${atozResults.value.length} results for "${query}"`);
-                }
+            if (atozResults.status === 'fulfilled' && atozResults.value?.length > 0) {
+                results.push(...atozResults.value);
+                logger.info(`AtoZ: ${atozResults.value.length} results for "${query}"`);
+            } else {
+                logger.warn(
+                    `AtoZ: ${atozResults.status === 'rejected' ? atozResults.reason?.message : 'no results'} for "${query}"`,
+                );
             }
 
             results = rankMovieResults(results, query);
@@ -1145,6 +1152,20 @@ class MovieController {
 
             if (!unlimited) await this.incrementSearchCount(normalizedUserId);
             void this.logSearch(normalizedUserId, query, results.length, chatId);
+
+            try {
+                await Promise.race([
+                    urlShortener.shortenMovieResults(results, SHORTEN_BUDGET_MS),
+                    new Promise((resolve) => {
+                        setTimeout(() => {
+                            logger.warn(`URL shorten cap (${SHORTEN_BUDGET_MS}ms) — sending with available short links`);
+                            resolve(results);
+                        }, SHORTEN_BUDGET_MS);
+                    }),
+                ]);
+            } catch (err) {
+                logger.warn(`URL shorten skipped (sending results anyway): ${err?.message || err}`);
+            }
 
             const resultMessages = formatMovieResults(query, results, pushName, sources);
             logger.info(`Formatted ${resultMessages.length} message(s) for "${query}" (${resultMessages.reduce((a, m) => a + m.length, 0)} chars)`);
