@@ -17,6 +17,7 @@ import {
     buildDiscoveryUserPrompt,
 } from '../prompts/stockDiscoveryPrompt.js';
 import { parseTradeSignal, parseDiscoverySymbols } from '../utils/tradeSignalParser.js';
+import { enforceLiveSpotPrice } from '../utils/tradeQuoteUtils.js';
 
 function parseAlertTime(timeStr) {
     const [h, m = '0'] = String(timeStr || '09:20').trim().split(':');
@@ -72,15 +73,18 @@ class TradeAlertController {
             symbol: intel.symbol,
             displayName: intel.displayName,
             quoteContext: intel.quoteContext,
+            quote: intel.quote,
             newsContext: intel.newsContext,
             marketBrief: intel.marketBrief,
             mode,
         });
 
-        const body = await this.nvidia.complete(TRADE_ANALYSIS_SYSTEM_PROMPT, userPrompt, {
+        let body = await this.nvidia.complete(TRADE_ANALYSIS_SYSTEM_PROMPT, userPrompt, {
             maxTokens: 1600,
             timeoutMs: 100_000,
         });
+
+        body = enforceLiveSpotPrice(body, intel.quote);
 
         const signal = parseTradeSignal(body);
         const text = wrapTradeAlertMessage(intel.symbol, body, { isDaily: mode === 'daily' });

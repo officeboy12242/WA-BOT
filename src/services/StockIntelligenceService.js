@@ -14,10 +14,8 @@ class StockIntelligenceService {
     async gatherForSymbol(symbol, opts = {}) {
         const sym = String(symbol || '').trim().toUpperCase();
 
-        const [quote, news] = await Promise.all([
-            indianStockQuoteService.fetchQuoteContext(sym),
-            stockNewsService.fetchForSymbol(sym),
-        ]);
+        const quotePack = await indianStockQuoteService.fetchQuoteContext(sym);
+        const news = await stockNewsService.fetchForSymbol(sym, quotePack?.displayName || sym);
 
         let marketBrief = null;
         if (opts.includeMarketBrief) {
@@ -27,8 +25,9 @@ class StockIntelligenceService {
 
         return {
             symbol: sym,
-            displayName: quote?.displayName || sym,
-            quoteContext: quote?.context || null,
+            displayName: quotePack?.displayName || sym,
+            quoteContext: quotePack?.context || null,
+            quote: quotePack?.quote || null,
             newsContext: news.context,
             newsHeadlines: news.headlines,
             marketBrief,

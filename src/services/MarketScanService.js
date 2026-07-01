@@ -2,14 +2,10 @@
  * Scan liquid NSE F&O names for movers + index context (Yahoo Finance).
  */
 
-import axios from 'axios';
 import { logger } from '../utils/logger.js';
-import { indianStockQuoteService, normalizeYahooSymbol } from './IndianStockQuoteService.js';
+import { indianStockQuoteService } from './IndianStockQuoteService.js';
 import { stockNewsService } from './StockNewsService.js';
 
-const UA = 'Mozilla/5.0 (compatible; SassyBot/1.0)';
-const CHART = 'https://query1.finance.yahoo.com/v8/finance/chart';
-const TIMEOUT_MS = 10_000;
 const BATCH = 6;
 
 /** Liquid F&O / Nifty-heavy names for daily AI scan */
@@ -26,31 +22,15 @@ export const FNO_UNIVERSE = [
 const INDICES = ['NIFTY', 'BANKNIFTY'];
 
 async function fetchQuoteRow(symbol) {
-    const yahoo = normalizeYahooSymbol(symbol);
-    try {
-        const { data } = await axios.get(`${CHART}/${encodeURIComponent(yahoo)}`, {
-            params: { interval: '1d', range: '5d' },
-            headers: { 'User-Agent': UA },
-            timeout: TIMEOUT_MS,
-        });
-        const meta = data?.chart?.result?.[0]?.meta;
-        if (!meta) return null;
-
-        const price = meta.regularMarketPrice ?? meta.previousClose;
-        const prev = meta.chartPreviousClose ?? meta.previousClose;
-        const changePct =
-            price != null && prev ? ((price - prev) / prev) * 100 : null;
-
-        return {
-            symbol: String(symbol).replace(/\.NS$/, '').toUpperCase(),
-            name: meta.shortName || meta.longName || symbol,
-            price,
-            changePct: changePct != null ? Number(changePct.toFixed(2)) : null,
-            volume: meta.regularMarketVolume ?? null,
-        };
-    } catch {
-        return null;
-    }
+    const quote = await indianStockQuoteService.fetchQuote(symbol);
+    if (!quote) return null;
+    return {
+        symbol: quote.symbol,
+        name: quote.displayName,
+        price: quote.price,
+        changePct: quote.changePct,
+        volume: quote.volume,
+    };
 }
 
 async function mapPool(items, fn, poolSize = BATCH) {

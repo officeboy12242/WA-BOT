@@ -1,12 +1,20 @@
 /**
- * Lightweight NSE/BSE spot quotes via Yahoo Finance (best-effort).
+ * Lightweight NSE/BSE spot quotes — Yahoo Finance chart API with retries + fallbacks.
  */
 
 import axios from 'axios';
 import { logger } from '../utils/logger.js';
 
-const YAHOO_CHART = 'https://query1.finance.yahoo.com/v8/finance/chart';
-const TIMEOUT_MS = 12_000;
+const YAHOO_CHART_HOSTS = [
+    'https://query1.finance.yahoo.com/v8/finance/chart',
+    'https://query2.finance.yahoo.com/v8/finance/chart',
+];
+
+const CHROME_UA =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+const TIMEOUT_MS = 18_000;
+const MAX_ATTEMPTS = 3;
 
 const INDEX_MAP = {
     NIFTY: '^NSEI',
@@ -25,19 +33,98 @@ function normalizeSymbol(raw) {
     return `${s}.NS`;
 }
 
-function formatQuoteContext(meta, symbol) {
-    const price = meta?.regularMarketPrice ?? meta?.previousClose;
-    const prev = meta?.previousClose ?? meta?.chartPreviousClose;
-    const change = price != null && prev != null ? price - prev : null;
-    const changePct = change != null && prev ? ((change / prev) * 100).toFixed(2) : null;
-    const currency = meta?.currency || 'INR';
+function sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+}
 
-    const lines = [`Symbol (Yahoo): ${symbol}`];
-    if (price != null) lines.push(`Last price: ${price} ${currency}`);
-    if (change != null) lines.push(`Change: ${change >= 0 ? '+' : ''}${change.toFixed(2)} (${changePct}%)`);
-    if (meta?.fiftyTwoWeekHigh) lines.push(`52W high: ${meta.fiftyTwoWeekHigh}`);
-    if (meta?.fiftyTwoWeekLow) lines.push(`52W low: ${meta.fiftyTwoWeekLow}`);
+/**
+ * @param {object} meta Yahoo chart meta
+ * @returns {import('./IndianStockQuoteService.js').StockQuote | null}
+ */
+function metaToQuote(meta, yahooSymbol, rawSymbol) {
+    if (!meta) return null;
+
+    const price = meta.regularMarketPrice ?? meta.previousClose;
+    if (price == null) return null;
+
+    const prev = meta.chartPreviousClose ?? meta.previousClose;
+    const change = prev != null ? price - prev : null;
+    const changePct = change != null && prev ? Number(((change / prev) * 100).toFixed(2)) : null;
+
+    return {
+        symbol: String(rawSymbol).trim().toUpperCase(),
+        yahooSymbol,
+        displayName: meta.longName || meta.shortName || rawSymbol,
+        price: Number(price),
+        change: change != null ? Number(change.toFixed(2)) : null,
+        changePct,
+        open: meta.regularMarketDayOpen ?? null,
+        high: meta.regularMarketDayHigh ?? null,
+        low: meta.regularMarketDayLow ?? null,
+        prevClose: prev != null ? Number(prev) : null,
+        volume: meta.regularMarketVolume ?? null,
+        currency: meta.currency || 'INR',
+        fiftyTwoWeekHigh: meta.fiftyTwoWeekHigh ?? null,
+        fiftyTwoWeekLow: meta.fiftyTwoWeekLow ?? null,
+        exchange: meta.fullExchangeName || meta.exchangeName || 'NSE',
+        marketState: meta.marketState || '',
+    };
+}
+
+function formatQuoteContext(quote) {
+    const lines = [
+        `Symbol (Yahoo): ${quote.yahooSymbol}`,
+        `Exchange: ${quote.exchange}`,
+        `Last price: ${quote.price} ${quote.currency}`,
+    ];
+
+    if (quote.change != null && quote.changePct != null) {
+        const sign = quote.change >= 0 ? '+' : '';
+        lines.push(`Change today: ${sign}${quote.change} (${sign}${quote.changePct}%)`);
+    }
+    if (quote.open != null) lines.push(`Open: ${quote.open}`);
+    if (quote.high != null) lines.push(`Day high: ${quote.high}`);
+    if (quote.low != null) lines.push(`Day low: ${quote.low}`);
+    if (quote.prevClose != null) lines.push(`Previous close: ${quote.prevClose}`);
+    if (quote.volume != null) lines.push(`Volume: ${quote.volume}`);
+    if (quote.fiftyTwoWeekHigh != null) lines.push(`52W high: ${quote.fiftyTwoWeekHigh}`);
+    if (quote.fiftyTwoWeekLow != null) lines.push(`52W low: ${quote.fiftyTwoWeekLow}`);
+    if (quote.marketState) lines.push(`Market state: ${quote.marketState}`);
+
     return lines.join('\n');
+}
+
+async function fetchYahooMeta(yahooSymbol) {
+    let lastErr;
+
+    for (const host of YAHOO_CHART_HOSTS) {
+        for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+            try {
+                const url = `${host}/${encodeURIComponent(yahooSymbol)}`;
+                const { data } = await axios.get(url, {
+                    params: { interval: '1d', range: '5d', includePrePost: false },
+                    timeout: TIMEOUT_MS,
+                    headers: {
+                        'User-Agent': CHROME_UA,
+                        Accept: 'application/json,text/plain,*/*',
+                        'Accept-Language': 'en-IN,en;q=0.9',
+                    },
+                });
+
+                const meta = data?.chart?.result?.[0]?.meta;
+                if (meta?.regularMarketPrice != null || meta?.previousClose != null) {
+                    return meta;
+                }
+                lastErr = new Error('empty chart meta');
+            } catch (err) {
+                lastErr = err;
+                logger.debug(`Yahoo quote attempt failed ${yahooSymbol} @ ${host}: ${err.message}`);
+                await sleep(500 * (attempt + 1));
+            }
+        }
+    }
+
+    throw lastErr || new Error(`No quote for ${yahooSymbol}`);
 }
 
 export function normalizeYahooSymbol(raw) {
@@ -46,37 +133,39 @@ export function normalizeYahooSymbol(raw) {
 
 class IndianStockQuoteService {
     /**
-     * @param {string} rawSymbol e.g. RELIANCE, NIFTY
-     * @returns {Promise<{ yahooSymbol: string, displayName: string, context: string } | null>}
+     * @param {string} rawSymbol
+     * @returns {Promise<StockQuote | null>}
      */
-    async fetchQuoteContext(rawSymbol) {
+    async fetchQuote(rawSymbol) {
         const yahooSymbol = normalizeSymbol(rawSymbol);
         if (!yahooSymbol) return null;
 
         try {
-            const url = `${YAHOO_CHART}/${encodeURIComponent(yahooSymbol)}`;
-            const { data } = await axios.get(url, {
-                params: { interval: '1d', range: '5d' },
-                timeout: TIMEOUT_MS,
-                headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SassyBot/1.0)' },
-            });
-
-            const result = data?.chart?.result?.[0];
-            const meta = result?.meta;
-            if (!meta) return null;
-
-            const displayName = meta.longName || meta.shortName || rawSymbol;
-            return {
-                yahooSymbol,
-                displayName,
-                context: formatQuoteContext(meta, yahooSymbol),
-            };
+            const meta = await fetchYahooMeta(yahooSymbol);
+            return metaToQuote(meta, yahooSymbol, rawSymbol);
         } catch (err) {
-            logger.debug(`Stock quote failed for ${rawSymbol}: ${err.message}`);
+            logger.warn(`Stock quote failed for ${rawSymbol}: ${err.message}`);
             return null;
         }
     }
+
+    /**
+     * @param {string} rawSymbol
+     * @returns {Promise<{ yahooSymbol: string, displayName: string, context: string, quote: StockQuote } | null>}
+     */
+    async fetchQuoteContext(rawSymbol) {
+        const quote = await this.fetchQuote(rawSymbol);
+        if (!quote) return null;
+
+        return {
+            yahooSymbol: quote.yahooSymbol,
+            displayName: quote.displayName,
+            context: formatQuoteContext(quote),
+            quote,
+        };
+    }
 }
 
-export const indianStockQuoteService = new IndianStockQuoteService();
+/** @typedef {object} StockQuote */
 export default IndianStockQuoteService;
+export const indianStockQuoteService = new IndianStockQuoteService();
