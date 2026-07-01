@@ -66,7 +66,7 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
             r += `🧠 *Mode:* ${modeLabel(mode)}\n`;
             r += `🕐 *Daily time:* ${formatAlertTime()} IST\n`;
             r += `📊 *Symbols:* ${symbolLine}\n`;
-            r += `🔔 *Posts only:* BUY signals ≥70% confidence\n`;
+            r += `🔔 *Posts:* Full CE + PE analysis when Primary ≥70%\n`;
             r += `🌐 *Data:* Live Yahoo prices + Google News RSS\n`;
             r += `🤖 *AI:* ${nvidiaOk ? 'ready' : 'NVIDIA_API_KEY missing'}\n\n`;
             r += '*Commands:*\n';
@@ -98,7 +98,7 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
             r += `🕐 Daily scan at *${formatAlertTime()}* IST\n`;
             r += `🧠 *Mode:* ${modeLabel(mode)}\n`;
             r += '🌐 Scans *live news*, earnings/results headlines, top gainers/losers\n';
-            r += '🔔 Posts only *BUY CALL / BUY PUT* when confidence ≥70%\n\n';
+            r += '🔔 Posts full *CE + PE* analysis when Primary Pick ≥70%\n';
             r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
             r += '💡 `/tradelert scan` — preview watchlist now\n';
             r += '💡 `/tradenow TCS` — on-demand analysis';
