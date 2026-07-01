@@ -42,7 +42,7 @@ class TradeAlertController {
         this._sock = null;
         this._sentCollection = null;
         this._discoveryCollection = null;
-        this._discoveryCache = { date: null, symbols: [], moversBrief: '', marketNews: '' };
+        this._discoveryCache = { date: null, symbols: [], moversBrief: '', marketNews: '', scannedAt: null };
     }
 
     async init() {
@@ -100,30 +100,54 @@ class TradeAlertController {
         return result.text;
     }
 
-    async discoverSymbolsForToday() {
-        const dateStr = getTodayDateStrIST();
-        if (this._discoveryCache.date === dateStr && this._discoveryCache.symbols.length) {
-            return this._discoveryCache.symbols;
-        }
+    async discoverSymbolsForToday({ forceRefresh = false } = {}) {
+        const result = await this.runDiscovery({ forceRefresh, persist: !forceRefresh });
+        return result.symbols;
+    }
 
-        if (this._discoveryCollection) {
-            const row = await this._discoveryCollection.findOne({ alert_date: dateStr });
-            if (row?.symbols?.length) {
-                this._discoveryCache = {
-                    date: dateStr,
-                    symbols: row.symbols,
-                    moversBrief: row.movers_brief || '',
-                    marketNews: row.market_news || '',
-                };
-                return row.symbols;
+    /**
+     * @param {{ forceRefresh?: boolean, persist?: boolean }} opts
+     * persist=false for manual /tradelert scan so it does not lock in stale all-day cache
+     */
+    async runDiscovery({ forceRefresh = false, persist = true } = {}) {
+        const dateStr = getTodayDateStrIST();
+
+        if (!forceRefresh) {
+            if (this._discoveryCache.date === dateStr && this._discoveryCache.symbols.length) {
+                return this._discoveryResultFromCache();
+            }
+
+            if (this._discoveryCollection) {
+                const row = await this._discoveryCollection.findOne({ alert_date: dateStr });
+                if (row?.symbols?.length) {
+                    this._discoveryCache = {
+                        date: dateStr,
+                        symbols: row.symbols,
+                        moversBrief: row.movers_brief || '',
+                        marketNews: row.market_news || '',
+                        scannedAt: row.created_at || null,
+                    };
+                    return this._discoveryResultFromCache();
+                }
             }
         }
 
         if (!this.nvidia.isConfigured()) {
-            return this.defaultSymbols.slice(0, this.discoveryCount);
+            const symbols = this.defaultSymbols.slice(0, this.discoveryCount);
+            return {
+                symbols,
+                moversBrief: 'n/a',
+                marketNews: 'n/a',
+                scannedAt: new Date(),
+            };
         }
 
-        logger.info('🤖 AI stock discovery: scanning market + news…');
+        logger.info(
+            forceRefresh
+                ? '📡 Fresh trade scan requested (bypassing cache)…'
+                : '🤖 AI stock discovery: scanning market + news…'
+        );
+
         const snapshot = await marketScanService.buildDiscoverySnapshot();
         const userPrompt = buildDiscoveryUserPrompt(snapshot.context);
 
@@ -146,9 +170,17 @@ class TradeAlertController {
 
         const moversBrief = marketScanService.formatMoversBrief(snapshot.movers);
         const marketNews = snapshot.marketNews.split('\n').slice(0, 5).join('\n');
+        const scannedAt = new Date();
 
-        this._discoveryCache = { date: dateStr, symbols, moversBrief, marketNews };
-        if (this._discoveryCollection) {
+        this._discoveryCache = {
+            date: dateStr,
+            symbols,
+            moversBrief,
+            marketNews,
+            scannedAt,
+        };
+
+        if (persist && this._discoveryCollection) {
             await this._discoveryCollection.updateOne(
                 { alert_date: dateStr },
                 {
@@ -157,7 +189,7 @@ class TradeAlertController {
                         movers_brief: moversBrief,
                         market_news: marketNews,
                         raw_response: raw.slice(0, 4000),
-                        created_at: new Date(),
+                        created_at: scannedAt,
                     },
                 },
                 { upsert: true }
@@ -165,7 +197,16 @@ class TradeAlertController {
         }
 
         logger.info(`🤖 AI discovery picks: ${symbols.join(', ')}`);
-        return symbols;
+        return { symbols, moversBrief, marketNews, scannedAt };
+    }
+
+    _discoveryResultFromCache() {
+        return {
+            symbols: this._discoveryCache.symbols,
+            moversBrief: this._discoveryCache.moversBrief || 'n/a',
+            marketNews: this._discoveryCache.marketNews || 'n/a',
+            scannedAt: this._discoveryCache.scannedAt || null,
+        };
     }
 
     async wasDailySent(groupId, symbol, dateStr) {
@@ -226,9 +267,31 @@ class TradeAlertController {
         const dateLabel = formatDateLabelIST(dateStr);
         logger.info(`📈 Daily trade alerts for ${groups.length} group(s) — ${dateLabel}`);
 
+        let autoDiscovery = null;
+
         for (const group of groups) {
             const mode = await this.resolveModeForGroup(group);
-            const symbols = await this.resolveSymbolsForGroup(group);
+            let symbols;
+            if (mode === 'manual') {
+                const groupSymbols = await this.groupManager.getTradeAlertSymbols(group.group_id);
+                symbols = groupSymbols.length ? groupSymbols : this.defaultSymbols;
+            } else {
+                if (!autoDiscovery) {
+                    try {
+                        autoDiscovery = await this.runDiscovery({ forceRefresh: true, persist: true });
+                    } catch (err) {
+                        logger.error(`Daily discovery failed, using fallback watchlist: ${err.message}`);
+                        autoDiscovery = {
+                            symbols: this.defaultSymbols.slice(0, this.discoveryCount),
+                            moversBrief: 'Discovery unavailable — using default watchlist',
+                            marketNews: '',
+                            scannedAt: new Date(),
+                        };
+                    }
+                }
+                symbols = autoDiscovery.symbols;
+            }
+
             if (!symbols.length) {
                 logger.warn(`Trade alert: no symbols for ${group.group_name || group.group_id}`);
                 continue;
@@ -236,18 +299,25 @@ class TradeAlertController {
 
             let sentCount = 0;
             const skipped = [];
+            const actionableSent = [];
 
             if (mode === 'auto') {
                 const intro =
                     `📡 *AI Market Scan* · ${dateLabel}\n` +
-                    `Watchlist today: *${symbols.join(', ')}*\n` +
-                    `_Live news + movers → only high-confidence BUY alerts below._`;
+                    `Scanning: *${symbols.join(', ')}*\n` +
+                    `_Only BUY CALL/PUT ≥70% confidence are posted (max ${this.maxSendsPerGroup}/day)._\n` +
+                    `_Analyzing one by one — may take several minutes._`;
                 await sock.sendMessage(group.group_id, { text: intro }).catch(() => {});
                 await new Promise((r) => setTimeout(r, 800));
             }
 
             for (const symbol of symbols) {
                 try {
+                    if (this.onlyBuySignals && sentCount >= this.maxSendsPerGroup) {
+                        skipped.push(`${symbol} (daily alert limit reached)`);
+                        continue;
+                    }
+
                     if (await this.wasDailySent(group.group_id, symbol, dateStr)) {
                         continue;
                     }
@@ -266,6 +336,10 @@ class TradeAlertController {
 
                     if (sentCount >= this.maxSendsPerGroup) {
                         skipped.push(`${symbol} (daily limit reached)`);
+                        await this.markDailySent(group.group_id, symbol, dateStr, {
+                            skipped: true,
+                            reason: 'daily_limit',
+                        });
                         continue;
                     }
 
@@ -276,20 +350,28 @@ class TradeAlertController {
                         confidence: signal.confidence,
                     });
                     sentCount += 1;
+                    actionableSent.push(symbol);
                     logger.info(`✅ Trade alert sent: ${symbol} → ${group.group_name || group.group_id}`);
-                    await new Promise((r) => setTimeout(r, 1500));
+                    await new Promise((r) => setTimeout(r, 2000));
                 } catch (err) {
                     logger.error(`Trade alert failed ${symbol} in ${group.group_id}: ${err.message}`);
                 }
             }
 
-            if (this.onlyBuySignals && sentCount === 0) {
+            if (sentCount > 0) {
+                await sock.sendMessage(group.group_id, {
+                    text:
+                        `📈 *Daily F&O scan complete*\n` +
+                        `Posted *${sentCount}* actionable alert(s): *${actionableSent.join(', ')}*\n\n` +
+                        `_Use \`/tradenow SYMBOL\` anytime for full analysis._`,
+                }).catch(() => {});
+            } else if (this.onlyBuySignals) {
                 const skipNote = skipped.length
                     ? `\n_Scanned: ${skipped.slice(0, 6).join('; ')}_`
                     : '';
                 await sock.sendMessage(group.group_id, {
                     text:
-                        `📈 *Daily F&O Scan complete*\n` +
+                        `📈 *Daily F&O scan complete*\n` +
                         `No high-confidence BUY setups (≥70%) today.${skipNote}\n\n` +
                         `Use \`/tradenow SYMBOL\` for full analysis including NO TRADE.`,
                 }).catch(() => {});
@@ -297,14 +379,9 @@ class TradeAlertController {
         }
     }
 
-    /** Manual preview of AI discovery (for /tradelert scan) */
+    /** Manual preview — always fresh live scan (does not reuse all-day cache). */
     async previewDiscovery() {
-        const symbols = await this.discoverSymbolsForToday();
-        return {
-            symbols,
-            moversBrief: this._discoveryCache.moversBrief || 'n/a',
-            marketNews: this._discoveryCache.marketNews || 'n/a',
-        };
+        return this.runDiscovery({ forceRefresh: true, persist: false });
     }
 }
 

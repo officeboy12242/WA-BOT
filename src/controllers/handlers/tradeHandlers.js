@@ -23,6 +23,16 @@ function modeLabel(mode) {
     return mode === 'manual' ? '📋 Manual watchlist' : '🤖 AI auto (live news + movers)';
 }
 
+function formatScannedAt(scannedAt) {
+    if (!scannedAt) return 'just now';
+    const d = scannedAt instanceof Date ? scannedAt : new Date(scannedAt);
+    return d.toLocaleString('en-IN', {
+        timeZone: config.TRADE_ALERT_TIMEZONE || 'Asia/Kolkata',
+        dateStyle: 'medium',
+        timeStyle: 'short',
+    });
+}
+
 async function getGroupName(sock, chatId) {
     try {
         const meta = await sock.groupMetadata(chatId);
@@ -155,6 +165,7 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
                 let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
                 r += '📡 *AI WATCHLIST PREVIEW* 📡\n';
                 r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+                r += `🕐 *Scanned:* ${formatScannedAt(preview.scannedAt)} IST\n`;
                 r += `📈 *Picks:* ${preview.symbols.join(', ')}\n\n`;
                 r += `📊 *Movers*\n${preview.moversBrief}\n\n`;
                 r += `📰 *Market news*\n${preview.marketNews}\n\n`;
