@@ -4,6 +4,7 @@
 
 import { indianStockQuoteService } from './IndianStockQuoteService.js';
 import { stockNewsService } from './StockNewsService.js';
+import { nseOptionChainService } from './NseOptionChainService.js';
 import { marketScanService } from './MarketScanService.js';
 
 class StockIntelligenceService {
@@ -15,7 +16,13 @@ class StockIntelligenceService {
         const sym = String(symbol || '').trim().toUpperCase();
 
         const quotePack = await indianStockQuoteService.fetchQuoteContext(sym);
-        const news = await stockNewsService.fetchForSymbol(sym, quotePack?.displayName || sym);
+        const displayName = quotePack?.displayName || sym;
+
+        const [news, optionsNews, optionChain] = await Promise.all([
+            stockNewsService.fetchForSymbol(sym, displayName),
+            stockNewsService.fetchOptionsNews(sym, displayName),
+            nseOptionChainService.fetchOptionContext(sym),
+        ]);
 
         let marketBrief = null;
         if (opts.includeMarketBrief) {
@@ -25,11 +32,15 @@ class StockIntelligenceService {
 
         return {
             symbol: sym,
-            displayName: quotePack?.displayName || sym,
+            displayName,
             quoteContext: quotePack?.context || null,
             quote: quotePack?.quote || null,
             newsContext: news.context,
             newsHeadlines: news.headlines,
+            optionsNewsContext: optionsNews.context,
+            optionsNewsHeadlines: optionsNews.headlines,
+            optionChainContext: optionChain?.context || null,
+            optionChainSnapshot: optionChain?.snapshot || null,
             marketBrief,
         };
     }

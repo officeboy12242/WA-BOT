@@ -87,6 +87,31 @@ class StockNewsService {
         return { headlines, context: this.formatContext(headlines) };
     }
 
+    /**
+     * Options / F&O focused headlines for CE and PE context.
+     * @param {string} symbol
+     * @param {string} [displayName]
+     */
+    async fetchOptionsNews(symbol, displayName = '') {
+        const sym = String(symbol || '').trim().toUpperCase();
+        const name = displayName || sym;
+        const queries = [
+            `${sym} put call ratio open interest NSE`,
+            `${name} options trading F&O India`,
+            `${sym} call put options premium NSE`,
+        ];
+
+        const batches = await Promise.all(
+            queries.map((q) => fetchRss(q).catch((err) => {
+                logger.debug(`Options news RSS failed (${q}): ${err.message}`);
+                return [];
+            }))
+        );
+
+        const headlines = dedupeHeadlines(batches.flat()).slice(0, 6);
+        return { headlines, context: this.formatContext(headlines) };
+    }
+
     formatContext(headlines) {
         if (!headlines.length) {
             return 'No recent headlines fetched from live news feeds.';

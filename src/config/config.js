@@ -91,6 +91,8 @@ export const config = {
     TRADE_ALERT_MAX_SENDS: Math.max(1, parseInt(process.env.TRADE_ALERT_MAX_SENDS, 10) || 5),
     /** How many symbols AI discovery picks to scan */
     TRADE_ALERT_DISCOVERY_COUNT: Math.max(3, Math.min(12, parseInt(process.env.TRADE_ALERT_DISCOVERY_COUNT, 10) || 8)),
+    /** Step-1 AI research brief before CE/PE trade analysis */
+    TRADE_TWO_STEP_RESEARCH: process.env.TRADE_TWO_STEP_RESEARCH !== 'false',
     BOT_LOG_NUMBER: process.env.BOT_LOG_NUMBER?.trim() || '',
     GITHUB_TRENDING_ENABLED: process.env.GITHUB_TRENDING_ENABLED !== 'false',
     GITHUB_TRENDING_TIMES: (process.env.GITHUB_TRENDING_TIMES || '09:00,11:30,14:00,16:30,19:00')
