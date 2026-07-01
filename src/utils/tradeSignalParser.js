@@ -1,28 +1,69 @@
 /**
- * Parse BUY / NO TRADE signals from AI trade analysis text.
+ * Parse CE/PE dual-scenario trade analysis from AI output.
  */
+
+const MIN_CONFIDENCE = 70;
+
+function parseSectionConfidence(text, sectionPattern) {
+    const block = text.match(sectionPattern)?.[0] || '';
+    const conf = block.match(/Confidence:\s*(\d{1,3})\s*%?/i)?.[1];
+    return conf ? Math.min(100, parseInt(conf, 10)) : 0;
+}
+
+function parseSectionVerdict(text, sectionPattern) {
+    const block = text.match(sectionPattern)?.[0] || '';
+    const verdict = block.match(/Verdict:\s*(.+)/i)?.[1]?.trim() || '';
+    const isBuy = /✅\s*BUY/i.test(verdict) && !/AVOID/i.test(verdict);
+    return { verdict, isBuy };
+}
 
 export function parseTradeSignal(body) {
     const text = String(body || '');
-    const recLine = text.match(/Recommendation:\s*(.+)/i)?.[1]?.trim() || '';
-    const confMatch = text.match(/Confidence\s*Score:\s*(\d{1,3})\s*%?/i);
-    const confidence = confMatch ? Math.min(100, parseInt(confMatch[1], 10)) : 0;
 
-    const isNoTrade = /NO\s*TRADE/i.test(recLine) || /❌/.test(recLine);
-    const isBuyCall = /BUY\s*CALL/i.test(recLine) && !isNoTrade;
-    const isBuyPut = /BUY\s*PUT/i.test(recLine) && !isNoTrade;
+    const ceBlock = /━━━\s*CALL\s*\(CE\)\s*SETUP\s*━━━[\s\S]*?(?=━━━\s*PUT|Primary Pick:|$)/i;
+    const peBlock = /━━━\s*PUT\s*\(PE\)\s*SETUP\s*━━━[\s\S]*?(?=Primary Pick:|$)/i;
 
-    const minConfidence = 70;
+    const ceConf = parseSectionConfidence(text, ceBlock);
+    const peConf = parseSectionConfidence(text, peBlock);
+    const ce = parseSectionVerdict(text, ceBlock);
+    const pe = parseSectionVerdict(text, peBlock);
+
+    const primaryLine = text.match(/Primary Pick:\s*(.+)/i)?.[1]?.trim() || '';
+    const primaryConfMatch = text.match(/Primary Confidence:\s*(\d{1,3})\s*%?/i);
+    const primaryConfidence = primaryConfMatch
+        ? Math.min(100, parseInt(primaryConfMatch[1], 10))
+        : Math.max(ceConf, peConf);
+
+    const isBuyCall =
+        (/BUY\s*CE/i.test(primaryLine) && !/NO\s*TRADE/i.test(primaryLine)) ||
+        (ce.isBuy && ceConf >= MIN_CONFIDENCE);
+    const isBuyPut =
+        (/BUY\s*PE/i.test(primaryLine) && !/NO\s*TRADE/i.test(primaryLine)) ||
+        (pe.isBuy && peConf >= MIN_CONFIDENCE);
+    const isNoTrade =
+        /NO\s*TRADE/i.test(primaryLine) ||
+        (!isBuyCall && !isBuyPut && primaryConfidence < MIN_CONFIDENCE);
+
     const isActionable =
-        (isBuyCall || isBuyPut) && confidence >= minConfidence && !isNoTrade;
+        (isBuyCall || isBuyPut) &&
+        primaryConfidence >= MIN_CONFIDENCE &&
+        !/NO\s*TRADE/i.test(primaryLine);
+
+  // Fallback: strong CE or PE even if Primary line missing
+    const actionableFallback =
+        (ce.isBuy && ceConf >= MIN_CONFIDENCE) || (pe.isBuy && peConf >= MIN_CONFIDENCE);
 
     return {
-        confidence,
-        isBuyCall,
-        isBuyPut,
-        isNoTrade: isNoTrade || (!isBuyCall && !isBuyPut),
-        isActionable,
-        recommendation: recLine,
+        confidence: primaryConfidence,
+        ceConfidence: ceConf,
+        peConfidence: peConf,
+        isBuyCall: isBuyCall || (ce.isBuy && ceConf >= MIN_CONFIDENCE),
+        isBuyPut: isBuyPut || (pe.isBuy && peConf >= MIN_CONFIDENCE),
+        isNoTrade: isNoTrade && !actionableFallback,
+        isActionable: isActionable || actionableFallback,
+        recommendation: primaryLine || (isBuyCall ? 'BUY CE' : isBuyPut ? 'BUY PE' : 'NO TRADE'),
+        ceVerdict: ce.verdict,
+        peVerdict: pe.verdict,
     };
 }
 

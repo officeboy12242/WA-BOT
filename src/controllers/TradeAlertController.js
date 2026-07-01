@@ -80,8 +80,8 @@ class TradeAlertController {
         });
 
         let body = await this.nvidia.complete(TRADE_ANALYSIS_SYSTEM_PROMPT, userPrompt, {
-            maxTokens: 1600,
-            timeoutMs: 100_000,
+            maxTokens: 2200,
+            timeoutMs: 110_000,
         });
 
         body = enforceLiveSpotPrice(body, intel.quote);
@@ -305,7 +305,7 @@ class TradeAlertController {
                 const intro =
                     `📡 *AI Market Scan* · ${dateLabel}\n` +
                     `Scanning: *${symbols.join(', ')}*\n` +
-                    `_Only BUY CALL/PUT ≥70% confidence are posted (max ${this.maxSendsPerGroup}/day)._\n` +
+                    `_CE + PE analysis posted when Primary Pick ≥70% (max ${this.maxSendsPerGroup}/day)._\n` +
                     `_Analyzing one by one — may take several minutes._`;
                 await sock.sendMessage(group.group_id, { text: intro }).catch(() => {});
                 await new Promise((r) => setTimeout(r, 800));
@@ -325,7 +325,8 @@ class TradeAlertController {
                     const { text, signal } = await this._runAnalysis(symbol, { mode: 'daily' });
 
                     if (this.onlyBuySignals && !signal.isActionable) {
-                        skipped.push(`${symbol} (${signal.isNoTrade ? 'NO TRADE' : `conf ${signal.confidence}%`})`);
+                        const cePe = `CE ${signal.ceConfidence}% / PE ${signal.peConfidence}%`;
+                        skipped.push(`${symbol} (NO TRADE · ${cePe})`);
                         await this.markDailySent(group.group_id, symbol, dateStr, {
                             skipped: true,
                             signal: signal.recommendation,
