@@ -64,6 +64,7 @@ class GroupChatLogService {
         this.mongoDb = mongoDb;
         this.groupManager = groupManager;
         this.maxPerDay = Math.max(50, Number(config.GROUP_SUMMARY_MAX_MESSAGES) || 400);
+        this.llmMaxMessages = Math.max(20, Number(config.GROUP_SUMMARY_LLM_MAX_MESSAGES) || 100);
         /** @type {Set<string>} */
         this._enabledGroups = new Set();
         this._refreshTimer = null;
@@ -253,21 +254,43 @@ class GroupChatLogService {
     }
 
     buildPrompt(messages, groupName, dateLabel) {
-        const lines = messages.map((row) => {
+        const maxLines = this.llmMaxMessages;
+        let sampled = messages;
+        if (messages.length > maxLines) {
+            sampled = [];
+            for (let i = 0; i < maxLines; i++) {
+                const idx = Math.floor((i * messages.length) / maxLines);
+                sampled.push(messages[idx]);
+            }
+        }
+
+        const lines = sampled.map((row) => {
             const time = new Date(row.ts).toLocaleTimeString('en-IN', {
                 hour: '2-digit',
                 minute: '2-digit',
                 timeZone: 'Asia/Kolkata',
             });
-            return `[${time}] ${row.sender_name}: ${row.text}`;
+            const text = String(row.text || '').slice(0, 180);
+            return `[${time}] ${row.sender_name}: ${text}`;
         });
 
-        return [
+        const sampledNote = messages.length > maxLines
+            ? `\n(Showing ${maxLines} of ${messages.length} messages — evenly sampled.)`
+            : '';
+
+        let body = [
             `Group: ${groupName}`,
             `Date: ${dateLabel}`,
-            `Messages (${messages.length}):`,
+            `Messages (${messages.length}):${sampledNote}`,
             lines.join('\n'),
         ].join('\n\n');
+
+        const maxChars = 12_000;
+        if (body.length > maxChars) {
+            body = `${body.slice(0, maxChars)}\n\n[...truncated...]`;
+        }
+
+        return body;
     }
 
     async purgeDay(groupId, dateStr) {

@@ -305,7 +305,22 @@ class GroupSummaryController {
 
         const stats = this.chatLog.computeStats(messages);
         const prompt = this.chatLog.buildPrompt(messages, groupName, dateLabel);
-        const summary = await this.nvidia.summarizeGroupChat(prompt);
+
+        let summary;
+        try {
+            summary = await this.nvidia.summarizeGroupChat(prompt);
+        } catch (err) {
+            logger.error(`NVIDIA recap failed for ${groupName}: ${err.message}`);
+            summary = {
+                topics: [],
+                notable: [],
+                wrap_up:
+                    `Active day — ${stats.totalMessages} messages from ${stats.uniqueMembers} members` +
+                    `${stats.busiestHourLabel ? `, busiest around ${stats.busiestHourLabel}` : ''}.` +
+                    ' (Topic details unavailable — summary service timed out.)',
+            };
+        }
+
         const text = formatRecapMessage({
             groupName,
             dateLabel,

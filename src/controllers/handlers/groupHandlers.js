@@ -1193,11 +1193,13 @@ export async function handleSummaryNow(sock, chatId, senderJid, { groupManager, 
 
         const dateStr = getYesterdayDateStrIST();
         await groupSummaryController.postRecapForGroup(sock, chatId, { dateStr, force: true });
-
         logger.info(`🗓️ Manual recap triggered in ${chatId} by ${senderPhone} for ${dateStr}`);
     } catch (error) {
         logger.error(`Error running manual recap: ${error.message}`);
-        await sock.sendMessage(chatId, { text: `❌ Recap failed: ${error.message}` }).catch(() => {});
+        const msg = /timeout/i.test(error.message)
+            ? '❌ Recap timed out. Try again — prompt size is now capped. Remove NVIDIA_TIMEOUT_MS=900000 from Render if set.'
+            : `❌ Recap failed: ${error.message}`;
+        await sock.sendMessage(chatId, { text: msg }).catch(() => {});
     }
 }
 
