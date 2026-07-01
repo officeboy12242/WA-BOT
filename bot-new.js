@@ -42,6 +42,8 @@ import { pronoobDriveService } from './src/services/PronoobDriveService.js';
 import GroupChatLogService from './src/services/GroupChatLogService.js';
 import GroupSummaryController from './src/controllers/GroupSummaryController.js';
 import { startGroupSummaryScheduler } from './src/utils/groupSummaryScheduler.js';
+import TradeAlertController from './src/controllers/TradeAlertController.js';
+import { startTradeAlertScheduler } from './src/utils/tradeAlertScheduler.js';
 
 // Bot state
 const botState = {
@@ -55,6 +57,7 @@ const botState = {
     lastGithubCheckTime: null,
     githubTrendingCache: null,
     lastGroupSummarySlot: null,
+    lastTradeAlertSlot: null,
 };
 
 // ─── Main Application ─────────────────────────────────────────────────────────
@@ -79,6 +82,8 @@ class WhatsAppCourseBot {
         this.groupSummaryScheduler = null;
         this.groupChatLogService = null;
         this.groupSummaryController = null;
+        this.tradeAlertController = null;
+        this.tradeAlertScheduler = null;
         this.morningDatabase = null;
         this.stickerController = null;
         this.adminPanel = null;
@@ -175,6 +180,13 @@ class WhatsAppCourseBot {
                 mongoDb
             );
             await this.groupSummaryController.init();
+
+            this.tradeAlertController = new TradeAlertController(
+                this.groupManager,
+                config,
+                mongoDb
+            );
+            await this.tradeAlertController.init();
             
             this.stickerController = new StickerController(config);
 
@@ -226,6 +238,7 @@ class WhatsAppCourseBot {
             this.commandController.setStickerForwarder(this.stickerForwarder);
             this.commandController.setGroupChatLogService(this.groupChatLogService);
             this.commandController.setGroupSummaryController(this.groupSummaryController);
+            this.commandController.setTradeAlertController(this.tradeAlertController);
             
             this.whatsappService = new WhatsAppService(
                 this.commandController,
@@ -272,6 +285,9 @@ class WhatsAppCourseBot {
             if (this.groupSummaryController) {
                 this.groupSummaryController.setSock(sock);
             }
+            if (this.tradeAlertController) {
+                this.tradeAlertController.setSock(sock);
+            }
             if (this.stickerController) this.stickerController.setConnectionProvider(this.whatsappService);
             this.commandController.setGetSock(() => this.whatsappService.getSock());
 
@@ -302,6 +318,13 @@ class WhatsAppCourseBot {
                 getSock: () => this.whatsappService.getSock(),
                 botState,
                 groupSummaryController: this.groupSummaryController,
+                config,
+            });
+
+            this.tradeAlertScheduler = startTradeAlertScheduler({
+                getSock: () => this.whatsappService.getSock(),
+                botState,
+                tradeAlertController: this.tradeAlertController,
                 config,
             });
 
@@ -343,6 +366,9 @@ class WhatsAppCourseBot {
         }
         if (this.groupSummaryScheduler) {
             this.groupSummaryScheduler.stop();
+        }
+        if (this.tradeAlertScheduler) {
+            this.tradeAlertScheduler.stop();
         }
         if (this.groupChatLogService) {
             this.groupChatLogService.stop();

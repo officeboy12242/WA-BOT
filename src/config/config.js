@@ -73,6 +73,24 @@ export const config = {
     })(),
     /** Max chat lines sent to the LLM per recap (rest are sampled). */
     GROUP_SUMMARY_LLM_MAX_MESSAGES: parseInt(process.env.GROUP_SUMMARY_LLM_MAX_MESSAGES, 10) || 100,
+    /** Daily F&O trade alerts (/tradelert on groups). */
+    TRADE_ALERT_ENABLED: process.env.TRADE_ALERT_ENABLED !== 'false',
+    /** Pre-market scan time IST — default 09:20. */
+    TRADE_ALERT_TIME: (process.env.TRADE_ALERT_TIME || '09:20').trim(),
+    TRADE_ALERT_TIMEZONE: process.env.TRADE_ALERT_TIMEZONE || 'Asia/Kolkata',
+    /** Default watchlist when group has no /tradelert stocks set. */
+    TRADE_ALERT_STOCKS: (process.env.TRADE_ALERT_STOCKS || 'NIFTY,BANKNIFTY,RELIANCE,TCS')
+        .split(',')
+        .map((s) => s.trim().toUpperCase())
+        .filter(Boolean),
+    /** auto = AI picks stocks from live news/movers; manual = fixed watchlist */
+    TRADE_ALERT_MODE: (process.env.TRADE_ALERT_MODE || 'auto').trim().toLowerCase() === 'manual' ? 'manual' : 'auto',
+    /** Daily alerts: only post BUY CALL/PUT when confidence ≥ 70% */
+    TRADE_ALERT_ONLY_BUY_SIGNALS: process.env.TRADE_ALERT_ONLY_BUY_SIGNALS !== 'false',
+    /** Max actionable alerts per group per day */
+    TRADE_ALERT_MAX_SENDS: Math.max(1, parseInt(process.env.TRADE_ALERT_MAX_SENDS, 10) || 5),
+    /** How many symbols AI discovery picks to scan */
+    TRADE_ALERT_DISCOVERY_COUNT: Math.max(3, Math.min(12, parseInt(process.env.TRADE_ALERT_DISCOVERY_COUNT, 10) || 8)),
     BOT_LOG_NUMBER: process.env.BOT_LOG_NUMBER?.trim() || '',
     GITHUB_TRENDING_ENABLED: process.env.GITHUB_TRENDING_ENABLED !== 'false',
     GITHUB_TRENDING_TIMES: (process.env.GITHUB_TRENDING_TIMES || '09:00,11:30,14:00,16:30,19:00')
