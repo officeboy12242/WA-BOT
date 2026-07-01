@@ -20,6 +20,7 @@ import {
     groupParticipantSnapshot,
 } from '../../utils/groupParticipantSnapshot.js';
 import { config } from '../../config/config.js';
+import { getYesterdayDateStrIST } from '../../utils/dateIST.js';
 
 /** Dedupe welcome when both stub message + participants.update fire */
 const recentWelcomes = new Map();
@@ -1169,6 +1170,34 @@ export async function handleSummaryOff(sock, chatId, senderJid, { groupManager, 
         logger.info(`🗓️ Group recap disabled: ${chatId} by ${senderPhone}`);
     } catch (error) {
         logger.error(`Error disabling group recap: ${error.message}`);
+    }
+}
+
+export async function handleSummaryNow(sock, chatId, senderJid, { groupManager, groupSummaryController }) {
+    try {
+        const senderPhone = extractPhoneNumber(senderJid);
+        const enabled = await groupManager.isSummaryEnabled(chatId);
+        if (!enabled) {
+            await sock.sendMessage(chatId, {
+                text: 'ℹ️ Group recap is not enabled here. Use `/summaryon` first.',
+            });
+            return;
+        }
+
+        if (!groupSummaryController) {
+            await sock.sendMessage(chatId, { text: '❌ Recap service not available.' });
+            return;
+        }
+
+        await sock.sendMessage(chatId, { text: '🗓️ _Generating recap…_' });
+
+        const dateStr = getYesterdayDateStrIST();
+        await groupSummaryController.postRecapForGroup(sock, chatId, { dateStr, force: true });
+
+        logger.info(`🗓️ Manual recap triggered in ${chatId} by ${senderPhone} for ${dateStr}`);
+    } catch (error) {
+        logger.error(`Error running manual recap: ${error.message}`);
+        await sock.sendMessage(chatId, { text: `❌ Recap failed: ${error.message}` }).catch(() => {});
     }
 }
 

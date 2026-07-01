@@ -790,8 +790,9 @@ class GroupManager {
     }
 
     async setSummaryEnabled(groupId, groupName, enabled, setBy) {
+        const normalizedId = jidNormalizedUser(String(groupId).replace(/:\d+(?=@)/, '')) || groupId;
         await this.groups.updateOne(
-            { group_id: groupId },
+            { group_id: normalizedId },
             {
                 $set: {
                     group_name: groupName,
@@ -799,12 +800,12 @@ class GroupManager {
                     summary_set_by: setBy,
                     summary_set_at: new Date(),
                 },
-                $setOnInsert: { group_id: groupId, is_active: false },
+                $setOnInsert: { group_id: normalizedId, is_active: false },
             },
             { upsert: true }
         );
         logger.info(
-            `${enabled ? '🗓️ Group recap ON' : '🗓️ Group recap OFF'}: ${groupName} (${groupId}) by ${setBy}`
+            `${enabled ? '🗓️ Group recap ON' : '🗓️ Group recap OFF'}: ${groupName} (${normalizedId}) by ${setBy}`
         );
     }
 

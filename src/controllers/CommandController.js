@@ -42,6 +42,7 @@ import {
     handleMovieOff,
     handleSummaryOn,
     handleSummaryOff,
+    handleSummaryNow,
     handleTrending,
 } from './handlers/groupHandlers.js';
 
@@ -114,6 +115,7 @@ class CommandController {
         this.getSock = null;
         this.whatsappService = null;
         this.groupChatLogService = null;
+        this.groupSummaryController = null;
         this.botStartTime = Date.now();
         this.stickerForwarder = null;
 
@@ -130,6 +132,10 @@ class CommandController {
 
     setGroupChatLogService(groupChatLogService) {
         this.groupChatLogService = groupChatLogService;
+    }
+
+    setGroupSummaryController(groupSummaryController) {
+        this.groupSummaryController = groupSummaryController;
     }
 
     setGetSock(getSock) {
@@ -180,6 +186,7 @@ class CommandController {
             getSock: this.getSock,
             whatsappService: this.whatsappService,
             groupChatLogService: this.groupChatLogService,
+            groupSummaryController: this.groupSummaryController,
             botStartTime: this.botStartTime,
             isOwnerFromJid: this._isOwnerFromJid,
         };
@@ -281,6 +288,7 @@ class CommandController {
             case 'movieoff':   await handleMovieOff(sock, chatId, senderJid, ctx); break;
             case 'summaryon':  await handleSummaryOn(sock, chatId, senderJid, ctx); break;
             case 'summaryoff': await handleSummaryOff(sock, chatId, senderJid, ctx); break;
+            case 'summarynow': await handleSummaryNow(sock, chatId, senderJid, ctx); break;
             case 'trending':   await handleTrending(sock, chatId, senderJid, args, ctx); break;
 
             /* ── Admin management ── */

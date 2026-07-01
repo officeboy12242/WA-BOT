@@ -171,8 +171,10 @@ class WhatsAppCourseBot {
             this.groupSummaryController = new GroupSummaryController(
                 this.groupChatLogService,
                 this.groupManager,
-                config
+                config,
+                mongoDb
             );
+            await this.groupSummaryController.init();
             
             this.stickerController = new StickerController(config);
 
@@ -223,6 +225,7 @@ class WhatsAppCourseBot {
             );
             this.commandController.setStickerForwarder(this.stickerForwarder);
             this.commandController.setGroupChatLogService(this.groupChatLogService);
+            this.commandController.setGroupSummaryController(this.groupSummaryController);
             
             this.whatsappService = new WhatsAppService(
                 this.commandController,
