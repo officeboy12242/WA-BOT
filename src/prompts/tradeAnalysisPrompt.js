@@ -54,12 +54,15 @@ RULES:
 • Use Indian market context (IST, NSE symbols, weekly/monthly expiries)
 • Keep bullets concise; no long essays
 • Do not mention AI, models, or that you are a bot
-• Base news/earnings commentary on the LIVE NEWS section when provided — cite specific headlines when relevant`;
+• Base news/earnings commentary on the LIVE NEWS section when provided — cite specific headlines when relevant
+• Spot Price MUST match the MANDATORY Spot Price line exactly when provided — never use analyst targets, old prices, or guesses
+• If MANDATORY says no live spot price → output ❌ NO TRADE only (no BUY, no assumed price)`;
 
 export function buildTradeUserPrompt({
     symbol,
     displayName,
     quoteContext,
+    quote,
     newsContext,
     marketBrief,
     mode = 'live',
@@ -79,7 +82,23 @@ export function buildTradeUserPrompt({
         lines.push('');
     } else {
         lines.push('=== LIVE PRICE DATA ===');
-        lines.push('Unavailable — state assumptions clearly in Spot Price.');
+        lines.push('Unavailable — return NO TRADE only. Do NOT guess spot price.');
+        lines.push('');
+    }
+
+    if (quote?.price != null) {
+        const currency = quote.currency || 'INR';
+        const pct =
+            quote.changePct != null
+                ? `, ${quote.changePct >= 0 ? '+' : ''}${quote.changePct}% today`
+                : '';
+        lines.push('=== MANDATORY OUTPUT (Spot Price) ===');
+        lines.push(`Copy this EXACTLY into your Spot Price line:`);
+        lines.push(`Spot Price: ${quote.price} ${currency}${pct} (live market data)`);
+        lines.push('');
+    } else {
+        lines.push('=== MANDATORY OUTPUT ===');
+        lines.push('No live price — return Recommendation: ❌ NO TRADE only.');
         lines.push('');
     }
 
