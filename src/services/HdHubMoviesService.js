@@ -49,6 +49,20 @@ function formatLinkEntry(link) {
     };
 }
 
+function pageUrlAsLink(pageUrl) {
+    const url = String(pageUrl || '').trim();
+    if (!url.startsWith('http')) {
+        return null;
+    }
+    return {
+        label: 'Movie page',
+        size: 'Open page',
+        audio: '',
+        rawFilename: 'page',
+        url,
+    };
+}
+
 class HdHubMoviesService {
     constructor() {
         this.name = 'HDHub4u';
@@ -74,14 +88,26 @@ class HdHubMoviesService {
     _normalizeResults(payload) {
         const rows = Array.isArray(payload?.results) ? payload.results : [];
         const results = [];
+        const maxLinksPerResult = 10;
 
         for (const row of rows) {
             const title = String(row?.title || '').trim();
-            const links = (Array.isArray(row?.links) ? row.links : [])
+            let links = (Array.isArray(row?.links) ? row.links : [])
                 .map(formatLinkEntry)
                 .filter(Boolean);
 
+            if (!links.length) {
+                const pageLink = pageUrlAsLink(row?.page_url);
+                if (pageLink) {
+                    links = [pageLink];
+                }
+            }
+
             if (!title || !links.length) continue;
+
+            if (links.length > maxLinksPerResult) {
+                links = links.slice(0, maxLinksPerResult);
+            }
 
             results.push({
                 title,
@@ -89,6 +115,11 @@ class HdHubMoviesService {
                 pageUrl: row?.page_url || null,
                 links,
             });
+        }
+
+        const rawCount = rows.length;
+        if (rawCount && !results.length) {
+            logger.warn(`HDHub API: ${rawCount} raw row(s) but none had links or page_url`);
         }
 
         return results;
@@ -110,9 +141,12 @@ class HdHubMoviesService {
             try {
                 const started = Date.now();
                 const payload = await this._fetchJson(apiUrl);
-                const results = this._normalizeResults(payload).slice(0, maxResults);
+                const normalized = this._normalizeResults(payload);
+                const results = normalized.slice(0, maxResults);
                 logger.info(
-                    `HDHub API: ${results.length} result(s) for "${q}" in ${Date.now() - started}ms (attempt ${attempt})`,
+                    `HDHub API: ${results.length}/${normalized.length} normalized from ` +
+                        `${payload?.count ?? payload?.results?.length ?? 0} raw for "${q}" ` +
+                        `in ${Date.now() - started}ms (attempt ${attempt})`,
                 );
                 return results;
             } catch (err) {

@@ -6,7 +6,8 @@ import https from 'https';
 import { logger } from './logger.js';
 
 const TINYURL_API = 'https://tinyurl.com/api-create.php?url=';
-const TINYURL_TIMEOUT_MS = 6000;
+const TINYURL_TIMEOUT_MS = 5000;
+const PER_LINK_SHORTEN_MS = 8000;
 const MAX_CACHE_SIZE = 500;
 const SHORTEN_CONCURRENCY = 4;
 const BATCH_PAUSE_MS = 250;
@@ -82,31 +83,46 @@ class UrlShortener {
             return cached.finalUrl;
         }
 
-        let expiringLink = url;
-        if (this._service) {
-            try {
-                expiringLink = await this._service.shorten(url);
-            } catch (err) {
-                logger.warn(`Expiring link failed: ${err.message}`);
+        const work = (async () => {
+            let expiringLink = url;
+            if (this._service) {
+                try {
+                    expiringLink = await this._service.shorten(url);
+                } catch (err) {
+                    logger.warn(`Expiring link failed: ${err.message}`);
+                }
             }
-        }
 
-        let tiny = await this._toTinyUrl(expiringLink);
-        if (!tiny && expiringLink !== url) {
-            tiny = await this._toTinyUrl(url);
-        }
+            let tiny = await this._toTinyUrl(expiringLink);
+            if (!tiny && expiringLink !== url) {
+                tiny = await this._toTinyUrl(url);
+            }
 
-        const finalUrl = tiny || expiringLink;
+            return tiny || expiringLink;
+        })();
+
+        let finalUrl = url;
+        try {
+            finalUrl = await Promise.race([
+                work,
+                new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error('shorten timeout')), PER_LINK_SHORTEN_MS),
+                ),
+            ]);
+        } catch (err) {
+            logger.warn(`Shorten skipped for ${url.slice(0, 60)}…: ${err.message}`);
+            finalUrl = url;
+        }
 
         if (this._cache.size >= MAX_CACHE_SIZE) {
             this._cache.delete(this._cache.keys().next().value);
         }
-        this._cache.set(url, { expiringLink, finalUrl });
+        this._cache.set(url, { expiringLink: finalUrl, finalUrl });
 
         return finalUrl;
     }
 
-    async shortenMovieResults(results, maxMs = 60000) {
+    async shortenMovieResults(results, maxMs = 20000) {
         const links = [];
         for (const item of results) {
             for (const link of item.links || []) {
