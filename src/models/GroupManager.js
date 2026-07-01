@@ -823,6 +823,98 @@ class GroupManager {
             .toArray();
     }
 
+    async setTradeAlertEnabled(groupId, groupName, enabled, setBy) {
+        const normalizedId = jidNormalizedUser(String(groupId).replace(/:\d+(?=@)/, '')) || groupId;
+        await this.groups.updateOne(
+            { group_id: normalizedId },
+            {
+                $set: {
+                    group_name: groupName,
+                    trade_alert_enabled: enabled,
+                    trade_alert_set_by: setBy,
+                    trade_alert_set_at: new Date(),
+                },
+                $setOnInsert: { group_id: normalizedId, is_active: false },
+            },
+            { upsert: true }
+        );
+        logger.info(
+            `${enabled ? '📈 Trade alert ON' : '📈 Trade alert OFF'}: ${groupName} (${normalizedId}) by ${setBy}`
+        );
+    }
+
+    async isTradeAlertEnabled(groupId) {
+        const row = await this.groups.findOne(
+            { group_id: groupId },
+            { projection: { trade_alert_enabled: 1 } }
+        );
+        return row?.trade_alert_enabled === true;
+    }
+
+    async getTradeAlertGroups() {
+        return this.groups
+            .find({ trade_alert_enabled: true }, { projection: { _id: 0 } })
+            .toArray();
+    }
+
+    async setTradeAlertSymbols(groupId, groupName, symbols, setBy) {
+        const normalizedId = jidNormalizedUser(String(groupId).replace(/:\d+(?=@)/, '')) || groupId;
+        const list = Array.isArray(symbols)
+            ? symbols.map((s) => String(s).trim().toUpperCase()).filter(Boolean).slice(0, 12)
+            : [];
+        await this.groups.updateOne(
+            { group_id: normalizedId },
+            {
+                $set: {
+                    group_name: groupName,
+                    trade_alert_symbols: list,
+                    trade_alert_symbols_by: setBy,
+                    trade_alert_symbols_at: new Date(),
+                },
+                $setOnInsert: { group_id: normalizedId, is_active: false },
+            },
+            { upsert: true }
+        );
+        logger.info(`📈 Trade watchlist (${list.join(',')}) for ${groupName} (${normalizedId})`);
+    }
+
+    async getTradeAlertSymbols(groupId) {
+        const row = await this.groups.findOne(
+            { group_id: groupId },
+            { projection: { trade_alert_symbols: 1 } }
+        );
+        const list = row?.trade_alert_symbols;
+        return Array.isArray(list) ? list.filter(Boolean) : [];
+    }
+
+    async setTradeAlertMode(groupId, groupName, mode, setBy) {
+        const normalizedId = jidNormalizedUser(String(groupId).replace(/:\d+(?=@)/, '')) || groupId;
+        const m = mode === 'manual' ? 'manual' : 'auto';
+        await this.groups.updateOne(
+            { group_id: normalizedId },
+            {
+                $set: {
+                    group_name: groupName,
+                    trade_alert_mode: m,
+                    trade_alert_mode_by: setBy,
+                    trade_alert_mode_at: new Date(),
+                },
+                $setOnInsert: { group_id: normalizedId, is_active: false },
+            },
+            { upsert: true }
+        );
+        logger.info(`📈 Trade alert mode ${m}: ${groupName} (${normalizedId})`);
+    }
+
+    async getTradeAlertMode(groupId) {
+        const row = await this.groups.findOne(
+            { group_id: groupId },
+            { projection: { trade_alert_mode: 1 } }
+        );
+        const m = row?.trade_alert_mode;
+        return m === 'manual' ? 'manual' : m === 'auto' ? 'auto' : null;
+    }
+
     async setWeeklyTrendingEnabled(groupId, groupName, enabled, setBy) {
         await this.groups.updateOne(
             { group_id: groupId },

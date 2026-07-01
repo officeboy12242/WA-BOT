@@ -373,6 +373,22 @@ export const COMMAND_REGISTRY = [
         category: 'movie',
     },
     {
+        names: ['/tradelert'],
+        key: 'tradelert',
+        scope: 'group_only',
+        role: 'staff',
+        help: 'Daily F&O alerts — `/tradelert on`, `auto`, `scan`, `stocks RELIANCE,TCS`',
+        category: 'trade',
+    },
+    {
+        names: ['/tradenow'],
+        key: 'tradenow',
+        scope: 'any',
+        role: 'anyone',
+        help: 'Indian options analysis — `/tradenow RELIANCE`',
+        category: 'trade',
+    },
+    {
         names: ['/addpremium'],
         key: 'addpremium',
         scope: 'any',

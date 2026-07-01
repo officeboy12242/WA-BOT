@@ -46,6 +46,8 @@ import {
     handleTrending,
 } from './handlers/groupHandlers.js';
 
+import { handleTradelert, handleTradenow } from './handlers/tradeHandlers.js';
+
 import {
     handleAddAdmin,
     handleRemoveAdmin,
@@ -116,6 +118,7 @@ class CommandController {
         this.whatsappService = null;
         this.groupChatLogService = null;
         this.groupSummaryController = null;
+        this.tradeAlertController = null;
         this.botStartTime = Date.now();
         this.stickerForwarder = null;
 
@@ -136,6 +139,10 @@ class CommandController {
 
     setGroupSummaryController(groupSummaryController) {
         this.groupSummaryController = groupSummaryController;
+    }
+
+    setTradeAlertController(tradeAlertController) {
+        this.tradeAlertController = tradeAlertController;
     }
 
     setGetSock(getSock) {
@@ -187,6 +194,7 @@ class CommandController {
             whatsappService: this.whatsappService,
             groupChatLogService: this.groupChatLogService,
             groupSummaryController: this.groupSummaryController,
+            tradeAlertController: this.tradeAlertController,
             botStartTime: this.botStartTime,
             isOwnerFromJid: this._isOwnerFromJid,
         };
@@ -290,6 +298,8 @@ class CommandController {
             case 'summaryoff': await handleSummaryOff(sock, chatId, senderJid, ctx); break;
             case 'summarynow': await handleSummaryNow(sock, chatId, senderJid, ctx); break;
             case 'trending':   await handleTrending(sock, chatId, senderJid, args, ctx); break;
+            case 'tradelert':  await handleTradelert(sock, chatId, senderJid, args, ctx); break;
+            case 'tradenow':   await handleTradenow(sock, chatId, senderJid, args, ctx); break;
 
             /* ── Admin management ── */
             case 'addadmin':    await handleAddAdmin(sock, chatId, senderJid, args, originalMsg, ctx); break;
