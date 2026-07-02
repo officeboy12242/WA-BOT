@@ -25,19 +25,21 @@ OUTPUT — valid JSON only, no markdown outside the JSON:
 }
 
 RULES:
-• Return 4 to 8 symbols max
+• Return 8 to 10 symbols (never fewer than 8 unless market is closed)
 • Use NSE tickers only (RELIANCE not RELIANCE.NS)
-• Prefer symbols with catalysts (news/earnings/results) OR strong price action
+• Include a mix: at least 3 gainers, 2 losers, and 1 index (NIFTY or BANKNIFTY)
+• Prefer symbols with catalysts (news/earnings/results) OR strong price action (>1.5% move)
 • Do not repeat the same sector more than twice unless exceptional
-• If market is flat with no catalysts, still return 3–4 index/heavyweight names to watch`;
+• If market is flat, still return 8 liquid Nifty 50 / index names with best relative moves`;
 
-export function buildDiscoveryUserPrompt(marketSnapshot) {
+export function buildDiscoveryUserPrompt(marketSnapshot, targetCount = 10) {
     return [
         'Today is an Indian market trading day (IST).',
-        'Using the LIVE snapshot below, pick symbols for F&O options analysis.',
+        `Using the LIVE snapshot below, pick exactly ${targetCount} symbols for F&O options analysis.`,
+        'Prioritize names from TOP GAINERS and TOP LOSERS sections when they have news or strong % moves.',
         '',
         marketSnapshot,
         '',
-        'Respond with JSON only in the format specified.',
+        `Respond with JSON only. The "symbols" array must contain ${targetCount} distinct NSE tickers.`,
     ].join('\n');
 }

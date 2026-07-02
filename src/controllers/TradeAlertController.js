@@ -44,7 +44,7 @@ class TradeAlertController {
         this._sock = null;
         this._sentCollection = null;
         this._discoveryCollection = null;
-        this._discoveryCache = { date: null, symbols: [], moversBrief: '', marketNews: '', scannedAt: null };
+        this._discoveryCache = { date: null, symbols: [], movers: null, moversBrief: '', marketNews: '', scannedAt: null };
     }
 
     async init() {
@@ -134,6 +134,7 @@ class TradeAlertController {
                     this._discoveryCache = {
                         date: dateStr,
                         symbols: row.symbols,
+                        movers: row.movers || null,
                         moversBrief: row.movers_brief || '',
                         marketNews: row.market_news || '',
                         scannedAt: row.created_at || null,
@@ -160,24 +161,28 @@ class TradeAlertController {
         );
 
         const snapshot = await marketScanService.buildDiscoverySnapshot();
-        const userPrompt = buildDiscoveryUserPrompt(snapshot.context);
+        const userPrompt = buildDiscoveryUserPrompt(snapshot.context, this.discoveryCount);
 
         const raw = await this.nvidia.complete(STOCK_DISCOVERY_SYSTEM_PROMPT, userPrompt, {
-            maxTokens: 600,
+            maxTokens: 800,
             timeoutMs: 90_000,
         });
 
-        let symbols = parseDiscoverySymbols(raw);
-        if (!symbols.length) {
+        let aiSymbols = parseDiscoverySymbols(raw);
+        if (!aiSymbols.length) {
             logger.warn('AI discovery returned no symbols — using top movers fallback');
-            symbols = [
-                ...snapshot.movers.gainers.slice(0, 4).map((x) => x.symbol),
-                ...snapshot.movers.losers.slice(0, 3).map((x) => x.symbol),
-                'NIFTY',
+            aiSymbols = [
+                ...snapshot.movers.gainers.slice(0, 5).map((x) => x.symbol),
+                ...snapshot.movers.losers.slice(0, 4).map((x) => x.symbol),
             ];
         }
 
-        symbols = [...new Set(symbols.map((s) => s.toUpperCase()))].slice(0, this.discoveryCount);
+        let symbols = marketScanService.buildDiscoveryWatchlist(
+            aiSymbols,
+            snapshot.movers,
+            this.discoveryCount
+        );
+        symbols = marketScanService.orderSymbolsByMovers(symbols, snapshot.movers);
 
         const moversBrief = marketScanService.formatMoversBrief(snapshot.movers);
         const marketNews = snapshot.marketNews.split('\n').slice(0, 5).join('\n');
@@ -186,6 +191,7 @@ class TradeAlertController {
         this._discoveryCache = {
             date: dateStr,
             symbols,
+            movers: snapshot.movers,
             moversBrief,
             marketNews,
             scannedAt,
@@ -197,6 +203,7 @@ class TradeAlertController {
                 {
                     $set: {
                         symbols,
+                        movers: snapshot.movers,
                         movers_brief: moversBrief,
                         market_news: marketNews,
                         raw_response: raw.slice(0, 4000),
@@ -207,17 +214,28 @@ class TradeAlertController {
             );
         }
 
-        logger.info(`🤖 AI discovery picks: ${symbols.join(', ')}`);
-        return { symbols, moversBrief, marketNews, scannedAt };
+        logger.info(`🤖 AI discovery watchlist (${symbols.length}): ${symbols.join(', ')}`);
+        return { symbols, movers: snapshot.movers, moversBrief, marketNews, scannedAt };
     }
 
     _discoveryResultFromCache() {
         return {
             symbols: this._discoveryCache.symbols,
+            movers: this._discoveryCache.movers || null,
             moversBrief: this._discoveryCache.moversBrief || 'n/a',
             marketNews: this._discoveryCache.marketNews || 'n/a',
             scannedAt: this._discoveryCache.scannedAt || null,
         };
+    }
+
+    _formatScanResultLine(entry) {
+        if (entry.posted) {
+            return `✅ *${entry.symbol}* — ${entry.recommendation} (${entry.confidence}%)`;
+        }
+        if (entry.isActionable) {
+            return `⚠️ ${entry.symbol} — ${entry.recommendation} (${entry.confidence}%)`;
+        }
+        return `— ${entry.symbol} — NO TRADE (CE ${entry.ceConfidence}% / PE ${entry.peConfidence}%)`;
     }
 
     async wasDailySent(groupId, symbol, dateStr) {
@@ -301,6 +319,9 @@ class TradeAlertController {
                     }
                 }
                 symbols = autoDiscovery.symbols;
+                if (autoDiscovery.movers) {
+                    symbols = marketScanService.orderSymbolsByMovers(symbols, autoDiscovery.movers);
+                }
             }
 
             if (!symbols.length) {
@@ -311,6 +332,7 @@ class TradeAlertController {
             let sentCount = 0;
             const skipped = [];
             const actionableSent = [];
+            const scanResults = [];
 
             if (mode === 'auto') {
                 const intro =
@@ -335,9 +357,20 @@ class TradeAlertController {
 
                     const { text, signal } = await this._runAnalysis(symbol, { mode: 'daily' });
 
+                    const resultEntry = {
+                        symbol,
+                        recommendation: signal.recommendation,
+                        confidence: signal.confidence,
+                        ceConfidence: signal.ceConfidence,
+                        peConfidence: signal.peConfidence,
+                        isActionable: signal.isActionable,
+                        posted: false,
+                    };
+
                     if (this.onlyBuySignals && !signal.isActionable) {
                         const cePe = `CE ${signal.ceConfidence}% / PE ${signal.peConfidence}%`;
                         skipped.push(`${symbol} (NO TRADE · ${cePe})`);
+                        scanResults.push(resultEntry);
                         await this.markDailySent(group.group_id, symbol, dateStr, {
                             skipped: true,
                             signal: signal.recommendation,
@@ -348,6 +381,7 @@ class TradeAlertController {
 
                     if (sentCount >= this.maxSendsPerGroup) {
                         skipped.push(`${symbol} (daily limit reached)`);
+                        scanResults.push(resultEntry);
                         await this.markDailySent(group.group_id, symbol, dateStr, {
                             skipped: true,
                             reason: 'daily_limit',
@@ -356,6 +390,8 @@ class TradeAlertController {
                     }
 
                     await sock.sendMessage(group.group_id, { text });
+                    resultEntry.posted = true;
+                    scanResults.push(resultEntry);
                     await this.markDailySent(group.group_id, symbol, dateStr, {
                         skipped: false,
                         signal: signal.recommendation,
@@ -370,22 +406,28 @@ class TradeAlertController {
                 }
             }
 
+            const scanSummary = scanResults.length
+                ? `\n\n📋 *Scan summary*\n${scanResults.map((e) => this._formatScanResultLine(e)).join('\n')}`
+                : '';
+
             if (sentCount > 0) {
                 await sock.sendMessage(group.group_id, {
                     text:
                         `📈 *Daily F&O scan complete*\n` +
-                        `Posted *${sentCount}* actionable alert(s): *${actionableSent.join(', ')}*\n\n` +
-                        `_Use \`/tradenow SYMBOL\` anytime for full analysis._`,
+                        `Posted *${sentCount}* actionable alert(s): *${actionableSent.join(', ')}*` +
+                        scanSummary +
+                        `\n\n_Use \`/tradenow SYMBOL\` anytime for full analysis._`,
                 }).catch(() => {});
             } else if (this.onlyBuySignals) {
                 const skipNote = skipped.length
-                    ? `\n_Scanned: ${skipped.slice(0, 6).join('; ')}_`
+                    ? `\n_Scanned: ${skipped.slice(0, 8).join('; ')}_`
                     : '';
                 await sock.sendMessage(group.group_id, {
                     text:
                         `📈 *Daily F&O scan complete*\n` +
-                        `No high-confidence BUY setups (≥70%) today.${skipNote}\n\n` +
-                        `Use \`/tradenow SYMBOL\` for full analysis including NO TRADE.`,
+                        `No high-confidence BUY setups (≥70%) today.${skipNote}` +
+                        scanSummary +
+                        `\n\nUse \`/tradenow SYMBOL\` for full analysis including NO TRADE.`,
                 }).catch(() => {});
             }
         }

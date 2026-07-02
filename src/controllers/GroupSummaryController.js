@@ -304,11 +304,31 @@ class GroupSummaryController {
         }
 
         const stats = this.chatLog.computeStats(messages);
-        const prompt = this.chatLog.buildPrompt(messages, groupName, dateLabel);
+        const useChunks = this.chatLog.shouldUseChunkedSummary(messages);
+        const startedAt = Date.now();
 
         let summary;
         try {
-            summary = await this.nvidia.summarizeGroupChat(prompt);
+            if (useChunks) {
+                const chunkPrompts = this.chatLog.buildChunkPrompts(messages, groupName, dateLabel);
+                logger.info(
+                    `Group summary: ${groupName} — ${messages.length} msgs, ` +
+                        `${chunkPrompts.length} chunk(s) for map-reduce`
+                );
+                summary = await this.nvidia.summarizeGroupChatChunks(chunkPrompts, {
+                    groupName,
+                    dateLabel,
+                    totalMessages: messages.length,
+                });
+            } else {
+                const prompt = this.chatLog.buildPrompt(messages, groupName, dateLabel);
+                logger.info(
+                    `Group summary: ${groupName} — ${messages.length} msgs, ` +
+                        `prompt ${prompt.length} chars`
+                );
+                summary = await this.nvidia.summarizeGroupChat(prompt);
+            }
+            logger.info(`Group summary: ${groupName} LLM done in ${Date.now() - startedAt}ms`);
         } catch (err) {
             logger.error(`NVIDIA recap failed for ${groupName}: ${err.message}`);
             summary = {

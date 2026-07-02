@@ -97,6 +97,70 @@ class MarketScanService {
         const l = movers.losers.slice(0, 5).map((x) => `${x.symbol} ${x.changePct}%`).join(', ');
         return `Gainers: ${g || 'n/a'}\nLosers: ${l || 'n/a'}`;
     }
+
+    /** Higher score = stronger intraday move (prefers liquid names with volume). */
+    scoreMover(row) {
+        if (row?.changePct == null) return 0;
+        const pct = Math.abs(Number(row.changePct) || 0);
+        const vol = Number(row.volume) || 0;
+        const volBoost = vol > 1_000_000 ? 1.15 : vol > 300_000 ? 1.08 : 1;
+        return pct * volBoost;
+    }
+
+    buildMoverScoreMap(movers) {
+        const map = new Map();
+        for (const row of [...(movers?.gainers || []), ...(movers?.losers || [])]) {
+            if (!row?.symbol) continue;
+            map.set(row.symbol.toUpperCase(), this.scoreMover(row));
+        }
+        return map;
+    }
+
+    /**
+     * Build a full watchlist: AI picks + top movers + indices (always targetCount symbols).
+     * @param {string[]} aiSymbols
+     * @param {{ gainers: object[], losers: object[] }} movers
+     * @param {number} targetCount
+     */
+    buildDiscoveryWatchlist(aiSymbols, movers, targetCount = 10) {
+        const target = Math.max(8, targetCount);
+        const ordered = [];
+        const seen = new Set();
+
+        const push = (symbol) => {
+            const sym = String(symbol || '').trim().toUpperCase();
+            if (!sym || seen.has(sym)) return;
+            seen.add(sym);
+            ordered.push(sym);
+        };
+
+        for (const sym of aiSymbols) {
+            push(sym);
+        }
+
+        const ranked = [...(movers?.gainers || []), ...(movers?.losers || [])]
+            .sort((a, b) => this.scoreMover(b) - this.scoreMover(a));
+
+        for (const row of ranked) {
+            if (ordered.length >= target) break;
+            push(row.symbol);
+        }
+
+        push('NIFTY');
+        push('BANKNIFTY');
+
+        for (const row of ranked) {
+            if (ordered.length >= target) break;
+            push(row.symbol);
+        }
+
+        return ordered.slice(0, target);
+    }
+
+    orderSymbolsByMovers(symbols, movers) {
+        const scores = this.buildMoverScoreMap(movers);
+        return [...symbols].sort((a, b) => (scores.get(b) || 0) - (scores.get(a) || 0));
+    }
 }
 
 export const marketScanService = new MarketScanService();

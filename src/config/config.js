@@ -73,6 +73,16 @@ export const config = {
     })(),
     /** Max chat lines sent to the LLM per recap (rest are sampled). */
     GROUP_SUMMARY_LLM_MAX_MESSAGES: parseInt(process.env.GROUP_SUMMARY_LLM_MAX_MESSAGES, 10) || 100,
+    /** Use map-reduce summarization when a day exceeds this many logged messages. */
+    GROUP_SUMMARY_CHUNK_THRESHOLD: parseInt(process.env.GROUP_SUMMARY_CHUNK_THRESHOLD, 10) || 150,
+    /** Messages per chunk when map-reduce is used. */
+    GROUP_SUMMARY_CHUNK_SIZE: parseInt(process.env.GROUP_SUMMARY_CHUNK_SIZE, 10) || 50,
+    /** LLM timeout for group recap (defaults to max(90s, NVIDIA_TIMEOUT_MS)). */
+    GROUP_SUMMARY_LLM_TIMEOUT_MS: (() => {
+        const n = parseInt(process.env.GROUP_SUMMARY_LLM_TIMEOUT_MS, 10);
+        if (!Number.isFinite(n) || n <= 0) return 0;
+        return Math.min(120_000, Math.max(30_000, n));
+    })(),
     /** Daily F&O trade alerts (/tradelert on groups). */
     TRADE_ALERT_ENABLED: process.env.TRADE_ALERT_ENABLED !== 'false',
     /** Pre-market scan time IST — default 09:20. */
@@ -90,7 +100,7 @@ export const config = {
     /** Max actionable alerts per group per day */
     TRADE_ALERT_MAX_SENDS: Math.max(1, parseInt(process.env.TRADE_ALERT_MAX_SENDS, 10) || 5),
     /** How many symbols AI discovery picks to scan */
-    TRADE_ALERT_DISCOVERY_COUNT: Math.max(3, Math.min(12, parseInt(process.env.TRADE_ALERT_DISCOVERY_COUNT, 10) || 8)),
+    TRADE_ALERT_DISCOVERY_COUNT: Math.max(8, Math.min(15, parseInt(process.env.TRADE_ALERT_DISCOVERY_COUNT, 10) || 10)),
     /** Step-1 AI research brief before CE/PE trade analysis */
     TRADE_TWO_STEP_RESEARCH: process.env.TRADE_TWO_STEP_RESEARCH !== 'false',
     BOT_LOG_NUMBER: process.env.BOT_LOG_NUMBER?.trim() || '',
