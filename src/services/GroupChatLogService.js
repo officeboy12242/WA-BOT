@@ -65,6 +65,8 @@ class GroupChatLogService {
         this.groupManager = groupManager;
         this.maxPerDay = Math.max(50, Number(config.GROUP_SUMMARY_MAX_MESSAGES) || 400);
         this.llmMaxMessages = Math.max(20, Number(config.GROUP_SUMMARY_LLM_MAX_MESSAGES) || 100);
+        this.chunkThreshold = Math.max(80, Number(config.GROUP_SUMMARY_CHUNK_THRESHOLD) || 150);
+        this.chunkSize = Math.max(30, Math.min(60, Number(config.GROUP_SUMMARY_CHUNK_SIZE) || 50));
         /** @type {Set<string>} */
         this._enabledGroups = new Set();
         this._refreshTimer = null;
@@ -253,29 +255,73 @@ class GroupChatLogService {
         };
     }
 
-    buildPrompt(messages, groupName, dateLabel) {
-        const maxLines = this.llmMaxMessages;
-        let sampled = messages;
-        if (messages.length > maxLines) {
-            sampled = [];
-            for (let i = 0; i < maxLines; i++) {
-                const idx = Math.floor((i * messages.length) / maxLines);
-                sampled.push(messages[idx]);
-            }
+    /** Scale down LLM input for busier days to avoid API timeouts. */
+    getLlmSampleLimit(totalMessages) {
+        if (totalMessages <= 80) {
+            return Math.min(this.llmMaxMessages, totalMessages);
+        }
+        if (totalMessages <= 150) {
+            return Math.min(70, this.llmMaxMessages);
+        }
+        if (totalMessages <= 250) {
+            return Math.min(55, this.llmMaxMessages);
+        }
+        return Math.min(45, this.llmMaxMessages);
+    }
+
+    /** Keep conversation edges plus evenly spaced middle messages. */
+    sampleMessages(messages, maxLines) {
+        if (messages.length <= maxLines) {
+            return messages;
         }
 
-        const lines = sampled.map((row) => {
+        const picked = [];
+        const used = new Set();
+
+        const addAt = (idx) => {
+            if (idx < 0 || idx >= messages.length || used.has(idx)) {
+                return;
+            }
+            used.add(idx);
+            picked.push(messages[idx]);
+        };
+
+        for (let i = 0; i < Math.min(4, messages.length); i++) {
+            addAt(i);
+        }
+        for (let i = Math.max(0, messages.length - 4); i < messages.length; i++) {
+            addAt(i);
+        }
+
+        const slots = maxLines - picked.length;
+        for (let i = 0; i < slots; i++) {
+            const idx = Math.floor(((i + 0.5) * messages.length) / slots);
+            addAt(idx);
+        }
+
+        return picked.sort((a, b) => a.ts - b.ts);
+    }
+
+    formatMessageLines(messages, textLimit = 120) {
+        return messages.map((row) => {
             const time = new Date(row.ts).toLocaleTimeString('en-IN', {
                 hour: '2-digit',
                 minute: '2-digit',
                 timeZone: 'Asia/Kolkata',
             });
-            const text = String(row.text || '').slice(0, 180);
+            const text = String(row.text || '').slice(0, textLimit);
             return `[${time}] ${row.sender_name}: ${text}`;
         });
+    }
+
+    buildPrompt(messages, groupName, dateLabel) {
+        const maxLines = this.getLlmSampleLimit(messages.length);
+        const textLimit = messages.length > 150 ? 100 : messages.length > 80 ? 120 : 150;
+        const sampled = this.sampleMessages(messages, maxLines);
+        const lines = this.formatMessageLines(sampled, textLimit);
 
         const sampledNote = messages.length > maxLines
-            ? `\n(Showing ${maxLines} of ${messages.length} messages — evenly sampled.)`
+            ? `\n(Showing ${sampled.length} of ${messages.length} messages — sampled for recap.)`
             : '';
 
         let body = [
@@ -285,12 +331,48 @@ class GroupChatLogService {
             lines.join('\n'),
         ].join('\n\n');
 
-        const maxChars = 12_000;
+        const maxChars = messages.length > 150 ? 7000 : messages.length > 80 ? 9000 : 12_000;
         if (body.length > maxChars) {
             body = `${body.slice(0, maxChars)}\n\n[...truncated...]`;
         }
 
         return body;
+    }
+
+    /**
+     * Split a busy day into smaller LLM prompts (map-reduce summarization).
+     * @returns {string[]}
+     */
+    buildChunkPrompts(messages, groupName, dateLabel) {
+        const prompts = [];
+        const total = messages.length;
+        const size = this.chunkSize;
+        const textLimit = 100;
+
+        for (let start = 0; start < total; start += size) {
+            const chunk = messages.slice(start, start + size);
+            const part = Math.floor(start / size) + 1;
+            const parts = Math.ceil(total / size);
+            const lines = this.formatMessageLines(chunk, textLimit);
+
+            let body = [
+                `Group: ${groupName}`,
+                `Date: ${dateLabel}`,
+                `Part ${part} of ${parts} (${chunk.length} messages, ${total} total for the day)`,
+                lines.join('\n'),
+            ].join('\n\n');
+
+            if (body.length > 5500) {
+                body = `${body.slice(0, 5500)}\n\n[...truncated...]`;
+            }
+            prompts.push(body);
+        }
+
+        return prompts;
+    }
+
+    shouldUseChunkedSummary(messages) {
+        return messages.length >= this.chunkThreshold;
     }
 
     async purgeDay(groupId, dateStr) {

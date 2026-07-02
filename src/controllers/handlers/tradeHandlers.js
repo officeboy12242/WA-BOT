@@ -134,7 +134,7 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
                     '✅ *AI AUTO MODE*\n\n' +
                     'Each morning the bot will:\n' +
                     '1. Scan live market news & top movers\n' +
-                    '2. AI picks 4–8 stocks to analyze\n' +
+                    '2. AI picks 8–10 stocks to analyze\n' +
                     '3. Post only high-confidence BUY alerts\n\n' +
                     '_Use `/tradelert scan` to preview today\'s picks._',
             });
