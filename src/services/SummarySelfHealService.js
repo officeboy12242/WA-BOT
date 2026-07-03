@@ -148,6 +148,38 @@ class SummarySelfHealService {
         return (process.env.GITHUB_TOKEN || this.config.GITHUB_TOKEN || this.githubToken || '').trim();
     }
 
+    /**
+     * Normalize owner/repo — accepts full URLs or trailing .git
+     * e.g. https://github.com/officeboy12242/WA-BOT.git → officeboy12242/WA-BOT
+     */
+    getGithubRepo() {
+        let repo = (
+            process.env.GITHUB_REPO ||
+            this.config.GITHUB_REPO ||
+            this.githubRepo ||
+            'officeboy12242/WA-BOT'
+        ).trim();
+        repo = repo
+            .replace(/^https?:\/\/github\.com\//i, '')
+            .replace(/^git@github\.com:/i, '')
+            .replace(/\.git$/i, '')
+            .replace(/^\/+|\/+$/g, '');
+        // If only owner was set, append default repo name
+        if (repo && !repo.includes('/')) {
+            repo = `${repo}/WA-BOT`;
+        }
+        return repo || 'officeboy12242/WA-BOT';
+    }
+
+    getGithubBranch() {
+        return (
+            process.env.GITHUB_BRANCH ||
+            this.config.GITHUB_BRANCH ||
+            this.githubBranch ||
+            'main'
+        ).trim() || 'main';
+    }
+
     isReady() {
         return (
             this.enabled &&
@@ -738,6 +770,8 @@ class SummarySelfHealService {
         }
 
         const token = this.getGithubToken();
+        const repo = this.getGithubRepo();
+        const branch = this.getGithubBranch();
         if (!token) {
             return {
                 ok: false,
@@ -746,12 +780,17 @@ class SummarySelfHealService {
                     '_Add it on Render → Environment, then restart the service._',
             };
         }
-        // Keep in-memory copy in sync for push helper
         this.githubToken = token;
+        this.githubRepo = repo;
+        this.githubBranch = branch;
 
-        await this._notify(`🔧 Owner approved heal *${id}* — pushing to GitHub…`);
+        await this._notify(
+            `🔧 Owner approved heal *${id}* — pushing to \`${repo}@${branch}\`…`
+        );
 
         try {
+            await this._assertGithubAccess(repo, branch);
+
             const pushed = [];
             for (const file of row.files || []) {
                 const commitMsg = row.instruction
@@ -781,7 +820,7 @@ class SummarySelfHealService {
                 `📝 ${row.summary}\n` +
                 (changes ? `\n📋 *Changes:*\n${changes}\n` : '') +
                 `📁 ${pushed.join(', ')}\n` +
-                `🌿 ${this.githubRepo}@${this.githubBranch}\n` +
+                `🌿 ${repo}@${branch}\n` +
                 `_Render will redeploy from main._`;
             await this._notify(msg);
             return { ok: true, message: msg };
@@ -797,18 +836,76 @@ class SummarySelfHealService {
         }
     }
 
+    async _assertGithubAccess(repo, branch) {
+        const headers = await this._githubHeaders();
+        try {
+            const { data } = await axios.get(`https://api.github.com/repos/${repo}`, {
+                headers,
+                timeout: 20_000,
+            });
+            if (data.permissions && data.permissions.push === false) {
+                throw Object.assign(new Error('Token cannot push to this repo'), {
+                    response: {
+                        status: 403,
+                        data: { message: 'Token lacks push permission on repository' },
+                    },
+                });
+            }
+            logger.info(`GitHub access OK: ${repo} (push=${data.permissions?.push})`);
+        } catch (err) {
+            if (err.response?.status === 404) {
+                throw Object.assign(
+                    new Error(
+                        `Repo not found or token has no access. Set GITHUB_REPO=officeboy12242/WA-BOT ` +
+                            `(not just "officeboy"). Current: ${repo}`
+                    ),
+                    { response: err.response }
+                );
+            }
+            throw err;
+        }
+
+        // Confirm branch exists
+        try {
+            await axios.get(`https://api.github.com/repos/${repo}/branches/${encodeURIComponent(branch)}`, {
+                headers,
+                timeout: 20_000,
+            });
+        } catch (err) {
+            if (err.response?.status === 404) {
+                throw Object.assign(
+                    new Error(`Branch "${branch}" not found on ${repo}. Set GITHUB_BRANCH=main`),
+                    { response: err.response }
+                );
+            }
+            throw err;
+        }
+    }
+
     _formatGithubError(err) {
         const status = err.response?.status;
         const body = err.response?.data;
         const ghMsg = body?.message || body?.error || err.message;
+        const repo = this.getGithubRepo();
         if (status === 401) {
             return `GitHub 401 — invalid/expired token. Update GITHUB_TOKEN on Render. (${ghMsg})`;
         }
         if (status === 403) {
-            return `GitHub 403 — token needs Contents: Read and Write on ${this.githubRepo}. (${ghMsg})`;
+            return (
+                `GitHub 403 — token needs *Contents: Read and write* on \`${repo}\`.\n` +
+                `For fine-grained PAT: Repository access → only select WA-BOT → Permissions → Contents: Read and write.\n` +
+                `(${ghMsg})`
+            );
         }
         if (status === 404) {
-            return `GitHub 404 — repo/path not found or token lacks access to ${this.githubRepo}. (${ghMsg})`;
+            return (
+                `GitHub 404 — cannot access \`${repo}\`.\n` +
+                `On Render set exactly:\n` +
+                `• GITHUB_REPO=\`officeboy12242/WA-BOT\`\n` +
+                `• GITHUB_BRANCH=\`main\`\n` +
+                `• GITHUB_TOKEN= classic PAT with *repo* scope, or fine-grained with Contents R/W\n` +
+                `(${ghMsg})`
+            );
         }
         if (status === 409 || status === 422) {
             return `GitHub ${status} — file conflict (branch moved). Run /fix again. (${ghMsg})`;
@@ -826,58 +923,65 @@ class SummarySelfHealService {
         };
     }
 
+    _contentsUrl(relPath) {
+        const repo = this.getGithubRepo();
+        // Encode each path segment but keep slashes as path separators
+        const encoded = String(relPath || '')
+            .replace(/\\/g, '/')
+            .split('/')
+            .filter(Boolean)
+            .map((s) => encodeURIComponent(s))
+            .join('/');
+        return `https://api.github.com/repos/${repo}/contents/${encoded}`;
+    }
+
     async _pushFileToGitHub(relPath, content, message) {
-        const url = `https://api.github.com/repos/${this.githubRepo}/contents/${relPath}`;
+        const branch = this.getGithubBranch();
+        const url = this._contentsUrl(relPath);
         const headers = await this._githubHeaders();
 
         let sha;
         try {
             const { data } = await axios.get(url, {
                 headers,
-                params: { ref: this.githubBranch },
+                params: { ref: branch },
                 timeout: 30_000,
             });
             sha = data.sha;
         } catch (err) {
+            // 404 on GET is OK for new files; 404 on repo is not (caught by assert)
             if (err.response?.status !== 404) {
                 throw err;
             }
         }
 
+        const body = {
+            message,
+            content: Buffer.from(content, 'utf8').toString('base64'),
+            branch,
+            ...(sha ? { sha } : {}),
+        };
+
         try {
-            await axios.put(
-                url,
-                {
-                    message,
-                    content: Buffer.from(content, 'utf8').toString('base64'),
-                    branch: this.githubBranch,
-                    ...(sha ? { sha } : {}),
-                },
-                { headers, timeout: 60_000 }
-            );
+            await axios.put(url, body, { headers, timeout: 60_000 });
         } catch (err) {
             // Retry once if SHA conflict
             if (err.response?.status === 409 || err.response?.status === 422) {
                 const { data } = await axios.get(url, {
                     headers,
-                    params: { ref: this.githubBranch },
+                    params: { ref: branch },
                     timeout: 30_000,
                 });
                 await axios.put(
                     url,
-                    {
-                        message,
-                        content: Buffer.from(content, 'utf8').toString('base64'),
-                        branch: this.githubBranch,
-                        sha: data.sha,
-                    },
+                    { ...body, sha: data.sha },
                     { headers, timeout: 60_000 }
                 );
             } else {
                 throw err;
             }
         }
-        logger.info(`Self-heal pushed ${relPath} to ${this.githubRepo}@${this.githubBranch}`);
+        logger.info(`Self-heal pushed ${relPath} to ${this.getGithubRepo()}@${branch}`);
     }
 
     async listPending() {
