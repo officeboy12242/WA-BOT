@@ -18,6 +18,33 @@ function sourceLabel(raw) {
     return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
+function isZipOrPackLink(link) {
+    const label = String(link?.label || '');
+    const size = String(link?.size || '');
+    const quality = String(link?.quality || '');
+    const blob = `${label} ${size} ${quality}`;
+    return /\bzip\b/i.test(blob) || /\bpack\b/i.test(blob) || /\bfull\s*season\b/i.test(blob);
+}
+
+/**
+ * Prefer season Zip/pack links (often listed after episode links in API).
+ * Episode links fill remaining slots so WhatsApp stays under length limits.
+ */
+function prioritizeLinks(links, maxLinks) {
+    if (!links.length || links.length <= maxLinks) return links;
+
+    const zips = [];
+    const rest = [];
+    for (const link of links) {
+        if (isZipOrPackLink(link)) zips.push(link);
+        else rest.push(link);
+    }
+
+    const zipTake = Math.min(zips.length, maxLinks);
+    const episodeTake = Math.max(0, maxLinks - zipTake);
+    return [...zips.slice(0, zipTake), ...rest.slice(0, episodeTake)];
+}
+
 function formatLinkEntry(link) {
     const quality = String(link?.quality || '').trim();
     const size = String(link?.size || '').trim();
@@ -26,13 +53,20 @@ function formatLinkEntry(link) {
 
     if (!url) return null;
 
+    const isZip = isZipOrPackLink({ label, size, quality });
+
     let sizeLine;
-    if (quality && size) {
+    if (isZip && size && label) {
+        // "Zip [2.14GB] (HubCloud)" + size "2.14GB" → keep label as primary
+        sizeLine = label.includes(size) ? label : `${label} • ${size}`;
+    } else if (quality && size) {
         sizeLine = `${quality} • ${size}`;
     } else if (quality && label) {
         sizeLine = `${quality} • ${label}`;
     } else if (label) {
         sizeLine = label;
+    } else if (size) {
+        sizeLine = size;
     } else if (quality) {
         sizeLine = quality;
     } else {
@@ -40,9 +74,9 @@ function formatLinkEntry(link) {
     }
 
     return {
-        label,
+        label: label || (isZip ? `Zip${size ? ` [${size}]` : ''}` : ''),
         size: sizeLine,
-        audio: link?.audio || audioFromFilename(label || quality),
+        audio: link?.audio || audioFromFilename(label || quality || size),
         quality: quality || undefined,
         rawFilename: label || url,
         url,
@@ -88,7 +122,8 @@ class HdHubMoviesService {
     _normalizeResults(payload) {
         const rows = Array.isArray(payload?.results) ? payload.results : [];
         const results = [];
-        const maxLinksPerResult = 12;
+        // Episode lists can be long; zip/pack links are prioritized so they are never dropped.
+        const maxLinksPerResult = 16;
 
         for (const row of rows) {
             const title = String(row?.title || '').trim();
@@ -105,9 +140,7 @@ class HdHubMoviesService {
 
             if (!title || !links.length) continue;
 
-            if (links.length > maxLinksPerResult) {
-                links = links.slice(0, maxLinksPerResult);
-            }
+            links = prioritizeLinks(links, maxLinksPerResult);
 
             results.push({
                 title,
