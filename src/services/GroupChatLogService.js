@@ -261,12 +261,13 @@ class GroupChatLogService {
             return Math.min(this.llmMaxMessages, totalMessages);
         }
         if (totalMessages <= 150) {
-            return Math.min(70, this.llmMaxMessages);
+            return Math.min(60, this.llmMaxMessages);
         }
         if (totalMessages <= 250) {
-            return Math.min(55, this.llmMaxMessages);
+            return Math.min(50, this.llmMaxMessages);
         }
-        return Math.min(45, this.llmMaxMessages);
+        // Very busy days: one compact sample beats many sequential chunk calls
+        return Math.min(40, this.llmMaxMessages);
     }
 
     /** Keep conversation edges plus evenly spaced middle messages. */
@@ -316,7 +317,7 @@ class GroupChatLogService {
 
     buildPrompt(messages, groupName, dateLabel) {
         const maxLines = this.getLlmSampleLimit(messages.length);
-        const textLimit = messages.length > 150 ? 100 : messages.length > 80 ? 120 : 150;
+        const textLimit = messages.length > 150 ? 80 : messages.length > 80 ? 100 : 140;
         const sampled = this.sampleMessages(messages, maxLines);
         const lines = this.formatMessageLines(sampled, textLimit);
 
@@ -328,10 +329,12 @@ class GroupChatLogService {
             `Group: ${groupName}`,
             `Date: ${dateLabel}`,
             `Messages (${messages.length}):${sampledNote}`,
+            'Extract 3-5 concrete topics with short details from the chat lines below.',
             lines.join('\n'),
         ].join('\n\n');
 
-        const maxChars = messages.length > 150 ? 7000 : messages.length > 80 ? 9000 : 12_000;
+        // Keep prompts small so DeepSeek finishes within timeout
+        const maxChars = messages.length > 150 ? 4500 : messages.length > 80 ? 5500 : 8000;
         if (body.length > maxChars) {
             body = `${body.slice(0, maxChars)}\n\n[...truncated...]`;
         }
@@ -340,30 +343,36 @@ class GroupChatLogService {
     }
 
     /**
-     * Split a busy day into smaller LLM prompts (map-reduce summarization).
+     * Split a busy day into at most 3 compact LLM prompts (map-reduce).
+     * Samples within each time window so chunks stay small and reliable.
      * @returns {string[]}
      */
     buildChunkPrompts(messages, groupName, dateLabel) {
-        const prompts = [];
         const total = messages.length;
-        const size = this.chunkSize;
-        const textLimit = 100;
+        const maxParts = 3;
+        const partSize = Math.ceil(total / maxParts);
+        const prompts = [];
+        const textLimit = 70;
+        const perChunkSample = 28;
 
-        for (let start = 0; start < total; start += size) {
-            const chunk = messages.slice(start, start + size);
-            const part = Math.floor(start / size) + 1;
-            const parts = Math.ceil(total / size);
-            const lines = this.formatMessageLines(chunk, textLimit);
+        for (let part = 0; part < maxParts; part++) {
+            const start = part * partSize;
+            if (start >= total) break;
+            const chunk = messages.slice(start, start + partSize);
+            const sampled = this.sampleMessages(chunk, perChunkSample);
+            const lines = this.formatMessageLines(sampled, textLimit);
+            const parts = Math.min(maxParts, Math.ceil(total / partSize));
 
             let body = [
                 `Group: ${groupName}`,
                 `Date: ${dateLabel}`,
-                `Part ${part} of ${parts} (${chunk.length} messages, ${total} total for the day)`,
+                `Part ${part + 1} of ${parts} (sample of ${sampled.length} from ${chunk.length} msgs; day total ${total})`,
+                'List 2-4 topics from this part only (JSON topics/notable/wrap_up).',
                 lines.join('\n'),
             ].join('\n\n');
 
-            if (body.length > 5500) {
-                body = `${body.slice(0, 5500)}\n\n[...truncated...]`;
+            if (body.length > 3500) {
+                body = `${body.slice(0, 3500)}\n\n[...truncated...]`;
             }
             prompts.push(body);
         }
@@ -371,8 +380,73 @@ class GroupChatLogService {
         return prompts;
     }
 
+    /**
+     * Prefer a single compact sample for most days.
+     * Chunk only for very busy days where one sample would be too thin.
+     */
     shouldUseChunkedSummary(messages) {
-        return messages.length >= this.chunkThreshold;
+        return messages.length >= Math.max(this.chunkThreshold, 220);
+    }
+
+    /**
+     * Offline topics when the LLM times out — still useful for the group.
+     * @returns {{ topics: object[], notable: string[], wrap_up: string }}
+     */
+    buildHeuristicSummary(messages, stats) {
+        const hourBuckets = new Map();
+        for (const row of messages) {
+            const hour = new Date(row.ts).toLocaleString('en-IN', {
+                timeZone: 'Asia/Kolkata',
+                hour: 'numeric',
+                hour12: false,
+            });
+            const h = Number(hour) === 24 ? 0 : Number(hour);
+            if (!hourBuckets.has(h)) hourBuckets.set(h, []);
+            hourBuckets.get(h).push(row);
+        }
+
+        const rankedHours = [...hourBuckets.entries()]
+            .sort((a, b) => b[1].length - a[1].length)
+            .slice(0, 4);
+
+        const topics = rankedHours.map(([hour, rows], idx) => {
+            const sample = rows
+                .filter((r) => r.text && !/^\[/.test(r.text))
+                .slice(0, 3)
+                .map((r) => String(r.text).slice(0, 60))
+                .filter(Boolean);
+            const period = hour >= 12 ? 'PM' : 'AM';
+            const hour12 = hour % 12 || 12;
+            const title = idx === 0
+                ? `Busy chat around ${hour12} ${period}`
+                : `Chat around ${hour12} ${period}`;
+            const detail = sample.length
+                ? `Members talked about: ${sample.join(' · ')}`
+                : `${rows.length} messages in this hour.`;
+            return { title, detail };
+        });
+
+        if (!topics.length) {
+            topics.push({
+                title: 'Group activity',
+                detail: `${stats.totalMessages} messages from ${stats.uniqueMembers} members.`,
+            });
+        }
+
+        const notable = [];
+        if (stats.topSender) {
+            notable.push(`${stats.topSender.name} was most active (${stats.topSender.count} msgs)`);
+        }
+        if (stats.busiestHourLabel) {
+            notable.push(`Busiest hour: ${stats.busiestHourLabel}`);
+        }
+
+        const wrap_up =
+            `Active day with ${stats.totalMessages} messages from ${stats.uniqueMembers} members` +
+            `${stats.busiestHourLabel ? `, peaking around ${stats.busiestHourLabel}` : ''}.` +
+            (stats.topSender ? ` ${stats.topSender.name} led the chat.` : '');
+
+        return { topics, notable, wrap_up };
     }
 
     async purgeDay(groupId, dateStr) {

@@ -306,6 +306,7 @@ class GroupSummaryController {
         const stats = this.chatLog.computeStats(messages);
         const useChunks = this.chatLog.shouldUseChunkedSummary(messages);
         const startedAt = Date.now();
+        const heuristic = this.chatLog.buildHeuristicSummary(messages, stats);
 
         let summary;
         try {
@@ -331,14 +332,22 @@ class GroupSummaryController {
             logger.info(`Group summary: ${groupName} LLM done in ${Date.now() - startedAt}ms`);
         } catch (err) {
             logger.error(`NVIDIA recap failed for ${groupName}: ${err.message}`);
+            summary = null;
+        }
+
+        // Always show topics — fill gaps from chat activity if LLM timed out or returned empty
+        if (!summary?.topics?.length) {
+            logger.warn(`Group summary: using heuristic topics for ${groupName}`);
             summary = {
-                topics: [],
-                notable: [],
-                wrap_up:
-                    `Active day — ${stats.totalMessages} messages from ${stats.uniqueMembers} members` +
-                    `${stats.busiestHourLabel ? `, busiest around ${stats.busiestHourLabel}` : ''}.` +
-                    ' (Topic details unavailable — summary service timed out.)',
+                topics: heuristic.topics,
+                notable: summary?.notable?.length ? summary.notable : heuristic.notable,
+                wrap_up: summary?.wrap_up?.trim() || heuristic.wrap_up,
             };
+        } else if (!summary.wrap_up?.trim()) {
+            summary.wrap_up = heuristic.wrap_up;
+        }
+        if (!summary.notable?.length && heuristic.notable.length) {
+            summary.notable = heuristic.notable;
         }
 
         const text = formatRecapMessage({
