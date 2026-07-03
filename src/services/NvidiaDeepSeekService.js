@@ -96,11 +96,24 @@ class NvidiaDeepSeekService {
             },
         });
 
-        const content = data?.choices?.[0]?.message?.content;
+        const content = this.extractMessageContent(data);
         if (!content?.trim()) {
             throw new Error('Empty response from NVIDIA API');
         }
         return content.trim();
+    }
+
+    extractMessageContent(data) {
+        const msg = data?.choices?.[0]?.message || {};
+        let content = msg.content || msg.reasoning_content || '';
+        if (Array.isArray(content)) {
+            content = content.map((p) => p?.text || p?.content || '').join('');
+        }
+        content = String(content || '')
+            .replace(/<think>[\s\S]*?<\/think>/gi, '')
+            .replace(/<\|thinking\|>[\s\S]*?<\|\/thinking\|>/gi, '')
+            .trim();
+        return content;
     }
 
     /** Trade discovery, research, CE/PE analysis — uses NVIDIA_TRADE_MODEL (GLM-5.2). */
@@ -108,18 +121,98 @@ class NvidiaDeepSeekService {
         return this.complete(systemPrompt, userPrompt, { ...opts, forTrade: true });
     }
 
-    parseSummaryJson(raw) {
-        const jsonText = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-        try {
-            return JSON.parse(jsonText);
-        } catch (err) {
-            logger.warn(`Group summary JSON parse failed: ${err.message}`);
-            return {
-                topics: [],
-                notable: [],
-                wrap_up: raw.slice(0, 600),
-            };
+    normalizeSummaryShape(parsed, fallbackText = '') {
+        const topics = [];
+        const rawTopics = Array.isArray(parsed?.topics) ? parsed.topics : [];
+        for (const t of rawTopics) {
+            if (typeof t === 'string' && t.trim()) {
+                topics.push({ title: t.trim().slice(0, 80), detail: '' });
+            } else if (t && typeof t === 'object') {
+                const title = String(t.title || t.name || t.topic || '').trim();
+                const detail = String(t.detail || t.summary || t.description || '').trim();
+                if (title || detail) {
+                    topics.push({
+                        title: (title || 'Discussion').slice(0, 80),
+                        detail: detail.slice(0, 280),
+                    });
+                }
+            }
         }
+
+        const notable = (Array.isArray(parsed?.notable) ? parsed.notable : [])
+            .map((n) => (typeof n === 'string' ? n : n?.text || n?.detail || ''))
+            .map((s) => String(s).trim())
+            .filter(Boolean)
+            .slice(0, 4);
+
+        const wrap_up = String(
+            parsed?.wrap_up || parsed?.wrapUp || parsed?.summary || fallbackText || ''
+        ).trim();
+
+        return { topics, notable, wrap_up };
+    }
+
+    parseSummaryJson(raw) {
+        let text = String(raw || '')
+            .replace(/<think>[\s\S]*?<\/think>/gi, '')
+            .replace(/^```(?:json)?\s*/i, '')
+            .replace(/\s*```$/i, '')
+            .trim();
+
+        const tryParse = (candidate) => {
+            try {
+                return this.normalizeSummaryShape(JSON.parse(candidate), text.slice(0, 400));
+            } catch {
+                return null;
+            }
+        };
+
+        let parsed = tryParse(text);
+        if (parsed?.topics?.length || parsed?.wrap_up) return parsed;
+
+        const objectMatch = text.match(/\{[\s\S]*\}/);
+        if (objectMatch) {
+            parsed = tryParse(objectMatch[0]);
+            if (parsed?.topics?.length || parsed?.wrap_up) return parsed;
+        }
+
+        logger.warn('Group summary JSON parse failed — using text wrap-up only');
+        return {
+            topics: [],
+            notable: [],
+            wrap_up: text.slice(0, 600),
+        };
+    }
+
+    /** Merge partial recaps without another LLM call (timeout-safe). */
+    mergePartialsLocally(partials, meta = {}) {
+        const topics = [];
+        const notable = [];
+        const wrapParts = [];
+        const seenTitles = new Set();
+
+        for (const part of partials) {
+            for (const t of part?.topics || []) {
+                const key = String(t.title || '').toLowerCase();
+                if (!key || seenTitles.has(key)) continue;
+                seenTitles.add(key);
+                topics.push(t);
+            }
+            for (const n of part?.notable || []) {
+                if (n && !notable.includes(n)) notable.push(n);
+            }
+            if (part?.wrap_up) wrapParts.push(part.wrap_up);
+        }
+
+        const wrap_up = wrapParts.length
+            ? wrapParts.slice(0, 3).join(' ')
+            : `Busy day${meta.totalMessages ? ` with ${meta.totalMessages} messages` : ''}.`;
+
+        return {
+            topics: topics.slice(0, 5),
+            notable: notable.slice(0, 3),
+            wrap_up: wrap_up.slice(0, 800),
+        };
     }
 
     isTimeoutError(err) {
@@ -134,10 +227,23 @@ class NvidiaDeepSeekService {
      */
     async completeWithSummaryRetry(systemPrompt, prompt, opts = {}) {
         const baseTimeout = clampTimeoutMs(opts.baseTimeoutMs ?? this.summaryTimeoutMs);
+        // Start compact — large prompts are the main timeout cause
         const attempts = [
-            { prompt, timeoutMs: baseTimeout, maxTokens: opts.maxTokens ?? 800 },
-            { prompt: prompt.slice(0, 6000), timeoutMs: Math.min(MAX_TIMEOUT_MS, baseTimeout + 15_000), maxTokens: 700 },
-            { prompt: prompt.slice(0, 3500), timeoutMs: MAX_TIMEOUT_MS, maxTokens: 600 },
+            {
+                prompt: prompt.length > 5000 ? prompt.slice(0, 5000) + '\n\n[...truncated...]' : prompt,
+                timeoutMs: Math.min(MAX_TIMEOUT_MS, Math.max(baseTimeout, 90_000)),
+                maxTokens: opts.maxTokens ?? 700,
+            },
+            {
+                prompt: prompt.slice(0, 3200) + (prompt.length > 3200 ? '\n\n[...truncated...]' : ''),
+                timeoutMs: MAX_TIMEOUT_MS,
+                maxTokens: 600,
+            },
+            {
+                prompt: prompt.slice(0, 2000) + (prompt.length > 2000 ? '\n\n[...truncated...]' : ''),
+                timeoutMs: MAX_TIMEOUT_MS,
+                maxTokens: 500,
+            },
         ];
 
         let lastErr;
@@ -159,7 +265,8 @@ class NvidiaDeepSeekService {
                 });
             } catch (err) {
                 lastErr = err;
-                if (!this.isTimeoutError(err) || i === attempts.length - 1) {
+                const retryable = this.isTimeoutError(err) || /empty response|5\d\d|ECONNRESET/i.test(String(err?.message || ''));
+                if (!retryable || i === attempts.length - 1) {
                     throw err;
                 }
             }
@@ -245,7 +352,21 @@ class NvidiaDeepSeekService {
                 `Group recap chunk ${i + 1}/${chunkPrompts.length} ` +
                     `(${chunkPrompts[i].length} chars) for ${meta.groupName || 'group'}`
             );
-            partials.push(await this.summarizeGroupChat(chunkPrompts[i]));
+            try {
+                partials.push(await this.summarizeGroupChat(chunkPrompts[i]));
+            } catch (err) {
+                logger.warn(
+                    `Group recap chunk ${i + 1}/${chunkPrompts.length} failed: ${err.message}`
+                );
+            }
+        }
+
+        if (!partials.length) {
+            throw new Error('All recap chunks failed');
+        }
+
+        if (partials.length === 1) {
+            return partials[0];
         }
 
         const mergePrompt = [
@@ -267,8 +388,15 @@ class NvidiaDeepSeekService {
             'Deduplicate topics; preserve the most important details from each part.',
         ].join(' ');
 
-        const raw = await this.completeWithSummaryRetry(mergeSystem, mergePrompt, { maxTokens: 900 });
-        return this.parseSummaryJson(raw);
+        try {
+            const raw = await this.completeWithSummaryRetry(mergeSystem, mergePrompt, { maxTokens: 800 });
+            const merged = this.parseSummaryJson(raw);
+            if (merged.topics?.length) return merged;
+            return this.mergePartialsLocally(partials, meta);
+        } catch (err) {
+            logger.warn(`Group recap merge failed, using local merge: ${err.message}`);
+            return this.mergePartialsLocally(partials, meta);
+        }
     }
 }
 
