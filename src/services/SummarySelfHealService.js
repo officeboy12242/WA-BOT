@@ -130,11 +130,16 @@ class SummarySelfHealService {
         this._sock = sock;
     }
 
+    /** Always read token from env so Render/local updates apply after restart. */
+    getGithubToken() {
+        return (process.env.GITHUB_TOKEN || this.config.GITHUB_TOKEN || this.githubToken || '').trim();
+    }
+
     isReady() {
         return (
             this.enabled &&
             this.nvidia.isConfigured() &&
-            Boolean(this.githubToken) &&
+            Boolean(this.getGithubToken()) &&
             Boolean(this._collection)
         );
     }
@@ -693,17 +698,42 @@ class SummarySelfHealService {
     async approveAndPush(healId, byPhone = '') {
         const id = String(healId || '').trim().toLowerCase();
         const row = await this.getProposal(id);
-        if (!row) return { ok: false, message: `No heal proposal \`${id}\`` };
+        if (!row) {
+            return {
+                ok: false,
+                message:
+                    `❌ No heal proposal \`${id}\`.\n` +
+                    `_It may have expired or this is a different bot instance. Run \`/fix …\` again._`,
+            };
+        }
         if (row.status !== 'pending') {
-            return { ok: false, message: `Heal \`${id}\` is already *${row.status}*` };
+            return {
+                ok: false,
+                message:
+                    `❌ Heal \`${id}\` is already *${row.status}*.\n` +
+                    (row.error_push ? `_Last error:_ ${row.error_push}\n` : '') +
+                    `_Run \`/fix …\` again for a new proposal._`,
+            };
         }
         if (row.expires_at && new Date(row.expires_at) < new Date()) {
             await this._collection.updateOne({ heal_id: id }, { $set: { status: 'expired' } });
-            return { ok: false, message: `Heal \`${id}\` expired. Run summary again to regenerate.` };
+            return { ok: false, message: `❌ Heal \`${id}\` expired. Run \`/fix …\` again.` };
         }
-        if (!this.githubToken) {
-            return { ok: false, message: '❌ `GITHUB_TOKEN` is not set on the server.' };
+        if (!row.files?.length) {
+            return { ok: false, message: `❌ Heal \`${id}\` has no file changes to push.` };
         }
+
+        const token = this.getGithubToken();
+        if (!token) {
+            return {
+                ok: false,
+                message:
+                    '❌ `GITHUB_TOKEN` is not set on the server.\n' +
+                    '_Add it on Render → Environment, then restart the service._',
+            };
+        }
+        // Keep in-memory copy in sync for push helper
+        this.githubToken = token;
 
         await this._notify(`🔧 Owner approved heal *${id}* — pushing to GitHub…`);
 
@@ -742,19 +772,40 @@ class SummarySelfHealService {
             await this._notify(msg);
             return { ok: true, message: msg };
         } catch (err) {
+            const detail = this._formatGithubError(err);
             await this._collection.updateOne(
                 { heal_id: id },
-                { $set: { status: 'failed', error_push: err.message, failed_at: new Date() } }
+                { $set: { status: 'failed', error_push: detail, failed_at: new Date() } }
             );
-            const msg = `❌ Heal push failed for *${id}*: ${err.message}`;
+            const msg = `❌ Heal push failed for *${id}*:\n${detail}`;
             await this._notify(msg);
             return { ok: false, message: msg };
         }
     }
 
+    _formatGithubError(err) {
+        const status = err.response?.status;
+        const body = err.response?.data;
+        const ghMsg = body?.message || body?.error || err.message;
+        if (status === 401) {
+            return `GitHub 401 — invalid/expired token. Update GITHUB_TOKEN on Render. (${ghMsg})`;
+        }
+        if (status === 403) {
+            return `GitHub 403 — token needs Contents: Read and Write on ${this.githubRepo}. (${ghMsg})`;
+        }
+        if (status === 404) {
+            return `GitHub 404 — repo/path not found or token lacks access to ${this.githubRepo}. (${ghMsg})`;
+        }
+        if (status === 409 || status === 422) {
+            return `GitHub ${status} — file conflict (branch moved). Run /fix again. (${ghMsg})`;
+        }
+        return status ? `GitHub ${status}: ${ghMsg}` : String(ghMsg || err.message);
+    }
+
     async _githubHeaders() {
+        const token = this.getGithubToken();
         return {
-            Authorization: `Bearer ${this.githubToken}`,
+            Authorization: `Bearer ${token}`,
             Accept: 'application/vnd.github+json',
             'X-GitHub-Api-Version': '2022-11-28',
             'User-Agent': 'WA-BOT-summary-self-heal',
@@ -774,19 +825,44 @@ class SummarySelfHealService {
             });
             sha = data.sha;
         } catch (err) {
-            if (err.response?.status !== 404) throw err;
+            if (err.response?.status !== 404) {
+                throw err;
+            }
         }
 
-        await axios.put(
-            url,
-            {
-                message,
-                content: Buffer.from(content, 'utf8').toString('base64'),
-                branch: this.githubBranch,
-                ...(sha ? { sha } : {}),
-            },
-            { headers, timeout: 60_000 }
-        );
+        try {
+            await axios.put(
+                url,
+                {
+                    message,
+                    content: Buffer.from(content, 'utf8').toString('base64'),
+                    branch: this.githubBranch,
+                    ...(sha ? { sha } : {}),
+                },
+                { headers, timeout: 60_000 }
+            );
+        } catch (err) {
+            // Retry once if SHA conflict
+            if (err.response?.status === 409 || err.response?.status === 422) {
+                const { data } = await axios.get(url, {
+                    headers,
+                    params: { ref: this.githubBranch },
+                    timeout: 30_000,
+                });
+                await axios.put(
+                    url,
+                    {
+                        message,
+                        content: Buffer.from(content, 'utf8').toString('base64'),
+                        branch: this.githubBranch,
+                        sha: data.sha,
+                    },
+                    { headers, timeout: 60_000 }
+                );
+            } else {
+                throw err;
+            }
+        }
         logger.info(`Self-heal pushed ${relPath} to ${this.githubRepo}@${this.githubBranch}`);
     }
 
