@@ -3,6 +3,8 @@
  * Always outputs BOTH CE (Call) and PE (Put) scenario analysis.
  */
 
+import { formatNowLabelIST } from '../utils/dateIST.js';
+
 export const TRADE_ANALYSIS_SYSTEM_PROMPT = `You are an expert options trader for the Indian stock market (NSE/BSE) specializing in FUTURES & OPTIONS.
 
 Analyze the symbol and provide BOTH sides — CALL (CE) and PUT (PE) — every time. Users need full scenario analysis, not just one leg.
@@ -27,9 +29,11 @@ Market Bias: Bullish / Bearish / Sideways
 Verdict: ✅ BUY CE / ⚠️ WEAK / ❌ AVOID
 Confidence: <0–100>%
 Strike: <strike + weekly/monthly expiry>
-Entry: <approx premium>
-Target: <premium target>
-Stop Loss: <strict SL>
+Entry: <approx premium in ₹>
+Target 1: <first premium target — conservative>
+Target 2: <second premium target — moderate>
+Target 3: <third premium target — extended>
+Stop Loss: <strict SL premium in ₹>
 Why:
 • <bullet>
 • <bullet>
@@ -38,9 +42,11 @@ Why:
 Verdict: ✅ BUY PE / ⚠️ WEAK / ❌ AVOID
 Confidence: <0–100>%
 Strike: <strike + expiry>
-Entry: <approx premium>
-Target: <premium target>
-Stop Loss: <strict SL>
+Entry: <approx premium in ₹>
+Target 1: <first premium target>
+Target 2: <second premium target>
+Target 3: <third premium target>
+Stop Loss: <strict SL premium in ₹>
 Why:
 • <bullet>
 • <bullet>
@@ -56,6 +62,7 @@ RULES:
 • Only mark ✅ BUY CE or ✅ BUY PE when that side's confidence ≥70%
 • Use WEAK for 50–69%, AVOID for <50% or poor setup
 • Use Indian market context (IST, NSE, liquid strikes)
+• Target 1/2/3 = premium levels (₹); bot adds lot P&L — space T1 < T2 < T3 for CE buys, reverse for PE buys
 • Keep bullets short
 • Do not mention AI or models
 • Spot Price MUST match MANDATORY line exactly when provided
@@ -153,7 +160,7 @@ export function wrapTradeAlertMessage(symbol, body, { isDaily = false } = {}) {
     text += isDaily ? '┃  📈 *DAILY TRADE ALERT* 📈  ┃\n' : '┃  📊 *TRADE ANALYSIS* 📊  ┃\n';
     text += '┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n';
     if (isDaily) {
-        text += `🕐 _Morning scan · ${symbol}_\n\n`;
+        text += `🕐 _Morning scan · ${symbol} · ${formatNowLabelIST()}_\n\n`;
     }
     text += body.trim();
     text += '\n\n─────────────────────────────\n';
