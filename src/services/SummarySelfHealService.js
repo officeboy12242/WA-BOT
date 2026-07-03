@@ -1,5 +1,6 @@
 /**
- * Summary-only self-heal: Nemotron proposes a fix, owner approves, then GitHub push.
+ * Self-heal: Nemotron proposes code fixes (auto summary issues or owner /fix).
+ * Owner must approve before GitHub push.
  */
 
 import fs from 'fs/promises';
@@ -12,40 +13,55 @@ import NvidiaDeepSeekService from './NvidiaDeepSeekService.js';
 import { resolveNotificationJid, normalizePhoneNumber } from '../utils/permissions.js';
 
 const DEFAULT_HEAL_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b';
-const ALLOWED_FILES = new Set([
+const SUMMARY_ALLOWED_FILES = [
     'src/controllers/GroupSummaryController.js',
     'src/services/GroupChatLogService.js',
     'src/services/NvidiaDeepSeekService.js',
-]);
+];
 
-const HEAL_SYSTEM_PROMPT = `You are a senior Node.js engineer fixing WhatsApp group SUMMARY/RECAP bugs only.
+const BLOCKED_PATH_PARTS = ['.env', 'node_modules', 'auth_info', 'credentials', '.git'];
 
-You receive an error report and snippets of allowlisted source files.
-Return ONLY valid JSON (no markdown fences) in this shape:
-{
+const JSON_SHAPE = `{
   "summary": "one-line description of the fix",
+  "changelog": ["bullet what changed 1", "bullet what changed 2"],
   "files": [
     {
-      "path": "src/services/GroupChatLogService.js",
+      "path": "src/path/File.js",
       "replacements": [
         { "old_string": "exact existing code block", "new_string": "replacement code block" }
       ]
     }
   ]
-}
+}`;
+
+const SUMMARY_HEAL_SYSTEM_PROMPT = `You are a senior Node.js engineer fixing WhatsApp group SUMMARY/RECAP bugs only.
+
+Return ONLY valid JSON (no markdown fences) in this shape:
+${JSON_SHAPE}
 
 RULES:
 • Only touch summary/recap reliability (timeouts, empty topics, JSON parse, chunking, prompts).
-• Do NOT change trade alerts, movies, stickers, or unrelated features.
-• path must be one of:
-  - src/controllers/GroupSummaryController.js
-  - src/services/GroupChatLogService.js
-  - src/services/NvidiaDeepSeekService.js
-• old_string must match the file EXACTLY (unique snippet, include enough context).
-• Prefer small, safe fixes: shorter prompts, better retries, heuristic topics, resilient chunk merge.
-• Keep existing exports and public method names.
-• Max 4 replacements total across all files.
-• If no code change is needed, return {"summary":"no change","files":[]}`;
+• path must be one of: ${SUMMARY_ALLOWED_FILES.join(', ')}
+• old_string must match the file EXACTLY (unique snippet).
+• Max 4 replacements total.
+• If no code change is needed, return {"summary":"no change","changelog":[],"files":[]}`;
+
+const INSTRUCTION_HEAL_SYSTEM_PROMPT = `You are a senior Node.js engineer for a WhatsApp bot (Baileys, ESM).
+
+The owner gives a natural-language fix instruction. Apply ONLY that request.
+
+Return ONLY valid JSON (no markdown fences) in this shape:
+${JSON_SHAPE}
+
+RULES:
+• Only edit files under src/ that are provided below.
+• old_string must match the file EXACTLY (include enough context to be unique).
+• new_string is the replacement (use "" to delete a block).
+• Prefer minimal diffs — do not refactor unrelated code.
+• changelog: short bullets of what you changed (for the owner to review).
+• Max 6 replacements total across all files.
+• Do not touch secrets, .env, or auth sessions.
+• If the instruction cannot be done safely with the given files, return files:[].`;
 
 function shortId() {
     return crypto.randomBytes(3).toString('hex');
@@ -205,7 +221,18 @@ class SummarySelfHealService {
                     `_Asking Nemotron for a summary-only fix…_`
             );
 
-            const proposal = await this._generateProposal(ctx);
+            const proposal = await this._generateProposal({
+                mode: 'summary',
+                allowedPaths: SUMMARY_ALLOWED_FILES,
+                systemPrompt: SUMMARY_HEAL_SYSTEM_PROMPT,
+                userPromptParts: [
+                    'Summary/recap failure report:',
+                    `Group: ${ctx.groupName}`,
+                    `Date: ${ctx.dateStr}`,
+                    `Message count: ${ctx.messageCount}`,
+                    `Error: ${ctx.errorMessage}`,
+                ],
+            });
             if (!proposal?.files?.length) {
                 await this._notify(
                     `🔧 *Summary self-heal*\nNemotron found no safe code change.\nIssue: ${ctx.errorMessage}`
@@ -213,38 +240,20 @@ class SummarySelfHealService {
                 return;
             }
 
-            const healId = shortId();
-            await this._collection.insertOne({
-                heal_id: healId,
-                status: 'pending',
+            const healId = await this._storeProposal({
+                source: 'auto_summary',
+                instruction: `Auto-fix summary failure: ${ctx.errorMessage}`,
                 group_name: ctx.groupName || '',
                 recap_date: ctx.dateStr || '',
                 error: String(ctx.errorMessage || '').slice(0, 1000),
                 message_count: ctx.messageCount || 0,
-                summary: proposal.summary,
-                files: proposal.files,
-                model: this.healModel,
-                created_at: new Date(),
-                expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000),
+                proposal,
             });
 
-            const fileList = proposal.files.map((f) => `• \`${f.path}\``).join('\n');
-            await this._notifyOwnersOnly(
-                `┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n` +
-                    `┃  🔧 *SUMMARY SELF-HEAL* 🔧  ┃\n` +
-                    `┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n` +
-                    `⚠️ Summary failed — AI proposed a fix.\n\n` +
-                    `📌 *Issue:* ${String(ctx.errorMessage || '').slice(0, 200)}\n` +
-                    `📢 *Group:* ${ctx.groupName || 'n/a'}\n` +
-                    `🧠 *Model:* ${this.healModel}\n` +
-                    `📝 *Fix:* ${proposal.summary}\n\n` +
-                    `📁 *Files:*\n${fileList}\n\n` +
-                    `🆔 Heal ID: *${healId}*\n\n` +
-                    `Reply as *owner*:\n` +
-                    `✅ \`/heal approve ${healId}\` — push to GitHub\n` +
-                    `❌ \`/heal reject ${healId}\` — discard\n\n` +
-                    `_Nothing is pushed until you approve._`
-            );
+            await this._notifyOwnersOnly(this._formatProposalMessage(healId, proposal, {
+                title: 'SUMMARY SELF-HEAL',
+                context: `⚠️ Summary failed — AI proposed a fix.\n📌 *Issue:* ${String(ctx.errorMessage || '').slice(0, 200)}\n📢 *Group:* ${ctx.groupName || 'n/a'}`,
+            }));
             logger.info(`Summary self-heal proposal ${healId} awaiting owner approval`);
         } catch (err) {
             logger.error(`Summary self-heal cycle failed: ${err.message}`);
@@ -254,17 +263,254 @@ class SummarySelfHealService {
         }
     }
 
-    async _generateProposal(ctx) {
+    /**
+     * Owner-driven fix: `/fix remove testing thing`
+     * @param {string} instruction
+     * @param {{ byPhone?: string }} [opts]
+     * @returns {Promise<{ ok: boolean, message: string, healId?: string }>}
+     */
+    async proposeFromInstruction(instruction, { byPhone = '' } = {}) {
+        const text = String(instruction || '').trim();
+        if (!text) {
+            return { ok: false, message: '❌ Usage: `/fix <what to change>`\nExample: `/fix remove testing thing`' };
+        }
+        if (!this.isReady()) {
+            return {
+                ok: false,
+                message: '❌ Self-heal not ready. Set `GITHUB_TOKEN` + Mongo + `NVIDIA_API_KEY` on Render.',
+            };
+        }
+        if (this._inflight) {
+            return { ok: false, message: '⏳ Another heal is running — try again in a minute.' };
+        }
+
+        this._inflight = true;
+        try {
+            const candidates = await this._pickCandidateFiles(text);
+            if (!candidates.length) {
+                return { ok: false, message: '❌ No matching source files found under `src/`.' };
+            }
+
+            const proposal = await this._generateProposal({
+                mode: 'instruction',
+                allowedPaths: candidates,
+                systemPrompt: INSTRUCTION_HEAL_SYSTEM_PROMPT,
+                userPromptParts: [
+                    `Owner instruction: ${text}`,
+                    `Requested by: ${byPhone || 'owner'}`,
+                    'Apply ONLY this instruction. List every change in changelog.',
+                ],
+            });
+
+            if (!proposal?.files?.length) {
+                return {
+                    ok: false,
+                    message:
+                        `❌ Nemotron could not apply that safely with the available files.\n` +
+                        `_Tried:_ ${candidates.slice(0, 6).join(', ')}`,
+                };
+            }
+
+            const healId = await this._storeProposal({
+                source: 'owner_fix',
+                instruction: text,
+                requested_by: byPhone,
+                proposal,
+            });
+
+            const preview = this._formatProposalMessage(healId, proposal, {
+                title: 'OWNER /FIX PROPOSAL',
+                context: `🗣️ *You asked:* ${text}`,
+            });
+
+            await this._notify(preview);
+            return { ok: true, message: preview, healId };
+        } catch (err) {
+            logger.error(`Owner /fix failed: ${err.message}`);
+            return { ok: false, message: `❌ Fix failed: ${err.message}` };
+        } finally {
+            this._inflight = false;
+        }
+    }
+
+    async _storeProposal(row) {
+        const healId = shortId();
+        await this._collection.insertOne({
+            heal_id: healId,
+            status: 'pending',
+            source: row.source || 'manual',
+            instruction: row.instruction || '',
+            requested_by: row.requested_by || '',
+            group_name: row.group_name || '',
+            recap_date: row.recap_date || '',
+            error: row.error || '',
+            message_count: row.message_count || 0,
+            summary: row.proposal.summary,
+            changelog: row.proposal.changelog || [],
+            change_preview: row.proposal.changePreview || '',
+            files: row.proposal.files,
+            model: this.healModel,
+            created_at: new Date(),
+            expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        });
+        return healId;
+    }
+
+    _formatProposalMessage(healId, proposal, { title, context }) {
+        const fileList = proposal.files.map((f) => `• \`${f.path}\``).join('\n');
+        const changes = (proposal.changelog || [])
+            .slice(0, 8)
+            .map((c) => `• ${c}`)
+            .join('\n');
+        const preview = proposal.changePreview
+            ? `\n🔎 *Diff preview*\n${proposal.changePreview}\n`
+            : '';
+
+        return (
+            `┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n` +
+            `┃  🔧 *${title}* 🔧  ┃\n` +
+            `┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n` +
+            `${context}\n\n` +
+            `🧠 *Model:* ${this.healModel}\n` +
+            `📝 *Summary:* ${proposal.summary}\n\n` +
+            (changes ? `📋 *What changed:*\n${changes}\n\n` : '') +
+            `📁 *Files:*\n${fileList}\n` +
+            preview +
+            `\n🆔 Heal ID: *${healId}*\n\n` +
+            `Reply as *owner*:\n` +
+            `✅ \`/heal approve ${healId}\` — push to GitHub\n` +
+            `❌ \`/heal reject ${healId}\` — discard\n\n` +
+            `_Nothing is pushed until you confirm._`
+        );
+    }
+
+    _isSafePath(rel) {
+        const p = String(rel || '').replace(/\\/g, '/');
+        if (!p.startsWith('src/') || !p.endsWith('.js')) return false;
+        if (p.includes('..')) return false;
+        return !BLOCKED_PATH_PARTS.some((b) => p.includes(b));
+    }
+
+    async _listSrcJsFiles() {
+        const out = [];
+        const walk = async (dir, prefix) => {
+            let entries;
+            try {
+                entries = await fs.readdir(dir, { withFileTypes: true });
+            } catch {
+                return;
+            }
+            for (const ent of entries) {
+                const rel = `${prefix}/${ent.name}`.replace(/^\//, '');
+                const full = path.join(dir, ent.name);
+                if (ent.isDirectory()) {
+                    if (BLOCKED_PATH_PARTS.some((b) => ent.name.includes(b))) continue;
+                    await walk(full, rel);
+                } else if (ent.isFile() && ent.name.endsWith('.js') && this._isSafePath(rel)) {
+                    out.push(rel);
+                }
+            }
+        };
+        await walk(path.join(this.rootDir, 'src'), 'src');
+        return out;
+    }
+
+    async _pickCandidateFiles(instruction) {
+        const all = await this._listSrcJsFiles();
+        const words = String(instruction)
+            .toLowerCase()
+            .split(/[^a-z0-9_/.-]+/)
+            .filter((w) => w.length > 2);
+
+        const scored = [];
+        for (const rel of all) {
+            let score = 0;
+            const low = rel.toLowerCase();
+            for (const w of words) {
+                if (low.includes(w)) score += 5;
+            }
+            // Prefer likely areas from instruction keywords
+            if (/test|debug|temp|todo|mock/i.test(instruction) && /test|debug|temp|mock/i.test(low)) {
+                score += 8;
+            }
+            if (/summary|recap/i.test(instruction) && /summary|groupchat|nvidia/i.test(low)) score += 8;
+            if (/trade|stock|alert/i.test(instruction) && /trade|market|stock/i.test(low)) score += 8;
+            if (/movie|zip/i.test(instruction) && /movie|hdhub/i.test(low)) score += 8;
+
+            // Light content scan for instruction keywords (e.g. "testing thing")
+            if (words.length && score < 10) {
+                try {
+                    const body = (await this._readLocalFile(rel)).toLowerCase();
+                    for (const w of words.slice(0, 6)) {
+                        if (body.includes(w)) score += 2;
+                    }
+                } catch {
+                    // ignore
+                }
+            }
+            if (score > 0) scored.push({ rel, score });
+        }
+
+        scored.sort((a, b) => b.score - a.score);
+        let picks = scored.slice(0, 8).map((s) => s.rel);
+
+        // Fallback: common entrypoints if no keyword match
+        if (!picks.length) {
+            picks = [
+                'src/controllers/GroupSummaryController.js',
+                'src/services/GroupChatLogService.js',
+                'src/commands/registry.js',
+                'src/controllers/CommandController.js',
+            ].filter((p) => all.includes(p));
+        }
+
+        return picks.slice(0, 8);
+    }
+
+    _buildChangePreview(originals, files) {
+        const lines = [];
+        for (const f of files) {
+            const before = originals.get(f.path) || '';
+            const after = f.content || '';
+            if (before === after) continue;
+            const beforeLines = before.split('\n');
+            const afterLines = after.split('\n');
+            let removed = 0;
+            let added = 0;
+            // Simple line-count delta
+            if (afterLines.length >= beforeLines.length) {
+                added = afterLines.length - beforeLines.length;
+            } else {
+                removed = beforeLines.length - afterLines.length;
+            }
+            // Show a short snippet of first differing region
+            let snippet = '';
+            const max = Math.min(beforeLines.length, afterLines.length);
+            for (let i = 0; i < max; i++) {
+                if (beforeLines[i] !== afterLines[i]) {
+                    const oldBit = beforeLines[i].trim().slice(0, 60);
+                    const newBit = afterLines[i].trim().slice(0, 60);
+                    snippet = `  - ${oldBit || '(empty)'}\n  + ${newBit || '(empty)'}`;
+                    break;
+                }
+            }
+            lines.push(`\`${f.path}\` (Δ lines ~${added - removed >= 0 ? '+' : ''}${added - removed})`);
+            if (snippet) lines.push(snippet);
+        }
+        return lines.join('\n').slice(0, 1200);
+    }
+
+    async _generateProposal({ allowedPaths, systemPrompt, userPromptParts }) {
         const originals = new Map();
         const filePayload = [];
-        for (const rel of ALLOWED_FILES) {
+        for (const rel of allowedPaths) {
+            if (!this._isSafePath(rel) && !SUMMARY_ALLOWED_FILES.includes(rel)) continue;
             try {
                 const content = await this._readLocalFile(rel);
                 originals.set(rel, content);
-                // Send focused tails/heads for large files to keep prompt small
                 const snippet =
-                    content.length > 18_000
-                        ? `${content.slice(0, 9000)}\n\n/* ... middle omitted ... */\n\n${content.slice(-9000)}`
+                    content.length > 16_000
+                        ? `${content.slice(0, 8000)}\n\n/* ... middle omitted ... */\n\n${content.slice(-8000)}`
                         : content;
                 filePayload.push({ path: rel, content: snippet });
             } catch (err) {
@@ -273,23 +519,19 @@ class SummarySelfHealService {
         }
 
         const userPrompt = [
-            'Summary/recap failure report:',
-            `Group: ${ctx.groupName}`,
-            `Date: ${ctx.dateStr}`,
-            `Message count: ${ctx.messageCount}`,
-            `Error: ${ctx.errorMessage}`,
+            ...userPromptParts,
             '',
-            'Allowlisted source (may be truncated — old_string must still match exactly):',
+            'Source files (may be truncated — old_string must still match exactly):',
             ...filePayload.map((f) => `\n===== FILE: ${f.path} =====\n${f.content}`),
             '',
-            'Return JSON with precise replacements only.',
+            'Return JSON with precise replacements and a changelog.',
         ].join('\n');
 
         const previousModel = this.nvidia.model;
         this.nvidia.model = this.healModel;
         let raw;
         try {
-            raw = await this.nvidia.complete(HEAL_SYSTEM_PROMPT, userPrompt, {
+            raw = await this.nvidia.complete(systemPrompt, userPrompt, {
                 maxTokens: 4000,
                 timeoutMs: 120_000,
             });
@@ -302,25 +544,28 @@ class SummarySelfHealService {
             throw new Error('Heal model returned invalid JSON');
         }
 
+        const allowed = new Set(allowedPaths);
         const files = [];
+        const appliedNotes = [];
+
         for (const f of parsed.files) {
             const rel = String(f.path || '').replace(/\\/g, '/').replace(/^\.\//, '');
-            if (!ALLOWED_FILES.has(rel)) {
-                logger.warn(`Self-heal rejected non-allowlisted path: ${rel}`);
+            if (!allowed.has(rel) || (!this._isSafePath(rel) && !SUMMARY_ALLOWED_FILES.includes(rel))) {
+                logger.warn(`Self-heal rejected path: ${rel}`);
                 continue;
             }
 
             let next = originals.get(rel);
             if (!next) continue;
 
-            // Full-file override (rare)
-            if (typeof f.content === 'string' && f.content.length > 50 && f.content.includes('export')) {
+            if (typeof f.content === 'string' && f.content.length > 50) {
                 next = f.content;
+                appliedNotes.push(`${rel}: full file rewrite`);
             } else if (Array.isArray(f.replacements)) {
                 let applied = 0;
-                for (const rep of f.replacements.slice(0, 4)) {
-                    const oldStr = String(rep.old_string || rep.old || '');
-                    const newStr = String(rep.new_string || rep.new || '');
+                for (const rep of f.replacements.slice(0, 6)) {
+                    const oldStr = String(rep.old_string ?? rep.old ?? '');
+                    const newStr = String(rep.new_string ?? rep.new ?? '');
                     if (!oldStr || oldStr === newStr) continue;
                     if (!next.includes(oldStr)) {
                         logger.warn(`Self-heal old_string not found in ${rel}`);
@@ -328,6 +573,8 @@ class SummarySelfHealService {
                     }
                     next = next.replace(oldStr, newStr);
                     applied += 1;
+                    const label = oldStr.trim().slice(0, 40).replace(/\n/g, ' ');
+                    appliedNotes.push(`${rel}: replaced “${label}…”`);
                 }
                 if (!applied) continue;
             } else {
@@ -342,8 +589,14 @@ class SummarySelfHealService {
             files.push({ path: rel, content: next });
         }
 
+        const changelog = Array.isArray(parsed.changelog)
+            ? parsed.changelog.map((c) => String(c).trim()).filter(Boolean).slice(0, 10)
+            : appliedNotes.slice(0, 10);
+
         return {
-            summary: String(parsed.summary || 'Summary reliability fix').slice(0, 200),
+            summary: String(parsed.summary || 'Code fix').slice(0, 200),
+            changelog,
+            changePreview: this._buildChangePreview(originals, files),
             files,
         };
     }
@@ -389,7 +642,10 @@ class SummarySelfHealService {
         try {
             const pushed = [];
             for (const file of row.files || []) {
-                await this._pushFileToGitHub(file.path, file.content, `fix(summary): ${row.summary} [${id}]`);
+                const commitMsg = row.instruction
+                    ? `fix: ${String(row.instruction).slice(0, 72)} [${id}]`
+                    : `fix(summary): ${row.summary} [${id}]`;
+                await this._pushFileToGitHub(file.path, file.content, commitMsg);
                 pushed.push(file.path);
             }
 
@@ -405,10 +661,13 @@ class SummarySelfHealService {
                 }
             );
 
+            const changes = (row.changelog || []).slice(0, 6).map((c) => `• ${c}`).join('\n');
             const msg =
-                `✅ *Summary self-heal pushed*\n` +
+                `✅ *Self-heal pushed*\n` +
                 `🆔 ${id}\n` +
+                (row.instruction ? `🗣️ *Asked:* ${row.instruction}\n` : '') +
                 `📝 ${row.summary}\n` +
+                (changes ? `\n📋 *Changes:*\n${changes}\n` : '') +
                 `📁 ${pushed.join(', ')}\n` +
                 `🌿 ${this.githubRepo}@${this.githubBranch}\n` +
                 `_Render will redeploy from main._`;
