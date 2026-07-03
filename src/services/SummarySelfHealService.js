@@ -95,6 +95,16 @@ class SummarySelfHealService {
         this.config = cfg;
         this.enabled = cfg.SUMMARY_SELF_HEAL_ENABLED !== false;
         this.healModel = cfg.NVIDIA_HEAL_MODEL || DEFAULT_HEAL_MODEL;
+        // Fallback chain if Nemotron times out / is unavailable
+        this.healModels = [
+            ...new Set(
+                [
+                    cfg.NVIDIA_HEAL_MODEL || DEFAULT_HEAL_MODEL,
+                    cfg.NVIDIA_TRADE_MODEL || 'z-ai/glm-5.2',
+                    cfg.NVIDIA_MODEL || 'deepseek-ai/deepseek-v4-flash',
+                ].filter(Boolean)
+            ),
+        ];
         this.githubToken = cfg.GITHUB_TOKEN || '';
         this.githubRepo = cfg.GITHUB_REPO || 'officeboy12242/WA-BOT';
         this.githubBranch = cfg.GITHUB_BRANCH || 'main';
@@ -327,7 +337,16 @@ class SummarySelfHealService {
             return { ok: true, message: preview, healId };
         } catch (err) {
             logger.error(`Owner /fix failed: ${err.message}`);
-            return { ok: false, message: `❌ Fix failed: ${err.message}` };
+            const hint = /timeout|ETIMEDOUT/i.test(err.message)
+                ? '\n_NVIDIA timed out — try a shorter instruction (e.g. one file/area)._'
+                : /429|overloaded/i.test(err.message)
+                  ? '\n_NVIDIA is busy — wait 1–2 min and retry._'
+                  : '';
+            await this._notify(`🔧 */fix failed*\n${err.message}${hint}`).catch(() => {});
+            return {
+                ok: false,
+                message: `❌ Fix failed: ${err.message}${hint}\n_Tried models:_ ${this.healModels.join(' → ')}`,
+            };
         } finally {
             this._inflight = false;
         }
@@ -437,22 +456,26 @@ class SummarySelfHealService {
             if (/trade|stock|alert/i.test(instruction) && /trade|market|stock/i.test(low)) score += 8;
             if (/movie|zip/i.test(instruction) && /movie|hdhub/i.test(low)) score += 8;
 
-            // Light content scan for instruction keywords (e.g. "testing thing")
-            if (words.length && score < 10) {
-                try {
-                    const body = (await this._readLocalFile(rel)).toLowerCase();
-                    for (const w of words.slice(0, 6)) {
-                        if (body.includes(w)) score += 2;
-                    }
-                } catch {
-                    // ignore
-                }
-            }
             if (score > 0) scored.push({ rel, score });
         }
 
         scored.sort((a, b) => b.score - a.score);
-        let picks = scored.slice(0, 8).map((s) => s.rel);
+
+        // Content-scan only top path matches (avoid reading entire repo)
+        for (const row of scored.slice(0, 10)) {
+            try {
+                const body = (await this._readLocalFile(row.rel)).toLowerCase().slice(0, 12_000);
+                for (const w of words.slice(0, 5)) {
+                    if (body.includes(w)) row.score += 2;
+                }
+            } catch {
+                // ignore
+            }
+        }
+
+        scored.sort((a, b) => b.score - a.score);
+        // Keep payload small so NVIDIA does not time out
+        let picks = scored.slice(0, 4).map((s) => s.rel);
 
         // Fallback: common entrypoints if no keyword match
         if (!picks.length) {
@@ -464,7 +487,7 @@ class SummarySelfHealService {
             ].filter((p) => all.includes(p));
         }
 
-        return picks.slice(0, 8);
+        return picks.slice(0, 4);
     }
 
     _buildChangePreview(originals, files) {
@@ -501,16 +524,18 @@ class SummarySelfHealService {
     }
 
     async _generateProposal({ allowedPaths, systemPrompt, userPromptParts }) {
+        const pathList = allowedPaths.slice(0, 4);
         const originals = new Map();
         const filePayload = [];
-        for (const rel of allowedPaths) {
+        for (const rel of pathList) {
             if (!this._isSafePath(rel) && !SUMMARY_ALLOWED_FILES.includes(rel)) continue;
             try {
                 const content = await this._readLocalFile(rel);
                 originals.set(rel, content);
+                // Small snippets — large prompts are the main NVIDIA timeout cause
                 const snippet =
-                    content.length > 16_000
-                        ? `${content.slice(0, 8000)}\n\n/* ... middle omitted ... */\n\n${content.slice(-8000)}`
+                    content.length > 8_000
+                        ? `${content.slice(0, 4000)}\n\n/* ... middle omitted ... */\n\n${content.slice(-4000)}`
                         : content;
                 filePayload.push({ path: rel, content: snippet });
             } catch (err) {
@@ -518,37 +543,69 @@ class SummarySelfHealService {
             }
         }
 
-        const userPrompt = [
-            ...userPromptParts,
-            '',
-            'Source files (may be truncated — old_string must still match exactly):',
-            ...filePayload.map((f) => `\n===== FILE: ${f.path} =====\n${f.content}`),
-            '',
-            'Return JSON with precise replacements and a changelog.',
-        ].join('\n');
-
-        const previousModel = this.nvidia.model;
-        this.nvidia.model = this.healModel;
-        let raw;
-        try {
-            raw = await this.nvidia.complete(systemPrompt, userPrompt, {
-                maxTokens: 4000,
-                timeoutMs: 120_000,
-            });
-        } finally {
-            this.nvidia.model = previousModel;
+        if (!filePayload.length) {
+            throw new Error('No readable source files for heal');
         }
 
-        const parsed = extractJsonObject(raw);
-        if (!parsed || !Array.isArray(parsed.files)) {
-            throw new Error('Heal model returned invalid JSON');
+        const buildUserPrompt = (payload) =>
+            [
+                ...userPromptParts,
+                '',
+                'Source files (may be truncated — old_string must still match exactly):',
+                ...payload.map((f) => `\n===== FILE: ${f.path} =====\n${f.content}`),
+                '',
+                'Return JSON with precise replacements and a changelog. Keep replacements small.',
+            ].join('\n');
+
+        // Attempt 1: all candidates. Attempt 2: top 2 files only if model fails / bad JSON
+        const payloadAttempts = [
+            filePayload,
+            filePayload.slice(0, 2),
+            filePayload.slice(0, 1),
+        ];
+
+        let lastErr;
+        for (let p = 0; p < payloadAttempts.length; p++) {
+            const payload = payloadAttempts[p];
+            if (!payload.length) continue;
+            try {
+                const userPrompt = buildUserPrompt(payload);
+                logger.info(
+                    `Self-heal LLM call (${payload.length} file(s), ${userPrompt.length} chars), ` +
+                        `models: ${this.healModels.join(' → ')}`
+                );
+
+                const raw = await this.nvidia.completeWithModelFallback(
+                    this.healModels,
+                    systemPrompt,
+                    userPrompt,
+                    { maxTokens: 2500 }
+                );
+
+                const parsed = extractJsonObject(raw);
+                if (!parsed || !Array.isArray(parsed.files)) {
+                    throw new Error('Heal model returned invalid JSON');
+                }
+
+                const result = this._applyParsedProposal(parsed, originals, new Set(pathList));
+                if (!result.files.length) {
+                    throw new Error('Heal model returned no applicable replacements');
+                }
+                return result;
+            } catch (err) {
+                lastErr = err;
+                logger.warn(`Self-heal proposal attempt ${p + 1} failed: ${err.message}`);
+            }
         }
 
-        const allowed = new Set(allowedPaths);
+        throw lastErr || new Error('Heal proposal failed');
+    }
+
+    _applyParsedProposal(parsed, originals, allowed) {
         const files = [];
         const appliedNotes = [];
 
-        for (const f of parsed.files) {
+        for (const f of parsed.files || []) {
             const rel = String(f.path || '').replace(/\\/g, '/').replace(/^\.\//, '');
             if (!allowed.has(rel) || (!this._isSafePath(rel) && !SUMMARY_ALLOWED_FILES.includes(rel))) {
                 logger.warn(`Self-heal rejected path: ${rel}`);
@@ -559,20 +616,31 @@ class SummarySelfHealService {
             if (!next) continue;
 
             if (typeof f.content === 'string' && f.content.length > 50) {
-                next = f.content;
-                appliedNotes.push(`${rel}: full file rewrite`);
+                // Full rewrite only if file is small enough to be trustworthy
+                if (f.content.length < 25_000) {
+                    next = f.content;
+                    appliedNotes.push(`${rel}: full file rewrite`);
+                }
             } else if (Array.isArray(f.replacements)) {
                 let applied = 0;
-                for (const rep of f.replacements.slice(0, 6)) {
+                for (const rep of f.replacements.slice(0, 4)) {
                     const oldStr = String(rep.old_string ?? rep.old ?? '');
                     const newStr = String(rep.new_string ?? rep.new ?? '');
                     if (!oldStr || oldStr === newStr) continue;
                     if (!next.includes(oldStr)) {
-                        logger.warn(`Self-heal old_string not found in ${rel}`);
-                        continue;
+                        // Try a looser match: trim and collapse whitespace once
+                        const loose = oldStr.trim();
+                        if (loose && next.includes(loose)) {
+                            next = next.replace(loose, newStr.trim());
+                            applied += 1;
+                        } else {
+                            logger.warn(`Self-heal old_string not found in ${rel}`);
+                            continue;
+                        }
+                    } else {
+                        next = next.replace(oldStr, newStr);
+                        applied += 1;
                     }
-                    next = next.replace(oldStr, newStr);
-                    applied += 1;
                     const label = oldStr.trim().slice(0, 40).replace(/\n/g, ' ');
                     appliedNotes.push(`${rel}: replaced “${label}…”`);
                 }

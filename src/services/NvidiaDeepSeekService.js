@@ -71,7 +71,7 @@ class NvidiaDeepSeekService {
     /**
      * @param {string} systemPrompt
      * @param {string} userPrompt
-     * @param {{ timeoutMs?: number, maxTokens?: number, forTrade?: boolean }} [opts]
+     * @param {{ timeoutMs?: number, maxTokens?: number, forTrade?: boolean, model?: string, timeoutCapMs?: number }} [opts]
      * @returns {Promise<string>}
      */
     async complete(systemPrompt, userPrompt, opts = {}) {
@@ -80,27 +80,101 @@ class NvidiaDeepSeekService {
         }
 
         const forTrade = opts.forTrade === true;
-        const model = this.resolveModel(forTrade);
+        const model = opts.model || this.resolveModel(forTrade);
+        const cap = opts.timeoutCapMs || (forTrade ? MAX_TRADE_TIMEOUT_MS : MAX_TIMEOUT_MS);
         const timeoutMs = clampTimeoutMs(
-            opts.timeoutMs ?? (forTrade ? this.tradeTimeoutMs : this.timeoutMs)
+            opts.timeoutMs ?? (forTrade ? this.tradeTimeoutMs : this.timeoutMs),
+            cap
         );
         const maxTokens = opts.maxTokens ?? 800;
 
         const body = this.buildRequestBody(model, systemPrompt, userPrompt, maxTokens);
 
-        const { data } = await axios.post(this.baseUrl, body, {
-            timeout: timeoutMs,
-            headers: {
-                Authorization: `Bearer ${this.apiKey}`,
-                'Content-Type': 'application/json',
-            },
-        });
+        try {
+            const { data } = await axios.post(this.baseUrl, body, {
+                timeout: timeoutMs,
+                headers: {
+                    Authorization: `Bearer ${this.apiKey}`,
+                    'Content-Type': 'application/json',
+                },
+            });
 
-        const content = this.extractMessageContent(data);
-        if (!content?.trim()) {
-            throw new Error('Empty response from NVIDIA API');
+            const content = this.extractMessageContent(data);
+            if (!content?.trim()) {
+                throw new Error('Empty response from NVIDIA API');
+            }
+            return content.trim();
+        } catch (err) {
+            const status = err.response?.status;
+            const detail = err.response?.data?.detail || err.response?.data?.message || err.message;
+            const msg = status ? `NVIDIA ${status}: ${detail}` : String(detail || err.message);
+            const wrapped = new Error(msg);
+            wrapped.cause = err;
+            throw wrapped;
         }
-        return content.trim();
+    }
+
+    /**
+     * Heal / long jobs: try primary model then fallbacks with shrinking prompts.
+     * @param {string[]} models
+     * @param {string} systemPrompt
+     * @param {string} userPrompt
+     * @param {{ maxTokens?: number }} [opts]
+     */
+    async completeWithModelFallback(models, systemPrompt, userPrompt, opts = {}) {
+        const chain = [...new Set((models || []).filter(Boolean))];
+        if (!chain.length) chain.push(this.model);
+
+        const attempts = [
+            { prompt: userPrompt, maxTokens: opts.maxTokens ?? 2500, timeoutMs: 120_000 },
+            {
+                prompt: userPrompt.slice(0, 10_000) + (userPrompt.length > 10_000 ? '\n\n[...truncated...]' : ''),
+                maxTokens: 1800,
+                timeoutMs: 150_000,
+            },
+            {
+                prompt: userPrompt.slice(0, 5500) + (userPrompt.length > 5500 ? '\n\n[...truncated...]' : ''),
+                maxTokens: 1200,
+                timeoutMs: 150_000,
+            },
+        ];
+
+        let lastErr;
+        for (const model of chain) {
+            for (let i = 0; i < attempts.length; i++) {
+                const attempt = attempts[i];
+                try {
+                    if (i > 0 || model !== chain[0]) {
+                        logger.warn(
+                            `NVIDIA heal retry model=${model} attempt=${i + 1} ` +
+                                `(${attempt.prompt.length} chars)`
+                        );
+                    }
+                    return await this.complete(systemPrompt, attempt.prompt, {
+                        model,
+                        maxTokens: attempt.maxTokens,
+                        timeoutMs: attempt.timeoutMs,
+                        timeoutCapMs: MAX_TRADE_TIMEOUT_MS,
+                    });
+                } catch (err) {
+                    lastErr = err;
+                    const retryable =
+                        this.isTimeoutError(err) ||
+                        /empty response|429|5\d\d|ECONNRESET|ENOTFOUND|socket|overloaded|unavailable/i.test(
+                            String(err?.message || '')
+                        );
+                    logger.warn(`NVIDIA heal failed (${model}): ${err.message}`);
+                    if (!retryable && i === 0 && /401|403|invalid.*model|not found/i.test(String(err.message))) {
+                        // bad model id — try next model immediately
+                        break;
+                    }
+                    if (!retryable && i === attempts.length - 1) {
+                        break;
+                    }
+                }
+            }
+        }
+        throw lastErr || new Error('All NVIDIA heal models failed');
     }
 
     extractMessageContent(data) {
