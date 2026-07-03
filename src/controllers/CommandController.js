@@ -47,6 +47,7 @@ import {
 } from './handlers/groupHandlers.js';
 
 import { handleTradelert, handleTradenow } from './handlers/tradeHandlers.js';
+import { handleHeal } from './handlers/healHandlers.js';
 
 import {
     handleAddAdmin,
@@ -297,6 +298,7 @@ class CommandController {
             case 'summaryon':  await handleSummaryOn(sock, chatId, senderJid, ctx); break;
             case 'summaryoff': await handleSummaryOff(sock, chatId, senderJid, ctx); break;
             case 'summarynow': await handleSummaryNow(sock, chatId, senderJid, ctx); break;
+            case 'heal':       await handleHeal(sock, chatId, senderJid, args, ctx); break;
             case 'trending':   await handleTrending(sock, chatId, senderJid, args, ctx); break;
             case 'tradelert':  await handleTradelert(sock, chatId, senderJid, args, ctx); break;
             case 'tradenow':   await handleTradenow(sock, chatId, senderJid, args, ctx); break;

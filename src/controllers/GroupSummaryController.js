@@ -5,6 +5,7 @@
 import { logger } from '../utils/logger.js';
 import { formatDateLabelIST, getRecapDateStrIST } from '../utils/dateIST.js';
 import NvidiaDeepSeekService from '../services/NvidiaDeepSeekService.js';
+import SummarySelfHealService from '../services/SummarySelfHealService.js';
 
 function parseSummaryTime(timeStr) {
     const [h, m = '0'] = String(timeStr || '00:00').trim().split(':');
@@ -111,6 +112,7 @@ class GroupSummaryController {
         this.config = config;
         this.mongoDb = mongoDb;
         this.nvidia = new NvidiaDeepSeekService(config);
+        this.selfHeal = new SummarySelfHealService(config, mongoDb);
         this.minMessages = Math.max(1, Number(config.GROUP_SUMMARY_MIN_MESSAGES) || 3);
         this.enabled = config.GROUP_SUMMARY_ENABLED !== false;
         this.timezone = config.GROUP_SUMMARY_TIMEZONE || 'Asia/Kolkata';
@@ -130,10 +132,12 @@ class GroupSummaryController {
             { group_id: 1, recap_date: 1 },
             { unique: true, name: 'group_summary_sent_unique' }
         );
+        await this.selfHeal.init();
     }
 
     setSock(sock) {
         this._sock = sock;
+        this.selfHeal.setSock(sock);
     }
 
     async wasRecapSent(groupId, dateStr) {
@@ -276,6 +280,7 @@ class GroupSummaryController {
     }
 
     async postSummaryForGroup(sock, group, dateStr, dateLabel, timeLabel, { force = false } = {}) {
+        this.selfHeal.setSock(sock);
         const groupId = group.group_id;
         const groupName = group.group_name || groupId;
         const messages = await this.chatLog.getMessagesForDay(groupId, dateStr);
@@ -333,6 +338,12 @@ class GroupSummaryController {
         } catch (err) {
             logger.error(`NVIDIA recap failed for ${groupName}: ${err.message}`);
             summary = null;
+            this.selfHeal.triggerFromSummaryFailure({
+                groupName,
+                dateStr,
+                errorMessage: err.message,
+                messageCount: messages.length,
+            });
         }
 
         // Always show topics — fill gaps from chat activity if LLM timed out or returned empty

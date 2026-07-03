@@ -365,6 +365,14 @@ export const COMMAND_REGISTRY = [
         category: 'movie',
     },
     {
+        names: ['/heal'],
+        key: 'heal',
+        scope: 'any',
+        role: 'owner',
+        help: 'Summary self-heal — `/heal approve ID` or `/heal reject ID`',
+        category: 'owner',
+    },
+    {
         names: ['/trending'],
         key: 'trending',
         scope: 'group_only',
