@@ -167,14 +167,16 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
                 r += '📡 *AI WATCHLIST PREVIEW* 📡\n';
                 r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
                 r += `🕐 *Scanned:* ${formatScannedAt(preview.scannedAt)} IST\n`;
-                r += `📈 *Picks:* ${preview.symbols.join(', ')}\n`;
+                r += `📈 *Picks (today's top movers):* ${preview.symbols.join(', ')}\n`;
+                if (preview.moversBrief) {
+                    r += `📊 *Live movers*\n${preview.moversBrief}\n`;
+                }
                 if (preview.hiddenGem) {
                     r += `💎 *Hidden gem:* ${preview.hiddenGem}`;
                     if (preview.hiddenGemReason) r += ` — _${preview.hiddenGemReason}_`;
                     r += '\n';
                 }
                 r += '\n';
-                r += `📊 *Movers*\n${preview.moversBrief}\n\n`;
                 r += `📰 *Market news*\n${preview.marketNews}\n\n`;
                 r += '_Full analysis runs at daily alert time; only BUY ≥70% gets posted._';
                 await editMessageText(sock, chatId, loading?.key, r);
