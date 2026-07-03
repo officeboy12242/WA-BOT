@@ -1,48 +1,10 @@
 /**
- * Lightweight NSE/BSE spot quotes — Yahoo Finance chart API with retries + fallbacks.
+ * Lightweight NSE/BSE spot quotes — Yahoo Finance with AI symbol resolution on failure.
  */
 
-import axios from 'axios';
 import { logger } from '../utils/logger.js';
-
-const YAHOO_CHART_HOSTS = [
-    'https://query1.finance.yahoo.com/v8/finance/chart',
-    'https://query2.finance.yahoo.com/v8/finance/chart',
-];
-
-const CHROME_UA =
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-
-const TIMEOUT_MS = 18_000;
-const MAX_ATTEMPTS = 3;
-
-const INDEX_MAP = {
-    NIFTY: '^NSEI',
-    NIFTY50: '^NSEI',
-    BANKNIFTY: '^NSEBANK',
-    SENSEX: '^BSESN',
-    FINNIFTY: 'NIFTY_FIN_SERVICE.NS',
-};
-
-/** NSE ticker → Yahoo symbols to try (post-demerger / renames) */
-const YAHOO_SYMBOL_FALLBACKS = {
-    TATAMOTORS: ['TMPV.NS', 'TMCV.NS', 'TATAMOTORS.NS'],
-    TATAMTRDVV: ['TMPV.NS', 'TMCV.NS'],
-};
-
-function yahooCandidates(rawSymbol) {
-    const raw = String(rawSymbol || '').trim().toUpperCase().replace(/\s+/g, '');
-    if (!raw) return [];
-    if (INDEX_MAP[raw]) return [INDEX_MAP[raw]];
-    if (raw.startsWith('^')) return [raw];
-    if (raw.endsWith('.NS') || raw.endsWith('.BO')) return [raw];
-    if (YAHOO_SYMBOL_FALLBACKS[raw]) return YAHOO_SYMBOL_FALLBACKS[raw];
-    return [`${raw}.NS`];
-}
-
-function sleep(ms) {
-    return new Promise((r) => setTimeout(r, ms));
-}
+import { fetchYahooChartMeta } from '../utils/yahooChartFetch.js';
+import { stockSymbolResolverService } from './StockSymbolResolverService.js';
 
 /**
  * @param {object} meta Yahoo chart meta
@@ -101,41 +63,13 @@ function formatQuoteContext(quote) {
     return lines.join('\n');
 }
 
-async function fetchYahooMeta(yahooSymbol) {
-    let lastErr;
-
-    for (const host of YAHOO_CHART_HOSTS) {
-        for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-            try {
-                const url = `${host}/${encodeURIComponent(yahooSymbol)}`;
-                const { data } = await axios.get(url, {
-                    params: { interval: '1d', range: '5d', includePrePost: false },
-                    timeout: TIMEOUT_MS,
-                    headers: {
-                        'User-Agent': CHROME_UA,
-                        Accept: 'application/json,text/plain,*/*',
-                        'Accept-Language': 'en-IN,en;q=0.9',
-                    },
-                });
-
-                const meta = data?.chart?.result?.[0]?.meta;
-                if (meta?.regularMarketPrice != null || meta?.previousClose != null) {
-                    return meta;
-                }
-                lastErr = new Error('empty chart meta');
-            } catch (err) {
-                lastErr = err;
-                logger.debug(`Yahoo quote attempt failed ${yahooSymbol} @ ${host}: ${err.message}`);
-                await sleep(500 * (attempt + 1));
-            }
-        }
-    }
-
-    throw lastErr || new Error(`No quote for ${yahooSymbol}`);
-}
-
 export function normalizeYahooSymbol(raw) {
-    return yahooCandidates(raw)[0] || '';
+    const s = String(raw || '').trim().toUpperCase().replace(/\.NS$|\.BO$/i, '').replace(/\s+/g, '');
+    if (!s) return '';
+    if (s === 'NIFTY' || s === 'NIFTY50') return '^NSEI';
+    if (s === 'BANKNIFTY') return '^NSEBANK';
+    if (s.endsWith('.NS') || s.endsWith('.BO')) return s;
+    return `${s}.NS`;
 }
 
 class IndianStockQuoteService {
@@ -145,22 +79,24 @@ class IndianStockQuoteService {
      */
     async fetchQuote(rawSymbol) {
         const raw = String(rawSymbol || '').trim().toUpperCase();
-        const candidates = yahooCandidates(raw);
-        if (!candidates.length) return null;
+        if (!raw) return null;
 
-        let lastErr;
-        for (const yahooSymbol of candidates) {
+        try {
+            return await this._fetchWithMapping(raw, false);
+        } catch (err) {
             try {
-                const meta = await fetchYahooMeta(yahooSymbol);
-                return metaToQuote(meta, yahooSymbol, raw);
-            } catch (err) {
-                lastErr = err;
-                logger.debug(`Yahoo fallback ${raw} via ${yahooSymbol}: ${err.message}`);
+                return await this._fetchWithMapping(raw, true);
+            } catch (retryErr) {
+                logger.warn(`Stock quote failed for ${rawSymbol}: ${retryErr.message}`);
+                return null;
             }
         }
+    }
 
-        logger.warn(`Stock quote failed for ${rawSymbol}: ${lastErr?.message || 'no quote'}`);
-        return null;
+    async _fetchWithMapping(raw, forceRefresh) {
+        const mapping = await stockSymbolResolverService.resolve(raw, { forceRefresh });
+        const meta = await fetchYahooChartMeta(mapping.yahooSymbol);
+        return metaToQuote(meta, mapping.yahooSymbol, mapping.userSymbol || raw);
     }
 
     /**
