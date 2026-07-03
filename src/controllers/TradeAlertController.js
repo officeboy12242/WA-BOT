@@ -108,8 +108,8 @@ class TradeAlertController {
         });
 
         logger.info(
-            `Trade analysis LLM for ${intel.symbol} (prompt ${userPrompt.length} chars, ` +
-                `research=${researchBrief ? 'yes' : 'no'})…`
+            `Trade analysis LLM for ${intel.symbol} (${this.nvidia.tradeModel}, ` +
+                `prompt ${userPrompt.length} chars, research=${researchBrief ? 'yes' : 'no'})…`
         );
 
         let body = await this.nvidia.completeTradeAnalysis(TRADE_ANALYSIS_SYSTEM_PROMPT, userPrompt, {
@@ -243,7 +243,7 @@ class TradeAlertController {
         const snapshot = await marketScanService.buildDiscoverySnapshot();
         const userPrompt = buildDiscoveryUserPrompt(snapshot.context, this.discoveryCount);
 
-        const raw = await this.nvidia.complete(STOCK_DISCOVERY_SYSTEM_PROMPT, userPrompt, {
+        const raw = await this.nvidia.completeTrade(STOCK_DISCOVERY_SYSTEM_PROMPT, userPrompt, {
             maxTokens: 900,
             timeoutMs: 90_000,
         });

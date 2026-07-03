@@ -1,12 +1,13 @@
 /**
- * NVIDIA NIM chat completions (DeepSeek V4 Flash).
+ * NVIDIA NIM chat completions — summary model + optional trade model (GLM-5.2).
  */
 
 import axios from 'axios';
 import { logger } from '../utils/logger.js';
 
 const DEFAULT_BASE_URL = 'https://integrate.api.nvidia.com/v1/chat/completions';
-const DEFAULT_MODEL = 'deepseek-ai/deepseek-v4-flash';
+const DEFAULT_SUMMARY_MODEL = 'deepseek-ai/deepseek-v4-flash';
+const DEFAULT_TRADE_MODEL = 'z-ai/glm-5.2';
 const MAX_TIMEOUT_MS = 120_000;
 const MAX_TRADE_TIMEOUT_MS = 180_000;
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -29,7 +30,8 @@ function clampTimeoutMs(raw, cap = MAX_TIMEOUT_MS) {
 class NvidiaDeepSeekService {
     constructor(config = {}) {
         this.apiKey = config.NVIDIA_API_KEY || '';
-        this.model = config.NVIDIA_MODEL || DEFAULT_MODEL;
+        this.model = config.NVIDIA_MODEL || DEFAULT_SUMMARY_MODEL;
+        this.tradeModel = config.NVIDIA_TRADE_MODEL?.trim() || DEFAULT_TRADE_MODEL;
         this.baseUrl = config.NVIDIA_API_BASE_URL || DEFAULT_BASE_URL;
         this.timeoutMs = clampTimeoutMs(config.NVIDIA_TIMEOUT_MS);
         this.summaryTimeoutMs = clampTimeoutMs(
@@ -45,22 +47,13 @@ class NvidiaDeepSeekService {
         return Boolean(this.apiKey);
     }
 
-    /**
-     * @param {string} systemPrompt
-     * @param {string} userPrompt
-     * @param {{ timeoutMs?: number, maxTokens?: number }} [opts]
-     * @returns {Promise<string>}
-     */
-    async complete(systemPrompt, userPrompt, opts = {}) {
-        if (!this.apiKey) {
-            throw new Error('NVIDIA_API_KEY is not configured');
-        }
+    resolveModel(forTrade = false) {
+        return forTrade ? this.tradeModel : this.model;
+    }
 
-        const timeoutMs = clampTimeoutMs(opts.timeoutMs ?? this.timeoutMs);
-        const maxTokens = opts.maxTokens ?? 800;
-
+    buildRequestBody(model, systemPrompt, userPrompt, maxTokens) {
         const body = {
-            model: this.model,
+            model,
             messages: [
                 { role: 'system', content: systemPrompt },
                 { role: 'user', content: userPrompt },
@@ -68,8 +61,32 @@ class NvidiaDeepSeekService {
             temperature: 0.35,
             max_tokens: maxTokens,
             stream: false,
-            chat_template_kwargs: { thinking: false },
         };
+        if (/deepseek/i.test(model)) {
+            body.chat_template_kwargs = { thinking: false };
+        }
+        return body;
+    }
+
+    /**
+     * @param {string} systemPrompt
+     * @param {string} userPrompt
+     * @param {{ timeoutMs?: number, maxTokens?: number, forTrade?: boolean }} [opts]
+     * @returns {Promise<string>}
+     */
+    async complete(systemPrompt, userPrompt, opts = {}) {
+        if (!this.apiKey) {
+            throw new Error('NVIDIA_API_KEY is not configured');
+        }
+
+        const forTrade = opts.forTrade === true;
+        const model = this.resolveModel(forTrade);
+        const timeoutMs = clampTimeoutMs(
+            opts.timeoutMs ?? (forTrade ? this.tradeTimeoutMs : this.timeoutMs)
+        );
+        const maxTokens = opts.maxTokens ?? 800;
+
+        const body = this.buildRequestBody(model, systemPrompt, userPrompt, maxTokens);
 
         const { data } = await axios.post(this.baseUrl, body, {
             timeout: timeoutMs,
@@ -84,6 +101,11 @@ class NvidiaDeepSeekService {
             throw new Error('Empty response from NVIDIA API');
         }
         return content.trim();
+    }
+
+    /** Trade discovery, research, CE/PE analysis — uses NVIDIA_TRADE_MODEL (GLM-5.2). */
+    async completeTrade(systemPrompt, userPrompt, opts = {}) {
+        return this.complete(systemPrompt, userPrompt, { ...opts, forTrade: true });
     }
 
     parseSummaryJson(raw) {
@@ -183,6 +205,7 @@ class NvidiaDeepSeekService {
                 return await this.complete(systemPrompt, attempt.prompt, {
                     timeoutMs: attempt.timeoutMs,
                     maxTokens: attempt.maxTokens,
+                    forTrade: true,
                 });
             } catch (err) {
                 lastErr = err;

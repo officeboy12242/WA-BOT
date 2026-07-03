@@ -63,7 +63,10 @@ export const config = {
     GROUP_SUMMARY_MIN_MESSAGES: parseInt(process.env.GROUP_SUMMARY_MIN_MESSAGES, 10) || 3,
     GROUP_SUMMARY_MAX_MESSAGES: parseInt(process.env.GROUP_SUMMARY_MAX_MESSAGES, 10) || 400,
     NVIDIA_API_KEY: process.env.NVIDIA_API_KEY?.trim() || '',
+    /** Group summary / recap model */
     NVIDIA_MODEL: process.env.NVIDIA_MODEL?.trim() || 'deepseek-ai/deepseek-v4-flash',
+    /** Trade discovery, research, CE/PE analysis model */
+    NVIDIA_TRADE_MODEL: process.env.NVIDIA_TRADE_MODEL?.trim() || 'z-ai/glm-5.2',
     NVIDIA_API_BASE_URL: process.env.NVIDIA_API_BASE_URL?.trim() || 'https://integrate.api.nvidia.com/v1/chat/completions',
     /** Capped at 120s — avoid huge env values (e.g. 900000) that hang recaps. */
     NVIDIA_TIMEOUT_MS: (() => {
