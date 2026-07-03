@@ -64,7 +64,7 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
             r += `📢 *Group:* ${groupName}\n`;
             r += `🔘 *Status:* ${currentlyOn ? '✅ ON' : '❌ OFF'}\n`;
             r += `🧠 *Mode:* ${modeLabel(mode)}\n`;
-            r += `🕐 *Daily time:* ${formatAlertTime()} IST\n`;
+            r += `🕐 *Daily time:* ${formatAlertTime()} IST (trading days only)\n`;
             r += `📊 *Symbols:* ${symbolLine}\n`;
             r += `🔔 *Posts:* Full CE + PE analysis when Primary ≥70%\n`;
             r += `🌐 *Data:* Live Yahoo prices + Google News RSS\n`;
@@ -99,6 +99,7 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
             r += `🧠 *Mode:* ${modeLabel(mode)}\n`;
             r += '🌐 Scans *live news*, earnings/results headlines, top gainers/losers\n';
             r += '🔔 Posts full *CE + PE* analysis when Primary Pick ≥70%\n';
+            r += '📅 Skips *weekends & NSE holidays* — use `/tradenow` anytime\n';
             r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
             r += '💡 `/tradelert scan` — preview watchlist now\n';
             r += '💡 `/tradenow TCS` — on-demand analysis';

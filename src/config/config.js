@@ -103,6 +103,13 @@ export const config = {
     TRADE_ALERT_DISCOVERY_COUNT: Math.max(8, Math.min(15, parseInt(process.env.TRADE_ALERT_DISCOVERY_COUNT, 10) || 10)),
     /** Step-1 AI research brief before CE/PE trade analysis */
     TRADE_TWO_STEP_RESEARCH: process.env.TRADE_TWO_STEP_RESEARCH !== 'false',
+    /** Skip daily trade alerts on NSE holidays and weekends (IST) */
+    TRADE_ALERT_SKIP_NON_TRADING_DAYS: process.env.TRADE_ALERT_SKIP_NON_TRADING_DAYS !== 'false',
+    TRADE_ALERT_SKIP_WEEKENDS: process.env.TRADE_ALERT_SKIP_WEEKENDS !== 'false',
+    /** Extra closed dates YYYY-MM-DD, comma-separated */
+    TRADE_ALERT_EXTRA_HOLIDAYS: (process.env.TRADE_ALERT_EXTRA_HOLIDAYS || '').trim(),
+    /** Force run on specific dates (e.g. budget Sunday) YYYY-MM-DD, comma-separated */
+    TRADE_ALERT_FORCE_TRADING_DAYS: (process.env.TRADE_ALERT_FORCE_TRADING_DAYS || '').trim(),
     BOT_LOG_NUMBER: process.env.BOT_LOG_NUMBER?.trim() || '',
     GITHUB_TRENDING_ENABLED: process.env.GITHUB_TRENDING_ENABLED !== 'false',
     GITHUB_TRENDING_TIMES: (process.env.GITHUB_TRENDING_TIMES || '09:00,11:30,14:00,16:30,19:00')

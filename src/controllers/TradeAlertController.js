@@ -18,6 +18,10 @@ import {
 } from '../prompts/stockDiscoveryPrompt.js';
 import { parseTradeSignal, parseDiscoverySymbols } from '../utils/tradeSignalParser.js';
 import { enforceLiveSpotPrice } from '../utils/tradeQuoteUtils.js';
+import {
+    getIndianMarketClosedReason,
+    isIndianEquityTradingDay,
+} from '../utils/indianMarketCalendar.js';
 
 function parseAlertTime(timeStr) {
     const [h, m = '0'] = String(timeStr || '09:20').trim().split(':');
@@ -277,6 +281,13 @@ class TradeAlertController {
             logger.info('Trade alert: disabled (TRADE_ALERT_ENABLED=false)');
             return;
         }
+
+        if (!isIndianEquityTradingDay(Date.now(), this.config)) {
+            const reason = getIndianMarketClosedReason(Date.now(), this.config);
+            logger.info(`Trade alert: skipped — ${reason}`);
+            return;
+        }
+
         if (!sock) {
             logger.warn('Trade alert: no socket');
             return;
