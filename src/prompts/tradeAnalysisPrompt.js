@@ -162,13 +162,18 @@ export function buildTradeUserPrompt({
     return lines.join('\n');
 }
 
-export function wrapTradeAlertMessage(symbol, body, { isDaily = false } = {}) {
+export function wrapTradeAlertMessage(symbol, body, { isDaily = false, isHiddenGem = false } = {}) {
     let text = '';
     text += '┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n';
-    text += isDaily ? '┃  📈 *DAILY TRADE ALERT* 📈  ┃\n' : '┃  📊 *TRADE ANALYSIS* 📊  ┃\n';
+    if (isHiddenGem && isDaily) {
+        text += '┃  💎 *HIDDEN GEM ALERT* 💎  ┃\n';
+    } else {
+        text += isDaily ? '┃  📈 *DAILY TRADE ALERT* 📈  ┃\n' : '┃  📊 *TRADE ANALYSIS* 📊  ┃\n';
+    }
     text += '┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n';
     if (isDaily) {
-        text += `🕐 _Morning scan · ${symbol} · ${formatNowLabelIST()}_\n\n`;
+        const tag = isHiddenGem ? '💎 Hidden gem scan' : 'Morning scan';
+        text += `🕐 _${tag} · ${symbol} · ${formatNowLabelIST()}_\n\n`;
     }
     text += body.trim();
     text += '\n\n─────────────────────────────\n';
