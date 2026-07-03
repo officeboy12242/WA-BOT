@@ -3,10 +3,17 @@
  */
 
 import { extractPhoneNumber } from '../../utils/permissions.js';
+import { editMessageText } from '../../utils/waMessage.js';
 import { logger } from '../../utils/logger.js';
 
 function getHeal(groupSummaryController) {
     return groupSummaryController?.selfHeal || null;
+}
+
+function makeProgressEditor(sock, chatId, messageKey) {
+    return async (text) => {
+        await editMessageText(sock, chatId, messageKey, text);
+    };
 }
 
 export async function handleFix(sock, chatId, senderJid, args, { groupManager, groupSummaryController }) {
@@ -47,12 +54,22 @@ export async function handleFix(sock, chatId, senderJid, args, { groupManager, g
         return;
     }
 
-    await sock.sendMessage(chatId, {
-        text: `🔧 _Working on:_ ${instruction}\n_Nemotron is preparing a patch…_`,
+    const loading = await sock.sendMessage(chatId, {
+        text:
+            '🔧 *AI FIX IN PROGRESS*\n\n' +
+            `🗣️ *Instruction:* ${instruction.slice(0, 120)}\n` +
+            '⏳ Starting…',
     });
 
-    const result = await heal.proposeFromInstruction(instruction, { byPhone: senderPhone });
-    await sock.sendMessage(chatId, { text: result.message });
+    const onProgress = makeProgressEditor(sock, chatId, loading?.key);
+
+    const result = await heal.proposeFromInstruction(instruction, {
+        byPhone: senderPhone,
+        onProgress,
+    });
+
+    // Final message replaces the live status (proposal or error)
+    await editMessageText(sock, chatId, loading?.key, result.message);
     logger.info(`/fix by ${senderPhone}: ${result.ok ? result.healId : result.message}`);
 }
 
@@ -102,9 +119,14 @@ export async function handleHeal(sock, chatId, senderJid, args, { groupManager, 
             await sock.sendMessage(chatId, { text: '❌ Usage: `/heal approve <id>`' });
             return;
         }
-        await sock.sendMessage(chatId, { text: `🔧 _Pushing heal ${healId}…_` });
-        const result = await heal.approveAndPush(healId, senderPhone);
-        await sock.sendMessage(chatId, { text: result.message });
+
+        const loading = await sock.sendMessage(chatId, {
+            text: `🔧 *PUSHING TO GITHUB*\n\n🆔 Heal *${healId}*\n⏳ Starting…`,
+        });
+        const onProgress = makeProgressEditor(sock, chatId, loading?.key);
+
+        const result = await heal.approveAndPush(healId, senderPhone, { onProgress });
+        await editMessageText(sock, chatId, loading?.key, result.message);
         logger.info(`Heal ${healId} approve by ${senderPhone}: ${result.ok}`);
         return;
     }
