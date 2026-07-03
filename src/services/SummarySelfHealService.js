@@ -89,35 +89,116 @@ RULES:
 • Max 4 replacements total.
 • If no code change is needed, return {"summary":"no change","changelog":[],"files":[]}`;
 
-const INSTRUCTION_HEAL_SYSTEM_PROMPT = `You are a senior Node.js engineer for a WhatsApp bot (Baileys, ESM).
+const INSTRUCTION_HEAL_SYSTEM_PROMPT = `You are an expert coding agent for a WhatsApp bot (Baileys, Node ESM), same quality bar as a senior engineer in Cursor.
 
-The owner gives a natural-language fix instruction. Apply ONLY that request.
+The owner gives a natural-language instruction. Implement it COMPLETELY and PROPERLY — not a hack.
+
+Return ONLY valid JSON (no markdown fences) in this shape:
+${JSON_SHAPE}
+
+QUALITY RULES (mandatory):
+1. Prefer CONFIG / feature flags over deleting logic.
+   - Example: disable good-morning → set MORNING_MESSAGES_ENABLED default/check to false in src/config/config.js
+     and keep sendDailyMorning implementation intact so it can be re-enabled.
+   - NEVER gut a method to only \`return;\` when a flag already exists.
+2. Touch ALL related entry points for the feature (controller + scheduler + config + bot wiring if present).
+3. Keep changes reversible: owner should turn the feature back on via env/config without rewriting code.
+4. Minimal but COMPLETE: no drive-by refactors, but do not leave dead timers/schedulers running for disabled features.
+5. Preserve exports and public method names.
+6. Valid ESM JavaScript only.
+7. old_string must match the file EXACTLY (unique snippet).
+8. Max 8 replacements total across all files.
+9. Do not touch secrets, .env files, or auth sessions (config.js defaults are OK).
+10. changelog must explain the proper approach (not "emptied function").
+11. If you cannot do it safely, return files:[].`;
+
+const COMPLETENESS_SYSTEM_PROMPT = `You review a code change for completeness (like a senior PR review).
+
+The owner instruction and the CURRENT patched file contents are provided.
+If the change is incomplete or hacky, return MORE replacements to finish it properly.
+If already complete and proper, return {"summary":"complete","changelog":[],"files":[]}.
+
+Return ONLY valid JSON:
+${JSON_SHAPE}
+
+REJECT these incomplete patterns:
+• Emptying a function to \`return;\` / \`return null;\` when a feature flag exists
+• Disabling a feature in one file but leaving its scheduler/timer still running
+• Deleting implementation that should stay for re-enable via config
+
+PREFER:
+• config.js flag defaults (e.g. MORNING_MESSAGES_ENABLED === 'true' so default is off)
+• Early-return guards that check the flag
+• Stopping schedulers when the flag is false (scheduler already no-ops if flag false — ensure flag is false by default)`;
+
+const REPAIR_SYSTEM_PROMPT = `You repair a failed code patch. The previous patch failed validation or was incomplete/hacky.
 
 Return ONLY valid JSON (no markdown fences) in this shape:
 ${JSON_SHAPE}
 
 RULES:
-• Only edit files under src/ that are provided below.
-• old_string must match the file EXACTLY (include enough context to be unique).
-• new_string is the replacement (use "" to delete a block).
-• Prefer minimal diffs — do not refactor unrelated code.
-• Keep all existing exports and public methods unless the instruction explicitly removes them.
-• Output must be valid JavaScript (ESM). Do not leave broken brackets or half-deleted functions.
-• changelog: short bullets of what you changed (for the owner to review).
-• Max 6 replacements total across all files.
-• Do not touch secrets, .env, or auth sessions.
-• If the instruction cannot be done safely with the given files, return files:[].`;
+• Fix the validation / completeness errors listed by the user.
+• Prefer proper config-flag disable over gutting methods.
+• old_string must match the provided file content exactly.
+• Keep the owner's original intent.
+• Preserve exports and public methods.`;
 
-const REPAIR_SYSTEM_PROMPT = `You repair a failed code patch. The previous patch broke syntax or integrity checks.
-
-Return ONLY valid JSON (no markdown fences) in this shape:
-${JSON_SHAPE}
-
-RULES:
-• Fix the validation errors listed by the user.
-• old_string must match the CURRENT (broken or original) file content exactly.
-• Prefer minimal fixes to restore valid JS and required exports/methods.
-• Keep the owner's original intent if possible.`;
+/** Keyword → files that must be considered for a complete fix */
+const FEATURE_FILE_MAP = [
+    {
+        re: /morning|good\s*morning|romantic\s*morning/i,
+        files: [
+            'src/config/config.js',
+            'src/controllers/MorningMessageController.js',
+            'src/utils/morningScheduler.js',
+            'src/services/MorningMessageScraper.js',
+            'src/models/MorningMessageDatabase.js',
+        ],
+    },
+    {
+        re: /summary|recap|group\s*chat\s*log/i,
+        files: [
+            'src/controllers/GroupSummaryController.js',
+            'src/services/GroupChatLogService.js',
+            'src/services/NvidiaDeepSeekService.js',
+            'src/utils/groupSummaryScheduler.js',
+            'src/config/config.js',
+        ],
+    },
+    {
+        re: /trade|stock|f&o|option/i,
+        files: [
+            'src/controllers/TradeAlertController.js',
+            'src/services/MarketScanService.js',
+            'src/services/TradeResearchService.js',
+            'src/config/config.js',
+        ],
+    },
+    {
+        re: /movie|zip|hdhub|moviesdrive/i,
+        files: [
+            'src/services/HdHubMoviesService.js',
+            'src/controllers/MovieController.js',
+            'src/config/config.js',
+        ],
+    },
+    {
+        re: /heal|self-?heal|\/fix/i,
+        files: [
+            'src/services/SummarySelfHealService.js',
+            'src/controllers/handlers/healHandlers.js',
+            'src/config/config.js',
+        ],
+    },
+    {
+        re: /sticker/i,
+        files: [
+            'src/services/StickerForwarder.js',
+            'src/controllers/StickerController.js',
+            'src/config/config.js',
+        ],
+    },
+];
 
 function shortId() {
     return crypto.randomBytes(3).toString('hex');
@@ -444,6 +525,7 @@ class SummarySelfHealService {
         this._inflight = true;
         try {
             await status.step(`🗣️ *Instruction:* ${text.slice(0, 120)}`);
+            await status.step('🧠 Planning complete fix (config-first, related files)…');
             await status.step('📂 Scanning `src/` for matching files…');
 
             const candidates = await this._pickCandidateFiles(text);
@@ -456,16 +538,18 @@ class SummarySelfHealService {
                 await status.note(`  • \`${f}\``);
             }
 
-            const proposal = await this._generateProposal({
+            let proposal = await this._generateProposal({
                 mode: 'instruction',
                 allowedPaths: candidates,
                 systemPrompt: INSTRUCTION_HEAL_SYSTEM_PROMPT,
                 userPromptParts: [
                     `Owner instruction: ${text}`,
                     `Requested by: ${byPhone || 'owner'}`,
-                    'Apply ONLY this instruction. List every change in changelog.',
+                    'Implement COMPLETELY and PROPERLY (config flags over gutting code).',
+                    'Touch all related entry points. Keep feature reversible via config/env.',
                 ],
                 onProgress: (line) => status.step(line),
+                instruction: text,
             });
 
             if (!proposal?.files?.length) {
@@ -479,6 +563,12 @@ class SummarySelfHealService {
                 };
             }
 
+            // Completeness review (catches morning-message style incomplete fixes)
+            await status.step('🔎 Completeness review (agent-style)…');
+            proposal = await this._ensureCompleteProposal(text, proposal, candidates, (line) =>
+                status.step(line)
+            );
+
             await status.step('📝 Building change preview…');
             for (const f of proposal.files) {
                 await status.note(`  ✓ will update \`${f.path}\``);
@@ -486,6 +576,12 @@ class SummarySelfHealService {
             if (proposal.validationNotes?.length) {
                 await status.step('🛡️ Validation passed:');
                 for (const n of proposal.validationNotes.slice(0, 6)) {
+                    await status.note(`  • ${n}`);
+                }
+            }
+            if (proposal.qualityNotes?.length) {
+                await status.step('✨ Quality:');
+                for (const n of proposal.qualityNotes.slice(0, 4)) {
                     await status.note(`  • ${n}`);
                 }
             }
@@ -504,9 +600,12 @@ class SummarySelfHealService {
                 title: 'OWNER /FIX PROPOSAL',
                 context:
                     `🗣️ *You asked:* ${text}\n` +
-                    `🛡️ *Checks:* syntax + integrity + related imports` +
+                    `🛡️ *Checks:* syntax · integrity · related files · completeness (config-first)` +
                     (proposal.validationNotes?.length
                         ? `\n_${proposal.validationNotes.slice(0, 3).join(' · ')}_`
+                        : '') +
+                    (proposal.qualityNotes?.length
+                        ? `\n✨ ${proposal.qualityNotes.slice(0, 2).join(' · ')}`
                         : ''),
             });
 
@@ -616,33 +715,49 @@ class SummarySelfHealService {
 
     async _pickCandidateFiles(instruction) {
         const all = await this._listSrcJsFiles();
+        const allSet = new Set(all);
         const words = String(instruction)
             .toLowerCase()
             .split(/[^a-z0-9_/.-]+/)
             .filter((w) => w.length > 2);
 
+        const forced = new Set();
+        // Always include config for enable/disable/remove/stop instructions
+        if (/disable|enable|remove|stop|don'?t|do not|turn\s*off|no longer|want tha/i.test(instruction)) {
+            if (allSet.has('src/config/config.js')) forced.add('src/config/config.js');
+        }
+        for (const feat of FEATURE_FILE_MAP) {
+            if (feat.re.test(instruction)) {
+                for (const f of feat.files) {
+                    if (allSet.has(f)) forced.add(f);
+                }
+            }
+        }
+
         const scored = [];
         for (const rel of all) {
-            let score = 0;
+            let score = forced.has(rel) ? 20 : 0;
             const low = rel.toLowerCase();
             for (const w of words) {
                 if (low.includes(w)) score += 5;
             }
-            // Prefer likely areas from instruction keywords
             if (/test|debug|temp|todo|mock/i.test(instruction) && /test|debug|temp|mock/i.test(low)) {
                 score += 8;
             }
             if (/summary|recap/i.test(instruction) && /summary|groupchat|nvidia/i.test(low)) score += 8;
             if (/trade|stock|alert/i.test(instruction) && /trade|market|stock/i.test(low)) score += 8;
             if (/movie|zip/i.test(instruction) && /movie|hdhub/i.test(low)) score += 8;
+            if (/morning/i.test(instruction) && /morning/i.test(low)) score += 10;
+            if (/config\.js$/i.test(rel) && /disable|enable|remove|stop|off/i.test(instruction)) {
+                score += 12;
+            }
 
             if (score > 0) scored.push({ rel, score });
         }
 
         scored.sort((a, b) => b.score - a.score);
 
-        // Content-scan only top path matches (avoid reading entire repo)
-        for (const row of scored.slice(0, 10)) {
+        for (const row of scored.slice(0, 12)) {
             try {
                 const body = (await this._readLocalFile(row.rel)).toLowerCase().slice(0, 12_000);
                 for (const w of words.slice(0, 5)) {
@@ -654,21 +769,224 @@ class SummarySelfHealService {
         }
 
         scored.sort((a, b) => b.score - a.score);
-        let picks = scored.slice(0, 5).map((s) => s.rel);
+        let picks = [...forced];
+        for (const s of scored) {
+            if (!picks.includes(s.rel)) picks.push(s.rel);
+            if (picks.length >= 8) break;
+        }
 
-        // Fallback: common entrypoints if no keyword match
         if (!picks.length) {
             picks = [
+                'src/config/config.js',
                 'src/controllers/GroupSummaryController.js',
                 'src/services/GroupChatLogService.js',
                 'src/commands/registry.js',
-                'src/controllers/CommandController.js',
-            ].filter((p) => all.includes(p));
+            ].filter((p) => allSet.has(p));
         }
 
-        // Pull in imported siblings so the model sees related code (like a real review)
         const withRelated = await this._expandWithRelatedFiles(picks, all);
-        return withRelated.slice(0, 6);
+        return withRelated.slice(0, 8);
+    }
+
+    /**
+     * Detect hacky "empty the function" patches (like the morning-message bot fix).
+     */
+    _findHackyGutting(originals, files) {
+        const issues = [];
+        for (const f of files) {
+            const before = originals.get(f.path) || '';
+            const after = f.content || '';
+            if (!before || !after) continue;
+
+            // Method body reduced to bare return
+            const guttedFns = after.match(
+                /async\s+\w+\s*\([^)]*\)\s*\{\s*return\s*;?\s*\}/g
+            ) || after.match(
+                /\b\w+\s*\([^)]*\)\s*\{\s*return\s*;?\s*\}/g
+            ) || [];
+            for (const stub of guttedFns) {
+                const name = stub.match(/(?:async\s+)?(\w+)\s*\(/)?.[1];
+                if (!name) continue;
+                const beforeFn = before.match(
+                    new RegExp(`(?:async\\s+)?${name}\\s*\\([^)]*\\)\\s*\\{([\\s\\S]*?)\\n\\s*\\}`, 'm')
+                );
+                const body = beforeFn?.[1] || '';
+                if (body.split('\n').length >= 8) {
+                    issues.push(
+                        `${f.path}: gutted \`${name}()\` to empty return — prefer a config/feature flag instead`
+                    );
+                }
+            }
+
+            // Large deletion without touching config when instruction was disable/remove
+            if (
+                after.length < before.length * 0.55 &&
+                !files.some((x) => x.path.includes('config.js'))
+            ) {
+                issues.push(
+                    `${f.path}: large deletion without config.js change — incomplete disable`
+                );
+            }
+        }
+        return issues;
+    }
+
+    /**
+     * Second pass: reject hacky patches and ask model to finish properly.
+     */
+    async _ensureCompleteProposal(instruction, proposal, candidates, onProgress) {
+        const progress = typeof onProgress === 'function' ? onProgress : async () => {};
+        const originals = new Map();
+        for (const rel of candidates) {
+            try {
+                originals.set(rel, await this._readLocalFile(rel));
+            } catch {
+                // ignore
+            }
+        }
+        // Map current proposal onto originals for gutting detection
+        const baseOriginals = new Map(originals);
+        for (const f of proposal.files) {
+            if (!baseOriginals.has(f.path)) {
+                try {
+                    baseOriginals.set(f.path, await this._readLocalFile(f.path));
+                } catch {
+                    baseOriginals.set(f.path, '');
+                }
+            }
+        }
+
+        let working = proposal;
+        const hacky = this._findHackyGutting(baseOriginals, working.files);
+        const needsReview =
+            hacky.length > 0 ||
+            /disable|remove|stop|don'?t|do not|turn\s*off|no longer|want tha/i.test(instruction);
+
+        if (!needsReview && !hacky.length) {
+            working.qualityNotes = ['no hacky gutting detected'];
+            return working;
+        }
+
+        if (hacky.length) {
+            await progress('⚠️ Incomplete/hacky pattern detected — fixing properly…');
+            for (const h of hacky.slice(0, 4)) await progress(`  • ${h}`);
+        } else {
+            await progress('🔎 Reviewing related entry points…');
+        }
+
+        // Build view of patched world for review
+        const patchedView = new Map(baseOriginals);
+        for (const f of working.files) patchedView.set(f.path, f.content);
+
+        const reviewPayload = [];
+        for (const rel of candidates.slice(0, 8)) {
+            const content = patchedView.get(rel);
+            if (!content) continue;
+            reviewPayload.push({
+                path: rel,
+                content: content.length > 10_000
+                    ? `${content.slice(0, 5000)}\n\n/* ... */\n\n${content.slice(-5000)}`
+                    : content,
+            });
+        }
+
+        const userPrompt = [
+            `Owner instruction: ${instruction}`,
+            hacky.length ? `Problems found:\n${hacky.map((h) => `• ${h}`).join('\n')}` : '',
+            'Review whether this change is COMPLETE and PROPER (config-first, all entry points).',
+            'If incomplete, return additional/replacement patches. Prefer config flags over empty methods.',
+            ...reviewPayload.map((f) => `\n===== FILE: ${f.path} =====\n${f.content}`),
+        ]
+            .filter(Boolean)
+            .join('\n');
+
+        try {
+            const { content: raw, model } = await this.nvidia.completeWithModelFallback(
+                this.healModels,
+                COMPLETENESS_SYSTEM_PROMPT,
+                userPrompt,
+                { maxTokens: 2500, onProgress: progress }
+            );
+            const parsed = extractJsonObject(raw);
+            if (parsed?.files?.length) {
+                // Apply completeness patches on top of CURRENT patched content
+                const applyBase = new Map(patchedView);
+                const extra = this._applyParsedProposal(
+                    parsed,
+                    applyBase,
+                    new Set(candidates),
+                    progress
+                );
+                if (extra.files.length) {
+                    // Merge: start from original disk, apply final contents from extra (already full file content)
+                    const mergedByPath = new Map(working.files.map((f) => [f.path, f]));
+                    for (const f of extra.files) mergedByPath.set(f.path, f);
+                    working = {
+                        summary: parsed.summary || working.summary,
+                        changelog: [
+                            ...(working.changelog || []),
+                            ...(extra.changelog || []),
+                            'completeness review applied',
+                        ].slice(0, 12),
+                        files: [...mergedByPath.values()],
+                        usedModel: model || working.usedModel,
+                        qualityNotes: ['completeness review improved the patch'],
+                    };
+
+                    await progress('🛡️ Re-validating after completeness review…');
+                    const validation = await this._validatePatchedFiles(
+                        baseOriginals,
+                        working.files,
+                        progress
+                    );
+                    if (!validation.ok) {
+                        await progress('⚠️ Completeness patch failed checks — keeping prior valid patch');
+                        // fall through with previous proposal if it was valid
+                    } else {
+                        working.validationNotes = validation.notes;
+                        working.changePreview = this._buildChangePreview(baseOriginals, working.files);
+                    }
+                }
+            } else {
+                working.qualityNotes = working.qualityNotes || ['completeness review: no extra changes'];
+            }
+        } catch (err) {
+            logger.warn(`Completeness review failed: ${err.message}`);
+            await progress(`⚠️ Completeness review skipped: ${err.message.slice(0, 60)}`);
+        }
+
+        // Final anti-gutting gate
+        const stillHacky = this._findHackyGutting(baseOriginals, working.files);
+        if (stillHacky.length) {
+            // Try one repair toward config-first
+            await progress('🛠️ Forcing config-first repair…');
+            const repaired = await this._repairProposal(
+                `${instruction}\n\nREJECT empty-function gutting. Use config flags. Problems:\n${stillHacky.join('\n')}`,
+                baseOriginals,
+                working.files,
+                stillHacky,
+                progress
+            );
+            if (repaired?.files?.length) {
+                const validation = await this._validatePatchedFiles(
+                    baseOriginals,
+                    repaired.files,
+                    progress
+                );
+                if (validation.ok && !this._findHackyGutting(baseOriginals, repaired.files).length) {
+                    repaired.validationNotes = validation.notes;
+                    repaired.qualityNotes = ['config-first repair applied'];
+                    repaired.changePreview = this._buildChangePreview(baseOriginals, repaired.files);
+                    return repaired;
+                }
+            }
+            throw new Error(
+                `Rejected incomplete fix:\n${stillHacky.map((h) => `• ${h}`).join('\n')}\n` +
+                    `_Agent requires config-first / full entry-point changes._`
+            );
+        }
+
+        return working;
     }
 
     /** Follow local imports so patches don't break callers/callees. */
@@ -854,9 +1172,9 @@ class SummarySelfHealService {
         return lines.join('\n').slice(0, 1200);
     }
 
-    async _generateProposal({ allowedPaths, systemPrompt, userPromptParts, onProgress }) {
+    async _generateProposal({ allowedPaths, systemPrompt, userPromptParts, onProgress, instruction }) {
         const progress = typeof onProgress === 'function' ? onProgress : async () => {};
-        const pathList = allowedPaths.slice(0, 4);
+        const pathList = allowedPaths.slice(0, 8);
         const originals = new Map();
         const filePayload = [];
         for (const rel of pathList) {
@@ -935,7 +1253,10 @@ class SummarySelfHealService {
                     for (const e of validation.errors.slice(0, 5)) {
                         await progress(`  • ${e.slice(0, 100)}`);
                     }
-                    const instructionHint = userPromptParts.find((l) => /instruction|Error:/i.test(l)) || '';
+                    const instructionHint =
+                        instruction ||
+                        userPromptParts.find((l) => /instruction|Error:/i.test(l)) ||
+                        '';
                     const repaired = await this._repairProposal(
                         instructionHint,
                         originals,
