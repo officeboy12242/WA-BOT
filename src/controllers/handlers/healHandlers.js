@@ -79,7 +79,7 @@ export async function handleHeal(sock, chatId, senderJid, args, { groupManager, 
                 text:
                     '🔧 *Self-heal*\nNo pending proposals.\n\n' +
                     `_Ready: ${heal.isReady() ? 'yes' : 'no (need GITHUB_TOKEN + Mongo)'}_\n` +
-                    `Model: ${heal.healModel}\n\n` +
+                    `Models: ${(heal.healModels || [heal.healModel]).join(' → ')}\n\n` +
                     'Create one with:\n`/fix <what to change>`',
             });
             return;
