@@ -918,9 +918,18 @@ class SummarySelfHealService {
                     progress
                 );
                 if (extra.files.length) {
-                    // Merge: start from original disk, apply final contents from extra (already full file content)
+                    // Merge: keep prior files; completeness files use original baseHash for clean GitHub sync
                     const mergedByPath = new Map(working.files.map((f) => [f.path, f]));
-                    for (const f of extra.files) mergedByPath.set(f.path, f);
+                    for (const f of extra.files) {
+                        const orig = baseOriginals.get(f.path) || '';
+                        mergedByPath.set(f.path, {
+                            path: f.path,
+                            content: f.content,
+                            baseHash: this._hashContent(orig),
+                            // Full content vs original base — push if remote still at base
+                            replacements: f.replacements || [],
+                        });
+                    }
                     working = {
                         summary: parsed.summary || working.summary,
                         changelog: [
@@ -1293,6 +1302,10 @@ class SummarySelfHealService {
         throw lastErr || new Error('Heal proposal failed');
     }
 
+    _hashContent(text) {
+        return crypto.createHash('sha256').update(String(text || ''), 'utf8').digest('hex');
+    }
+
     _applyParsedProposal(parsed, originals, allowed, onProgress) {
         const progress = typeof onProgress === 'function' ? onProgress : async () => {};
         const files = [];
@@ -1305,8 +1318,11 @@ class SummarySelfHealService {
                 continue;
             }
 
-            let next = originals.get(rel);
-            if (!next) continue;
+            const baseContent = originals.get(rel);
+            if (baseContent == null) continue;
+            let next = baseContent;
+            /** @type {{ old_string: string, new_string: string }[]} */
+            const appliedReplacements = [];
 
             void progress(`✏️ Updating \`${rel}\`…`);
 
@@ -1324,10 +1340,10 @@ class SummarySelfHealService {
                     const newStr = String(rep.new_string ?? rep.new ?? '');
                     if (!oldStr || oldStr === newStr) continue;
                     if (!next.includes(oldStr)) {
-                        // Try a looser match: trim and collapse whitespace once
                         const loose = oldStr.trim();
                         if (loose && next.includes(loose)) {
                             next = next.replace(loose, newStr.trim());
+                            appliedReplacements.push({ old_string: loose, new_string: newStr.trim() });
                             applied += 1;
                         } else {
                             logger.warn(`Self-heal old_string not found in ${rel}`);
@@ -1336,6 +1352,7 @@ class SummarySelfHealService {
                         }
                     } else {
                         next = next.replace(oldStr, newStr);
+                        appliedReplacements.push({ old_string: oldStr, new_string: newStr });
                         applied += 1;
                     }
                     const label = oldStr.trim().slice(0, 40).replace(/\n/g, ' ');
@@ -1347,13 +1364,18 @@ class SummarySelfHealService {
                 continue;
             }
 
-            if (next === originals.get(rel)) continue;
+            if (next === baseContent) continue;
             if (rel.includes('NvidiaDeepSeek') && !next.includes('completeTrade')) {
                 logger.warn(`Self-heal rejected NvidiaDeepSeekService change that removes trade API`);
                 void progress(`  ⛔ blocked unsafe change in \`${rel}\``);
                 continue;
             }
-            files.push({ path: rel, content: next });
+            files.push({
+                path: rel,
+                content: next,
+                baseHash: this._hashContent(baseContent),
+                replacements: appliedReplacements,
+            });
         }
 
         const changelog = Array.isArray(parsed.changelog)
@@ -1444,40 +1466,46 @@ class SummarySelfHealService {
             await this._assertGithubAccess(repo, branch);
             await status.step('✅ GitHub access OK');
 
-            // Re-validate before push (files may be stale vs current disk, but syntax must still pass)
-            await status.step('🛡️ Re-validating patches before push…');
-            const originals = new Map();
+            // Sync with latest GitHub (avoids conflicts with Cursor / other pushes)
+            await status.step('🔄 Syncing with latest GitHub (rebase patches)…');
+            const toPush = [];
+            const syncOriginals = new Map();
             for (const file of row.files || []) {
-                try {
-                    originals.set(file.path, await this._readLocalFile(file.path));
-                } catch {
-                    originals.set(file.path, '');
-                }
+                await status.step(`📥 Fetching latest \`${file.path}\`…`);
+                const resolved = await this._resolveContentAgainstGithub(file, (line) => status.note(line));
+                syncOriginals.set(file.path, resolved.baseContent);
+                toPush.push({
+                    path: file.path,
+                    content: resolved.content,
+                    sha: resolved.sha,
+                });
             }
+
+            await status.step('🛡️ Validating rebased patches…');
             const prePush = await this._validatePatchedFiles(
-                originals,
-                row.files,
+                syncOriginals,
+                toPush,
                 (line) => status.step(line)
             );
             if (!prePush.ok) {
                 throw new Error(
-                    `Pre-push validation failed (patch rejected):\n${prePush.errors.map((e) => `• ${e}`).join('\n')}\n` +
-                        `_Run /fix again — nothing was pushed._`
+                    `Pre-push validation failed after sync:\n${prePush.errors.map((e) => `• ${e}`).join('\n')}\n` +
+                        `_Remote changed — run /fix again. Nothing was pushed._`
                 );
             }
             await status.step('✅ Pre-push validation passed');
 
             const pushed = [];
-            for (const file of row.files || []) {
+            for (const file of toPush) {
                 await status.step(`⬆️ Pushing \`${file.path}\`…`);
                 const commitMsg = row.instruction
                     ? `fix: ${String(row.instruction).slice(0, 72)} [${id}]`
                     : `fix(summary): ${row.summary} [${id}]`;
-                await this._pushFileToGitHub(file.path, file.content, commitMsg);
+                await this._pushFileToGitHub(file.path, file.content, commitMsg, file.sha);
                 pushed.push(file.path);
                 await status.note(`  ✓ \`${file.path}\``);
             }
-            await status.step('🎉 Push complete');
+            await status.step('🎉 Push complete (synced with remote)');
             await status.flush();
 
             await this._collection.updateOne(
@@ -1617,23 +1645,105 @@ class SummarySelfHealService {
         return `https://api.github.com/repos/${repo}/contents/${encoded}`;
     }
 
-    async _pushFileToGitHub(relPath, content, message) {
+    /**
+     * Fetch latest file from GitHub (source of truth for conflict-free push).
+     * @returns {Promise<{ content: string, sha: string|null, exists: boolean }>}
+     */
+    async _fetchGithubFile(relPath) {
         const branch = this.getGithubBranch();
         const url = this._contentsUrl(relPath);
         const headers = await this._githubHeaders();
-
-        let sha;
         try {
             const { data } = await axios.get(url, {
                 headers,
                 params: { ref: branch },
                 timeout: 30_000,
             });
-            sha = data.sha;
+            const content = Buffer.from(data.content || '', 'base64').toString('utf8');
+            return { content, sha: data.sha || null, exists: true };
         } catch (err) {
-            // 404 on GET is OK for new files; 404 on repo is not (caught by assert)
-            if (err.response?.status !== 404) {
-                throw err;
+            if (err.response?.status === 404) {
+                return { content: '', sha: null, exists: false };
+            }
+            throw err;
+        }
+    }
+
+    /**
+     * Rebase proposal onto latest GitHub so Cursor pushes don't conflict.
+     * @param {{ path: string, content: string, baseHash?: string, replacements?: {old_string:string,new_string:string}[] }} file
+     */
+    async _resolveContentAgainstGithub(file, onNote) {
+        const note = typeof onNote === 'function' ? onNote : async () => {};
+        const remote = await this._fetchGithubFile(file.path);
+
+        // New file on remote
+        if (!remote.exists) {
+            await note(`  • new file on remote`);
+            return { content: file.content, sha: null, baseContent: '' };
+        }
+
+        const remoteHash = this._hashContent(remote.content);
+
+        // Remote unchanged since proposal — safe to push proposed content
+        if (file.baseHash && remoteHash === file.baseHash) {
+            await note(`  • remote unchanged — direct push`);
+            return { content: file.content, sha: remote.sha, baseContent: remote.content };
+        }
+
+        // Remote already equals our proposal (maybe we pushed before)
+        if (remoteHash === this._hashContent(file.content)) {
+            await note(`  • remote already has our changes — skip`);
+            return { content: file.content, sha: remote.sha, baseContent: remote.content };
+        }
+
+        // Rebase: apply stored replacements onto latest remote
+        const reps = Array.isArray(file.replacements) ? file.replacements : [];
+        if (reps.length) {
+            let next = remote.content;
+            let applied = 0;
+            for (const rep of reps) {
+                if (rep.old_string && next.includes(rep.old_string)) {
+                    next = next.replace(rep.old_string, rep.new_string ?? '');
+                    applied += 1;
+                }
+            }
+            if (applied === reps.length) {
+                await note(`  • rebased ${applied} patch(es) onto latest remote`);
+                return { content: next, sha: remote.sha, baseContent: remote.content };
+            }
+            await note(`  • rebase partial (${applied}/${reps.length}) — using best effort`);
+            if (applied > 0) {
+                return { content: next, sha: remote.sha, baseContent: remote.content };
+            }
+        }
+
+        // Full rewrite proposals: if remote diverged, refuse to overwrite blindly
+        throw new Error(
+            `\`${file.path}\` changed on GitHub since the proposal (Cursor or another push).\n` +
+                `_Run /fix again on latest code — nothing was pushed._`
+        );
+    }
+
+    async _pushFileToGitHub(relPath, content, message, knownSha = undefined) {
+        const branch = this.getGithubBranch();
+        const url = this._contentsUrl(relPath);
+        const headers = await this._githubHeaders();
+
+        let sha = knownSha;
+        if (sha === undefined) {
+            try {
+                const { data } = await axios.get(url, {
+                    headers,
+                    params: { ref: branch },
+                    timeout: 30_000,
+                });
+                sha = data.sha;
+            } catch (err) {
+                if (err.response?.status !== 404) {
+                    throw err;
+                }
+                sha = null;
             }
         }
 
@@ -1647,16 +1757,22 @@ class SummarySelfHealService {
         try {
             await axios.put(url, body, { headers, timeout: 60_000 });
         } catch (err) {
-            // Retry once if SHA conflict
+            // Retry with fresh SHA if someone pushed between sync and put
             if (err.response?.status === 409 || err.response?.status === 422) {
-                const { data } = await axios.get(url, {
-                    headers,
-                    params: { ref: branch },
-                    timeout: 30_000,
-                });
+                const fresh = await this._fetchGithubFile(relPath);
+                // If remote already matches, treat as success
+                if (this._hashContent(fresh.content) === this._hashContent(content)) {
+                    logger.info(`Self-heal ${relPath} already up to date on remote`);
+                    return;
+                }
                 await axios.put(
                     url,
-                    { ...body, sha: data.sha },
+                    {
+                        message,
+                        content: Buffer.from(content, 'utf8').toString('base64'),
+                        branch,
+                        ...(fresh.sha ? { sha: fresh.sha } : {}),
+                    },
                     { headers, timeout: 60_000 }
                 );
             } else {
