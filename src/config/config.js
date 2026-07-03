@@ -67,6 +67,16 @@ export const config = {
     NVIDIA_MODEL: process.env.NVIDIA_MODEL?.trim() || 'deepseek-ai/deepseek-v4-flash',
     /** Trade discovery, research, CE/PE analysis model */
     NVIDIA_TRADE_MODEL: process.env.NVIDIA_TRADE_MODEL?.trim() || 'z-ai/glm-5.2',
+    /** Summary self-heal model (code fix proposals) */
+    NVIDIA_HEAL_MODEL: process.env.NVIDIA_HEAL_MODEL?.trim() || 'nvidia/nemotron-3-ultra-550b-a55b',
+    /** Auto-propose summary code fixes (owner must approve push) */
+    SUMMARY_SELF_HEAL_ENABLED: process.env.SUMMARY_SELF_HEAL_ENABLED !== 'false',
+    /** GitHub PAT with contents:write for self-heal push */
+    GITHUB_TOKEN: process.env.GITHUB_TOKEN?.trim() || '',
+    GITHUB_REPO: process.env.GITHUB_REPO?.trim() || 'officeboy12242/WA-BOT',
+    GITHUB_BRANCH: process.env.GITHUB_BRANCH?.trim() || 'main',
+    /** WhatsApp notify number for heal status (default logs number) */
+    SUMMARY_SELF_HEAL_NOTIFY: process.env.SUMMARY_SELF_HEAL_NOTIFY?.trim() || '917887499710',
     NVIDIA_API_BASE_URL: process.env.NVIDIA_API_BASE_URL?.trim() || 'https://integrate.api.nvidia.com/v1/chat/completions',
     /** Capped at 120s — avoid huge env values (e.g. 900000) that hang recaps. */
     NVIDIA_TIMEOUT_MS: (() => {
