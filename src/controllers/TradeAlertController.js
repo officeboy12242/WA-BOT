@@ -76,11 +76,12 @@ class TradeAlertController {
         return this.enabled && this.nvidia.isConfigured();
     }
 
-    async _runAnalysis(symbol, { mode = 'live', includeMarketBrief = false } = {}) {
-        const intel = await this.research.gatherIntel(symbol, { includeMarketBrief });
+    async _runAnalysis(symbol, { mode = 'live', skipResearch = false } = {}) {
+        const startedAt = Date.now();
+        const intel = await this.research.gatherIntel(symbol, { includeMarketBrief: false });
 
         let researchBrief = null;
-        if (this.twoStepResearch) {
+        if (this.twoStepResearch && !skipResearch) {
             researchBrief = await this.research.runResearchBrief(intel);
         }
 
@@ -93,13 +94,17 @@ class TradeAlertController {
             optionsNewsContext: intel.optionsNewsContext,
             optionChainContext: intel.optionChainContext,
             researchBrief,
-            marketBrief: intel.marketBrief,
+            marketBrief: null,
             mode,
         });
 
-        let body = await this.nvidia.complete(TRADE_ANALYSIS_SYSTEM_PROMPT, userPrompt, {
-            maxTokens: 2400,
-            timeoutMs: 120_000,
+        logger.info(
+            `Trade analysis LLM for ${intel.symbol} (prompt ${userPrompt.length} chars, ` +
+                `research=${researchBrief ? 'yes' : 'no'})…`
+        );
+
+        let body = await this.nvidia.completeTradeAnalysis(TRADE_ANALYSIS_SYSTEM_PROMPT, userPrompt, {
+            maxTokens: 2200,
         });
 
         body = enforceLiveSpotPrice(body, intel.quote);
@@ -108,18 +113,33 @@ class TradeAlertController {
             body = injectTradePlans(body, intel.symbol, { partials: this.tradePlanPartials });
         }
 
+        logger.info(`Trade analysis done for ${intel.symbol} in ${Date.now() - startedAt}ms`);
+
         const signal = parseTradeSignal(body);
         const text = wrapTradeAlertMessage(intel.symbol, body, { isDaily: mode === 'daily' });
         return { text, body, signal, symbol: intel.symbol };
     }
 
-    async analyzeSymbol(rawSymbol, { mode = 'live' } = {}) {
+    async analyzeSymbol(rawSymbol, { mode = 'live', skipResearch = false } = {}) {
         const symbol = String(rawSymbol || '').trim().toUpperCase();
         if (!symbol) throw new Error('Stock symbol required');
         if (!this.nvidia.isConfigured()) throw new Error('NVIDIA_API_KEY is not set on the server');
 
-        const result = await this._runAnalysis(symbol, { mode, includeMarketBrief: mode === 'live' });
-        return result.text;
+        try {
+            const result = await this._runAnalysis(symbol, { mode, skipResearch });
+            return result.text;
+        } catch (err) {
+            if (!skipResearch && this.isTimeoutError(err)) {
+                logger.warn(`Trade analysis timeout for ${symbol}, retrying without research step…`);
+                const result = await this._runAnalysis(symbol, { mode, skipResearch: true });
+                return result.text;
+            }
+            throw err;
+        }
+    }
+
+    isTimeoutError(err) {
+        return /timeout|ETIMEDOUT|ECONNABORTED/i.test(String(err?.message || err));
     }
 
     async discoverSymbolsForToday({ forceRefresh = false } = {}) {

@@ -8,6 +8,7 @@ import { logger } from '../utils/logger.js';
 const DEFAULT_BASE_URL = 'https://integrate.api.nvidia.com/v1/chat/completions';
 const DEFAULT_MODEL = 'deepseek-ai/deepseek-v4-flash';
 const MAX_TIMEOUT_MS = 120_000;
+const MAX_TRADE_TIMEOUT_MS = 180_000;
 const DEFAULT_TIMEOUT_MS = 60_000;
 const SUMMARY_SYSTEM_PROMPT = [
     'You summarize WhatsApp group chats for a daily recap.',
@@ -17,12 +18,12 @@ const SUMMARY_SYSTEM_PROMPT = [
     'keep topics to 3-5 items; notable to 0-3 items; friendly tone; English unless chat is mostly Hindi.',
 ].join(' ');
 
-function clampTimeoutMs(raw) {
+function clampTimeoutMs(raw, cap = MAX_TIMEOUT_MS) {
     const n = Number(raw);
     if (!Number.isFinite(n) || n <= 0) {
         return DEFAULT_TIMEOUT_MS;
     }
-    return Math.min(MAX_TIMEOUT_MS, Math.max(20_000, n));
+    return Math.min(cap, Math.max(20_000, n));
 }
 
 class NvidiaDeepSeekService {
@@ -33,6 +34,10 @@ class NvidiaDeepSeekService {
         this.timeoutMs = clampTimeoutMs(config.NVIDIA_TIMEOUT_MS);
         this.summaryTimeoutMs = clampTimeoutMs(
             config.GROUP_SUMMARY_LLM_TIMEOUT_MS || Math.max(this.timeoutMs, 90_000)
+        );
+        this.tradeTimeoutMs = clampTimeoutMs(
+            config.TRADE_ANALYSIS_TIMEOUT_MS || 150_000,
+            MAX_TRADE_TIMEOUT_MS
         );
     }
 
@@ -138,6 +143,55 @@ class NvidiaDeepSeekService {
             }
         }
         throw lastErr || new Error('Summary request failed');
+    }
+
+    /**
+     * Trade analysis with retry + prompt trim on timeout.
+     * @param {string} systemPrompt
+     * @param {string} userPrompt
+     * @param {{ maxTokens?: number, baseTimeoutMs?: number }} [opts]
+     */
+    async completeTradeAnalysis(systemPrompt, userPrompt, opts = {}) {
+        const baseTimeout = clampTimeoutMs(opts.baseTimeoutMs ?? this.tradeTimeoutMs, MAX_TRADE_TIMEOUT_MS);
+        const attempts = [
+            { prompt: userPrompt, timeoutMs: baseTimeout, maxTokens: opts.maxTokens ?? 2200 },
+            {
+                prompt: userPrompt.slice(0, 9000) + '\n\n[...trimmed for speed...]',
+                timeoutMs: Math.min(MAX_TRADE_TIMEOUT_MS, baseTimeout + 20_000),
+                maxTokens: 2000,
+            },
+            {
+                prompt: userPrompt.slice(0, 5000) + '\n\n[...trimmed for speed...]',
+                timeoutMs: MAX_TRADE_TIMEOUT_MS,
+                maxTokens: 1800,
+            },
+        ];
+
+        let lastErr;
+        for (let i = 0; i < attempts.length; i++) {
+            const attempt = attempts[i];
+            if (!attempt.prompt.trim()) {
+                continue;
+            }
+            try {
+                if (i > 0) {
+                    logger.warn(
+                        `NVIDIA trade analysis retry ${i + 1}/${attempts.length} ` +
+                            `(${attempt.prompt.length} chars, ${attempt.timeoutMs}ms)`
+                    );
+                }
+                return await this.complete(systemPrompt, attempt.prompt, {
+                    timeoutMs: attempt.timeoutMs,
+                    maxTokens: attempt.maxTokens,
+                });
+            } catch (err) {
+                lastErr = err;
+                if (!this.isTimeoutError(err) || i === attempts.length - 1) {
+                    throw err;
+                }
+            }
+        }
+        throw lastErr || new Error('Trade analysis request failed');
     }
 
     /**

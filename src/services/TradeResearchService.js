@@ -14,6 +14,10 @@ class TradeResearchService {
     constructor(config = {}) {
         this.nvidia = new NvidiaDeepSeekService(config);
         this.enabled = config.TRADE_TWO_STEP_RESEARCH !== false;
+        this.researchTimeoutMs = Math.min(
+            90_000,
+            Math.max(35_000, parseInt(config.TRADE_RESEARCH_TIMEOUT_MS, 10) || 55_000)
+        );
     }
 
     /** @param {string} symbol @param {{ includeMarketBrief?: boolean }} [opts] */
@@ -42,11 +46,16 @@ class TradeResearchService {
         });
 
         logger.info(`🔬 AI research brief for ${intel.symbol}…`);
-        const brief = await this.nvidia.complete(TRADE_RESEARCH_SYSTEM_PROMPT, userPrompt, {
-            maxTokens: 900,
-            timeoutMs: 75_000,
-        });
-        return brief?.trim() || null;
+        try {
+            const brief = await this.nvidia.complete(TRADE_RESEARCH_SYSTEM_PROMPT, userPrompt, {
+                maxTokens: 700,
+                timeoutMs: this.researchTimeoutMs,
+            });
+            return brief?.trim() || null;
+        } catch (err) {
+            logger.warn(`Research brief skipped for ${intel.symbol}: ${err.message}`);
+            return null;
+        }
     }
 }
 

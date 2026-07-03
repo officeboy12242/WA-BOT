@@ -118,7 +118,11 @@ export function buildTradeUserPrompt({
 
     if (optionChainContext) {
         lines.push('=== LIVE NSE OPTION CHAIN (CE + PE) ===');
-        lines.push(optionChainContext);
+        const chain =
+            optionChainContext.length > 3500
+                ? `${optionChainContext.slice(0, 3500)}\n[...chain trimmed...]`
+                : optionChainContext;
+        lines.push(chain);
         lines.push('');
     } else {
         lines.push('=== LIVE NSE OPTION CHAIN ===');
@@ -140,7 +144,11 @@ export function buildTradeUserPrompt({
 
     if (researchBrief) {
         lines.push('=== AI RESEARCH BRIEF (Step 1 — CE + PE) ===');
-        lines.push(researchBrief);
+        const brief =
+            researchBrief.length > 2200
+                ? `${researchBrief.slice(0, 2200)}\n[...research trimmed...]`
+                : researchBrief;
+        lines.push(brief);
         lines.push('');
     }
 

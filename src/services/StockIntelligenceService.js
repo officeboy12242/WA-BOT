@@ -7,6 +7,13 @@ import { stockNewsService } from './StockNewsService.js';
 import { nseOptionChainService } from './NseOptionChainService.js';
 import { marketScanService } from './MarketScanService.js';
 
+function withTimeout(promise, ms, fallback) {
+    return Promise.race([
+        promise,
+        new Promise((resolve) => setTimeout(() => resolve(fallback), ms)),
+    ]);
+}
+
 class StockIntelligenceService {
     /**
      * @param {string} symbol
@@ -21,7 +28,7 @@ class StockIntelligenceService {
         const [news, optionsNews, optionChain] = await Promise.all([
             stockNewsService.fetchForSymbol(sym, displayName),
             stockNewsService.fetchOptionsNews(sym, displayName),
-            nseOptionChainService.fetchOptionContext(sym),
+            withTimeout(nseOptionChainService.fetchOptionContext(sym), 18_000, null),
         ]);
 
         let marketBrief = null;
