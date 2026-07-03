@@ -69,6 +69,8 @@ export const config = {
     NVIDIA_TRADE_MODEL: process.env.NVIDIA_TRADE_MODEL?.trim() || 'z-ai/glm-5.2',
     /** Summary self-heal model (code fix proposals) */
     NVIDIA_HEAL_MODEL: process.env.NVIDIA_HEAL_MODEL?.trim() || 'nvidia/nemotron-3-ultra-550b-a55b',
+    /** Try Nemotron first (often 503); default false = GLM → DeepSeek → Nemotron */
+    NVIDIA_HEAL_PREFER_NEMOTRON: process.env.NVIDIA_HEAL_PREFER_NEMOTRON === 'true',
     /** Auto-propose summary code fixes (owner must approve push) */
     SUMMARY_SELF_HEAL_ENABLED: process.env.SUMMARY_SELF_HEAL_ENABLED !== 'false',
     /** GitHub PAT with contents:write for self-heal push */

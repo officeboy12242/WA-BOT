@@ -116,26 +116,28 @@ class NvidiaDeepSeekService {
 
     /**
      * Heal / long jobs: try primary model then fallbacks with shrinking prompts.
+     * 503/502/504 skip to next model immediately (smaller prompt will not help).
      * @param {string[]} models
      * @param {string} systemPrompt
      * @param {string} userPrompt
      * @param {{ maxTokens?: number }} [opts]
+     * @returns {Promise<{ content: string, model: string }>}
      */
     async completeWithModelFallback(models, systemPrompt, userPrompt, opts = {}) {
         const chain = [...new Set((models || []).filter(Boolean))];
         if (!chain.length) chain.push(this.model);
 
         const attempts = [
-            { prompt: userPrompt, maxTokens: opts.maxTokens ?? 2500, timeoutMs: 120_000 },
+            { prompt: userPrompt, maxTokens: opts.maxTokens ?? 2500, timeoutMs: 90_000 },
             {
-                prompt: userPrompt.slice(0, 10_000) + (userPrompt.length > 10_000 ? '\n\n[...truncated...]' : ''),
-                maxTokens: 1800,
-                timeoutMs: 150_000,
+                prompt: userPrompt.slice(0, 8_000) + (userPrompt.length > 8_000 ? '\n\n[...truncated...]' : ''),
+                maxTokens: 1600,
+                timeoutMs: 120_000,
             },
             {
-                prompt: userPrompt.slice(0, 5500) + (userPrompt.length > 5500 ? '\n\n[...truncated...]' : ''),
-                maxTokens: 1200,
-                timeoutMs: 150_000,
+                prompt: userPrompt.slice(0, 4_500) + (userPrompt.length > 4_500 ? '\n\n[...truncated...]' : ''),
+                maxTokens: 1000,
+                timeoutMs: 120_000,
             },
         ];
 
@@ -146,29 +148,40 @@ class NvidiaDeepSeekService {
                 try {
                     if (i > 0 || model !== chain[0]) {
                         logger.warn(
-                            `NVIDIA heal retry model=${model} attempt=${i + 1} ` +
+                            `NVIDIA heal try model=${model} attempt=${i + 1}/${attempts.length} ` +
                                 `(${attempt.prompt.length} chars)`
                         );
                     }
-                    return await this.complete(systemPrompt, attempt.prompt, {
+                    const content = await this.complete(systemPrompt, attempt.prompt, {
                         model,
                         maxTokens: attempt.maxTokens,
                         timeoutMs: attempt.timeoutMs,
                         timeoutCapMs: MAX_TRADE_TIMEOUT_MS,
                     });
+                    if (model !== chain[0]) {
+                        logger.info(`NVIDIA heal succeeded with fallback model: ${model}`);
+                    }
+                    return { content, model };
                 } catch (err) {
                     lastErr = err;
-                    const retryable =
-                        this.isTimeoutError(err) ||
-                        /empty response|429|5\d\d|ECONNRESET|ENOTFOUND|socket|overloaded|unavailable/i.test(
-                            String(err?.message || '')
-                        );
-                    logger.warn(`NVIDIA heal failed (${model}): ${err.message}`);
-                    if (!retryable && i === 0 && /401|403|invalid.*model|not found/i.test(String(err.message))) {
-                        // bad model id — try next model immediately
+                    const msg = String(err?.message || err);
+                    logger.warn(`NVIDIA heal failed (${model}): ${msg}`);
+
+                    // Service down / rate limit — do not burn retries on same model
+                    if (/503|502|504|429|overloaded|unavailable|capacity/i.test(msg)) {
+                        logger.warn(`NVIDIA heal skipping model ${model} (unavailable), trying next…`);
                         break;
                     }
-                    if (!retryable && i === attempts.length - 1) {
+                    // Bad model id — next model
+                    if (/401|403|404|invalid.*model|not found|does not exist/i.test(msg)) {
+                        logger.warn(`NVIDIA heal skipping model ${model} (not available), trying next…`);
+                        break;
+                    }
+
+                    const retryable =
+                        this.isTimeoutError(err) ||
+                        /empty response|ECONNRESET|ENOTFOUND|socket/i.test(msg);
+                    if (!retryable || i === attempts.length - 1) {
                         break;
                     }
                 }
