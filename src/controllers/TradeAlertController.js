@@ -3,7 +3,7 @@
  */
 
 import { logger } from '../utils/logger.js';
-import { formatDateLabelIST, getTodayDateStrIST } from '../utils/dateIST.js';
+import { formatDateLabelIST, formatNowLabelIST, getTodayDateStrIST } from '../utils/dateIST.js';
 import NvidiaDeepSeekService from '../services/NvidiaDeepSeekService.js';
 import { createTradeResearchService } from '../services/TradeResearchService.js';
 import { marketScanService } from '../services/MarketScanService.js';
@@ -304,7 +304,7 @@ class TradeAlertController {
         }
 
         const dateStr = getTodayDateStrIST();
-        const dateLabel = formatDateLabelIST(dateStr);
+        const dateLabel = formatNowLabelIST();
         logger.info(`📈 Daily trade alerts for ${groups.length} group(s) — ${dateLabel}`);
 
         let autoDiscovery = null;
