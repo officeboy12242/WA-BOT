@@ -26,6 +26,11 @@ const SUMMARY_ALLOWED_FILES = [
 
 const BLOCKED_PATH_PARTS = ['.env', 'node_modules', 'auth_info', 'credentials', '.git'];
 
+/** Hard security: heal agent may ONLY read/update file contents — never delete the repo */
+const GITHUB_ALLOWED_METHODS = new Set(['GET', 'PUT']);
+const REPO_DELETE_INSTRUCTION_RE =
+    /\b(delete|remove|destroy|wipe|drop)\b.{0,40}\b(repo|repository|github|project|codebase|entire\s+code)\b/i;
+
 /** Must-keep symbols per file so /fix cannot gut critical APIs */
 const FILE_INTEGRITY_RULES = {
     'src/services/NvidiaDeepSeekService.js': [
@@ -110,7 +115,8 @@ QUALITY RULES (mandatory):
 8. Max 8 replacements total across all files.
 9. Do not touch secrets, .env files, or auth sessions (config.js defaults are OK).
 10. changelog must explain the proper approach (not "emptied function").
-11. If you cannot do it safely, return files:[].`;
+11. NEVER delete the GitHub repository, wipe the project, or empty critical files.
+12. If you cannot do it safely, return files:[].`;
 
 const COMPLETENESS_SYSTEM_PROMPT = `You review a code change for completeness (like a senior PR review).
 
@@ -510,6 +516,15 @@ class SummarySelfHealService {
         const text = String(instruction || '').trim();
         if (!text) {
             return { ok: false, message: '❌ Usage: `/fix <what to change>`\nExample: `/fix remove testing thing`' };
+        }
+        if (REPO_DELETE_INSTRUCTION_RE.test(text)) {
+            return {
+                ok: false,
+                message:
+                    '🚫 *Blocked for security*\n' +
+                    'This agent can **never** delete the GitHub repository or wipe the project.\n' +
+                    '_Ask for a specific code change instead._',
+            };
         }
         if (!this.isReady()) {
             return {
@@ -1365,6 +1380,12 @@ class SummarySelfHealService {
             }
 
             if (next === baseContent) continue;
+            // Never allow wiping a file (GitHub "delete file" equivalent)
+            if (!String(next).trim() || String(next).trim().length < 20) {
+                logger.warn(`Self-heal rejected wipe of ${rel}`);
+                void progress(`  🚫 blocked wipe of \`${rel}\``);
+                continue;
+            }
             if (rel.includes('NvidiaDeepSeek') && !next.includes('completeTrade')) {
                 logger.warn(`Self-heal rejected NvidiaDeepSeekService change that removes trade API`);
                 void progress(`  ⛔ blocked unsafe change in \`${rel}\``);
@@ -1495,6 +1516,10 @@ class SummarySelfHealService {
             }
             await status.step('✅ Pre-push validation passed');
 
+            await status.step('🔒 Security check (no repo delete / no file wipe)…');
+            this._assertSafePushPayload(toPush);
+            await status.step('✅ Security check passed');
+
             const pushed = [];
             for (const file of toPush) {
                 await status.step(`⬆️ Pushing \`${file.path}\`…`);
@@ -1547,12 +1572,12 @@ class SummarySelfHealService {
     }
 
     async _assertGithubAccess(repo, branch) {
-        const headers = await this._githubHeaders();
         try {
-            const { data } = await axios.get(`https://api.github.com/repos/${repo}`, {
-                headers,
-                timeout: 20_000,
-            });
+            const { data } = await this._githubRequest(
+                'GET',
+                `https://api.github.com/repos/${repo}`,
+                { timeout: 20_000 }
+            );
             if (data.permissions && data.permissions.push === false) {
                 throw Object.assign(new Error('Token cannot push to this repo'), {
                     response: {
@@ -1561,6 +1586,7 @@ class SummarySelfHealService {
                     },
                 });
             }
+            // Admin delete-repo permission is irrelevant — we never call delete APIs
             logger.info(`GitHub access OK: ${repo} (push=${data.permissions?.push})`);
         } catch (err) {
             if (err.response?.status === 404) {
@@ -1577,10 +1603,11 @@ class SummarySelfHealService {
 
         // Confirm branch exists
         try {
-            await axios.get(`https://api.github.com/repos/${repo}/branches/${encodeURIComponent(branch)}`, {
-                headers,
-                timeout: 20_000,
-            });
+            await this._githubRequest(
+                'GET',
+                `https://api.github.com/repos/${repo}/branches/${encodeURIComponent(branch)}`,
+                { timeout: 20_000 }
+            );
         } catch (err) {
             if (err.response?.status === 404) {
                 throw Object.assign(
@@ -1633,6 +1660,99 @@ class SummarySelfHealService {
         };
     }
 
+    /**
+     * SECURITY: only GET/PUT on allowlisted repo endpoints.
+     * Never DELETE the repository or any other destructive GitHub API.
+     */
+    _assertSafeGithubUrl(method, url) {
+        const m = String(method || '').toUpperCase();
+        if (!GITHUB_ALLOWED_METHODS.has(m)) {
+            throw new Error(
+                `🚫 Security block: GitHub method ${m} is forbidden (repo delete/wipe disabled)`
+            );
+        }
+        if (m === 'DELETE') {
+            throw new Error('🚫 Security block: DELETE is never allowed (cannot delete repo or files)');
+        }
+
+        let parsed;
+        try {
+            parsed = new URL(url);
+        } catch {
+            throw new Error('🚫 Security block: invalid GitHub URL');
+        }
+        if (parsed.hostname !== 'api.github.com') {
+            throw new Error('🚫 Security block: only api.github.com is allowed');
+        }
+
+        const repo = this.getGithubRepo();
+        const repoPrefix = `/repos/${repo}`;
+        const pathName = parsed.pathname;
+
+        // Explicitly block repository delete endpoint and related destructive paths
+        if (/\/repos\/[^/]+\/[^/]+\/?$/.test(pathName) && m !== 'GET') {
+            throw new Error('🚫 Security block: cannot modify/delete the repository itself');
+        }
+        if (/\/(hooks|keys|collaborators|pages|actions|environments|vulnerability|secret|pages)\b/i.test(pathName)) {
+            throw new Error('🚫 Security block: forbidden GitHub admin endpoint');
+        }
+        if (!pathName.startsWith(repoPrefix)) {
+            throw new Error(`🚫 Security block: URL outside allowed repo ${repo}`);
+        }
+
+        const allowed =
+            (m === 'GET' && (
+                pathName === repoPrefix ||
+                pathName === `${repoPrefix}/` ||
+                pathName.startsWith(`${repoPrefix}/contents/`) ||
+                pathName.startsWith(`${repoPrefix}/branches/`)
+            )) ||
+            (m === 'PUT' && pathName.startsWith(`${repoPrefix}/contents/`));
+
+        if (!allowed) {
+            throw new Error(`🚫 Security block: ${m} ${pathName} is not an allowed heal operation`);
+        }
+    }
+
+    async _githubRequest(method, url, options = {}) {
+        const m = String(method || 'GET').toUpperCase();
+        this._assertSafeGithubUrl(m, url);
+        const headers = { ...(await this._githubHeaders()), ...(options.headers || {}) };
+        if (m === 'GET') {
+            return axios.get(url, { ...options, headers, method: 'GET' });
+        }
+        if (m === 'PUT') {
+            return axios.put(url, options.data, { ...options, headers, method: 'PUT' });
+        }
+        throw new Error(`🚫 Security block: method ${m} is not allowed`);
+    }
+
+    /** Never push empty/wiped files or mass-delete the tree. */
+    _assertSafePushPayload(files) {
+        if (!files?.length) {
+            throw new Error('🚫 Security block: no files to push');
+        }
+        if (files.length > 12) {
+            throw new Error('🚫 Security block: refusing to touch more than 12 files in one push');
+        }
+        for (const f of files) {
+            const content = String(f.content ?? '');
+            if (!f.path || (!this._isSafePath(f.path) && !SUMMARY_ALLOWED_FILES.includes(f.path))) {
+                throw new Error(`🚫 Security block: unsafe path ${f.path}`);
+            }
+            if (!content.trim()) {
+                throw new Error(
+                    `🚫 Security block: refusing to wipe \`${f.path}\` (empty content = file delete)`
+                );
+            }
+            if (content.trim().length < 15) {
+                throw new Error(
+                    `🚫 Security block: refusing near-empty \`${f.path}\` (possible wipe)`
+                );
+            }
+        }
+    }
+
     _contentsUrl(relPath) {
         const repo = this.getGithubRepo();
         // Encode each path segment but keep slashes as path separators
@@ -1652,10 +1772,8 @@ class SummarySelfHealService {
     async _fetchGithubFile(relPath) {
         const branch = this.getGithubBranch();
         const url = this._contentsUrl(relPath);
-        const headers = await this._githubHeaders();
         try {
-            const { data } = await axios.get(url, {
-                headers,
+            const { data } = await this._githubRequest('GET', url, {
                 params: { ref: branch },
                 timeout: 30_000,
             });
@@ -1726,15 +1844,18 @@ class SummarySelfHealService {
     }
 
     async _pushFileToGitHub(relPath, content, message, knownSha = undefined) {
+        // Final hard stop: never wipe a file (GitHub file-delete uses empty/delete APIs)
+        if (!String(content || '').trim() || String(content).trim().length < 20) {
+            throw new Error(`🚫 Security block: refusing to push empty/wiped \`${relPath}\``);
+        }
+
         const branch = this.getGithubBranch();
         const url = this._contentsUrl(relPath);
-        const headers = await this._githubHeaders();
 
         let sha = knownSha;
         if (sha === undefined) {
             try {
-                const { data } = await axios.get(url, {
-                    headers,
+                const { data } = await this._githubRequest('GET', url, {
                     params: { ref: branch },
                     timeout: 30_000,
                 });
@@ -1755,7 +1876,7 @@ class SummarySelfHealService {
         };
 
         try {
-            await axios.put(url, body, { headers, timeout: 60_000 });
+            await this._githubRequest('PUT', url, { data: body, timeout: 60_000 });
         } catch (err) {
             // Retry with fresh SHA if someone pushed between sync and put
             if (err.response?.status === 409 || err.response?.status === 422) {
@@ -1765,16 +1886,15 @@ class SummarySelfHealService {
                     logger.info(`Self-heal ${relPath} already up to date on remote`);
                     return;
                 }
-                await axios.put(
-                    url,
-                    {
+                await this._githubRequest('PUT', url, {
+                    data: {
                         message,
                         content: Buffer.from(content, 'utf8').toString('base64'),
                         branch,
                         ...(fresh.sha ? { sha: fresh.sha } : {}),
                     },
-                    { headers, timeout: 60_000 }
-                );
+                    timeout: 60_000,
+                });
             } else {
                 throw err;
             }
