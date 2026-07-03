@@ -110,6 +110,13 @@ export const config = {
     TRADE_ALERT_EXTRA_HOLIDAYS: (process.env.TRADE_ALERT_EXTRA_HOLIDAYS || '').trim(),
     /** Force run on specific dates (e.g. budget Sunday) YYYY-MM-DD, comma-separated */
     TRADE_ALERT_FORCE_TRADING_DAYS: (process.env.TRADE_ALERT_FORCE_TRADING_DAYS || '').trim(),
+    /** Multi-target trade plan on CE/PE sections (1 lot, ₹ P&L) */
+    TRADE_PLAN_ENABLED: process.env.TRADE_PLAN_ENABLED !== 'false',
+    /** Partial booking % at T1,T2,T3 e.g. 50,30,20 */
+    TRADE_PLAN_PARTIALS: (process.env.TRADE_PLAN_PARTIALS || '50,30,20')
+        .split(',')
+        .map((s) => parseInt(s.trim(), 10))
+        .filter((n) => Number.isFinite(n) && n > 0),
     BOT_LOG_NUMBER: process.env.BOT_LOG_NUMBER?.trim() || '',
     GITHUB_TRENDING_ENABLED: process.env.GITHUB_TRENDING_ENABLED !== 'false',
     GITHUB_TRENDING_TIMES: (process.env.GITHUB_TRENDING_TIMES || '09:00,11:30,14:00,16:30,19:00')

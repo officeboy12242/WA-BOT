@@ -18,6 +18,7 @@ import {
 } from '../prompts/stockDiscoveryPrompt.js';
 import { parseTradeSignal, parseDiscoverySymbols } from '../utils/tradeSignalParser.js';
 import { enforceLiveSpotPrice } from '../utils/tradeQuoteUtils.js';
+import { injectTradePlans } from '../utils/tradePlanFormatter.js';
 import {
     getIndianMarketClosedReason,
     isIndianEquityTradingDay,
@@ -45,6 +46,8 @@ class TradeAlertController {
         this.onlyBuySignals = config.TRADE_ALERT_ONLY_BUY_SIGNALS !== false;
         this.maxSendsPerGroup = config.TRADE_ALERT_MAX_SENDS || 5;
         this.discoveryCount = config.TRADE_ALERT_DISCOVERY_COUNT || 8;
+        this.tradePlansEnabled = config.TRADE_PLAN_ENABLED !== false;
+        this.tradePlanPartials = config.TRADE_PLAN_PARTIALS || [50, 30, 20];
         this._sock = null;
         this._sentCollection = null;
         this._discoveryCollection = null;
@@ -100,6 +103,10 @@ class TradeAlertController {
         });
 
         body = enforceLiveSpotPrice(body, intel.quote);
+
+        if (this.tradePlansEnabled) {
+            body = injectTradePlans(body, intel.symbol, { partials: this.tradePlanPartials });
+        }
 
         const signal = parseTradeSignal(body);
         const text = wrapTradeAlertMessage(intel.symbol, body, { isDaily: mode === 'daily' });

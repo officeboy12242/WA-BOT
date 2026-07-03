@@ -66,7 +66,7 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
             r += `🧠 *Mode:* ${modeLabel(mode)}\n`;
             r += `🕐 *Daily time:* ${formatAlertTime()} IST (trading days only)\n`;
             r += `📊 *Symbols:* ${symbolLine}\n`;
-            r += `🔔 *Posts:* Full CE + PE analysis when Primary ≥70%\n`;
+            r += `🔔 *Posts:* Full CE + PE + multi-target plan (50/30/20)\n`;
             r += `🌐 *Data:* Live Yahoo prices + Google News RSS\n`;
             r += `🤖 *AI:* ${nvidiaOk ? 'ready' : 'NVIDIA_API_KEY missing'}\n\n`;
             r += '*Commands:*\n';
