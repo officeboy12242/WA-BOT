@@ -238,7 +238,7 @@ export async function handleTradenow(sock, chatId, senderJid, args, { tradeAlert
         }
 
         const loading = await sock.sendMessage(chatId, {
-            text: `📊 _Analyzing ${symbol}…\n🌐 Fetching live price + news… (~45–90s)_`,
+            text: `📊 _Analyzing ${symbol}…\n🌐 Live price + NSE chain + news (~60–120s)_`,
         });
 
         try {
@@ -248,7 +248,7 @@ export async function handleTradenow(sock, chatId, senderJid, args, { tradeAlert
         } catch (error) {
             logger.error(`Error in tradenow: ${error.message}`);
             const msg = /timeout/i.test(error.message)
-                ? '❌ Analysis timed out. Try again in a moment.'
+                ? '❌ Analysis timed out after retries.\n_NVIDIA API slow — try again in 1–2 min or use a simpler symbol like NIFTY._'
                 : `❌ Analysis failed: ${error.message}`;
             await editMessageText(sock, chatId, loading?.key, msg);
         }

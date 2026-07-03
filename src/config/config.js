@@ -117,6 +117,18 @@ export const config = {
         .split(',')
         .map((s) => parseInt(s.trim(), 10))
         .filter((n) => Number.isFinite(n) && n > 0),
+    /** NVIDIA timeout for trade analysis step (max 180s) */
+    TRADE_ANALYSIS_TIMEOUT_MS: (() => {
+        const n = parseInt(process.env.TRADE_ANALYSIS_TIMEOUT_MS, 10);
+        if (!Number.isFinite(n) || n <= 0) return 150_000;
+        return Math.min(180_000, Math.max(60_000, n));
+    })(),
+    /** Step-1 research brief timeout (ms) */
+    TRADE_RESEARCH_TIMEOUT_MS: (() => {
+        const n = parseInt(process.env.TRADE_RESEARCH_TIMEOUT_MS, 10);
+        if (!Number.isFinite(n) || n <= 0) return 55_000;
+        return Math.min(90_000, Math.max(30_000, n));
+    })(),
     BOT_LOG_NUMBER: process.env.BOT_LOG_NUMBER?.trim() || '',
     GITHUB_TRENDING_ENABLED: process.env.GITHUB_TRENDING_ENABLED !== 'false',
     GITHUB_TRENDING_TIMES: (process.env.GITHUB_TRENDING_TIMES || '09:00,11:30,14:00,16:30,19:00')
