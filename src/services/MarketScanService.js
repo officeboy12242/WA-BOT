@@ -21,6 +21,15 @@ export const FNO_UNIVERSE = [
 
 const INDICES = ['NIFTY', 'BANKNIFTY'];
 
+/** Too obvious for "hidden gem" tag — still scannable, just not gem candidates */
+export const MEGA_OBVIOUS_SYMBOLS = new Set([
+    'NIFTY', 'BANKNIFTY', 'RELIANCE', 'TCS', 'HDFCBANK', 'INFY', 'ICICIBANK',
+    'SBIN', 'ITC', 'HINDUNILVR', 'BHARTIARTL', 'KOTAKBANK',
+]);
+
+/** Minimum score to designate a hidden gem for the daily hunt */
+const MIN_HIDDEN_GEM_SCORE = 35;
+
 async function fetchQuoteRow(symbol) {
     const quote = await indianStockQuoteService.fetchQuote(symbol);
     if (!quote) return null;
@@ -89,6 +98,7 @@ class MarketScanService {
             movers: { gainers, losers },
             indices: indexRows,
             marketNews: marketNews.context,
+            universeRows: withChange,
         };
     }
 
@@ -116,13 +126,96 @@ class MarketScanService {
         return map;
     }
 
+    /** Score overlooked F&O names with catalyst + momentum (excludes mega-obvious tickers). */
+    scoreHiddenGem(row, marketNews = '', aiBoost = false) {
+        const sym = String(row?.symbol || '').trim().toUpperCase();
+        if (!sym || MEGA_OBVIOUS_SYMBOLS.has(sym)) return 0;
+
+        let score = 0;
+        const pct = Math.abs(Number(row.changePct) || 0);
+        if (pct >= 2) score += 30;
+        else if (pct >= 1.5) score += 20;
+        else if (pct >= 1) score += 10;
+
+        const vol = Number(row.volume) || 0;
+        if (vol > 1_000_000) score += 15;
+        else if (vol > 300_000) score += 8;
+
+        const newsLower = String(marketNews || '').toLowerCase();
+        const nameLower = String(row.name || '').toLowerCase();
+        if (newsLower.includes(sym.toLowerCase()) || (nameLower && newsLower.includes(nameLower))) {
+            score += 25;
+        }
+
+        if (aiBoost) score += 20;
+        return score;
+    }
+
+    /**
+     * Rank hidden gem candidates from universe quotes + movers.
+     * @returns {{ symbol: string, score: number, changePct: number, reason: string }[]}
+     */
+    findHiddenGemCandidates(universeRows, movers, marketNews, aiHiddenGem = null) {
+        const aiSym = String(aiHiddenGem || '').trim().toUpperCase();
+        const rows = [];
+        const seen = new Set();
+
+        const addRow = (row) => {
+            const sym = String(row?.symbol || '').trim().toUpperCase();
+            if (!sym || seen.has(sym)) return;
+            seen.add(sym);
+            rows.push(row);
+        };
+
+        for (const row of universeRows || []) addRow(row);
+        for (const row of [...(movers?.gainers || []), ...(movers?.losers || [])]) addRow(row);
+
+        const candidates = [];
+        for (const row of rows) {
+            const sym = row.symbol.toUpperCase();
+            const aiBoost = Boolean(aiSym && sym === aiSym);
+            const score = this.scoreHiddenGem(row, marketNews, aiBoost);
+            if (score < 25) continue;
+
+            const pct = Number(row.changePct) || 0;
+            const parts = [];
+            if (Math.abs(pct) >= 1) parts.push(`${pct >= 0 ? '+' : ''}${pct.toFixed(1)}% move`);
+            if (aiBoost) parts.push('AI catalyst pick');
+            else if (score >= 40) parts.push('strong momentum + news');
+
+            candidates.push({
+                symbol: sym,
+                score,
+                changePct: pct,
+                reason: parts.join(' · ') || 'overlooked F&O mover',
+            });
+        }
+
+        return candidates.sort((a, b) => b.score - a.score);
+    }
+
+    /** Pick best hidden gem or null if none qualifies. */
+    pickHiddenGem(universeRows, movers, marketNews, aiHiddenGem = null, aiReason = null) {
+        const candidates = this.findHiddenGemCandidates(universeRows, movers, marketNews, aiHiddenGem);
+        const top = candidates[0];
+        if (!top || top.score < MIN_HIDDEN_GEM_SCORE) {
+            return { hiddenGem: null, hiddenGemReason: null, candidates };
+        }
+        return {
+            hiddenGem: top.symbol,
+            hiddenGemReason: aiReason || top.reason,
+            candidates,
+        };
+    }
+
     /**
      * Build a full watchlist: AI picks + top movers + indices (always targetCount symbols).
      * @param {string[]} aiSymbols
      * @param {{ gainers: object[], losers: object[] }} movers
      * @param {number} targetCount
+     * @param {{ hiddenGem?: string|null }} opts
      */
-    buildDiscoveryWatchlist(aiSymbols, movers, targetCount = 10) {
+    buildDiscoveryWatchlist(aiSymbols, movers, targetCount = 10, { hiddenGem = null } = {}) {
         const target = Math.max(8, targetCount);
         const ordered = [];
         const seen = new Set();
@@ -133,6 +226,8 @@ class MarketScanService {
             seen.add(sym);
             ordered.push(sym);
         };
+
+        if (hiddenGem) push(hiddenGem);
 
         for (const sym of aiSymbols) {
             push(sym);

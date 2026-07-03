@@ -16,7 +16,7 @@ import {
     STOCK_DISCOVERY_SYSTEM_PROMPT,
     buildDiscoveryUserPrompt,
 } from '../prompts/stockDiscoveryPrompt.js';
-import { parseTradeSignal, parseDiscoverySymbols } from '../utils/tradeSignalParser.js';
+import { parseTradeSignal, parseDiscoveryResult } from '../utils/tradeSignalParser.js';
 import { enforceLiveSpotPrice } from '../utils/tradeQuoteUtils.js';
 import { injectTradePlans } from '../utils/tradePlanFormatter.js';
 import {
@@ -51,7 +51,16 @@ class TradeAlertController {
         this._sock = null;
         this._sentCollection = null;
         this._discoveryCollection = null;
-        this._discoveryCache = { date: null, symbols: [], movers: null, moversBrief: '', marketNews: '', scannedAt: null };
+        this._discoveryCache = {
+            date: null,
+            symbols: [],
+            hiddenGem: null,
+            hiddenGemReason: null,
+            movers: null,
+            moversBrief: '',
+            marketNews: '',
+            scannedAt: null,
+        };
     }
 
     async init() {
@@ -76,7 +85,7 @@ class TradeAlertController {
         return this.enabled && this.nvidia.isConfigured();
     }
 
-    async _runAnalysis(symbol, { mode = 'live', skipResearch = false } = {}) {
+    async _runAnalysis(symbol, { mode = 'live', skipResearch = false, isHiddenGem = false } = {}) {
         const startedAt = Date.now();
         const intel = await this.research.gatherIntel(symbol, { includeMarketBrief: false });
 
@@ -116,8 +125,44 @@ class TradeAlertController {
         logger.info(`Trade analysis done for ${intel.symbol} in ${Date.now() - startedAt}ms`);
 
         const signal = parseTradeSignal(body);
-        const text = wrapTradeAlertMessage(intel.symbol, body, { isDaily: mode === 'daily' });
+        const text = wrapTradeAlertMessage(intel.symbol, body, {
+            isDaily: mode === 'daily',
+            isHiddenGem: isHiddenGem && mode === 'daily',
+        });
         return { text, body, signal, symbol: intel.symbol };
+    }
+
+    async _runDailyAnalysis(symbol, { isHiddenGem = false } = {}) {
+        try {
+            return await this._runAnalysis(symbol, { mode: 'daily', isHiddenGem });
+        } catch (err) {
+            if (this.isTimeoutError(err)) {
+                logger.warn(`Daily scan timeout for ${symbol}, retrying without research step…`);
+                return await this._runAnalysis(symbol, {
+                    mode: 'daily',
+                    skipResearch: true,
+                    isHiddenGem,
+                });
+            }
+            throw err;
+        }
+    }
+
+    /**
+     * Pick alerts to post: 4 standard + 1 gem when gem is actionable, else up to 5 standard.
+     * @param {{ symbol: string, text: string, signal: object, resultEntry: object }[]} actionableRegular
+     * @param {{ symbol: string, text: string, signal: object, resultEntry: object }|null} actionableGem
+     */
+    _selectDailyPosts(actionableRegular, actionableGem) {
+        const maxTotal = this.maxSendsPerGroup;
+        const sortedRegular = [...actionableRegular].sort(
+            (a, b) => (b.signal.confidence || 0) - (a.signal.confidence || 0)
+        );
+
+        if (actionableGem) {
+            return [actionableGem, ...sortedRegular.slice(0, maxTotal - 1)];
+        }
+        return sortedRegular.slice(0, maxTotal);
     }
 
     async analyzeSymbol(rawSymbol, { mode = 'live', skipResearch = false } = {}) {
@@ -165,6 +210,8 @@ class TradeAlertController {
                     this._discoveryCache = {
                         date: dateStr,
                         symbols: row.symbols,
+                        hiddenGem: row.hidden_gem || null,
+                        hiddenGemReason: row.hidden_gem_reason || null,
                         movers: row.movers || null,
                         moversBrief: row.movers_brief || '',
                         marketNews: row.market_news || '',
@@ -179,6 +226,8 @@ class TradeAlertController {
             const symbols = this.defaultSymbols.slice(0, this.discoveryCount);
             return {
                 symbols,
+                hiddenGem: null,
+                hiddenGemReason: null,
                 moversBrief: 'n/a',
                 marketNews: 'n/a',
                 scannedAt: new Date(),
@@ -195,11 +244,12 @@ class TradeAlertController {
         const userPrompt = buildDiscoveryUserPrompt(snapshot.context, this.discoveryCount);
 
         const raw = await this.nvidia.complete(STOCK_DISCOVERY_SYSTEM_PROMPT, userPrompt, {
-            maxTokens: 800,
+            maxTokens: 900,
             timeoutMs: 90_000,
         });
 
-        let aiSymbols = parseDiscoverySymbols(raw);
+        const discovery = parseDiscoveryResult(raw);
+        let aiSymbols = discovery.symbols;
         if (!aiSymbols.length) {
             logger.warn('AI discovery returned no symbols — using top movers fallback');
             aiSymbols = [
@@ -208,12 +258,26 @@ class TradeAlertController {
             ];
         }
 
+        const gemPick = marketScanService.pickHiddenGem(
+            snapshot.universeRows,
+            snapshot.movers,
+            snapshot.marketNews,
+            discovery.hiddenGem,
+            discovery.hiddenGemReason
+        );
+        const hiddenGem = gemPick.hiddenGem;
+        const hiddenGemReason = gemPick.hiddenGemReason;
+
         let symbols = marketScanService.buildDiscoveryWatchlist(
             aiSymbols,
             snapshot.movers,
-            this.discoveryCount
+            this.discoveryCount,
+            { hiddenGem }
         );
         symbols = marketScanService.orderSymbolsByMovers(symbols, snapshot.movers);
+        if (hiddenGem) {
+            symbols = [hiddenGem, ...symbols.filter((s) => s !== hiddenGem)];
+        }
 
         const moversBrief = marketScanService.formatMoversBrief(snapshot.movers);
         const marketNews = snapshot.marketNews.split('\n').slice(0, 5).join('\n');
@@ -222,6 +286,8 @@ class TradeAlertController {
         this._discoveryCache = {
             date: dateStr,
             symbols,
+            hiddenGem,
+            hiddenGemReason,
             movers: snapshot.movers,
             moversBrief,
             marketNews,
@@ -234,6 +300,8 @@ class TradeAlertController {
                 {
                     $set: {
                         symbols,
+                        hidden_gem: hiddenGem,
+                        hidden_gem_reason: hiddenGemReason,
                         movers: snapshot.movers,
                         movers_brief: moversBrief,
                         market_news: marketNews,
@@ -245,13 +313,24 @@ class TradeAlertController {
             );
         }
 
-        logger.info(`🤖 AI discovery watchlist (${symbols.length}): ${symbols.join(', ')}`);
-        return { symbols, movers: snapshot.movers, moversBrief, marketNews, scannedAt };
+        const gemNote = hiddenGem ? ` · 💎 gem: ${hiddenGem}` : '';
+        logger.info(`🤖 AI discovery watchlist (${symbols.length}): ${symbols.join(', ')}${gemNote}`);
+        return {
+            symbols,
+            hiddenGem,
+            hiddenGemReason,
+            movers: snapshot.movers,
+            moversBrief,
+            marketNews,
+            scannedAt,
+        };
     }
 
     _discoveryResultFromCache() {
         return {
             symbols: this._discoveryCache.symbols,
+            hiddenGem: this._discoveryCache.hiddenGem || null,
+            hiddenGemReason: this._discoveryCache.hiddenGemReason || null,
             movers: this._discoveryCache.movers || null,
             moversBrief: this._discoveryCache.moversBrief || 'n/a',
             marketNews: this._discoveryCache.marketNews || 'n/a',
@@ -260,13 +339,14 @@ class TradeAlertController {
     }
 
     _formatScanResultLine(entry) {
+        const gemTag = entry.isHiddenGem ? ' 💎' : '';
         if (entry.posted) {
-            return `✅ *${entry.symbol}* — ${entry.recommendation} (${entry.confidence}%)`;
+            return `✅ *${entry.symbol}*${gemTag} — ${entry.recommendation} (${entry.confidence}%)`;
         }
         if (entry.isActionable) {
-            return `⚠️ ${entry.symbol} — ${entry.recommendation} (${entry.confidence}%)`;
+            return `⚠️ ${entry.symbol}${gemTag} — ${entry.recommendation} (${entry.confidence}%) · not posted (daily limit)`;
         }
-        return `— ${entry.symbol} — NO TRADE (CE ${entry.ceConfidence}% / PE ${entry.peConfidence}%)`;
+        return `— ${entry.symbol}${gemTag} — NO TRADE (CE ${entry.ceConfidence}% / PE ${entry.peConfidence}%)`;
     }
 
     async wasDailySent(groupId, symbol, dateStr) {
@@ -350,6 +430,8 @@ class TradeAlertController {
                         logger.error(`Daily discovery failed, using fallback watchlist: ${err.message}`);
                         autoDiscovery = {
                             symbols: this.defaultSymbols.slice(0, this.discoveryCount),
+                            hiddenGem: null,
+                            hiddenGemReason: null,
                             moversBrief: 'Discovery unavailable — using default watchlist',
                             marketNews: '',
                             scannedAt: new Date(),
@@ -367,33 +449,42 @@ class TradeAlertController {
                 continue;
             }
 
+            const hiddenGemSymbol = mode === 'auto' ? (autoDiscovery?.hiddenGem || null) : null;
+            const hiddenGemReason = mode === 'auto' ? (autoDiscovery?.hiddenGemReason || null) : null;
+
             let sentCount = 0;
             const skipped = [];
             const actionableSent = [];
             const scanResults = [];
+            const actionableRegular = [];
+            let actionableGem = null;
 
             if (mode === 'auto') {
-                const intro =
+                let intro =
                     `📡 *AI Market Scan* · ${dateLabel}\n` +
-                    `Scanning: *${symbols.join(', ')}*\n` +
-                    `_CE + PE analysis posted when Primary Pick ≥70% (max ${this.maxSendsPerGroup}/day)._\n` +
-                    `_Analyzing one by one — may take several minutes._`;
+                    `Scanning: *${symbols.join(', ')}*\n`;
+                if (hiddenGemSymbol) {
+                    intro +=
+                        `💎 *Hidden gem hunt:* *${hiddenGemSymbol}*` +
+                        (hiddenGemReason ? `\n_${hiddenGemReason}_` : '') +
+                        '\n';
+                    intro += `_Posts: up to 4 standard + 1 gem when gem ≥70%, else up to ${this.maxSendsPerGroup} standard._\n`;
+                } else {
+                    intro += `_CE + PE analysis posted when Primary Pick ≥70% (max ${this.maxSendsPerGroup}/day)._\n`;
+                }
+                intro += '_Analyzing one by one — may take several minutes._';
                 await sock.sendMessage(group.group_id, { text: intro }).catch(() => {});
                 await new Promise((r) => setTimeout(r, 800));
             }
 
             for (const symbol of symbols) {
                 try {
-                    if (this.onlyBuySignals && sentCount >= this.maxSendsPerGroup) {
-                        skipped.push(`${symbol} (daily alert limit reached)`);
-                        continue;
-                    }
-
                     if (await this.wasDailySent(group.group_id, symbol, dateStr)) {
                         continue;
                     }
 
-                    const { text, signal } = await this._runAnalysis(symbol, { mode: 'daily' });
+                    const isHiddenGem = Boolean(hiddenGemSymbol && symbol === hiddenGemSymbol);
+                    const { text, signal } = await this._runDailyAnalysis(symbol, { isHiddenGem });
 
                     const resultEntry = {
                         symbol,
@@ -402,6 +493,7 @@ class TradeAlertController {
                         ceConfidence: signal.ceConfidence,
                         peConfidence: signal.peConfidence,
                         isActionable: signal.isActionable,
+                        isHiddenGem,
                         posted: false,
                     };
 
@@ -417,31 +509,51 @@ class TradeAlertController {
                         continue;
                     }
 
-                    if (sentCount >= this.maxSendsPerGroup) {
-                        skipped.push(`${symbol} (daily limit reached)`);
-                        scanResults.push(resultEntry);
-                        await this.markDailySent(group.group_id, symbol, dateStr, {
-                            skipped: true,
-                            reason: 'daily_limit',
-                        });
-                        continue;
+                    const item = { symbol, text, signal, resultEntry };
+                    if (isHiddenGem) {
+                        actionableGem = item;
+                    } else {
+                        actionableRegular.push(item);
                     }
-
-                    await sock.sendMessage(group.group_id, { text });
-                    resultEntry.posted = true;
                     scanResults.push(resultEntry);
-                    await this.markDailySent(group.group_id, symbol, dateStr, {
-                        skipped: false,
-                        signal: signal.recommendation,
-                        confidence: signal.confidence,
-                    });
-                    sentCount += 1;
-                    actionableSent.push(symbol);
-                    logger.info(`✅ Trade alert sent: ${symbol} → ${group.group_name || group.group_id}`);
-                    await new Promise((r) => setTimeout(r, 2000));
                 } catch (err) {
                     logger.error(`Trade alert failed ${symbol} in ${group.group_id}: ${err.message}`);
+                    skipped.push(`${symbol} (scan error)`);
                 }
+            }
+
+            const toPost = this._selectDailyPosts(actionableRegular, actionableGem);
+            const postSymbols = new Set(toPost.map((p) => p.symbol));
+
+            for (const item of toPost) {
+                try {
+                    await sock.sendMessage(group.group_id, { text: item.text });
+                    item.resultEntry.posted = true;
+                    await this.markDailySent(group.group_id, item.symbol, dateStr, {
+                        skipped: false,
+                        signal: item.signal.recommendation,
+                        confidence: item.signal.confidence,
+                        hidden_gem: item.resultEntry.isHiddenGem,
+                    });
+                    sentCount += 1;
+                    actionableSent.push(item.resultEntry.isHiddenGem ? `${item.symbol} 💎` : item.symbol);
+                    logger.info(
+                        `✅ Trade alert sent: ${item.symbol}${item.resultEntry.isHiddenGem ? ' 💎' : ''} → ${group.group_name || group.group_id}`
+                    );
+                    await new Promise((r) => setTimeout(r, 2000));
+                } catch (err) {
+                    logger.error(`Trade alert send failed ${item.symbol} in ${group.group_id}: ${err.message}`);
+                }
+            }
+
+            for (const item of [...actionableRegular, ...(actionableGem ? [actionableGem] : [])]) {
+                if (postSymbols.has(item.symbol)) continue;
+                await this.markDailySent(group.group_id, item.symbol, dateStr, {
+                    skipped: true,
+                    reason: 'daily_limit',
+                    signal: item.signal.recommendation,
+                    confidence: item.signal.confidence,
+                }).catch(() => {});
             }
 
             const scanSummary = scanResults.length
@@ -449,10 +561,17 @@ class TradeAlertController {
                 : '';
 
             if (sentCount > 0) {
+                const gemPosted = toPost.some((p) => p.resultEntry.isHiddenGem && p.resultEntry.posted);
+                const gemNote = gemPosted
+                    ? '\n_💎 Hidden gem included in today\'s posts._'
+                    : hiddenGemSymbol
+                      ? `\n_No hidden gem posted — ${hiddenGemSymbol} did not reach ≥70%._`
+                      : '';
                 await sock.sendMessage(group.group_id, {
                     text:
                         `📈 *Daily F&O scan complete*\n` +
                         `Posted *${sentCount}* actionable alert(s): *${actionableSent.join(', ')}*` +
+                        gemNote +
                         scanSummary +
                         `\n\n_Use \`/tradenow SYMBOL\` anytime for full analysis._`,
                 }).catch(() => {});

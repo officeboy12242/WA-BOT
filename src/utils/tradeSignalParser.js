@@ -4,6 +4,12 @@
 
 const MIN_CONFIDENCE = 70;
 
+/** Keep mega-obvious names out of AI gem slot */
+const MEGA_OBVIOUS_FOR_GEM = new Set([
+    'NIFTY', 'BANKNIFTY', 'RELIANCE', 'TCS', 'HDFCBANK', 'INFY', 'ICICIBANK',
+    'SBIN', 'ITC', 'HINDUNILVR', 'BHARTIARTL', 'KOTAKBANK',
+]);
+
 function parseSectionConfidence(text, sectionPattern) {
     const block = text.match(sectionPattern)?.[0] || '';
     const conf = block.match(/Confidence:\s*(\d{1,3})\s*%?/i)?.[1];
@@ -109,4 +115,56 @@ export function parseDiscoverySymbols(raw) {
     }
 
     return [];
+}
+
+function extractDiscoveryJson(raw) {
+    const text = String(raw || '').trim();
+    if (!text) return null;
+
+    const jsonBlock = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
+    const candidate = jsonBlock || text;
+
+    try {
+        return JSON.parse(candidate);
+    } catch {
+        const objectMatch = candidate.match(/\{[\s\S]*\}/);
+        if (objectMatch) {
+            try {
+                return JSON.parse(objectMatch[0]);
+            } catch {
+                return null;
+            }
+        }
+    }
+    return null;
+}
+
+/**
+ * Extract symbols + optional hidden gem from AI discovery response.
+ * @returns {{ symbols: string[], hiddenGem: string|null, hiddenGemReason: string|null }}
+ */
+export function parseDiscoveryResult(raw) {
+    const symbols = parseDiscoverySymbols(raw);
+    const parsed = extractDiscoveryJson(raw);
+    if (!parsed) {
+        return { symbols, hiddenGem: null, hiddenGemReason: null };
+    }
+
+    let hiddenGem = null;
+    let hiddenGemReason = null;
+    const gem = parsed.hidden_gem ?? parsed.hiddenGem ?? null;
+
+    if (typeof gem === 'string' && gem.trim()) {
+        hiddenGem = gem.trim().toUpperCase();
+    } else if (gem && typeof gem === 'object' && gem.symbol) {
+        hiddenGem = String(gem.symbol).trim().toUpperCase();
+        hiddenGemReason = String(gem.reason || parsed.reasons?.[hiddenGem] || '').trim() || null;
+    }
+
+    if (hiddenGem && MEGA_OBVIOUS_FOR_GEM?.has?.(hiddenGem)) {
+        hiddenGem = null;
+        hiddenGemReason = null;
+    }
+
+    return { symbols, hiddenGem, hiddenGemReason };
 }
