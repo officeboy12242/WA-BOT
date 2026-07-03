@@ -33,10 +33,12 @@ function formatScannedAt(scannedAt) {
     });
 }
 
-async function getGroupName(sock, chatId) {
+async function getGroupName(sock, chatId, groupManager) {
     try {
-        const meta = await sock.groupMetadata(chatId);
-        return meta.subject;
+        const meta = groupManager?.getGroupMetadataCached
+            ? await groupManager.getGroupMetadataCached(sock, chatId)
+            : await sock.groupMetadata(chatId);
+        return meta?.subject || 'Unknown Group';
     } catch {
         return 'Unknown Group';
     }
@@ -46,7 +48,7 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
     try {
         const senderPhone = extractPhoneNumber(senderJid);
         const action = (args[0] || '').toLowerCase();
-        const groupName = await getGroupName(sock, chatId);
+        const groupName = await getGroupName(sock, chatId, groupManager);
         const currentlyOn = await groupManager.isTradeAlertEnabled(chatId);
         const mode = (await groupManager.getTradeAlertMode(chatId)) || config.TRADE_ALERT_MODE || 'auto';
         const symbols = await groupManager.getTradeAlertSymbols(chatId);

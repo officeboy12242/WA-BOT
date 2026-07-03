@@ -363,6 +363,13 @@ function looksLikePhone(value) {
  * @param {string} jid
  * @returns {Promise<string>}
  */
+/** Optional fast metadata provider (GroupManager cache) — avoids full WA fetch in big groups. */
+let _groupMetaProvider = null;
+
+export function setGroupMetaProvider(provider) {
+    _groupMetaProvider = typeof provider === 'function' ? provider : null;
+}
+
 export async function resolveJidToPhone(sock, chatId, jid) {
     if (!jid) {
         return '';
@@ -375,8 +382,10 @@ export async function resolveJidToPhone(sock, chatId, jid) {
         return direct;
     }
     try {
-        const meta = await sock.groupMetadata(chatId);
-        const hit = meta.participants.find(
+        const meta = _groupMetaProvider
+            ? await _groupMetaProvider(sock, chatId)
+            : await sock.groupMetadata(chatId);
+        const hit = (meta?.participants || []).find(
             (p) =>
                 p.id === jid ||
                 p.lid === jid ||
@@ -465,8 +474,10 @@ export async function resolveTargetParticipant(sock, chatId, args, waMessage, se
     const fromArgs = args.join('').replace(/\D/g, '');
     if (fromArgs.length >= 10 && chatId?.endsWith('@g.us') && sock) {
         try {
-            const meta = await sock.groupMetadata(chatId);
-            for (const p of meta.participants || []) {
+            const meta = _groupMetaProvider
+                ? await _groupMetaProvider(sock, chatId)
+                : await sock.groupMetadata(chatId);
+            for (const p of meta?.participants || []) {
                 const pPhone = participantToPhone(p);
                 const normalized = normalizePhoneNumber(pPhone);
                 if (
