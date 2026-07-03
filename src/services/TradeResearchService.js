@@ -47,7 +47,7 @@ class TradeResearchService {
 
         logger.info(`🔬 AI research brief for ${intel.symbol}…`);
         try {
-            const brief = await this.nvidia.complete(TRADE_RESEARCH_SYSTEM_PROMPT, userPrompt, {
+            const brief = await this.nvidia.completeTrade(TRADE_RESEARCH_SYSTEM_PROMPT, userPrompt, {
                 maxTokens: 700,
                 timeoutMs: this.researchTimeoutMs,
             });
