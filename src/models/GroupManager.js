@@ -22,6 +22,31 @@ function participantToPhone(participant) {
     return fromId || fromPn;
 }
 
+/** Group metadata is expensive for 700+ member groups — cache aggressively. */
+const GROUP_META_TTL_MS = 15 * 60_000;
+const ADMIN_STATUS_TTL_MS = 10 * 60_000;
+const BOT_ROLE_TTL_MS = 3 * 60_000;
+
+function buildAdminIndex(participants) {
+    /** @type {Map<string, boolean>} */
+    const index = new Map();
+    for (const p of participants || []) {
+        const isAdmin = p.admin === 'admin' || p.admin === 'superadmin';
+        if (p.id) index.set(String(p.id), isAdmin);
+        if (p.lid) index.set(String(p.lid), isAdmin);
+        if (p.pn) index.set(String(p.pn), isAdmin);
+        if (p.phoneNumber) index.set(String(p.phoneNumber), isAdmin);
+        const phone = normalizePhoneNumber(participantToPhone(p));
+        if (phone) index.set(phone, isAdmin);
+        // Also index bare user part of jid
+        const idUser = String(p.id || '').split('@')[0];
+        if (idUser) index.set(idUser, isAdmin);
+        const lidUser = String(p.lid || '').split('@')[0];
+        if (lidUser) index.set(lidUser, isAdmin);
+    }
+    return index;
+}
+
 class GroupManager {
     constructor(mongoDb) {
         this.mongoDb = mongoDb;
@@ -29,8 +54,16 @@ class GroupManager {
         this.admins = null;
         this.ownerNumbers = [];
         this.moderatorNumbers = [];
-        /** @type {Map<string, { data: object, at: number }>} */
+        /** @type {Map<string, { data: object, at: number, adminIndex: Map<string, boolean> }>} */
         this.groupMetaCache = new Map();
+        /** @type {Map<string, Promise<object>>} */
+        this.groupMetaInflight = new Map();
+        /** @type {Map<string, { isAdmin: boolean, at: number }>} */
+        this.senderAdminCache = new Map();
+        /** @type {Map<string, { value: boolean, at: number }>} */
+        this.botAdminCache = new Map();
+        /** @type {Map<string, { value: boolean, at: number }>} */
+        this.dynamicModCache = new Map();
     }
 
     async init() {
@@ -94,7 +127,49 @@ class GroupManager {
     }
 
     async isBotAdmin(phoneNumber) {
-        return Boolean(await this.findBotAdminRecord(phoneNumber));
+        const normalized = normalizePhoneNumber(phoneNumber);
+        if (!normalized) return false;
+        const cached = this.botAdminCache.get(normalized);
+        if (cached && Date.now() - cached.at < BOT_ROLE_TTL_MS) {
+            return cached.value;
+        }
+        const value = Boolean(await this.findBotAdminRecord(normalized));
+        this._setBoundedCache(this.botAdminCache, normalized, { value, at: Date.now() }, 500);
+        return value;
+    }
+
+    _setBoundedCache(map, key, value, maxSize) {
+        if (map.size >= maxSize) {
+            const oldest = map.keys().next().value;
+            if (oldest !== undefined) map.delete(oldest);
+        }
+        map.set(key, value);
+    }
+
+    /** Drop cached WA group metadata (call on participant join/leave/promote). */
+    invalidateGroupMeta(groupId) {
+        if (!groupId) return;
+        const id = jidNormalizedUser(String(groupId).replace(/:\d+(?=@)/, '')) || groupId;
+        this.groupMetaCache.delete(id);
+        this.groupMetaCache.delete(groupId);
+        this.groupMetaInflight.delete(id);
+        this.groupMetaInflight.delete(groupId);
+        for (const key of [...this.senderAdminCache.keys()]) {
+            if (key.startsWith(`${id}:`) || key.startsWith(`${groupId}:`)) {
+                this.senderAdminCache.delete(key);
+            }
+        }
+    }
+
+    invalidateBotRoleCaches(phoneNumber = '') {
+        if (!phoneNumber) {
+            this.botAdminCache.clear();
+            this.dynamicModCache.clear();
+            return;
+        }
+        const phone = normalizePhoneNumber(phoneNumber);
+        this.botAdminCache.delete(phone);
+        this.dynamicModCache.delete(phone);
     }
 
     /** Owners, moderators (env + dynamic), or DB bot admins — can add/remove other bot admins */
@@ -117,17 +192,55 @@ class GroupManager {
     }
 
     async getGroupMetadataCached(sock, groupId) {
-        const cached = this.groupMetaCache.get(groupId);
-        if (cached && Date.now() - cached.at < 60_000) {
+        const id = jidNormalizedUser(String(groupId || '').replace(/:\d+(?=@)/, '')) || groupId;
+        const cached = this.groupMetaCache.get(id) || this.groupMetaCache.get(groupId);
+        if (cached && Date.now() - cached.at < GROUP_META_TTL_MS) {
             return cached.data;
         }
-        const data = await sock.groupMetadata(groupId);
-        if (this.groupMetaCache.size > 200) {
-            const oldest = this.groupMetaCache.keys().next().value;
-            this.groupMetaCache.delete(oldest);
+
+        // Deduplicate concurrent metadata fetches (big groups: one WA call, many waiters)
+        const inflightKey = id || groupId;
+        const existing = this.groupMetaInflight.get(inflightKey);
+        if (existing) {
+            return existing;
         }
-        this.groupMetaCache.set(groupId, { data, at: Date.now() });
-        return data;
+
+        const fetchPromise = (async () => {
+            const data = await sock.groupMetadata(groupId);
+            const adminIndex = buildAdminIndex(data.participants || []);
+            const entry = { data, at: Date.now(), adminIndex };
+            if (this.groupMetaCache.size > 100) {
+                const oldest = this.groupMetaCache.keys().next().value;
+                if (oldest !== undefined) this.groupMetaCache.delete(oldest);
+            }
+            this.groupMetaCache.set(id, entry);
+            if (groupId !== id) this.groupMetaCache.set(groupId, entry);
+            return data;
+        })();
+
+        this.groupMetaInflight.set(inflightKey, fetchPromise);
+        try {
+            return await fetchPromise;
+        } finally {
+            this.groupMetaInflight.delete(inflightKey);
+        }
+    }
+
+    _lookupAdminIndex(adminIndex, senderJid, phoneNumber) {
+        if (!adminIndex) return null;
+        const keys = [
+            senderJid,
+            phoneNumber,
+            normalizePhoneNumber(phoneNumber),
+            extractPhoneNumber(senderJid),
+            String(senderJid || '').split('@')[0],
+        ].filter(Boolean);
+        for (const key of keys) {
+            if (adminIndex.has(key)) {
+                return adminIndex.get(key);
+            }
+        }
+        return null;
     }
 
     /**
@@ -160,22 +273,50 @@ class GroupManager {
         return typeof count === 'number' ? String(count) : '—';
     }
 
+    /** Fast group subject (uses metadata cache). */
+    async getGroupSubject(sock, groupId) {
+        try {
+            const meta = await this.getGroupMetadataCached(sock, groupId);
+            return meta?.subject || 'Unknown Group';
+        } catch {
+            return 'Unknown Group';
+        }
+    }
+
     async isGroupAdmin(sock, groupId, phoneNumber) {
         try {
-            const groupMetadata = await this.getGroupMetadataCached(sock, groupId);
             const normalized = normalizePhoneNumber(phoneNumber);
-            const participant = groupMetadata.participants.find((p) => {
+            const cacheKey = `${groupId}:phone:${normalized}`;
+            const cached = this.senderAdminCache.get(cacheKey);
+            if (cached && Date.now() - cached.at < ADMIN_STATUS_TTL_MS) {
+                return cached.isAdmin;
+            }
+
+            await this.getGroupMetadataCached(sock, groupId);
+            const entry = this.groupMetaCache.get(groupId)
+                || this.groupMetaCache.get(jidNormalizedUser(String(groupId).replace(/:\d+(?=@)/, '')) || groupId);
+            const indexed = this._lookupAdminIndex(entry?.adminIndex, '', normalized);
+            if (indexed !== null) {
+                this._setBoundedCache(this.senderAdminCache, cacheKey, { isAdmin: indexed, at: Date.now() }, 2000);
+                return indexed;
+            }
+
+            // Fallback scan (rare)
+            const groupMetadata = entry?.data;
+            const participant = (groupMetadata?.participants || []).find((p) => {
                 const participantPhone = normalizePhoneNumber(participantToPhone(p));
                 return (
                     participantPhone === normalized ||
-                    p.id.includes(normalized) ||
-                    p.id.includes(phoneNumber)
+                    p.id?.includes(normalized) ||
+                    p.id?.includes(phoneNumber)
                 );
             });
-            return Boolean(
+            const isAdmin = Boolean(
                 participant &&
                     (participant.admin === 'admin' || participant.admin === 'superadmin')
             );
+            this._setBoundedCache(this.senderAdminCache, cacheKey, { isAdmin, at: Date.now() }, 2000);
+            return isAdmin;
         } catch {
             return false;
         }
@@ -187,9 +328,23 @@ class GroupManager {
             return false;
         }
         try {
-            const groupMetadata = await this.getGroupMetadataCached(sock, groupId);
             const senderPhone = normalizePhoneNumber(extractPhoneNumber(senderJid));
-            for (const p of groupMetadata.participants || []) {
+            const cacheKey = `${groupId}:${senderJid}:${senderPhone}`;
+            const cached = this.senderAdminCache.get(cacheKey);
+            if (cached && Date.now() - cached.at < ADMIN_STATUS_TTL_MS) {
+                return cached.isAdmin;
+            }
+
+            await this.getGroupMetadataCached(sock, groupId);
+            const id = jidNormalizedUser(String(groupId).replace(/:\d+(?=@)/, '')) || groupId;
+            const entry = this.groupMetaCache.get(id) || this.groupMetaCache.get(groupId);
+            const indexed = this._lookupAdminIndex(entry?.adminIndex, senderJid, senderPhone);
+            if (indexed !== null) {
+                this._setBoundedCache(this.senderAdminCache, cacheKey, { isAdmin: indexed, at: Date.now() }, 2000);
+                return indexed;
+            }
+
+            for (const p of entry?.data?.participants || []) {
                 const matchesJid =
                     p.id === senderJid ||
                     p.lid === senderJid ||
@@ -198,7 +353,9 @@ class GroupManager {
                 const pPhone = normalizePhoneNumber(participantToPhone(p));
                 const matchesPhone = senderPhone && pPhone && pPhone === senderPhone;
                 if (matchesJid || matchesPhone) {
-                    return p.admin === 'admin' || p.admin === 'superadmin';
+                    const isAdmin = p.admin === 'admin' || p.admin === 'superadmin';
+                    this._setBoundedCache(this.senderAdminCache, cacheKey, { isAdmin, at: Date.now() }, 2000);
+                    return isAdmin;
                 }
             }
         } catch {
@@ -450,6 +607,7 @@ class GroupManager {
             phone_number: phone,
             added_at: new Date(),
         });
+        this.invalidateBotRoleCaches(phone);
         return { ok: true, reason: 'added', phone_number: phone };
     }
 
@@ -473,6 +631,8 @@ class GroupManager {
         const storedPhone = existing.phone_number;
         const result = await this.admins.deleteOne({ phone_number: storedPhone });
         if (result.deletedCount > 0) {
+            this.invalidateBotRoleCaches(phone);
+            this.invalidateBotRoleCaches(storedPhone);
             return {
                 ok: true,
                 reason: 'removed',
@@ -1101,6 +1261,7 @@ class GroupManager {
             added_by: addedBy,
             added_at: new Date(),
         });
+        this.invalidateBotRoleCaches(phone);
         logger.info(`🛡️ Dynamic moderator added: ${phone} by ${addedBy}`);
         return { ok: true, reason: 'added', phone_number: phone };
     }
@@ -1112,6 +1273,7 @@ class GroupManager {
         }
         const result = await this.dynamicModerators.deleteOne({ phone_number: phone });
         if (result.deletedCount > 0) {
+            this.invalidateBotRoleCaches(phone);
             logger.info(`🛡️ Dynamic moderator removed: ${phone}`);
             return { ok: true, reason: 'removed', phone_number: phone };
         }
@@ -1121,7 +1283,13 @@ class GroupManager {
     async isDynamicModerator(phoneNumber) {
         const phone = normalizePhoneNumber(phoneNumber);
         if (!phone) return false;
-        return Boolean(await this.dynamicModerators?.findOne({ phone_number: phone }));
+        const cached = this.dynamicModCache.get(phone);
+        if (cached && Date.now() - cached.at < BOT_ROLE_TTL_MS) {
+            return cached.value;
+        }
+        const value = Boolean(await this.dynamicModerators?.findOne({ phone_number: phone }));
+        this._setBoundedCache(this.dynamicModCache, phone, { value, at: Date.now() }, 500);
+        return value;
     }
 
     async getAllDynamicModerators() {

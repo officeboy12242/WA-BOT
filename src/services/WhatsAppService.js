@@ -13,7 +13,14 @@ import qrcode from 'qrcode-terminal';
 import { logger } from '../utils/logger.js';
 import { useDatabaseAuthState } from '../utils/databaseAuthState.js';
 import { extractInstagramUrl } from '../utils/instagramUrl.js';
-import { getMessageSenderJid, getTextForUrlScan, getTextFromWAMessage, safeSendMessage, resolveConversationChatId } from '../utils/waMessage.js';
+import {
+    getMessageSenderJid,
+    getTextForUrlScan,
+    getTextFromWAMessage,
+    safeSendMessage,
+    resolveConversationChatId,
+    setGroupMetaProvider,
+} from '../utils/waMessage.js';
 import { rememberLidPnFromMessageKey } from '../utils/lid.js';
 import { resolveChannelSourceEntries } from '../utils/channelResolve.js';
 import { extractStickerFromMessage, isNewsletterChat } from '../utils/stickerExtract.js';
@@ -60,6 +67,10 @@ class WhatsAppService {
         this.stickerForwarder = stickerForwarder;
         this.authDatabase = authDatabase;
         this.groupManager = groupManager;
+        // Fast path for big groups: all metadata lookups share one cache
+        if (groupManager?.getGroupMetadataCached) {
+            setGroupMetaProvider((sock, chatId) => groupManager.getGroupMetadataCached(sock, chatId));
+        }
         this.stickerSourceChannelEntries = stickerSourceChannelEntries;
         this.channelStickerPoller = channelStickerPoller;
         this.userManager = userManager;
@@ -377,6 +388,11 @@ class WhatsAppService {
         });
 
         this.sock.ev.on('group-participants.update', (update) => {
+            // Keep admin/meta caches fresh in large groups (promote/demote/join/leave)
+            const gid = update?.id || update?.groupId;
+            if (gid && this.groupManager?.invalidateGroupMeta) {
+                this.groupManager.invalidateGroupMeta(gid);
+            }
             void this.commandController
                 .handleGroupParticipantsUpdate(this.sock, update)
                 .catch((err) => {

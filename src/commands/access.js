@@ -112,12 +112,18 @@ export async function checkCommandAccess(sock, chatId, senderJid, def, groupMana
 
     if (def.role === 'owner') {
         const senderPhone = extractPhoneNumber(senderJid);
-        if (!groupManager.isOwner(senderPhone) && senderJid?.includes('@lid') && chatId?.endsWith('@g.us')) {
+        if (groupManager.isOwner(senderPhone)) {
+            return { ok: true };
+        }
+        // LID owners: resolve via cached group metadata (never full uncached fetch)
+        if (senderJid?.includes('@lid') && chatId?.endsWith('@g.us')) {
             try {
-                const meta = await sock.groupMetadata(chatId);
+                const meta = await groupManager.getGroupMetadataCached(sock, chatId);
                 for (const p of meta.participants || []) {
                     if (p.lid === senderJid || p.id === senderJid) {
-                        const phone = String(p.id || '').replace(/\D/g, '').split('@')[0];
+                        const phone = String(p.id || p.phoneNumber || p.pn || '')
+                            .replace(/\D/g, '')
+                            .split('@')[0];
                         if (groupManager.isOwner(phone)) {
                             return { ok: true };
                         }
@@ -127,16 +133,14 @@ export async function checkCommandAccess(sock, chatId, senderJid, def, groupMana
                 // fall through
             }
         }
-        if (!groupManager.isOwner(senderPhone)) {
-            return {
-                ok: false,
-                message:
-                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
-                    '🔒 *OWNER ONLY* 🔒\n' +
-                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
-                    'Only bot owners can use this command.',
-            };
-        }
+        return {
+            ok: false,
+            message:
+                '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
+                '🔒 *OWNER ONLY* 🔒\n' +
+                '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                'Only bot owners can use this command.',
+        };
     }
 
     return { ok: true };
