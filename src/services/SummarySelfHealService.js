@@ -6,11 +6,16 @@
 import fs from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+import { tmpdir } from 'os';
 import axios from 'axios';
 import { logger } from '../utils/logger.js';
 import { config } from '../config/config.js';
 import NvidiaDeepSeekService from './NvidiaDeepSeekService.js';
 import { resolveNotificationJid, normalizePhoneNumber } from '../utils/permissions.js';
+
+const execFileAsync = promisify(execFile);
 
 const DEFAULT_HEAL_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b';
 const SUMMARY_ALLOWED_FILES = [
@@ -20,6 +25,44 @@ const SUMMARY_ALLOWED_FILES = [
 ];
 
 const BLOCKED_PATH_PARTS = ['.env', 'node_modules', 'auth_info', 'credentials', '.git'];
+
+/** Must-keep symbols per file so /fix cannot gut critical APIs */
+const FILE_INTEGRITY_RULES = {
+    'src/services/NvidiaDeepSeekService.js': [
+        'completeTrade',
+        'summarizeGroupChat',
+        'completeWithModelFallback',
+        'export default',
+    ],
+    'src/controllers/GroupSummaryController.js': [
+        'postSummaryForGroup',
+        'postDailySummaries',
+        'export default',
+    ],
+    'src/services/GroupChatLogService.js': [
+        'buildPrompt',
+        'computeStats',
+        'export default',
+    ],
+    'src/controllers/TradeAlertController.js': [
+        'postDailyAlerts',
+        'analyzeSymbol',
+        'export default',
+    ],
+    'src/controllers/CommandController.js': [
+        'handleCommand',
+        'export default',
+    ],
+    'src/commands/registry.js': [
+        'COMMAND_REGISTRY',
+        'findCommand',
+    ],
+    'src/services/SummarySelfHealService.js': [
+        'proposeFromInstruction',
+        'approveAndPush',
+        'export default',
+    ],
+};
 
 const JSON_SHAPE = `{
   "summary": "one-line description of the fix",
@@ -58,10 +101,23 @@ RULES:
 • old_string must match the file EXACTLY (include enough context to be unique).
 • new_string is the replacement (use "" to delete a block).
 • Prefer minimal diffs — do not refactor unrelated code.
+• Keep all existing exports and public methods unless the instruction explicitly removes them.
+• Output must be valid JavaScript (ESM). Do not leave broken brackets or half-deleted functions.
 • changelog: short bullets of what you changed (for the owner to review).
 • Max 6 replacements total across all files.
 • Do not touch secrets, .env, or auth sessions.
 • If the instruction cannot be done safely with the given files, return files:[].`;
+
+const REPAIR_SYSTEM_PROMPT = `You repair a failed code patch. The previous patch broke syntax or integrity checks.
+
+Return ONLY valid JSON (no markdown fences) in this shape:
+${JSON_SHAPE}
+
+RULES:
+• Fix the validation errors listed by the user.
+• old_string must match the CURRENT (broken or original) file content exactly.
+• Prefer minimal fixes to restore valid JS and required exports/methods.
+• Keep the owner's original intent if possible.`;
 
 function shortId() {
     return crypto.randomBytes(3).toString('hex');
@@ -427,6 +483,12 @@ class SummarySelfHealService {
             for (const f of proposal.files) {
                 await status.note(`  ✓ will update \`${f.path}\``);
             }
+            if (proposal.validationNotes?.length) {
+                await status.step('🛡️ Validation passed:');
+                for (const n of proposal.validationNotes.slice(0, 6)) {
+                    await status.note(`  • ${n}`);
+                }
+            }
 
             const healId = await this._storeProposal({
                 source: 'owner_fix',
@@ -440,7 +502,12 @@ class SummarySelfHealService {
 
             const preview = this._formatProposalMessage(healId, proposal, {
                 title: 'OWNER /FIX PROPOSAL',
-                context: `🗣️ *You asked:* ${text}`,
+                context:
+                    `🗣️ *You asked:* ${text}\n` +
+                    `🛡️ *Checks:* syntax + integrity + related imports` +
+                    (proposal.validationNotes?.length
+                        ? `\n_${proposal.validationNotes.slice(0, 3).join(' · ')}_`
+                        : ''),
             });
 
             await this._notify(preview);
@@ -479,6 +546,7 @@ class SummarySelfHealService {
             summary: row.proposal.summary,
             changelog: row.proposal.changelog || [],
             change_preview: row.proposal.changePreview || '',
+            validation_notes: row.proposal.validationNotes || [],
             files: row.proposal.files,
             model: row.proposal.usedModel || this.healModel,
             created_at: new Date(),
@@ -586,8 +654,7 @@ class SummarySelfHealService {
         }
 
         scored.sort((a, b) => b.score - a.score);
-        // Keep payload small so NVIDIA does not time out
-        let picks = scored.slice(0, 4).map((s) => s.rel);
+        let picks = scored.slice(0, 5).map((s) => s.rel);
 
         // Fallback: common entrypoints if no keyword match
         if (!picks.length) {
@@ -599,7 +666,159 @@ class SummarySelfHealService {
             ].filter((p) => all.includes(p));
         }
 
-        return picks.slice(0, 4);
+        // Pull in imported siblings so the model sees related code (like a real review)
+        const withRelated = await this._expandWithRelatedFiles(picks, all);
+        return withRelated.slice(0, 6);
+    }
+
+    /** Follow local imports so patches don't break callers/callees. */
+    async _expandWithRelatedFiles(picks, allFiles) {
+        const allSet = new Set(allFiles);
+        const out = [...picks];
+        const seen = new Set(picks);
+
+        for (const rel of picks.slice(0, 4)) {
+            try {
+                const body = await this._readLocalFile(rel);
+                const importRe = /from\s+['"](\.[^'"]+)['"]/g;
+                let m;
+                while ((m = importRe.exec(body))) {
+                    let imp = m[1];
+                    if (!imp.endsWith('.js')) imp = `${imp}.js`;
+                    const resolved = path.posix.normalize(
+                        path.posix.join(path.posix.dirname(rel), imp)
+                    );
+                    if (allSet.has(resolved) && !seen.has(resolved) && this._isSafePath(resolved)) {
+                        seen.add(resolved);
+                        out.push(resolved);
+                    }
+                }
+            } catch {
+                // ignore
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Syntax + integrity checks (same class of safety as a careful agent review).
+     * @returns {Promise<{ ok: boolean, notes: string[], errors: string[] }>}
+     */
+    async _validatePatchedFiles(originals, files, onProgress) {
+        const progress = typeof onProgress === 'function' ? onProgress : async () => {};
+        const notes = [];
+        const errors = [];
+
+        for (const f of files) {
+            const before = originals.get(f.path) || '';
+            const after = f.content || '';
+
+            await progress(`🔍 Validating \`${f.path}\`…`);
+
+            // Size guard — accidental mass deletion
+            if (before && after.length < before.length * 0.4) {
+                errors.push(`${f.path}: lost >60% of file size (possible accidental wipe)`);
+                continue;
+            }
+            if (!after.includes('export')) {
+                errors.push(`${f.path}: missing export (broken module)`);
+                continue;
+            }
+
+            // Required symbols (critical APIs must survive)
+            const rules = FILE_INTEGRITY_RULES[f.path] || ['export'];
+            const missing = rules.filter((must) => !after.includes(must));
+            if (missing.length) {
+                for (const must of missing) {
+                    errors.push(`${f.path}: missing required \`${must}\``);
+                }
+                continue;
+            }
+
+            // Real Node syntax check (authoritative)
+            const syntax = await this._syntaxCheckJs(after, f.path);
+            if (!syntax.ok) {
+                errors.push(`${f.path}: syntax error — ${syntax.error}`);
+                continue;
+            }
+
+            notes.push(`syntax OK · integrity OK — \`${f.path}\``);
+            await progress(`  ✅ \`${f.path}\` passed checks`);
+        }
+
+        return { ok: errors.length === 0 && notes.length > 0, notes, errors };
+    }
+
+    async _syntaxCheckJs(content, relPath) {
+        // .mjs so node --check treats ESM (import/export) correctly outside package.json type:module
+        const base = path.basename(relPath).replace(/[^\w.-]/g, '_').replace(/\.js$/i, '');
+        const tmp = path.join(tmpdir(), `heal-check-${Date.now()}-${base}.mjs`);
+        try {
+            await fs.writeFile(tmp, content, 'utf8');
+            await execFileAsync(process.execPath, ['--check', tmp], {
+                timeout: 10_000,
+                windowsHide: true,
+            });
+            return { ok: true };
+        } catch (err) {
+            const msg = String(err.stderr || err.stdout || err.message || 'syntax error')
+                .replaceAll(tmp, relPath)
+                .split('\n')
+                .filter((l) => !/Warning:|trace-warnings/i.test(l))
+                .join(' ')
+                .trim()
+                .slice(0, 200);
+            return { ok: false, error: msg || 'syntax error' };
+        } finally {
+            await fs.unlink(tmp).catch(() => {});
+        }
+    }
+
+    /** One repair pass when validation fails. */
+    async _repairProposal(instruction, originals, failedFiles, errors, onProgress) {
+        const progress = typeof onProgress === 'function' ? onProgress : async () => {};
+        await progress('🛠️ Repairing failed patches…');
+
+        const payload = failedFiles.map((f) => {
+            const original = originals.get(f.path) || '';
+            const broken = f.content || '';
+            return {
+                path: f.path,
+                content:
+                    `--- ORIGINAL ---\n${original.slice(0, 5000)}\n\n` +
+                    `--- PATCHED (INVALID) ---\n${broken.slice(0, 5000)}`,
+            };
+        });
+
+        const userPrompt = [
+            `Owner instruction: ${instruction}`,
+            'Validation errors:',
+            ...errors.map((e) => `• ${e}`),
+            '',
+            'Fix the files. Prefer restoring required exports and valid syntax while keeping the intent.',
+            ...payload.map((f) => `\n===== FILE: ${f.path} =====\n${f.content}`),
+        ].join('\n');
+
+        const { content: raw, model } = await this.nvidia.completeWithModelFallback(
+            this.healModels,
+            REPAIR_SYSTEM_PROMPT,
+            userPrompt,
+            { maxTokens: 2500, onProgress: progress }
+        );
+
+        const parsed = extractJsonObject(raw);
+        if (!parsed) return null;
+
+        // Apply repairs against ORIGINAL sources (safer)
+        const result = this._applyParsedProposal(
+            parsed,
+            originals,
+            new Set(failedFiles.map((f) => f.path)),
+            progress
+        );
+        if (!result.files.length) return null;
+        result.usedModel = model;
+        return result;
     }
 
     _buildChangePreview(originals, files) {
@@ -702,11 +921,46 @@ class SummarySelfHealService {
                     throw new Error('Heal model returned invalid JSON');
                 }
 
-                const result = this._applyParsedProposal(parsed, originals, new Set(pathList), progress);
+                let result = this._applyParsedProposal(parsed, originals, new Set(pathList), progress);
                 if (!result.files.length) {
                     throw new Error('Heal model returned no applicable replacements');
                 }
                 result.usedModel = usedModel;
+
+                await progress('🛡️ Running syntax + integrity checks…');
+                let validation = await this._validatePatchedFiles(originals, result.files, progress);
+
+                if (!validation.ok) {
+                    await progress('⚠️ Checks failed — attempting auto-repair…');
+                    for (const e of validation.errors.slice(0, 5)) {
+                        await progress(`  • ${e.slice(0, 100)}`);
+                    }
+                    const instructionHint = userPromptParts.find((l) => /instruction|Error:/i.test(l)) || '';
+                    const repaired = await this._repairProposal(
+                        instructionHint,
+                        originals,
+                        result.files,
+                        validation.errors,
+                        progress
+                    );
+                    if (!repaired?.files?.length) {
+                        throw new Error(`Validation failed: ${validation.errors.join('; ')}`);
+                    }
+                    await progress('🛡️ Re-checking after repair…');
+                    validation = await this._validatePatchedFiles(originals, repaired.files, progress);
+                    if (!validation.ok) {
+                        throw new Error(`Validation failed after repair: ${validation.errors.join('; ')}`);
+                    }
+                    result = repaired;
+                    result.changelog = [
+                        ...(parsed.changelog || []),
+                        ...(repaired.changelog || []),
+                        'auto-repaired after validation',
+                    ].slice(0, 10);
+                }
+
+                result.validationNotes = validation.notes;
+                result.changePreview = this._buildChangePreview(originals, result.files);
                 return result;
             } catch (err) {
                 lastErr = err;
@@ -868,6 +1122,29 @@ class SummarySelfHealService {
             await status.step('🔑 Checking GitHub access…');
             await this._assertGithubAccess(repo, branch);
             await status.step('✅ GitHub access OK');
+
+            // Re-validate before push (files may be stale vs current disk, but syntax must still pass)
+            await status.step('🛡️ Re-validating patches before push…');
+            const originals = new Map();
+            for (const file of row.files || []) {
+                try {
+                    originals.set(file.path, await this._readLocalFile(file.path));
+                } catch {
+                    originals.set(file.path, '');
+                }
+            }
+            const prePush = await this._validatePatchedFiles(
+                originals,
+                row.files,
+                (line) => status.step(line)
+            );
+            if (!prePush.ok) {
+                throw new Error(
+                    `Pre-push validation failed (patch rejected):\n${prePush.errors.map((e) => `• ${e}`).join('\n')}\n` +
+                        `_Run /fix again — nothing was pushed._`
+                );
+            }
+            await status.step('✅ Pre-push validation passed');
 
             const pushed = [];
             for (const file of row.files || []) {
