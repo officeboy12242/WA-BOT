@@ -58,6 +58,7 @@ function resolveNseSymbol(raw) {
         return { symbol: s, type: 'Indices' };
     }
     if (s === 'NIFTY50') return { symbol: 'NIFTY', type: 'Indices' };
+    if (s === 'TATAMOTORS' || s === 'TATAMTRDVV') return { symbol: 'TMPV', type: 'Equity' };
     return { symbol: s, type: 'Equity' };
 }
 

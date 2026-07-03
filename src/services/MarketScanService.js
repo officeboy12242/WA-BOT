@@ -8,15 +8,17 @@ import { stockNewsService } from './StockNewsService.js';
 
 const BATCH = 6;
 
-/** Liquid F&O / Nifty-heavy names for daily AI scan */
+/** Liquid F&O names scanned for today's % movers (refreshed every discovery run) */
 export const FNO_UNIVERSE = [
     'RELIANCE', 'TCS', 'HDFCBANK', 'INFY', 'ICICIBANK', 'HINDUNILVR', 'ITC', 'SBIN',
     'BHARTIARTL', 'KOTAKBANK', 'LT', 'AXISBANK', 'ASIANPAINT', 'MARUTI', 'TITAN',
     'SUNPHARMA', 'BAJFINANCE', 'WIPRO', 'HCLTECH', 'ULTRACEMCO', 'ONGC', 'NTPC',
-    'POWERGRID', 'TATAMOTORS', 'M&M', 'ADANIENT', 'ADANIPORTS', 'COALINDIA', 'TATASTEEL',
+    'POWERGRID', 'TMPV', 'TMCV', 'M&M', 'ADANIENT', 'ADANIPORTS', 'COALINDIA', 'TATASTEEL',
     'JSWSTEEL', 'HINDALCO', 'INDUSINDBK', 'BPCL', 'GRASIM', 'DIVISLAB', 'CIPLA',
     'DRREDDY', 'EICHERMOT', 'HEROMOTOCO', 'BAJAJFINSV', 'SBILIFE', 'HDFCLIFE',
     'TECHM', 'APOLLOHOSP', 'BRITANNIA', 'NESTLEIND', 'TRENT', 'BEL', 'DLF', 'VEDL',
+    'HAL', 'IRFC', 'RVNL', 'JIOFIN', 'PNB', 'BANKBARODA', 'AMBUJACEM', 'GODREJCP',
+    'SIEMENS', 'ABB', 'POLYCAB', 'DABUR', 'PIDILITIND', 'SHREECEM',
 ];
 
 const INDICES = ['NIFTY', 'BANKNIFTY'];
@@ -71,8 +73,8 @@ class MarketScanService {
 
         const withChange = universeRows.filter((r) => r.changePct != null);
         const sorted = [...withChange].sort((a, b) => b.changePct - a.changePct);
-        const gainers = sorted.filter((r) => r.changePct > 0).slice(0, 8);
-        const losers = [...withChange].sort((a, b) => a.changePct - b.changePct).slice(0, 8);
+        const gainers = sorted.filter((r) => r.changePct > 0).slice(0, 12);
+        const losers = [...withChange].sort((a, b) => a.changePct - b.changePct).slice(0, 12);
 
         const lines = [];
         lines.push('=== INDICES ===');
@@ -209,40 +211,29 @@ class MarketScanService {
     }
 
     /**
-     * Build a full watchlist: AI picks + top movers + indices (always targetCount symbols).
-     * @param {string[]} aiSymbols
-     * @param {{ gainers: object[], losers: object[] }} movers
+     * Today's watchlist = top intraday movers (fresh each scan). No fixed repeat list.
+     * @param {object[]} universeRows — rows with live quote + changePct today
      * @param {number} targetCount
      * @param {{ hiddenGem?: string|null }} opts
      */
-    buildDiscoveryWatchlist(aiSymbols, movers, targetCount = 10, { hiddenGem = null } = {}) {
+    buildFreshMoversWatchlist(universeRows, targetCount = 10, { hiddenGem = null } = {}) {
         const target = Math.max(8, targetCount);
+        const quoted = new Set((universeRows || []).map((r) => r.symbol?.toUpperCase()).filter(Boolean));
+        const ranked = [...(universeRows || [])]
+            .filter((r) => r?.symbol && r.changePct != null)
+            .sort((a, b) => this.scoreMover(b) - this.scoreMover(a));
+
         const ordered = [];
         const seen = new Set();
 
         const push = (symbol) => {
             const sym = String(symbol || '').trim().toUpperCase();
-            if (!sym || seen.has(sym)) return;
+            if (!sym || seen.has(sym) || !quoted.has(sym)) return;
             seen.add(sym);
             ordered.push(sym);
         };
 
         if (hiddenGem) push(hiddenGem);
-
-        for (const sym of aiSymbols) {
-            push(sym);
-        }
-
-        const ranked = [...(movers?.gainers || []), ...(movers?.losers || [])]
-            .sort((a, b) => this.scoreMover(b) - this.scoreMover(a));
-
-        for (const row of ranked) {
-            if (ordered.length >= target) break;
-            push(row.symbol);
-        }
-
-        push('NIFTY');
-        push('BANKNIFTY');
 
         for (const row of ranked) {
             if (ordered.length >= target) break;
@@ -250,6 +241,47 @@ class MarketScanService {
         }
 
         return ordered.slice(0, target);
+    }
+
+    /** Replace missing quotes with next best movers from snapshot. */
+    finalizeWatchlist(symbols, universeRows, targetCount = 10) {
+        const target = Math.max(8, targetCount);
+        const quoted = new Set((universeRows || []).map((r) => r.symbol?.toUpperCase()).filter(Boolean));
+        const ranked = [...(universeRows || [])]
+            .filter((r) => r?.symbol && quoted.has(r.symbol.toUpperCase()))
+            .sort((a, b) => this.scoreMover(b) - this.scoreMover(a));
+
+        const out = [];
+        const seen = new Set();
+        const push = (sym) => {
+            const s = String(sym || '').trim().toUpperCase();
+            if (!s || seen.has(s) || !quoted.has(s)) return;
+            seen.add(s);
+            out.push(s);
+        };
+
+        for (const sym of symbols || []) push(sym);
+        for (const row of ranked) {
+            if (out.length >= target) break;
+            push(row.symbol);
+        }
+        return out.slice(0, target);
+    }
+
+    formatTopMoversLine(movers) {
+        const g = (movers?.gainers || []).slice(0, 6).map((x) => `${x.symbol} +${x.changePct}%`).join(', ');
+        const l = (movers?.losers || []).slice(0, 6).map((x) => `${x.symbol} ${x.changePct}%`).join(', ');
+        return `Gainers: ${g || 'n/a'} | Losers: ${l || 'n/a'}`;
+    }
+
+    /**
+     * @deprecated Use buildFreshMoversWatchlist — kept for tests
+     */
+    buildDiscoveryWatchlist(aiSymbols, movers, targetCount = 10, { hiddenGem = null } = {}) {
+        const ranked = [...(movers?.gainers || []), ...(movers?.losers || [])]
+            .sort((a, b) => this.scoreMover(b) - this.scoreMover(a));
+        const rows = ranked.map((r) => ({ symbol: r.symbol, changePct: r.changePct, volume: r.volume }));
+        return this.buildFreshMoversWatchlist(rows, targetCount, { hiddenGem });
     }
 
     orderSymbolsByMovers(symbols, movers) {

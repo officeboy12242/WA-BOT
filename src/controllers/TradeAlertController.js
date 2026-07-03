@@ -241,21 +241,19 @@ class TradeAlertController {
         );
 
         const snapshot = await marketScanService.buildDiscoverySnapshot();
+        logger.info(`📊 Today's top movers: ${marketScanService.formatTopMoversLine(snapshot.movers)}`);
+
         const userPrompt = buildDiscoveryUserPrompt(snapshot.context, this.discoveryCount);
 
-        const raw = await this.nvidia.completeTrade(STOCK_DISCOVERY_SYSTEM_PROMPT, userPrompt, {
-            maxTokens: 900,
-            timeoutMs: 90_000,
-        });
-
-        const discovery = parseDiscoveryResult(raw);
-        let aiSymbols = discovery.symbols;
-        if (!aiSymbols.length) {
-            logger.warn('AI discovery returned no symbols — using top movers fallback');
-            aiSymbols = [
-                ...snapshot.movers.gainers.slice(0, 5).map((x) => x.symbol),
-                ...snapshot.movers.losers.slice(0, 4).map((x) => x.symbol),
-            ];
+        let discovery = { symbols: [], hiddenGem: null, hiddenGemReason: null };
+        try {
+            const raw = await this.nvidia.completeTrade(STOCK_DISCOVERY_SYSTEM_PROMPT, userPrompt, {
+                maxTokens: 900,
+                timeoutMs: 90_000,
+            });
+            discovery = parseDiscoveryResult(raw);
+        } catch (err) {
+            logger.warn(`AI discovery skipped, using movers-only watchlist: ${err.message}`);
         }
 
         const gemPick = marketScanService.pickHiddenGem(
@@ -268,16 +266,12 @@ class TradeAlertController {
         const hiddenGem = gemPick.hiddenGem;
         const hiddenGemReason = gemPick.hiddenGemReason;
 
-        let symbols = marketScanService.buildDiscoveryWatchlist(
-            aiSymbols,
-            snapshot.movers,
+        let symbols = marketScanService.buildFreshMoversWatchlist(
+            snapshot.universeRows,
             this.discoveryCount,
             { hiddenGem }
         );
-        symbols = marketScanService.orderSymbolsByMovers(symbols, snapshot.movers);
-        if (hiddenGem) {
-            symbols = [hiddenGem, ...symbols.filter((s) => s !== hiddenGem)];
-        }
+        symbols = marketScanService.finalizeWatchlist(symbols, snapshot.universeRows, this.discoveryCount);
 
         const moversBrief = marketScanService.formatMoversBrief(snapshot.movers);
         const marketNews = snapshot.marketNews.split('\n').slice(0, 5).join('\n');
@@ -305,7 +299,7 @@ class TradeAlertController {
                         movers: snapshot.movers,
                         movers_brief: moversBrief,
                         market_news: marketNews,
-                        raw_response: raw.slice(0, 4000),
+                        raw_response: discovery.symbols?.length ? String(discovery.hiddenGem || '') : 'movers-only',
                         created_at: scannedAt,
                     },
                 },
@@ -314,7 +308,10 @@ class TradeAlertController {
         }
 
         const gemNote = hiddenGem ? ` · 💎 gem: ${hiddenGem}` : '';
-        logger.info(`🤖 AI discovery watchlist (${symbols.length}): ${symbols.join(', ')}${gemNote}`);
+        logger.info(
+            `🤖 Fresh movers watchlist (${symbols.length}): ${symbols.join(', ')}${gemNote} ` +
+                `[${marketScanService.formatTopMoversLine(snapshot.movers)}]`
+        );
         return {
             symbols,
             hiddenGem,

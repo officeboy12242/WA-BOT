@@ -24,13 +24,20 @@ const INDEX_MAP = {
     FINNIFTY: 'NIFTY_FIN_SERVICE.NS',
 };
 
-function normalizeSymbol(raw) {
-    const s = String(raw || '').trim().toUpperCase().replace(/\s+/g, '');
-    if (!s) return '';
-    if (INDEX_MAP[s]) return INDEX_MAP[s];
-    if (s.startsWith('^')) return s;
-    if (s.endsWith('.NS') || s.endsWith('.BO')) return s;
-    return `${s}.NS`;
+/** NSE ticker → Yahoo symbols to try (post-demerger / renames) */
+const YAHOO_SYMBOL_FALLBACKS = {
+    TATAMOTORS: ['TMPV.NS', 'TMCV.NS', 'TATAMOTORS.NS'],
+    TATAMTRDVV: ['TMPV.NS', 'TMCV.NS'],
+};
+
+function yahooCandidates(rawSymbol) {
+    const raw = String(rawSymbol || '').trim().toUpperCase().replace(/\s+/g, '');
+    if (!raw) return [];
+    if (INDEX_MAP[raw]) return [INDEX_MAP[raw]];
+    if (raw.startsWith('^')) return [raw];
+    if (raw.endsWith('.NS') || raw.endsWith('.BO')) return [raw];
+    if (YAHOO_SYMBOL_FALLBACKS[raw]) return YAHOO_SYMBOL_FALLBACKS[raw];
+    return [`${raw}.NS`];
 }
 
 function sleep(ms) {
@@ -128,7 +135,7 @@ async function fetchYahooMeta(yahooSymbol) {
 }
 
 export function normalizeYahooSymbol(raw) {
-    return normalizeSymbol(raw);
+    return yahooCandidates(raw)[0] || '';
 }
 
 class IndianStockQuoteService {
@@ -137,16 +144,23 @@ class IndianStockQuoteService {
      * @returns {Promise<StockQuote | null>}
      */
     async fetchQuote(rawSymbol) {
-        const yahooSymbol = normalizeSymbol(rawSymbol);
-        if (!yahooSymbol) return null;
+        const raw = String(rawSymbol || '').trim().toUpperCase();
+        const candidates = yahooCandidates(raw);
+        if (!candidates.length) return null;
 
-        try {
-            const meta = await fetchYahooMeta(yahooSymbol);
-            return metaToQuote(meta, yahooSymbol, rawSymbol);
-        } catch (err) {
-            logger.warn(`Stock quote failed for ${rawSymbol}: ${err.message}`);
-            return null;
+        let lastErr;
+        for (const yahooSymbol of candidates) {
+            try {
+                const meta = await fetchYahooMeta(yahooSymbol);
+                return metaToQuote(meta, yahooSymbol, raw);
+            } catch (err) {
+                lastErr = err;
+                logger.debug(`Yahoo fallback ${raw} via ${yahooSymbol}: ${err.message}`);
+            }
         }
+
+        logger.warn(`Stock quote failed for ${rawSymbol}: ${lastErr?.message || 'no quote'}`);
+        return null;
     }
 
     /**

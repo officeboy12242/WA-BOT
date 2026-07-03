@@ -37,6 +37,8 @@ export const NSE_LOT_SIZES = {
     NTPC: 1500,
     POWERGRID: 1900,
     TATAMOTORS: 625,
+    TMPV: 625,
+    TMCV: 800,
     'M&M': 350,
     M_M: 350,
     ADANIENT: 250,
