@@ -365,11 +365,19 @@ export const COMMAND_REGISTRY = [
         category: 'movie',
     },
     {
+        names: ['/fix'],
+        key: 'fix',
+        scope: 'any',
+        role: 'owner',
+        help: 'AI code fix — `/fix remove testing thing` (confirm with /heal approve)',
+        category: 'owner',
+    },
+    {
         names: ['/heal'],
         key: 'heal',
         scope: 'any',
         role: 'owner',
-        help: 'Summary self-heal — `/heal approve ID` or `/heal reject ID`',
+        help: 'Approve/reject AI fix — `/heal approve ID` or `/heal reject ID`',
         category: 'owner',
     },
     {
