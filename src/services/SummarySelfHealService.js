@@ -324,12 +324,52 @@ class SummarySelfHealService {
     }
 
     /**
+     * Build a live status updater that keeps a rolling log of steps.
+     * @param {string} title
+     * @param {(text: string) => void|Promise<void>} [onProgress]
+     */
+    _makeStatusTracker(title, onProgress) {
+        const lines = [];
+        let lastAt = 0;
+        const render = async (force = false) => {
+            if (typeof onProgress !== 'function') return;
+            const now = Date.now();
+            if (!force && now - lastAt < 450) return;
+            lastAt = now;
+            const body = [
+                `🔧 *${title}*`,
+                '',
+                ...lines.slice(-12),
+            ].join('\n');
+            try {
+                await onProgress(body);
+            } catch {
+                // ignore edit failures
+            }
+        };
+        return {
+            async step(line) {
+                lines.push(line);
+                await render(true);
+            },
+            async note(line) {
+                lines.push(line);
+                await render(false);
+            },
+            async flush() {
+                await render(true);
+            },
+            lines,
+        };
+    }
+
+    /**
      * Owner-driven fix: `/fix remove testing thing`
      * @param {string} instruction
-     * @param {{ byPhone?: string }} [opts]
+     * @param {{ byPhone?: string, onProgress?: (text: string) => void|Promise<void> }} [opts]
      * @returns {Promise<{ ok: boolean, message: string, healId?: string }>}
      */
-    async proposeFromInstruction(instruction, { byPhone = '' } = {}) {
+    async proposeFromInstruction(instruction, { byPhone = '', onProgress } = {}) {
         const text = String(instruction || '').trim();
         if (!text) {
             return { ok: false, message: '❌ Usage: `/fix <what to change>`\nExample: `/fix remove testing thing`' };
@@ -344,11 +384,20 @@ class SummarySelfHealService {
             return { ok: false, message: '⏳ Another heal is running — try again in a minute.' };
         }
 
+        const status = this._makeStatusTracker('AI FIX IN PROGRESS', onProgress);
         this._inflight = true;
         try {
+            await status.step(`🗣️ *Instruction:* ${text.slice(0, 120)}`);
+            await status.step('📂 Scanning `src/` for matching files…');
+
             const candidates = await this._pickCandidateFiles(text);
             if (!candidates.length) {
                 return { ok: false, message: '❌ No matching source files found under `src/`.' };
+            }
+
+            await status.step(`📁 Candidates (${candidates.length}):`);
+            for (const f of candidates) {
+                await status.note(`  • \`${f}\``);
             }
 
             const proposal = await this._generateProposal({
@@ -360,15 +409,23 @@ class SummarySelfHealService {
                     `Requested by: ${byPhone || 'owner'}`,
                     'Apply ONLY this instruction. List every change in changelog.',
                 ],
+                onProgress: (line) => status.step(line),
             });
 
             if (!proposal?.files?.length) {
+                await status.step('❌ No safe changes produced');
+                await status.flush();
                 return {
                     ok: false,
                     message:
-                        `❌ Nemotron could not apply that safely with the available files.\n` +
+                        `❌ Model could not apply that safely with the available files.\n` +
                         `_Tried:_ ${candidates.slice(0, 6).join(', ')}`,
                 };
+            }
+
+            await status.step('📝 Building change preview…');
+            for (const f of proposal.files) {
+                await status.note(`  ✓ will update \`${f.path}\``);
             }
 
             const healId = await this._storeProposal({
@@ -377,6 +434,9 @@ class SummarySelfHealService {
                 requested_by: byPhone,
                 proposal,
             });
+
+            await status.step(`🆔 Proposal *${healId}* ready — waiting for approve`);
+            await status.flush();
 
             const preview = this._formatProposalMessage(healId, proposal, {
                 title: 'OWNER /FIX PROPOSAL',
@@ -389,9 +449,11 @@ class SummarySelfHealService {
             logger.error(`Owner /fix failed: ${err.message}`);
             const hint = /timeout|ETIMEDOUT/i.test(err.message)
                 ? '\n_NVIDIA timed out — try a shorter instruction (e.g. one file/area)._'
-                : /429|overloaded/i.test(err.message)
+                : /429|overloaded|503/i.test(err.message)
                   ? '\n_NVIDIA is busy — wait 1–2 min and retry._'
                   : '';
+            await status.step(`❌ Failed: ${err.message}`).catch(() => {});
+            await status.flush().catch(() => {});
             await this._notify(`🔧 */fix failed*\n${err.message}${hint}`).catch(() => {});
             return {
                 ok: false,
@@ -573,16 +635,17 @@ class SummarySelfHealService {
         return lines.join('\n').slice(0, 1200);
     }
 
-    async _generateProposal({ allowedPaths, systemPrompt, userPromptParts }) {
+    async _generateProposal({ allowedPaths, systemPrompt, userPromptParts, onProgress }) {
+        const progress = typeof onProgress === 'function' ? onProgress : async () => {};
         const pathList = allowedPaths.slice(0, 4);
         const originals = new Map();
         const filePayload = [];
         for (const rel of pathList) {
             if (!this._isSafePath(rel) && !SUMMARY_ALLOWED_FILES.includes(rel)) continue;
             try {
+                await progress(`📖 Reading \`${rel}\`…`);
                 const content = await this._readLocalFile(rel);
                 originals.set(rel, content);
-                // Small snippets — large prompts are the main NVIDIA timeout cause
                 const snippet =
                     content.length > 8_000
                         ? `${content.slice(0, 4000)}\n\n/* ... middle omitted ... */\n\n${content.slice(-4000)}`
@@ -590,6 +653,7 @@ class SummarySelfHealService {
                 filePayload.push({ path: rel, content: snippet });
             } catch (err) {
                 logger.warn(`Self-heal could not read ${rel}: ${err.message}`);
+                await progress(`⚠️ Could not read \`${rel}\``);
             }
         }
 
@@ -607,7 +671,6 @@ class SummarySelfHealService {
                 'Return JSON with precise replacements and a changelog. Keep replacements small.',
             ].join('\n');
 
-        // Attempt 1: all candidates. Attempt 2: top 2 files only if model fails / bad JSON
         const payloadAttempts = [
             filePayload,
             filePayload.slice(0, 2),
@@ -620,6 +683,7 @@ class SummarySelfHealService {
             if (!payload.length) continue;
             try {
                 const userPrompt = buildUserPrompt(payload);
+                await progress(`📦 Prompt ready (${payload.length} file(s), ${userPrompt.length} chars)`);
                 logger.info(
                     `Self-heal LLM call (${payload.length} file(s), ${userPrompt.length} chars), ` +
                         `models: ${this.healModels.join(' → ')}`
@@ -629,15 +693,16 @@ class SummarySelfHealService {
                     this.healModels,
                     systemPrompt,
                     userPrompt,
-                    { maxTokens: 2500 }
+                    { maxTokens: 2500, onProgress: progress }
                 );
 
+                await progress('🧩 Applying patches to files…');
                 const parsed = extractJsonObject(raw);
                 if (!parsed || !Array.isArray(parsed.files)) {
                     throw new Error('Heal model returned invalid JSON');
                 }
 
-                const result = this._applyParsedProposal(parsed, originals, new Set(pathList));
+                const result = this._applyParsedProposal(parsed, originals, new Set(pathList), progress);
                 if (!result.files.length) {
                     throw new Error('Heal model returned no applicable replacements');
                 }
@@ -646,13 +711,15 @@ class SummarySelfHealService {
             } catch (err) {
                 lastErr = err;
                 logger.warn(`Self-heal proposal attempt ${p + 1} failed: ${err.message}`);
+                await progress(`⚠️ Attempt ${p + 1} failed: ${String(err.message).slice(0, 80)}`);
             }
         }
 
         throw lastErr || new Error('Heal proposal failed');
     }
 
-    _applyParsedProposal(parsed, originals, allowed) {
+    _applyParsedProposal(parsed, originals, allowed, onProgress) {
+        const progress = typeof onProgress === 'function' ? onProgress : async () => {};
         const files = [];
         const appliedNotes = [];
 
@@ -666,11 +733,14 @@ class SummarySelfHealService {
             let next = originals.get(rel);
             if (!next) continue;
 
+            void progress(`✏️ Updating \`${rel}\`…`);
+
             if (typeof f.content === 'string' && f.content.length > 50) {
                 // Full rewrite only if file is small enough to be trustworthy
                 if (f.content.length < 25_000) {
                     next = f.content;
                     appliedNotes.push(`${rel}: full file rewrite`);
+                    void progress(`  ✓ full rewrite \`${rel}\``);
                 }
             } else if (Array.isArray(f.replacements)) {
                 let applied = 0;
@@ -686,6 +756,7 @@ class SummarySelfHealService {
                             applied += 1;
                         } else {
                             logger.warn(`Self-heal old_string not found in ${rel}`);
+                            void progress(`  ⚠️ patch miss in \`${rel}\``);
                             continue;
                         }
                     } else {
@@ -696,6 +767,7 @@ class SummarySelfHealService {
                     appliedNotes.push(`${rel}: replaced “${label}…”`);
                 }
                 if (!applied) continue;
+                void progress(`  ✓ ${applied} patch(es) in \`${rel}\``);
             } else {
                 continue;
             }
@@ -703,6 +775,7 @@ class SummarySelfHealService {
             if (next === originals.get(rel)) continue;
             if (rel.includes('NvidiaDeepSeek') && !next.includes('completeTrade')) {
                 logger.warn(`Self-heal rejected NvidiaDeepSeekService change that removes trade API`);
+                void progress(`  ⛔ blocked unsafe change in \`${rel}\``);
                 continue;
             }
             files.push({ path: rel, content: next });
@@ -741,7 +814,8 @@ class SummarySelfHealService {
         return { ok: true, message: `✅ Heal \`${id}\` rejected. Nothing pushed.` };
     }
 
-    async approveAndPush(healId, byPhone = '') {
+    async approveAndPush(healId, byPhone = '', { onProgress } = {}) {
+        const status = this._makeStatusTracker('PUSHING TO GITHUB', onProgress);
         const id = String(healId || '').trim().toLowerCase();
         const row = await this.getProposal(id);
         if (!row) {
@@ -784,21 +858,29 @@ class SummarySelfHealService {
         this.githubRepo = repo;
         this.githubBranch = branch;
 
+        await status.step(`🆔 Heal *${id}*`);
+        await status.step(`🌿 Target \`${repo}@${branch}\``);
         await this._notify(
             `🔧 Owner approved heal *${id}* — pushing to \`${repo}@${branch}\`…`
         );
 
         try {
+            await status.step('🔑 Checking GitHub access…');
             await this._assertGithubAccess(repo, branch);
+            await status.step('✅ GitHub access OK');
 
             const pushed = [];
             for (const file of row.files || []) {
+                await status.step(`⬆️ Pushing \`${file.path}\`…`);
                 const commitMsg = row.instruction
                     ? `fix: ${String(row.instruction).slice(0, 72)} [${id}]`
                     : `fix(summary): ${row.summary} [${id}]`;
                 await this._pushFileToGitHub(file.path, file.content, commitMsg);
                 pushed.push(file.path);
+                await status.note(`  ✓ \`${file.path}\``);
             }
+            await status.step('🎉 Push complete');
+            await status.flush();
 
             await this._collection.updateOne(
                 { heal_id: id },
@@ -826,6 +908,8 @@ class SummarySelfHealService {
             return { ok: true, message: msg };
         } catch (err) {
             const detail = this._formatGithubError(err);
+            await status.step(`❌ ${detail.slice(0, 120)}`).catch(() => {});
+            await status.flush().catch(() => {});
             await this._collection.updateOne(
                 { heal_id: id },
                 { $set: { status: 'failed', error_push: detail, failed_at: new Date() } }

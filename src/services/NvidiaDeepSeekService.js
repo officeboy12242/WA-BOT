@@ -120,12 +120,13 @@ class NvidiaDeepSeekService {
      * @param {string[]} models
      * @param {string} systemPrompt
      * @param {string} userPrompt
-     * @param {{ maxTokens?: number }} [opts]
+     * @param {{ maxTokens?: number, onProgress?: (line: string) => void|Promise<void> }} [opts]
      * @returns {Promise<{ content: string, model: string }>}
      */
     async completeWithModelFallback(models, systemPrompt, userPrompt, opts = {}) {
         const chain = [...new Set((models || []).filter(Boolean))];
         if (!chain.length) chain.push(this.model);
+        const progress = typeof opts.onProgress === 'function' ? opts.onProgress : async () => {};
 
         const attempts = [
             { prompt: userPrompt, maxTokens: opts.maxTokens ?? 2500, timeoutMs: 90_000 },
@@ -146,6 +147,12 @@ class NvidiaDeepSeekService {
             for (let i = 0; i < attempts.length; i++) {
                 const attempt = attempts[i];
                 try {
+                    const shortModel = model.split('/').pop() || model;
+                    await progress(
+                        i === 0
+                            ? `🤖 Asking *${shortModel}*…`
+                            : `🤖 Retry *${shortModel}* (smaller prompt, try ${i + 1}/${attempts.length})…`
+                    );
                     if (i > 0 || model !== chain[0]) {
                         logger.warn(
                             `NVIDIA heal try model=${model} attempt=${i + 1}/${attempts.length} ` +
@@ -158,6 +165,7 @@ class NvidiaDeepSeekService {
                         timeoutMs: attempt.timeoutMs,
                         timeoutCapMs: MAX_TRADE_TIMEOUT_MS,
                     });
+                    await progress(`✅ Model *${shortModel}* responded`);
                     if (model !== chain[0]) {
                         logger.info(`NVIDIA heal succeeded with fallback model: ${model}`);
                     }
@@ -165,15 +173,18 @@ class NvidiaDeepSeekService {
                 } catch (err) {
                     lastErr = err;
                     const msg = String(err?.message || err);
+                    const shortModel = model.split('/').pop() || model;
                     logger.warn(`NVIDIA heal failed (${model}): ${msg}`);
 
                     // Service down / rate limit — do not burn retries on same model
                     if (/503|502|504|429|overloaded|unavailable|capacity/i.test(msg)) {
+                        await progress(`⚠️ *${shortModel}* unavailable (${msg.match(/\d{3}/)?.[0] || 'err'}) — next model…`);
                         logger.warn(`NVIDIA heal skipping model ${model} (unavailable), trying next…`);
                         break;
                     }
                     // Bad model id — next model
                     if (/401|403|404|invalid.*model|not found|does not exist/i.test(msg)) {
+                        await progress(`⚠️ *${shortModel}* not available — next model…`);
                         logger.warn(`NVIDIA heal skipping model ${model} (not available), trying next…`);
                         break;
                     }
@@ -182,8 +193,10 @@ class NvidiaDeepSeekService {
                         this.isTimeoutError(err) ||
                         /empty response|ECONNRESET|ENOTFOUND|socket/i.test(msg);
                     if (!retryable || i === attempts.length - 1) {
+                        await progress(`⚠️ *${shortModel}* failed — trying next…`);
                         break;
                     }
+                    await progress(`⚠️ *${shortModel}* timeout — retrying smaller prompt…`);
                 }
             }
         }
