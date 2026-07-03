@@ -95,16 +95,29 @@ class SummarySelfHealService {
         this.config = cfg;
         this.enabled = cfg.SUMMARY_SELF_HEAL_ENABLED !== false;
         this.healModel = cfg.NVIDIA_HEAL_MODEL || DEFAULT_HEAL_MODEL;
-        // Fallback chain if Nemotron times out / is unavailable
+        // Prefer reliable models first; Nemotron Ultra often 503s under load
+        // Order: GLM (stable) → DeepSeek (fast) → Nemotron (best when up)
         this.healModels = [
             ...new Set(
                 [
-                    cfg.NVIDIA_HEAL_MODEL || DEFAULT_HEAL_MODEL,
                     cfg.NVIDIA_TRADE_MODEL || 'z-ai/glm-5.2',
                     cfg.NVIDIA_MODEL || 'deepseek-ai/deepseek-v4-flash',
+                    cfg.NVIDIA_HEAL_MODEL || DEFAULT_HEAL_MODEL,
                 ].filter(Boolean)
             ),
         ];
+        // Optional: put Nemotron first when NVIDIA_HEAL_PREFER_NEMOTRON=true
+        if (cfg.NVIDIA_HEAL_PREFER_NEMOTRON === true || process.env.NVIDIA_HEAL_PREFER_NEMOTRON === 'true') {
+            this.healModels = [
+                ...new Set(
+                    [
+                        cfg.NVIDIA_HEAL_MODEL || DEFAULT_HEAL_MODEL,
+                        cfg.NVIDIA_TRADE_MODEL || 'z-ai/glm-5.2',
+                        cfg.NVIDIA_MODEL || 'deepseek-ai/deepseek-v4-flash',
+                    ].filter(Boolean)
+                ),
+            ];
+        }
         this.githubToken = cfg.GITHUB_TOKEN || '';
         this.githubRepo = cfg.GITHUB_REPO || 'officeboy12242/WA-BOT';
         this.githubBranch = cfg.GITHUB_BRANCH || 'main';
@@ -373,7 +386,7 @@ class SummarySelfHealService {
             changelog: row.proposal.changelog || [],
             change_preview: row.proposal.changePreview || '',
             files: row.proposal.files,
-            model: this.healModel,
+            model: row.proposal.usedModel || this.healModel,
             created_at: new Date(),
             expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000),
         });
@@ -395,7 +408,7 @@ class SummarySelfHealService {
             `┃  🔧 *${title}* 🔧  ┃\n` +
             `┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n` +
             `${context}\n\n` +
-            `🧠 *Model:* ${this.healModel}\n` +
+            `🧠 *Model:* ${proposal.usedModel || this.healModel}\n` +
             `📝 *Summary:* ${proposal.summary}\n\n` +
             (changes ? `📋 *What changed:*\n${changes}\n\n` : '') +
             `📁 *Files:*\n${fileList}\n` +
@@ -580,7 +593,7 @@ class SummarySelfHealService {
                         `models: ${this.healModels.join(' → ')}`
                 );
 
-                const raw = await this.nvidia.completeWithModelFallback(
+                const { content: raw, model: usedModel } = await this.nvidia.completeWithModelFallback(
                     this.healModels,
                     systemPrompt,
                     userPrompt,
@@ -596,6 +609,7 @@ class SummarySelfHealService {
                 if (!result.files.length) {
                     throw new Error('Heal model returned no applicable replacements');
                 }
+                result.usedModel = usedModel;
                 return result;
             } catch (err) {
                 lastErr = err;
