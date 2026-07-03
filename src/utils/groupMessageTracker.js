@@ -93,6 +93,7 @@ class GroupMessageTracker {
                 remoteJid,
                 id: sent.key.id,
                 fromMe: true,
+                ...(sent.key.participant ? { participant: sent.key.participant } : {}),
             },
             message,
         });
@@ -152,13 +153,34 @@ class GroupMessageTracker {
     }
 
     /**
-     * Messages eligible for bulk delete: only tracked entries strictly before the
-     * admin command, optionally limited to the oldest N (backlog cleanup).
-     *
+     * Most recent messages eligible for bulk delete (strictly before the command message).
      * @param {string} chatId
      * @param {number} count
-     * @param {string} [beforeMessageId] — exclude this message and anything after it
-     * @returns {Array<{ key: import('baileys').proto.IMessageKey, ts: number }>}
+     * @param {string} [beforeMessageId]
+     */
+    getRecentBefore(chatId, count, beforeMessageId) {
+        let list = [...this._getList(chatId).list];
+
+        if (beforeMessageId) {
+            const cut = list.findIndex((entry) => entry.key.id === beforeMessageId);
+            if (cut >= 0) {
+                list = list.slice(0, cut);
+            }
+        }
+
+        if (!list.length) {
+            return [];
+        }
+
+        if (!count || count >= list.length) {
+            return [...list];
+        }
+
+        return list.slice(-count);
+    }
+
+    /**
+     * @deprecated Use getRecentBefore for /dellast N — users expect most-recent messages.
      */
     getOldestBefore(chatId, count, beforeMessageId) {
         let list = [...this._getList(chatId).list];

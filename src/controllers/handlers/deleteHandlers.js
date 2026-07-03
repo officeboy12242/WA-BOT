@@ -7,7 +7,6 @@ import {
     buildQuotedTargetMessage,
     getSafeSendOptions,
     resolveConversationChatId,
-    resolveOutboundJid,
     safeDeleteMessage,
 } from '../../utils/waMessage.js';
 import { groupMessageTracker } from '../../utils/groupMessageTracker.js';
@@ -20,16 +19,38 @@ function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function parseBatchCount(rawArg) {
+    if (!rawArg) {
+        return null;
+    }
+    const trimmed = String(rawArg).trim().toLowerCase();
+    if (trimmed === 'all') {
+        return 'all';
+    }
+    const digits = trimmed.match(/^(\d{1,4})/);
+    if (!digits) {
+        return null;
+    }
+    const n = parseInt(digits[1], 10);
+    return Number.isFinite(n) && n > 0 ? n : null;
+}
+
 function buildDeleteKey(chatId, key) {
+    const groupJid = resolveConversationChatId({ remoteJid: chatId }) || chatId;
+    const remoteJid = resolveConversationChatId(key) || key.remoteJid || groupJid;
+    const fromMe = Boolean(key.fromMe);
+
     const deleteKey = {
-        remoteJid: key.remoteJid || chatId,
+        remoteJid,
         id: key.id,
-        fromMe: Boolean(key.fromMe),
+        fromMe,
     };
 
-    const participant = key.participant || key.participantLid;
-    if (participant && !deleteKey.fromMe) {
-        deleteKey.participant = participant;
+    if (!fromMe) {
+        const participant = key.participant || key.participantLid || key.participantPn;
+        if (participant) {
+            deleteKey.participant = participant;
+        }
     }
 
     return deleteKey;
@@ -41,9 +62,9 @@ function usageText() {
         '🗑️ *DELETE MESSAGES* 🗑️\n' +
         '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
         '*Commands (group admins):*\n' +
-        '• `/dellast <number>` — delete oldest N tracked messages (e.g. `/dellast 50`, `/dellast 200`)\n' +
-        '• `/dellast all` or `/delall` — delete all tracked backlog (up to 500)\n' +
-        '• Reply to a message + `/del` — delete that message\n\n' +
+        '• `/dellast <number>` — delete the most recent N tracked messages (e.g. `/dellast 20`)\n' +
+        '• `/dellast all` or `/delall` — delete all tracked messages (up to 500)\n' +
+        '• Reply to a message + `/del` — delete that one message only\n\n' +
         '_Bot must be a WhatsApp group admin._\n' +
         '_Tracks member + bot messages since the last restart (up to 500 per group)._'
     );
@@ -54,16 +75,51 @@ async function tryDelete(sock, chatId, key) {
         return false;
     }
 
-    const deleteKey = buildDeleteKey(chatId, key);
-    const targetJid = resolveOutboundJid(deleteKey, chatId);
+    const groupJid = resolveConversationChatId({ remoteJid: chatId }) || chatId;
+    const deleteKey = buildDeleteKey(groupJid, key);
+
+    const attempts = fromMeDeleteAttempts(groupJid, deleteKey);
+    for (const attempt of attempts) {
+        try {
+            await sock.sendMessage(attempt.jid, { delete: attempt.key });
+            return true;
+        } catch (err) {
+            logger.debug(`Delete failed for ${deleteKey.id} via ${attempt.jid}: ${err.message}`);
+        }
+    }
 
     try {
-        await sock.sendMessage(targetJid, { delete: deleteKey });
+        await safeDeleteMessage(sock, groupJid, deleteKey);
         return true;
-    } catch (err) {
-        logger.debug(`Delete failed for ${deleteKey.id}: ${err.message}`);
+    } catch {
         return false;
     }
+}
+
+function fromMeDeleteAttempts(groupJid, deleteKey) {
+    const attempts = [];
+    const seen = new Set();
+
+    const add = (jid, key) => {
+        const j = jid || '';
+        const sig = `${j}:${key.id}:${key.fromMe}:${key.participant || ''}`;
+        if (!j || seen.has(sig)) {
+            return;
+        }
+        seen.add(sig);
+        attempts.push({ jid: j, key });
+    };
+
+    add(groupJid, deleteKey);
+    if (deleteKey.remoteJid && deleteKey.remoteJid !== groupJid) {
+        add(deleteKey.remoteJid, deleteKey);
+    }
+
+    if (deleteKey.fromMe) {
+        add(groupJid, { remoteJid: groupJid, id: deleteKey.id, fromMe: true });
+    }
+
+    return attempts;
 }
 
 async function deleteKeys(sock, chatId, entries) {
@@ -106,8 +162,17 @@ export async function handleDelLast(sock, chatId, args, originalMsg, { fullComma
         logger.warn(`Bot admin check negative for ${chatId} — attempting delete anyway`);
     }
 
+    const cmdName = String(fullCommand || '').trim().split(/\s+/)[0]?.toLowerCase().replace(/^\//, '').split('@')[0];
+    let rawArg = args[0]?.toLowerCase();
+    if (!rawArg && cmdName === 'delall') {
+        rawArg = 'all';
+    }
+
+    const batchCount = parseBatchCount(rawArg);
     const quoted = buildQuotedTargetMessage(originalMsg);
-    if (quoted?.key?.id) {
+
+    // Reply + /del (no number) = single-message delete only
+    if (quoted?.key?.id && batchCount == null) {
         const ok = await tryDelete(sock, trackerChatId, quoted.key);
         if (ok) {
             groupMessageTracker.removeByIds(trackerChatId, [quoted.key.id]);
@@ -122,17 +187,12 @@ export async function handleDelLast(sock, chatId, args, originalMsg, { fullComma
         return;
     }
 
-    const cmdName = String(fullCommand || '').trim().split(/\s+/)[0]?.toLowerCase().replace(/^\//, '');
-    let rawArg = args[0]?.toLowerCase();
-    if (!rawArg && cmdName === 'delall') {
-        rawArg = 'all';
-    }
-    if (!rawArg) {
+    if (batchCount == null) {
         await sock.sendMessage(chatId, { text: usageText() }, sendOpts);
         return;
     }
 
-    const isAll = rawArg === 'all';
+    const isAll = batchCount === 'all';
     const commandMsgId = originalMsg?.key?.id;
     const tracked = groupMessageTracker.countBefore(trackerChatId, commandMsgId);
 
@@ -149,26 +209,19 @@ export async function handleDelLast(sock, chatId, args, originalMsg, { fullComma
         return;
     }
 
-    let take = 0;
-    if (isAll) {
-        take = tracked;
-    } else {
-        take = parseInt(rawArg, 10);
-        if (!Number.isFinite(take) || take < 1) {
-            await sock.sendMessage(chatId, { text: usageText() }, sendOpts);
-            return;
-        }
-        take = Math.min(take, MAX_BATCH);
-    }
+    const take = isAll ? tracked : Math.min(batchCount, MAX_BATCH);
 
-    const entries = groupMessageTracker.getOldestBefore(trackerChatId, take, commandMsgId);
+    const entries = isAll
+        ? groupMessageTracker.getRecentBefore(trackerChatId, tracked, commandMsgId)
+        : groupMessageTracker.getRecentBefore(trackerChatId, take, commandMsgId);
+
     if (!entries.length) {
         await sock.sendMessage(chatId, { text: '📭 Nothing to delete.' }, sendOpts);
         return;
     }
 
     const status = await sock.sendMessage(chatId, {
-        text: `⏳ Deleting *${entries.length}* older message(s)...`,
+        text: `⏳ Deleting *${entries.length}* message(s)...`,
     }, sendOpts);
 
     const { deleted, failed } = await deleteKeys(sock, trackerChatId, entries);
@@ -180,6 +233,8 @@ export async function handleDelLast(sock, chatId, args, originalMsg, { fullComma
         result += `❌ Failed: *${failed}*\n`;
         if (!botAdmin) {
             result += '\n_If nothing deleted, promote the bot to group admin._';
+        } else {
+            result += '\n_Some messages may be too old or already removed._';
         }
     }
     if (isAll && tracked > entries.length) {
@@ -193,5 +248,8 @@ export async function handleDelLast(sock, chatId, args, originalMsg, { fullComma
     } catch { /* ignore */ }
 
     await sock.sendMessage(chatId, { text: result }, sendOpts);
-    logger.info(`DelLast in ${trackerChatId}: requested=${take}, deleted=${deleted}, failed=${failed}, botAdmin=${botAdmin}`);
+    logger.info(
+        `DelLast in ${trackerChatId}: mode=${isAll ? 'all' : take}, ` +
+            `requested=${take}, deleted=${deleted}, failed=${failed}, botAdmin=${botAdmin}`
+    );
 }

@@ -252,7 +252,7 @@ export const COMMAND_REGISTRY = [
         key: 'dellast',
         scope: 'group_only',
         role: 'admins',
-        help: 'Delete oldest tracked messages — `/dellast <n>` (any number up to 500), `/delall`, reply + `/del`',
+        help: 'Delete recent tracked messages — `/dellast <n>` (most recent N), `/delall`, reply + `/del`',
     },
     {
         names: ['/delall'],
@@ -528,7 +528,10 @@ for (const def of COMMAND_REGISTRY) {
  */
 export function findCommand(cmdFirstToken) {
     if (!cmdFirstToken) return undefined;
-    return nameIndex.get(cmdFirstToken.toLowerCase());
+    const lower = String(cmdFirstToken).toLowerCase();
+    const at = lower.indexOf('@');
+    const base = at > 0 ? lower.slice(0, at) : lower;
+    return nameIndex.get(base) || nameIndex.get(lower);
 }
 
 /**
