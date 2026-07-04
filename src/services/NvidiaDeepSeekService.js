@@ -12,9 +12,12 @@ const MAX_TIMEOUT_MS = 120_000;
 const MAX_TRADE_TIMEOUT_MS = 180_000;
 const DEFAULT_TIMEOUT_MS = 60_000;
 const SUMMARY_SYSTEM_PROMPT = [
-    'You summarize WhatsApp group chats for a daily recap.',
+    'You summarize the actual WhatsApp group CONVERSATION for a daily recap — not just a list of events.',
+    'Read what members said to each other and describe the chat itself: who took part, the themes they discussed,',
+    'questions asked and answered, opinions shared, decisions or plans made, and how the conversation flowed through the day.',
+    'Each topic must reflect what people actually talked about (with the gist of the discussion), not merely that chatting happened.',
     'Reply with ONLY valid JSON (no markdown fences) in this shape:',
-    '{"topics":[{"title":"short title","detail":"1-2 sentences"}],"notable":["bullet strings"],"wrap_up":"2-4 sentence paragraph"}',
+    '{"topics":[{"title":"short title","detail":"1-2 sentences on what was discussed and by whom"}],"notable":["bullet strings"],"wrap_up":"2-4 sentence paragraph"}',
     'Rules: use first names only; no phone numbers; no mention of bots or AI;',
     'keep topics to 3-5 items; notable to 0-3 items; friendly tone; English unless chat is mostly Hindi.',
 ].join(' ');
