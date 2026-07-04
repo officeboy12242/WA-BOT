@@ -47,6 +47,34 @@ class NvidiaDeepSeekService {
         return Boolean(this.apiKey);
     }
 
+    isRetryableError(err) {
+        if (!err) return false;
+        if (this.isTimeoutError(err)) return true;
+        const status = err?.response?.status || err?.status;
+        return status === 503 || status === 502 || status === 429;
+    }
+
+    async completeWithSummaryRetry(systemPrompt, userPrompt, opts = {}) {
+        const maxRetries = 2;
+        let lastErr;
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+            try {
+                return await this.complete(systemPrompt, userPrompt, opts);
+            } catch (err) {
+                lastErr = err;
+                if (!this.isRetryableError(err) || attempt === maxRetries) {
+                    throw err;
+                }
+                const backoffMs = 3000 * (attempt + 1);
+                logger.warn(
+                    `NVIDIA summary retry ${attempt + 1}/${maxRetries} after ${backoffMs}ms: ${err.message}`
+                );
+                await new Promise((r) => setTimeout(r, backoffMs));
+            }
+        }
+        throw lastErr;
+    }
+
     resolveModel(forTrade = false) {
         return forTrade ? this.tradeModel : this.model;
     }
@@ -429,7 +457,9 @@ class NvidiaDeepSeekService {
      * @returns {Promise<object>}
      */
     async summarizeGroupChat(prompt) {
-        const raw = await this.completeWithSummaryRetry(SUMMARY_SYSTEM_PROMPT, prompt);
+        const raw = await this.completeWithSummaryRetry(SUMMARY_SYSTEM_PROMPT, prompt, {
+            timeoutMs: this.summaryTimeoutMs,
+        });
         return this.parseSummaryJson(raw);
     }
 
