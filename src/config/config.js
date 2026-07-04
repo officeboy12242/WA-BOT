@@ -59,6 +59,8 @@ export const config = {
     /** When recap is sent — default 00:00 = midnight IST (end of calendar day). */
     GROUP_SUMMARY_TIME: (process.env.GROUP_SUMMARY_TIME || '00:00').trim(),
     GROUP_SUMMARY_TIMEZONE: process.env.GROUP_SUMMARY_TIMEZONE || 'Asia/Kolkata',
+    /** Produce a chat-based narrative recap (who said what / themes / decisions) instead of only listing events. */
+    GROUP_SUMMARY_NARRATIVE: process.env.GROUP_SUMMARY_NARRATIVE !== 'false',
     /** Min member messages that day before a full recap; below this = short quiet note or skip. */
     GROUP_SUMMARY_MIN_MESSAGES: parseInt(process.env.GROUP_SUMMARY_MIN_MESSAGES, 10) || 3,
     GROUP_SUMMARY_MAX_MESSAGES: parseInt(process.env.GROUP_SUMMARY_MAX_MESSAGES, 10) || 400,
