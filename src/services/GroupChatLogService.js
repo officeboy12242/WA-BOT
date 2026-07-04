@@ -367,6 +367,8 @@ class GroupChatLogService {
                 `Group: ${groupName}`,
                 `Date: ${dateLabel}`,
                 `Part ${part + 1} of ${parts} (sample of ${sampled.length} from ${chunk.length} msgs; day total ${total})`,
+                'Below is the actual member conversation for this part of the day (name: message).',
+                'Summarize what people actually discussed — themes, who said what, questions, opinions, decisions — not just that chatting happened.',
                 'List 2-4 topics from this part only (JSON topics/notable/wrap_up).',
                 lines.join('\n'),
             ].join('\n\n');
