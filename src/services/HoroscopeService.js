@@ -129,11 +129,27 @@ class HoroscopeService {
             { timeout: 10000 }
         );
 
-        if (!response.data?.horoscope) {
-            throw new Error('Invalid Ohmanda response');
+        const text = String(response.data?.horoscope || '').trim();
+        if (!text) {
+            throw new Error('Ohmanda returned empty horoscope');
         }
 
-        return response.data.horoscope.trim();
+        return text;
+    }
+
+    async _fetchHoroscopeApp(sign) {
+        const titleSign = sign.charAt(0).toUpperCase() + sign.slice(1);
+        const response = await axios.get(
+            'https://horoscope-app-api.vercel.app/api/v1/get-horoscope/daily',
+            { params: { sign: titleSign, day: 'TODAY' }, timeout: 10000 }
+        );
+
+        const text = String(response.data?.data?.horoscope || '').trim();
+        if (!text) {
+            throw new Error('Invalid horoscope-app response');
+        }
+
+        return text;
     }
 
     async _fetchVedikaExtras(sign) {
@@ -173,14 +189,20 @@ class HoroscopeService {
             return cached.data;
         }
 
-        const [ohmandaResult, vedikaResult] = await Promise.allSettled([
+        const [ohmandaResult, vedikaResult, appResult] = await Promise.allSettled([
             this._fetchOhmanda(normalizedSign),
             this._fetchVedikaExtras(normalizedSign),
+            this._fetchHoroscopeApp(normalizedSign),
         ]);
 
-        const horoscopeText = ohmandaResult.status === 'fulfilled'
-            ? ohmandaResult.value
-            : (vedikaResult.status === 'fulfilled' ? vedikaResult.value.horoscope : '');
+        const horoscopeText =
+            (ohmandaResult.status === 'fulfilled' && ohmandaResult.value)
+                ? ohmandaResult.value
+                : (vedikaResult.status === 'fulfilled' && vedikaResult.value.horoscope)
+                    ? vedikaResult.value.horoscope
+                    : (appResult.status === 'fulfilled' && appResult.value)
+                        ? appResult.value
+                        : '';
 
         if (!horoscopeText) {
             logger.error(`Horoscope API error for ${normalizedSign}: all sources failed`);

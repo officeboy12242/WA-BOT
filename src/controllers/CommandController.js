@@ -341,7 +341,7 @@ class CommandController {
                     if (!sign) {
                         const listMsg = horoscopeService.getSignsList();
                         await safeSendMessage(sock, chatId, { text: listMsg }, originalMsg);
-            } else {
+                    } else {
                         const data = await horoscopeService.fetchHoroscope(sign);
                         const msg = horoscopeService.formatMessage(data);
                         await safeSendMessage(sock, chatId, { text: msg }, originalMsg);
