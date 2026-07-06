@@ -25,6 +25,15 @@ const SUMMARY_ALLOWED_FILES = [
     'src/services/NvidiaDeepSeekService.js',
 ];
 
+const HOROSCOPE_ALLOWED_FILES = [
+    'src/services/HoroscopeService.js',
+    'src/controllers/CommandController.js',
+    'src/commands/registry.js',
+];
+
+/** Min gap between auto horoscope heal proposals (avoid spam on every /horo) */
+const HOROSCOPE_HEAL_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+
 const BLOCKED_PATH_PARTS = ['.env', 'node_modules', 'auth_info', 'credentials', '.git'];
 
 /** Hard security: heal agent may ONLY read/update file contents — never delete the repo */
@@ -66,6 +75,12 @@ const FILE_INTEGRITY_RULES = {
     'src/services/SummarySelfHealService.js': [
         'proposeFromInstruction',
         'approveAndPush',
+        'export default',
+    ],
+    'src/services/HoroscopeService.js': [
+        'fetchHoroscope',
+        'formatMessage',
+        'normalizeSign',
         'export default',
     ],
 };
@@ -267,6 +282,14 @@ const FEATURE_FILE_MAP = [
         ],
     },
     {
+        re: /horo|horoscope|zodiac|ohmanda|vedika/i,
+        files: [
+            'src/services/HoroscopeService.js',
+            'src/commands/registry.js',
+            'src/controllers/CommandController.js',
+        ],
+    },
+    {
         re: /\b(add|new|create)\b.{0,40}\b(command|\/[a-z])/i,
         files: [
             'src/commands/registry.js',
@@ -358,6 +381,7 @@ class SummarySelfHealService {
         this._collection = null;
         this._sock = null;
         this._inflight = false;
+        this._horoscopeHealLastAt = 0;
         this.rootDir = process.cwd();
 
         if (mongoDb) {
@@ -533,6 +557,102 @@ class SummarySelfHealService {
         }
 
         void this._runHealCycle({ groupName, dateStr, errorMessage, messageCount });
+    }
+
+    /**
+     * Called when /horo fails (all APIs down or unexpected error). Non-blocking.
+     */
+    triggerFromHoroscopeFailure({ sign, errorMessage, chatId }) {
+        if (this.config.HOROSCOPE_SELF_HEAL_ENABLED === false) {
+            return;
+        }
+        if (!this.isReady()) {
+            logger.info('Horoscope self-heal skipped (disabled or missing GITHUB_TOKEN / Mongo)');
+            return;
+        }
+        if (this._inflight) {
+            logger.info('Self-heal already running — skip horoscope trigger');
+            return;
+        }
+        const now = Date.now();
+        if (now - this._horoscopeHealLastAt < HOROSCOPE_HEAL_COOLDOWN_MS) {
+            logger.info('Horoscope self-heal cooldown — skip');
+            return;
+        }
+
+        void this._runHoroscopeHealCycle({ sign, errorMessage, chatId });
+    }
+
+    async _runHoroscopeHealCycle(ctx) {
+        this._inflight = true;
+        try {
+            if (await this._hasPendingOrRecent()) {
+                logger.info('Horoscope self-heal: pending/recent proposal exists — skip');
+                await this._notify(
+                    `🔧 *Horoscope self-heal*\nSkipped (pending or recent heal exists).\n` +
+                        `Sign: ${ctx.sign || 'n/a'}\nError: ${String(ctx.errorMessage || '').slice(0, 200)}`
+                );
+                return;
+            }
+
+            const instruction =
+                `Auto-fix /horo horoscope failure: ${ctx.errorMessage}. ` +
+                `Sign: ${ctx.sign || 'unknown'}. ` +
+                'HoroscopeService must try multiple free APIs in parallel and use the first non-empty horoscope text. ' +
+                'If ohmanda returns whitespace-only text, treat it as failure and fall back to vedika or horoscope-app-api.';
+
+            await this._notify(
+                `🔮 *Horoscope issue detected*\n` +
+                    `Sign: *${ctx.sign || 'unknown'}*\n` +
+                    `Error: ${String(ctx.errorMessage || '').slice(0, 300)}\n\n` +
+                    `_Asking heal agent for a /horo fix…_`
+            );
+
+            const picked = await this._pickCandidateFiles(instruction);
+            const candidates = [...new Set([...HOROSCOPE_ALLOWED_FILES, ...picked])].slice(0, 8);
+
+            let proposal = await this._generateAgentProposal({
+                allowedPaths: candidates,
+                instruction,
+                userPromptParts: [
+                    'Horoscope (/horo) failure report:',
+                    `Sign requested: ${ctx.sign || 'unknown'}`,
+                    `Error: ${ctx.errorMessage}`,
+                    `Chat: ${ctx.chatId || 'n/a'}`,
+                ],
+            });
+
+            proposal = await this._ensureCompleteProposal(instruction, proposal, candidates);
+
+            if (!proposal?.files?.length) {
+                await this._notify(
+                    `🔧 *Horoscope self-heal*\nHeal agent found no safe code change.\nIssue: ${ctx.errorMessage}`
+                );
+                return;
+            }
+
+            const healId = await this._storeProposal({
+                source: 'auto_horoscope',
+                instruction,
+                error: String(ctx.errorMessage || '').slice(0, 1000),
+                proposal,
+            });
+
+            await this._notifyOwnersOnly(this._formatProposalMessage(healId, proposal, {
+                title: 'HOROSCOPE SELF-HEAL',
+                context:
+                    `⚠️ /horo failed — AI proposed a fix.\n` +
+                    `📌 *Sign:* ${ctx.sign || 'unknown'}\n` +
+                    `📌 *Issue:* ${String(ctx.errorMessage || '').slice(0, 200)}`,
+            }));
+            logger.info(`Horoscope self-heal proposal ${healId} awaiting owner approval`);
+            this._horoscopeHealLastAt = Date.now();
+        } catch (err) {
+            logger.error(`Horoscope self-heal cycle failed: ${err.message}`);
+            await this._notify(`🔧 *Horoscope self-heal error*\n${err.message}`).catch(() => {});
+        } finally {
+            this._inflight = false;
+        }
     }
 
     async _runHealCycle(ctx) {
@@ -910,6 +1030,7 @@ class SummarySelfHealService {
             if (/movie|zip/i.test(instruction) && /movie|hdhub/i.test(low)) score += 8;
             if (/morning/i.test(instruction) && /morning/i.test(low)) score += 10;
             if (/advice/i.test(instruction) && /advice/i.test(low)) score += 10;
+            if (/horo|horoscope|zodiac/i.test(instruction) && /horo|horoscope/i.test(low)) score += 10;
             if (isNewCommandInstruction(instruction) && /registry|commandcontroller|service/i.test(low)) {
                 score += 12;
             }

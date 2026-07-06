@@ -343,11 +343,23 @@ class CommandController {
                         await safeSendMessage(sock, chatId, { text: listMsg }, originalMsg);
                     } else {
                         const data = await horoscopeService.fetchHoroscope(sign);
+                        if (data.error === 'api_error') {
+                            ctx.groupSummaryController?.selfHeal?.triggerFromHoroscopeFailure({
+                                sign,
+                                errorMessage: 'All horoscope API sources failed',
+                                chatId,
+                            });
+                        }
                         const msg = horoscopeService.formatMessage(data);
                         await safeSendMessage(sock, chatId, { text: msg }, originalMsg);
                     }
                 } catch (err) {
                     logger.error('Horoscope command error:', err);
+                    ctx.groupSummaryController?.selfHeal?.triggerFromHoroscopeFailure({
+                        sign: args[0],
+                        errorMessage: err.message,
+                        chatId,
+                    });
                     await safeSendMessage(sock, chatId, { text: '⚠️ Failed to fetch horoscope. Please try again.' }, originalMsg);
                 }
                 break;
