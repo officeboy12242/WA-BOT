@@ -81,6 +81,11 @@ export const config = {
     NVIDIA_HEAL_MODEL: process.env.NVIDIA_HEAL_MODEL?.trim() || 'nvidia/nemotron-3-ultra-550b-a55b',
     /** Try Nemotron first (often 503); default false = GLM → DeepSeek → Nemotron */
     NVIDIA_HEAL_PREFER_NEMOTRON: process.env.NVIDIA_HEAL_PREFER_NEMOTRON === 'true',
+    /** Google Gemini API key — preferred for /fix heal (better JSON + replacements) */
+    GEMINI_API_KEY: process.env.GEMINI_API_KEY?.trim() || '',
+    /** Primary Gemini model for heal (comma-separated chain in GEMINI_HEAL_MODELS) */
+    GEMINI_HEAL_MODEL: process.env.GEMINI_HEAL_MODEL?.trim() || 'gemini-2.5-flash',
+    GEMINI_HEAL_MODELS: process.env.GEMINI_HEAL_MODELS?.trim() || 'gemini-2.5-flash,gemini-2.5-pro,gemini-2.0-flash',
     /** Auto-propose summary code fixes (owner must approve push) */
     SUMMARY_SELF_HEAL_ENABLED: process.env.SUMMARY_SELF_HEAL_ENABLED !== 'false',
     /** GitHub PAT with contents:write for self-heal push */

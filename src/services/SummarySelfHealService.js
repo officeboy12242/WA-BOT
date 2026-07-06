@@ -13,6 +13,7 @@ import axios from 'axios';
 import { logger } from '../utils/logger.js';
 import { config } from '../config/config.js';
 import NvidiaDeepSeekService from './NvidiaDeepSeekService.js';
+import GeminiHealService from './GeminiHealService.js';
 import { resolveNotificationJid, normalizePhoneNumber } from '../utils/permissions.js';
 
 const execFileAsync = promisify(execFile);
@@ -111,7 +112,7 @@ QUALITY RULES (mandatory):
 4. Minimal but COMPLETE: no drive-by refactors, but do not leave dead timers/schedulers running for disabled features.
 5. Preserve exports and public method names.
 6. Valid ESM JavaScript only.
-7. old_string must match the file EXACTLY (unique snippet).
+7. old_string must match the file EXACTLY — copy verbatim from the snippet below (min 2 lines or 60 chars, unique context).
 8. Max 8 replacements total across all files.
 9. Do not touch secrets, .env files, or auth sessions (config.js defaults are OK).
 10. changelog must explain the proper approach (not "emptied function").
@@ -148,6 +149,41 @@ RULES:
 • old_string must match the provided file content exactly.
 • Keep the owner's original intent.
 • Preserve exports and public methods.`;
+
+const PLAN_JSON_SHAPE = `{
+  "summary": "one-line what we will do",
+  "approach": "config-first|code|both",
+  "files_to_edit": ["src/path/File.js"],
+  "steps": ["short action 1", "short action 2"],
+  "changelog": ["bullet for owner"]
+}`;
+
+const PLAN_SYSTEM_PROMPT = `You are a senior engineer planning a WhatsApp bot code fix (Cursor agent style).
+
+The owner gives an instruction. You have a list of candidate files — pick which to edit and HOW (config-first when disabling features).
+
+Return ONLY valid JSON (no markdown):
+${PLAN_JSON_SHAPE}
+
+RULES:
+• files_to_edit: subset of candidates only (max 6), include ALL entry points (config + controller + scheduler if needed)
+• steps: 2–6 concrete actions the agent will take in order
+• approach: prefer config-first for disable/remove feature requests
+• Do not plan repo deletion or wiping files`;
+
+const PER_FILE_HEAL_SYSTEM_PROMPT = `You are a precise coding agent editing ONE file in a WhatsApp bot (Node ESM).
+
+Return ONLY valid JSON (no markdown):
+${JSON_SHAPE}
+
+RULES:
+• files[] must contain ONLY the one file path you were given — no other paths
+• Max 3 replacements per response — small, exact snippets
+• old_string: copy VERBATIM from the file content (min 2 lines or 80 chars, unique)
+• new_string: the replacement
+• If a previous attempt failed, fix the old_string to match the file EXACTLY
+• Prefer config flags over deleting logic
+• If nothing to change in this file, return files:[]`;
 
 /** Keyword → files that must be considered for a complete fix */
 const FEATURE_FILE_MAP = [
@@ -265,6 +301,7 @@ class SummarySelfHealService {
         this.githubRepo = cfg.GITHUB_REPO || 'officeboy12242/WA-BOT';
         this.githubBranch = cfg.GITHUB_BRANCH || 'main';
         this.notifyNumber = normalizePhoneNumber(cfg.SUMMARY_SELF_HEAL_NOTIFY || cfg.BOT_LOG_NUMBER || '917887499710');
+        this.gemini = new GeminiHealService(cfg);
         this.nvidia = new NvidiaDeepSeekService(cfg);
         this._collection = null;
         this._sock = null;
@@ -324,12 +361,55 @@ class SummarySelfHealService {
     }
 
     isReady() {
+        const hasLlm = this.gemini.isConfigured() || this.nvidia.isConfigured();
         return (
             this.enabled &&
-            this.nvidia.isConfigured() &&
+            hasLlm &&
             Boolean(this.getGithubToken()) &&
             Boolean(this._collection)
         );
+    }
+
+    /** Label for /heal status and error messages */
+    getHealModelLabel() {
+        const parts = [];
+        if (this.gemini.isConfigured()) {
+            parts.push(`Gemini: ${this.gemini.getModelChain().join(' → ')}`);
+        }
+        if (this.nvidia.isConfigured()) {
+            parts.push(`NVIDIA: ${this.healModels.join(' → ')}`);
+        }
+        return parts.join(' · ') || 'none';
+    }
+
+    /**
+     * Heal LLM: Gemini first (if configured), then NVIDIA fallback.
+     * @returns {Promise<{ content: string, model: string }>}
+     */
+    async _callHealLlm(systemPrompt, userPrompt, opts = {}) {
+        const progress = typeof opts.onProgress === 'function' ? opts.onProgress : async () => {};
+        let geminiErr;
+
+        if (this.gemini.isConfigured()) {
+            try {
+                return await this.gemini.completeWithModelFallback(
+                    this.gemini.getModelChain(),
+                    systemPrompt,
+                    userPrompt,
+                    opts,
+                );
+            } catch (err) {
+                geminiErr = err;
+                logger.warn(`Gemini heal chain failed: ${err.message}`);
+                await progress(`⚠️ Gemini failed — trying NVIDIA fallback…`);
+            }
+        }
+
+        if (!this.nvidia.isConfigured()) {
+            throw geminiErr || new Error('No heal LLM configured (set GEMINI_API_KEY or NVIDIA_API_KEY)');
+        }
+
+        return this.nvidia.completeWithModelFallback(this.healModels, systemPrompt, userPrompt, opts);
     }
 
     async _notify(text) {
@@ -477,12 +557,12 @@ class SummarySelfHealService {
         const render = async (force = false) => {
             if (typeof onProgress !== 'function') return;
             const now = Date.now();
-            if (!force && now - lastAt < 450) return;
+            if (!force && now - lastAt < 280) return;
             lastAt = now;
             const body = [
                 `🔧 *${title}*`,
                 '',
-                ...lines.slice(-12),
+                ...lines.slice(-14),
             ].join('\n');
             try {
                 await onProgress(body);
@@ -529,7 +609,8 @@ class SummarySelfHealService {
         if (!this.isReady()) {
             return {
                 ok: false,
-                message: '❌ Self-heal not ready. Set `GITHUB_TOKEN` + Mongo + `NVIDIA_API_KEY` on Render.',
+                message:
+                    '❌ Self-heal not ready. Set `GITHUB_TOKEN` + Mongo + `GEMINI_API_KEY` (or `NVIDIA_API_KEY`) on Render.',
             };
         }
         if (this._inflight) {
@@ -540,7 +621,7 @@ class SummarySelfHealService {
         this._inflight = true;
         try {
             await status.step(`🗣️ *Instruction:* ${text.slice(0, 120)}`);
-            await status.step('🧠 Planning complete fix (config-first, related files)…');
+            await status.step('🧠 Agent mode: plan → per-file patch → validate');
             await status.step('📂 Scanning `src/` for matching files…');
 
             const candidates = await this._pickCandidateFiles(text);
@@ -553,18 +634,14 @@ class SummarySelfHealService {
                 await status.note(`  • \`${f}\``);
             }
 
-            let proposal = await this._generateProposal({
-                mode: 'instruction',
+            let proposal = await this._generateAgentProposal({
                 allowedPaths: candidates,
-                systemPrompt: INSTRUCTION_HEAL_SYSTEM_PROMPT,
+                instruction: text,
                 userPromptParts: [
                     `Owner instruction: ${text}`,
                     `Requested by: ${byPhone || 'owner'}`,
-                    'Implement COMPLETELY and PROPERLY (config flags over gutting code).',
-                    'Touch all related entry points. Keep feature reversible via config/env.',
                 ],
                 onProgress: (line) => status.step(line),
-                instruction: text,
             });
 
             if (!proposal?.files?.length) {
@@ -638,7 +715,7 @@ class SummarySelfHealService {
             await this._notify(`🔧 */fix failed*\n${err.message}${hint}`).catch(() => {});
             return {
                 ok: false,
-                message: `❌ Fix failed: ${err.message}${hint}\n_Tried models:_ ${this.healModels.join(' → ')}`,
+                message: `❌ Fix failed: ${err.message}${hint}\n_Tried:_ ${this.getHealModelLabel()}`,
             };
         } finally {
             this._inflight = false;
@@ -679,6 +756,11 @@ class SummarySelfHealService {
             ? `\n🔎 *Diff preview*\n${proposal.changePreview}\n`
             : '';
 
+        const planBlock =
+            proposal.agentPlan?.steps?.length
+                ? `📋 *Agent plan:*\n${proposal.agentPlan.steps.map((s) => `  → ${s}`).join('\n')}\n\n`
+                : '';
+
         return (
             `┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n` +
             `┃  🔧 *${title}* 🔧  ┃\n` +
@@ -686,6 +768,7 @@ class SummarySelfHealService {
             `${context}\n\n` +
             `🧠 *Model:* ${proposal.usedModel || this.healModel}\n` +
             `📝 *Summary:* ${proposal.summary}\n\n` +
+            planBlock +
             (changes ? `📋 *What changed:*\n${changes}\n\n` : '') +
             `📁 *Files:*\n${fileList}\n` +
             preview +
@@ -916,8 +999,7 @@ class SummarySelfHealService {
             .join('\n');
 
         try {
-            const { content: raw, model } = await this.nvidia.completeWithModelFallback(
-                this.healModels,
+            const { content: raw, model } = await this._callHealLlm(
                 COMPLETENESS_SYSTEM_PROMPT,
                 userPrompt,
                 { maxTokens: 2500, onProgress: progress }
@@ -926,7 +1008,7 @@ class SummarySelfHealService {
             if (parsed?.files?.length) {
                 // Apply completeness patches on top of CURRENT patched content
                 const applyBase = new Map(patchedView);
-                const extra = this._applyParsedProposal(
+                const extra = await this._applyParsedProposal(
                     parsed,
                     applyBase,
                     new Set(candidates),
@@ -1141,8 +1223,7 @@ class SummarySelfHealService {
             ...payload.map((f) => `\n===== FILE: ${f.path} =====\n${f.content}`),
         ].join('\n');
 
-        const { content: raw, model } = await this.nvidia.completeWithModelFallback(
-            this.healModels,
+        const { content: raw, model } = await this._callHealLlm(
             REPAIR_SYSTEM_PROMPT,
             userPrompt,
             { maxTokens: 2500, onProgress: progress }
@@ -1152,7 +1233,7 @@ class SummarySelfHealService {
         if (!parsed) return null;
 
         // Apply repairs against ORIGINAL sources (safer)
-        const result = this._applyParsedProposal(
+        const result = await this._applyParsedProposal(
             parsed,
             originals,
             new Set(failedFiles.map((f) => f.path)),
@@ -1247,11 +1328,10 @@ class SummarySelfHealService {
                 await progress(`📦 Prompt ready (${payload.length} file(s), ${userPrompt.length} chars)`);
                 logger.info(
                     `Self-heal LLM call (${payload.length} file(s), ${userPrompt.length} chars), ` +
-                        `models: ${this.healModels.join(' → ')}`
+                        `models: ${this.getHealModelLabel()}`
                 );
 
-                const { content: raw, model: usedModel } = await this.nvidia.completeWithModelFallback(
-                    this.healModels,
+                const { content: raw, model: usedModel } = await this._callHealLlm(
                     systemPrompt,
                     userPrompt,
                     { maxTokens: 2500, onProgress: progress }
@@ -1263,7 +1343,7 @@ class SummarySelfHealService {
                     throw new Error('Heal model returned invalid JSON');
                 }
 
-                let result = this._applyParsedProposal(parsed, originals, new Set(pathList), progress);
+                let result = await this._applyParsedProposal(parsed, originals, new Set(pathList), progress);
                 if (!result.files.length) {
                     throw new Error('Heal model returned no applicable replacements');
                 }
@@ -1321,10 +1401,32 @@ class SummarySelfHealService {
         return crypto.createHash('sha256').update(String(text || ''), 'utf8').digest('hex');
     }
 
-    _applyParsedProposal(parsed, originals, allowed, onProgress) {
+    _tryApplyReplacement(content, oldStr, newStr) {
+        if (!oldStr || oldStr === newStr) return null;
+        if (content.includes(oldStr)) {
+            return content.replace(oldStr, newStr);
+        }
+        const variants = [
+            oldStr.trim(),
+            oldStr.replace(/\r\n/g, '\n'),
+            oldStr.replace(/\n/g, '\r\n'),
+            oldStr.replace(/\t/g, '    '),
+        ];
+        for (const v of variants) {
+            if (v && v !== oldStr && content.includes(v)) {
+                const trimmedNew = oldStr.trim() === oldStr ? newStr.trim() : newStr;
+                return content.replace(v, trimmedNew);
+            }
+        }
+        return null;
+    }
+
+    async _applyParsedProposal(parsed, originals, allowed, onProgress) {
         const progress = typeof onProgress === 'function' ? onProgress : async () => {};
         const files = [];
         const appliedNotes = [];
+        /** @type {{ path: string, old_string: string }[]} */
+        const failedReplacements = [];
 
         for (const f of parsed.files || []) {
             const rel = String(f.path || '').replace(/\\/g, '/').replace(/^\.\//, '');
@@ -1339,42 +1441,43 @@ class SummarySelfHealService {
             /** @type {{ old_string: string, new_string: string }[]} */
             const appliedReplacements = [];
 
-            void progress(`✏️ Updating \`${rel}\`…`);
+            await progress(`✏️ \`${rel}\` — applying changes…`);
 
             if (typeof f.content === 'string' && f.content.length > 50) {
                 // Full rewrite only if file is small enough to be trustworthy
                 if (f.content.length < 25_000) {
                     next = f.content;
                     appliedNotes.push(`${rel}: full file rewrite`);
-                    void progress(`  ✓ full rewrite \`${rel}\``);
+                    await progress(`  ✓ \`${rel}\` — full file rewrite`);
                 }
             } else if (Array.isArray(f.replacements)) {
                 let applied = 0;
-                for (const rep of f.replacements.slice(0, 4)) {
+                const reps = f.replacements.slice(0, 4);
+                await progress(`  📝 ${reps.length} replacement(s) in \`${rel}\``);
+                for (const rep of reps) {
                     const oldStr = String(rep.old_string ?? rep.old ?? '');
                     const newStr = String(rep.new_string ?? rep.new ?? '');
-                    if (!oldStr || oldStr === newStr) continue;
-                    if (!next.includes(oldStr)) {
-                        const loose = oldStr.trim();
-                        if (loose && next.includes(loose)) {
-                            next = next.replace(loose, newStr.trim());
-                            appliedReplacements.push({ old_string: loose, new_string: newStr.trim() });
-                            applied += 1;
-                        } else {
-                            logger.warn(`Self-heal old_string not found in ${rel}`);
-                            void progress(`  ⚠️ patch miss in \`${rel}\``);
-                            continue;
-                        }
-                    } else {
-                        next = next.replace(oldStr, newStr);
-                        appliedReplacements.push({ old_string: oldStr, new_string: newStr });
-                        applied += 1;
+                    const label = oldStr.trim().slice(0, 48).replace(/\n/g, ' ');
+                    await progress(`  • patching: \`${label || '(snippet)'}…\``);
+
+                    const replaced = this._tryApplyReplacement(next, oldStr, newStr);
+                    if (replaced == null) {
+                        logger.warn(`Self-heal old_string not found in ${rel}`);
+                        failedReplacements.push({ path: rel, old_string: oldStr });
+                        await progress(`  ⚠️ no match in \`${rel}\` for: \`${label}…\``);
+                        continue;
                     }
-                    const label = oldStr.trim().slice(0, 40).replace(/\n/g, ' ');
+                    next = replaced;
+                    appliedReplacements.push({
+                        old_string: oldStr,
+                        new_string: newStr,
+                    });
+                    applied += 1;
+                    await progress(`  ✓ applied in \`${rel}\``);
                     appliedNotes.push(`${rel}: replaced “${label}…”`);
                 }
                 if (!applied) continue;
-                void progress(`  ✓ ${applied} patch(es) in \`${rel}\``);
+                await progress(`  ✅ \`${rel}\` — ${applied}/${reps.length} patch(es) applied`);
             } else {
                 continue;
             }
@@ -1383,12 +1486,12 @@ class SummarySelfHealService {
             // Never allow wiping a file (GitHub "delete file" equivalent)
             if (!String(next).trim() || String(next).trim().length < 20) {
                 logger.warn(`Self-heal rejected wipe of ${rel}`);
-                void progress(`  🚫 blocked wipe of \`${rel}\``);
+                await progress(`  🚫 blocked wipe of \`${rel}\``);
                 continue;
             }
             if (rel.includes('NvidiaDeepSeek') && !next.includes('completeTrade')) {
                 logger.warn(`Self-heal rejected NvidiaDeepSeekService change that removes trade API`);
-                void progress(`  ⛔ blocked unsafe change in \`${rel}\``);
+                await progress(`  ⛔ blocked unsafe change in \`${rel}\``);
                 continue;
             }
             files.push({
@@ -1408,6 +1511,266 @@ class SummarySelfHealService {
             changelog,
             changePreview: this._buildChangePreview(originals, files),
             files,
+            failedReplacements,
+        };
+    }
+
+    /**
+     * Cursor-style step 1: plan which files to touch and how.
+     */
+    async _createHealPlan(instruction, candidatePaths, onProgress) {
+        const progress = typeof onProgress === 'function' ? onProgress : async () => {};
+        const paths = candidatePaths.slice(0, 8);
+        const userPrompt = [
+            `Owner instruction: ${instruction}`,
+            '',
+            'Candidate files (pick subset to edit):',
+            ...paths.map((p) => `• ${p}`),
+            '',
+            'Return the plan JSON only.',
+        ].join('\n');
+
+        await progress('🧠 Planning (which files + approach)…');
+        const { content: raw, model } = await this._callHealLlm(PLAN_SYSTEM_PROMPT, userPrompt, {
+            maxTokens: 2000,
+            onProgress: progress,
+        });
+
+        const parsed = extractJsonObject(raw);
+        if (!parsed) {
+            return {
+                summary: instruction.slice(0, 120),
+                approach: 'both',
+                files_to_edit: paths.slice(0, 4),
+                steps: ['Read files', 'Apply patches', 'Validate syntax'],
+                changelog: [],
+                usedModel: model,
+            };
+        }
+
+        const filesToEdit = (Array.isArray(parsed.files_to_edit) ? parsed.files_to_edit : [])
+            .map((p) => String(p).replace(/\\/g, '/').replace(/^\.\//, ''))
+            .filter((p) => paths.includes(p));
+
+        return {
+            summary: String(parsed.summary || 'Code fix').slice(0, 200),
+            approach: String(parsed.approach || 'both'),
+            files_to_edit: filesToEdit.length ? filesToEdit.slice(0, 6) : paths.slice(0, 4),
+            steps: (Array.isArray(parsed.steps) ? parsed.steps : [])
+                .map((s) => String(s).trim())
+                .filter(Boolean)
+                .slice(0, 6),
+            changelog: (Array.isArray(parsed.changelog) ? parsed.changelog : [])
+                .map((c) => String(c).trim())
+                .filter(Boolean)
+                .slice(0, 6),
+            usedModel: model,
+        };
+    }
+
+    /**
+     * Cursor-style step 2: one file at a time with patch retries.
+     */
+    async _proposeSingleFileWithRetries(instruction, rel, plan, onProgress) {
+        const progress = typeof onProgress === 'function' ? onProgress : async () => {};
+        if (!this._isSafePath(rel) && !SUMMARY_ALLOWED_FILES.includes(rel)) {
+            return null;
+        }
+
+        let originalContent;
+        try {
+            await progress(`📖 Reading \`${rel}\`…`);
+            originalContent = await this._readLocalFile(rel);
+        } catch (err) {
+            logger.warn(`Agent could not read ${rel}: ${err.message}`);
+            await progress(`⚠️ Could not read \`${rel}\``);
+            return null;
+        }
+
+        let working = originalContent;
+        const maxAttempts = 3;
+        /** @type {string[]} */
+        let lastErrors = [];
+        let usedModel = '';
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            await progress(`🤖 \`${rel}\` — attempt ${attempt}/${maxAttempts}…`);
+
+            const snippet =
+                working.length > 14_000
+                    ? `${working.slice(0, 7000)}\n\n/* ... middle omitted ... */\n\n${working.slice(-7000)}`
+                    : working;
+
+            const userPrompt = [
+                `Owner instruction: ${instruction}`,
+                `Plan: ${plan.summary || ''}`,
+                `Approach: ${plan.approach || 'both'}`,
+                attempt > 1 && lastErrors.length
+                    ? `PREVIOUS ATTEMPT FAILED — fix these issues:\n${lastErrors.map((e) => `• ${e}`).join('\n')}`
+                    : '',
+                `You must edit ONLY this file: ${rel}`,
+                'File content below — old_string must match EXACTLY:',
+                `===== FILE: ${rel} =====`,
+                snippet,
+                '',
+                'Return JSON with replacements for this file only (max 3).',
+            ]
+                .filter(Boolean)
+                .join('\n');
+
+            const { content: raw, model } = await this._callHealLlm(PER_FILE_HEAL_SYSTEM_PROMPT, userPrompt, {
+                maxTokens: 6000,
+                onProgress: progress,
+            });
+            usedModel = model;
+
+            const parsed = extractJsonObject(raw);
+            if (!parsed?.files?.length) {
+                lastErrors = ['Model returned no patches for this file'];
+                continue;
+            }
+
+            const applyBase = new Map([[rel, working]]);
+            const result = await this._applyParsedProposal(parsed, applyBase, new Set([rel]), progress);
+
+            if (!result.files.length) {
+                lastErrors =
+                    result.failedReplacements?.length
+                        ? result.failedReplacements.map(
+                              (f) => `old_string not found in ${f.path}: "${String(f.old_string).slice(0, 72)}…"`,
+                          )
+                        : ['No replacements could be applied — old_string did not match'];
+                continue;
+            }
+
+            working = result.files[0].content;
+            if (working === originalContent) {
+                lastErrors = ['Patches did not change the file'];
+                continue;
+            }
+
+            await progress(`🛡️ Validating \`${rel}\`…`);
+            const validation = await this._validatePatchedFiles(
+                new Map([[rel, originalContent]]),
+                [{ path: rel, content: working }],
+                progress,
+            );
+
+            if (!validation.ok) {
+                lastErrors = validation.errors;
+                working = originalContent;
+                continue;
+            }
+
+            await progress(`✅ \`${rel}\` — done`);
+            return {
+                path: rel,
+                content: working,
+                baseHash: this._hashContent(originalContent),
+                replacements: result.files[0].replacements || [],
+                model: usedModel,
+                changelog: result.changelog || [],
+            };
+        }
+
+        await progress(`❌ Gave up on \`${rel}\` after ${maxAttempts} attempts`);
+        return null;
+    }
+
+    /**
+     * Cursor-style agent: plan → per-file patch+validate+retry → merge.
+     */
+    async _generateAgentProposal({ allowedPaths, instruction, userPromptParts, onProgress }) {
+        const progress = typeof onProgress === 'function' ? onProgress : async () => {};
+        const pathList = allowedPaths.slice(0, 8);
+
+        await progress('📋 *Step 1/4* — Plan');
+        const plan = await this._createHealPlan(instruction, pathList, progress);
+
+        await progress(`📌 *${plan.summary}*`);
+        if (plan.steps?.length) {
+            for (const step of plan.steps) {
+                await progress(`  → ${step}`);
+            }
+        }
+
+        const filesToEdit = plan.files_to_edit?.length ? plan.files_to_edit : pathList.slice(0, 4);
+        await progress(`📁 Will edit ${filesToEdit.length} file(s)`);
+
+        await progress('🔧 *Step 2/4* — Per-file patches');
+        const originals = new Map();
+        /** @type {object[]} */
+        const patchedFiles = [];
+        const changelog = [...(plan.changelog || [])];
+        let usedModel = plan.usedModel || '';
+
+        for (const rel of filesToEdit) {
+            try {
+                originals.set(rel, await this._readLocalFile(rel));
+            } catch {
+                await progress(`⚠️ Skip unreadable \`${rel}\``);
+                continue;
+            }
+
+            const fileResult = await this._proposeSingleFileWithRetries(instruction, rel, plan, progress);
+            if (!fileResult) continue;
+
+            patchedFiles.push({
+                path: fileResult.path,
+                content: fileResult.content,
+                baseHash: fileResult.baseHash,
+                replacements: fileResult.replacements,
+            });
+            if (fileResult.model) usedModel = fileResult.model;
+            changelog.push(...(fileResult.changelog || []));
+        }
+
+        if (!patchedFiles.length) {
+            throw new Error('Agent could not apply patches to any file');
+        }
+
+        await progress('🛡️ *Step 3/4* — Final validation');
+        let validation = await this._validatePatchedFiles(originals, patchedFiles, progress);
+
+        if (!validation.ok) {
+            await progress('⚠️ Final check failed — repair pass…');
+            const repaired = await this._repairProposal(
+                instruction,
+                originals,
+                patchedFiles,
+                validation.errors,
+                progress,
+            );
+            if (!repaired?.files?.length) {
+                throw new Error(`Validation failed: ${validation.errors.join('; ')}`);
+            }
+            validation = await this._validatePatchedFiles(originals, repaired.files, progress);
+            if (!validation.ok) {
+                throw new Error(`Validation failed after repair: ${validation.errors.join('; ')}`);
+            }
+            return {
+                summary: plan.summary,
+                changelog: [...changelog, ...(repaired.changelog || []), 'auto-repaired after validation'].slice(
+                    0,
+                    10,
+                ),
+                files: repaired.files,
+                usedModel: repaired.usedModel || usedModel,
+                validationNotes: validation.notes,
+                changePreview: this._buildChangePreview(originals, repaired.files),
+                agentPlan: plan,
+            };
+        }
+
+        await progress('✅ *Step 4/4* — Proposal ready');
+        return {
+            summary: plan.summary,
+            changelog: [...new Set(changelog)].slice(0, 10),
+            files: patchedFiles,
+            usedModel,
+            validationNotes: validation.notes,
+            changePreview: this._buildChangePreview(originals, patchedFiles),
+            agentPlan: plan,
         };
     }
 
