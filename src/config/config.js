@@ -86,6 +86,13 @@ export const config = {
     /** Primary Gemini model for heal (comma-separated chain in GEMINI_HEAL_MODELS) */
     GEMINI_HEAL_MODEL: process.env.GEMINI_HEAL_MODEL?.trim() || 'gemini-2.5-flash',
     GEMINI_HEAL_MODELS: process.env.GEMINI_HEAL_MODELS?.trim() || 'gemini-2.5-flash,gemini-2.5-pro,gemini-2.0-flash',
+    /** Owner DM assistant — replies as ASSIST_OWNER_NAME in personal chats when /assist on */
+    ASSIST_OWNER_NAME: process.env.ASSIST_OWNER_NAME?.trim() || 'Jacky',
+    ASSIST_GEMINI_MODEL: process.env.ASSIST_GEMINI_MODEL?.trim() || 'gemini-2.5-flash',
+    ASSIST_GEMINI_MODELS: process.env.ASSIST_GEMINI_MODELS?.trim() || 'gemini-2.5-flash,gemini-2.0-flash,gemini-2.5-pro',
+    ASSIST_MAX_HISTORY: Math.max(4, parseInt(process.env.ASSIST_MAX_HISTORY, 10) || 12),
+    ASSIST_REPLY_COOLDOWN_MS: Math.max(1500, parseInt(process.env.ASSIST_REPLY_COOLDOWN_MS, 10) || 3500),
+    ASSIST_TIMEOUT_MS: Math.min(60_000, Math.max(15_000, parseInt(process.env.ASSIST_TIMEOUT_MS, 10) || 45_000)),
     /** Auto-propose summary code fixes (owner must approve push) */
     SUMMARY_SELF_HEAL_ENABLED: process.env.SUMMARY_SELF_HEAL_ENABLED !== 'false',
     /** Auto-propose /horo fixes when all horoscope APIs fail (owner must approve push) */

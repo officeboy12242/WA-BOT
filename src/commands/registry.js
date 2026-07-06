@@ -388,6 +388,14 @@ export const COMMAND_REGISTRY = [
         category: 'owner',
     },
     {
+        names: ['/assist'],
+        key: 'assist',
+        scope: 'any',
+        role: 'owner',
+        help: 'DM assistant — `/assist on` replies as Jacky in personal chats (Gemini)',
+        category: 'owner',
+    },
+    {
         names: ['/trending'],
         key: 'trending',
         scope: 'group_only',
