@@ -356,7 +356,10 @@ class CommandController {
                 if (!this.movieController) {
                     await safeSendMessage(sock, chatId, { text: '⚠️ Movie search is not available.' }, originalMsg);
                 } else {
-                    await this.movieController.handleMovieSearch(sock, chatId, senderJid, args, pushName, originalMsg);
+                    void this.movieController.handleMovieSearch(sock, chatId, senderJid, args, pushName, originalMsg)
+                        .catch((err) => {
+                            logger.error(`Movie search handler error: ${err?.message || err}`);
+                        });
                 }
                 break;
             case 'upcoming':

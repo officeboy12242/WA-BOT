@@ -9,7 +9,7 @@ import { audioFromFilename } from '../utils/movieMetadata.js';
 import { config } from '../config/config.js';
 
 const DEFAULT_API_URL = 'https://free-udemy-courses-bot.onrender.com/api/movies';
-const REQUEST_TIMEOUT_MS = 55_000;
+const SEARCH_CACHE_MAX = 80;
 
 function sourceLabel(raw) {
     const s = String(raw || 'hdhub4u').trim();
@@ -100,6 +100,16 @@ function pageUrlAsLink(pageUrl) {
 class HdHubMoviesService {
     constructor() {
         this.name = 'HDHub4u';
+        /** @type {Map<string, { results: object[], at: number }>} */
+        this._searchCache = new Map();
+    }
+
+    _requestTimeoutMs() {
+        return config.MOVIE_HD_TIMEOUT_MS || 28_000;
+    }
+
+    _cacheTtlMs() {
+        return config.MOVIE_SEARCH_CACHE_TTL_MS || 5 * 60_000;
     }
 
     _apiBase() {
@@ -109,7 +119,7 @@ class HdHubMoviesService {
 
     async _fetchJson(urlStr) {
         const { data } = await axios.get(urlStr, {
-            timeout: REQUEST_TIMEOUT_MS,
+            timeout: this._requestTimeoutMs(),
             headers: {
                 Accept: 'application/json',
                 'User-Agent': 'Mozilla/5.0 (compatible; SassyBot/1.0)',
@@ -167,6 +177,13 @@ class HdHubMoviesService {
         const q = String(query || '').trim();
         if (!q) return [];
 
+        const cacheKey = q.toLowerCase();
+        const cached = this._searchCache.get(cacheKey);
+        if (cached && Date.now() - cached.at < this._cacheTtlMs()) {
+            logger.info(`HDHub cache hit for "${q}" (${cached.results.length} results)`);
+            return cached.results.slice(0, maxResults);
+        }
+
         const apiUrl = `${this._apiBase()}?q=${encodeURIComponent(q)}`;
         let lastErr = null;
 
@@ -181,6 +198,12 @@ class HdHubMoviesService {
                         `${payload?.count ?? payload?.results?.length ?? 0} raw for "${q}" ` +
                         `in ${Date.now() - started}ms (attempt ${attempt})`,
                 );
+                if (normalized.length) {
+                    if (this._searchCache.size >= SEARCH_CACHE_MAX) {
+                        this._searchCache.delete(this._searchCache.keys().next().value);
+                    }
+                    this._searchCache.set(cacheKey, { results: normalized, at: Date.now() });
+                }
                 return results;
             } catch (err) {
                 lastErr = err;
