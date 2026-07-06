@@ -130,6 +130,13 @@ export const COMMAND_REGISTRY = [
         help: 'Daily horoscope — `/horo capricorn` or `/horo cap`',
     },
     {
+        names: ['/advice'],
+        key: 'advice',
+        scope: 'any',
+        role: 'anyone',
+        help: 'Random advice from AdviceSlip API',
+    },
+    {
         names: ['/posted'],
         key: 'posted',
         scope: 'any',

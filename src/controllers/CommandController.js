@@ -86,6 +86,7 @@ import {
 } from './handlers/memberScrapeHandlers.js';
 
 import { horoscopeService } from '../services/HoroscopeService.js';
+import { adviceService } from '../services/AdviceService.js';
 import { handleDriveUrl } from './handlers/driveHandlers.js';
 import { handleViewOnce } from './handlers/viewOnceHandler.js';
 import { handleDeploy } from './handlers/deployHandler.js';
@@ -338,11 +339,9 @@ class CommandController {
                 try {
                     const sign = args[0];
                     if (!sign) {
-                        // No sign provided, show list
                         const listMsg = horoscopeService.getSignsList();
                         await safeSendMessage(sock, chatId, { text: listMsg }, originalMsg);
             } else {
-                        // Fetch horoscope for the sign
                         const data = await horoscopeService.fetchHoroscope(sign);
                         const msg = horoscopeService.formatMessage(data);
                         await safeSendMessage(sock, chatId, { text: msg }, originalMsg);
@@ -350,6 +349,15 @@ class CommandController {
                 } catch (err) {
                     logger.error('Horoscope command error:', err);
                     await safeSendMessage(sock, chatId, { text: '⚠️ Failed to fetch horoscope. Please try again.' }, originalMsg);
+                }
+                break;
+            case 'advice':
+                try {
+                    const slip = await adviceService.fetchAdvice();
+                    await safeSendMessage(sock, chatId, { text: adviceService.formatMessage(slip) }, originalMsg);
+                } catch (err) {
+                    logger.error('Advice command error:', err);
+                    await safeSendMessage(sock, chatId, { text: adviceService.formatError() }, originalMsg);
                 }
                 break;
             case 'movie':
