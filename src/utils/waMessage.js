@@ -719,3 +719,23 @@ export async function plainSendMessage(sock, chatId, content, key = null) {
         return null;
     }
 }
+
+/**
+ * High-priority group reply — skips quotes, jumps ahead of normal queued sends.
+ * Use for time-sensitive acks (movie search, etc.) in busy large groups.
+ */
+export async function fastSendMessage(sock, chatId, content, key = null) {
+    if (!sock?.sendMessage || !chatId) return null;
+    const conversationJid = chatId || resolveConversationChatId(key);
+    const jid = resolveOutboundJid(key, conversationJid);
+    if (!jid) return null;
+
+    return messageQueue.enqueue(conversationJid || jid, async () => {
+        try {
+            return await sendWithTimeout(sock, jid, content, { linkPreview: false });
+        } catch (err) {
+            logger.warn(`fastSendMessage failed for ${jid}: ${err?.message || err}`);
+            return null;
+        }
+    }, 0);
+}

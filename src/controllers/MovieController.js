@@ -14,7 +14,7 @@ import { atozService } from '../services/AtoZService.js';
 import { hdHubMoviesService } from '../services/HdHubMoviesService.js';
 import { pronoobDriveService } from '../services/PronoobDriveService.js';
 import { urlShortener } from '../utils/urlShortener.js';
-import { safeSendMessage, safeDeleteMessage, plainSendMessage } from '../utils/waMessage.js';
+import { safeSendMessage, safeDeleteMessage, plainSendMessage, fastSendMessage } from '../utils/waMessage.js';
 import { audioFromFilename, qualityFromFilename } from '../utils/movieMetadata.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -342,19 +342,11 @@ function rankMovieResults(results, query) {
     return [...results].sort((a, b) => score(b.title) - score(a.title));
 }
 
-/** Quoting @lid senders in groups can hang Baileys — skip quote in that case. */
-function shouldQuoteMessage(originalMsg) {
-    if (!originalMsg?.key) return false;
-    const participant = originalMsg.key.participant || originalMsg.key.remoteJid || '';
-    return !participant.includes('@lid');
-}
-
-function movieReplyOptions(originalMsg) {
-    const opts = { linkPreview: false };
-    if (shouldQuoteMessage(originalMsg)) {
-        opts.quoted = originalMsg;
+function movieQuickSend(sock, chatId, content, originalMsg = null) {
+    if (isGroupMessage(chatId)) {
+        return fastSendMessage(sock, chatId, content, originalMsg?.key);
     }
-    return opts;
+    return safeSendMessage(sock, chatId, content, originalMsg);
 }
 
 const WHATSAPP_MAX_LENGTH = 4096;
@@ -523,6 +515,8 @@ class MovieController {
         this._activeDeleteTimers = 0;
         this._sock = null;
         this._getSock = null;
+        /** @type {Map<string, { unlimited: boolean, at: number }>} */
+        this._unlimitedCache = new Map();
     }
 
     async init() {
@@ -937,54 +931,55 @@ class MovieController {
 
     async isUnlimitedUser(phoneNumber) {
         if (!this.groupManager) {
-            logger.warn(`⚠️ No groupManager available for unlimited check: ${phoneNumber}`);
             return false;
         }
-        
-        // Normalize phone number for consistent checking
+
         const normalizedPhone = normalizePhoneNumber(phoneNumber);
         if (!normalizedPhone) {
-            logger.warn(`⚠️ Invalid phone number for unlimited check: ${phoneNumber}`);
             return false;
         }
-        
-        if (this.groupManager.isOwner(normalizedPhone)) {
-            logger.info(`✓ ${normalizedPhone} is owner (unlimited)`);
-            return true;
+
+        const cached = this._unlimitedCache.get(normalizedPhone);
+        if (cached && Date.now() - cached.at < 60_000) {
+            return cached.unlimited;
         }
-        if (this.groupManager.isModerator(normalizedPhone)) {
-            logger.info(`✓ ${normalizedPhone} is moderator (unlimited)`);
-            return true;
+
+        const gm = this.groupManager;
+        const [
+            owner,
+            moderator,
+            dynamicMod,
+            botAdmin,
+            premium,
+        ] = await Promise.all([
+            Promise.resolve(gm.isOwner(normalizedPhone)),
+            Promise.resolve(gm.isModerator(normalizedPhone)),
+            gm.isDynamicModerator(normalizedPhone),
+            gm.isBotAdmin(normalizedPhone),
+            gm.isPremiumUser(normalizedPhone),
+        ]);
+
+        const unlimited = owner || moderator || dynamicMod || botAdmin || premium;
+        if (this._unlimitedCache.size > 500) {
+            this._unlimitedCache.delete(this._unlimitedCache.keys().next().value);
         }
-        if (await this.groupManager.isDynamicModerator(normalizedPhone)) {
-            logger.info(`✓ ${normalizedPhone} is dynamic moderator (unlimited)`);
-            return true;
+        this._unlimitedCache.set(normalizedPhone, { unlimited, at: Date.now() });
+
+        if (unlimited) {
+            logger.debug(`✓ ${normalizedPhone} has unlimited movie searches`);
         }
-        if (await this.groupManager.isBotAdmin(normalizedPhone)) {
-            logger.info(`✓ ${normalizedPhone} is bot admin (unlimited)`);
-            return true;
-        }
-        if (await this.groupManager.isPremiumUser(normalizedPhone)) {
-            logger.info(`✓ ${normalizedPhone} is premium user (unlimited)`);
-            return true;
-        }
-        
-        logger.debug(`✗ ${normalizedPhone} is regular user (limited)`);
-        return false;
+        return unlimited;
     }
 
     async _notifySearchLog(sock, userId, query, resultCount, chatId, pushName) {
         try {
             const isGroup = chatId.endsWith('@g.us');
             let source = 'DM';
-            
-            if (isGroup) {
-                try {
-                    const groupMeta = await sock.groupMetadata(chatId);
-                    source = `📍 ${groupMeta.subject || 'Unknown Group'}`;
-                } catch {
-                    source = `📍 Group (${chatId.split('@')[0]})`;
-                }
+
+            if (isGroup && this.groupManager) {
+                source = `📍 ${await this.groupManager.getGroupSubject(sock, chatId)}`;
+            } else if (isGroup) {
+                source = `📍 Group (${chatId.split('@')[0]})`;
             }
             
             const time = new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' });
@@ -1030,18 +1025,71 @@ class MovieController {
         const direct = extractPhoneNumber(senderJid);
         if (direct && !senderJid?.includes('@lid')) return direct;
 
-        if (senderJid?.includes('@lid') && chatId?.endsWith('@g.us')) {
+        if (senderJid?.includes('@lid') && chatId?.endsWith('@g.us') && this.groupManager) {
             try {
-                const meta = await sock.groupMetadata(chatId);
+                const meta = await this.groupManager.getGroupMetadataCached(sock, chatId);
                 for (const p of meta.participants || []) {
                     if (p.lid === senderJid || p.id === senderJid) {
-                        const real = extractPhoneNumber(p.id);
+                        const real = extractPhoneNumber(p.id || p.phoneNumber || p.pn || '');
                         if (real) return real;
                     }
                 }
             } catch {}
         }
         return direct || senderJid;
+    }
+
+    _withTimeout(promise, ms, label = 'timeout') {
+        return Promise.race([
+            promise,
+            new Promise((_, rej) => setTimeout(() => rej(new Error(label)), ms)),
+        ]);
+    }
+
+    /**
+     * HDHub first; secondary sources only when needed or within a short grace window.
+     */
+    async _searchMovieSources(query) {
+        const hdTimeout = config.MOVIE_HD_TIMEOUT_MS || 28_000;
+        const secTimeout = config.MOVIE_SECONDARY_TIMEOUT_MS || 8_000;
+        const enrichGraceMs = 2_000;
+
+        const hdPromise = this._withTimeout(
+            hdHubMoviesService.searchMovies(query, 8),
+            hdTimeout,
+            'hdhub timeout',
+        ).catch((err) => {
+            logger.warn(`HDHub search failed for "${query}": ${err?.message || err}`);
+            return [];
+        });
+
+        const drivePromise = this._withTimeout(
+            pronoobDriveService.searchMovies(query, 5),
+            secTimeout,
+            'drive timeout',
+        ).catch(() => []);
+
+        const atozPromise = this._withTimeout(
+            atozService.searchMovies(query, 3),
+            secTimeout,
+            'atoz timeout',
+        ).catch(() => []);
+
+        const hdResults = await hdPromise;
+
+        let driveResults = [];
+        let atozResults = [];
+
+        if (hdResults.length >= 3) {
+            [driveResults, atozResults] = await Promise.all([
+                this._withTimeout(drivePromise, enrichGraceMs, 'drive grace').catch(() => []),
+                this._withTimeout(atozPromise, enrichGraceMs, 'atoz grace').catch(() => []),
+            ]);
+        } else {
+            [driveResults, atozResults] = await Promise.all([drivePromise, atozPromise]);
+        }
+
+        return { hdResults, driveResults, atozResults };
     }
 
     async handleMovieSearch(sock, chatId, senderJid, args, pushName = '', originalMsg = null) {
@@ -1063,25 +1111,32 @@ class MovieController {
             return;
         }
 
+        const dialogue = getRandomDialogue(SEARCH_DIALOGUES);
+        const searchingMsgPromise = movieQuickSend(sock, chatId, { text: dialogue }, originalMsg);
+
         const userId = await this._resolvePhoneNumber(sock, chatId, senderJid);
         const normalizedUserId = normalizePhoneNumber(userId);
+
         const unlimited = await this.isUnlimitedUser(userId);
         const currentCount = unlimited ? 0 : await this.getUserSearchCount(normalizedUserId);
 
         logger.info(`🎬 Movie search by ${userId} (normalized: ${normalizedUserId}): unlimited=${unlimited}, count=${currentCount}`);
 
         if (!unlimited && currentCount >= DAILY_LIMIT) {
+            const searchingMsg = await searchingMsgPromise;
+            void safeDeleteMessage(sock, chatId, searchingMsg?.key);
+
             const limitMsg = formatLimitReached();
-            const sent = await safeSendMessage(sock, chatId, { text: limitMsg }, originalMsg);
-            this.scheduleDelete(sock, chatId, sent.key);
+            const sent = await movieQuickSend(sock, chatId, { text: limitMsg }, originalMsg);
+            this.scheduleDelete(sock, chatId, sent?.key);
 
             if (existsSync(QR_IMAGE_PATH)) {
                 try {
-                    const qrSent = await safeSendMessage(sock, chatId, {
+                    const qrSent = await movieQuickSend(sock, chatId, {
                         image: readFileSync(QR_IMAGE_PATH),
                         caption: `💳 *Scan to pay for unlimited movie searches!*\n\nAfter payment, send screenshot to:\n📱 wa.me/${PAYMENT_CONTACT}`,
                     }, originalMsg);
-                    this.scheduleDelete(sock, chatId, qrSent.key);
+                    this.scheduleDelete(sock, chatId, qrSent?.key);
                 } catch (err) {
                     logger.error(`Failed to send QR image: ${err.message}`);
                 }
@@ -1089,49 +1144,30 @@ class MovieController {
             return;
         }
 
-        const dialogue = getRandomDialogue(SEARCH_DIALOGUES);
         const remaining = unlimited ? '∞' : (DAILY_LIMIT - currentCount - 1);
-        const searchingMsg = await safeSendMessage(sock, chatId, { text: dialogue }, originalMsg);
+        const searchingMsg = await searchingMsgPromise;
 
         try {
-            const withTimeout = (promise, ms) =>
-                Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
-
-            const OTHER_TIMEOUT_MS = 15000;
-            const SHORTEN_BUDGET_MS = 45000;
+            const SHORTEN_BUDGET_MS = config.MOVIE_SHORTEN_BUDGET_MS || 15_000;
             let results = [];
 
-            const [hdHubResults, driveResults, atozResults] = await Promise.allSettled([
-                hdHubMoviesService.searchMovies(query, 8),
-                withTimeout(pronoobDriveService.searchMovies(query, 5), OTHER_TIMEOUT_MS),
-                withTimeout(atozService.searchMovies(query, 3), OTHER_TIMEOUT_MS),
-            ]);
+            const { hdResults, driveResults, atozResults } = await this._searchMovieSources(query);
 
-            if (hdHubResults.status === 'fulfilled' && hdHubResults.value?.length > 0) {
-                results.push(...hdHubResults.value);
-                logger.info(`HDHub: ${hdHubResults.value.length} results for "${query}"`);
+            if (hdResults.length > 0) {
+                results.push(...hdResults);
+                logger.info(`HDHub: ${hdResults.length} results for "${query}"`);
             } else {
-                logger.warn(
-                    `HDHub: ${hdHubResults.status === 'rejected' ? hdHubResults.reason?.message : 'no results'} for "${query}"`,
-                );
+                logger.warn(`HDHub: no results for "${query}"`);
             }
 
-            if (driveResults.status === 'fulfilled' && driveResults.value?.length > 0) {
-                results.push(...driveResults.value);
-                logger.info(`Drive: ${driveResults.value.length} results for "${query}"`);
-            } else {
-                logger.warn(
-                    `Drive: ${driveResults.status === 'rejected' ? driveResults.reason?.message : 'no results'} for "${query}"`,
-                );
+            if (driveResults.length > 0) {
+                results.push(...driveResults);
+                logger.info(`Drive: ${driveResults.length} results for "${query}"`);
             }
 
-            if (atozResults.status === 'fulfilled' && atozResults.value?.length > 0) {
-                results.push(...atozResults.value);
-                logger.info(`AtoZ: ${atozResults.value.length} results for "${query}"`);
-            } else {
-                logger.warn(
-                    `AtoZ: ${atozResults.status === 'rejected' ? atozResults.reason?.message : 'no results'} for "${query}"`,
-                );
+            if (atozResults.length > 0) {
+                results.push(...atozResults);
+                logger.info(`AtoZ: ${atozResults.length} results for "${query}"`);
             }
 
             results = rankMovieResults(results, query);
@@ -1142,7 +1178,7 @@ class MovieController {
                 void safeDeleteMessage(sock, chatId, searchingMsg.key);
 
                 const noResult = getRandomDialogue(NO_RESULTS_DIALOGUES);
-                const noSent = await safeSendMessage(sock, chatId, { text: noResult, linkPreview: false }, originalMsg);
+                const noSent = await movieQuickSend(sock, chatId, { text: noResult, linkPreview: false }, originalMsg);
                 this.scheduleDelete(sock, chatId, noSent.key);
                 if (!unlimited) await this.incrementSearchCount(normalizedUserId);
                 void this.logSearch(normalizedUserId, query, 0, chatId);
@@ -1172,7 +1208,7 @@ class MovieController {
 
             if (!resultMessages.length) {
                 void safeDeleteMessage(sock, chatId, searchingMsg.key);
-                const errSent = await safeSendMessage(sock, chatId, {
+                const errSent = await movieQuickSend(sock, chatId, {
                     text: '⚠️ Found movies but could not format results. Try again.',
                 }, originalMsg);
                 this.scheduleDelete(sock, chatId, errSent.key);
@@ -1194,6 +1230,9 @@ class MovieController {
                     logger.info(`Sending movie result part ${i + 1}/${resultMessages.length} (${text.length} chars) to ${chatId}...`);
                     let sent = await plainSendMessage(sock, chatId, { text, linkPreview: false });
                     if (!sent?.key) {
+                        sent = await fastSendMessage(sock, chatId, { text, linkPreview: false }, originalMsg?.key);
+                    }
+                    if (!sent?.key && originalMsg) {
                         sent = await safeSendMessage(
                             sock,
                             chatId,
@@ -1209,7 +1248,7 @@ class MovieController {
                     }
 
                     if (i < resultMessages.length - 1) {
-                        await new Promise(r => setTimeout(r, 500));
+                        await new Promise((r) => setTimeout(r, 200));
                     }
                 } catch (sendErr) {
                     logger.error(`Movie result send failed (part ${i + 1}/${resultMessages.length}): ${sendErr.stack || sendErr.message}`);
@@ -1231,7 +1270,7 @@ class MovieController {
                 "🎭 _\"Server ne haath khade kar diye!\"_\n\n⚠️ Couldn't reach the movie database. Try again!",
                 "🎭 _\"Not even Doctor Strange saw this error coming...\"_\n\n⚠️ Something went wrong. Try later!",
             ];
-            const errSent = await safeSendMessage(sock, chatId, {
+            const errSent = await movieQuickSend(sock, chatId, {
                 text: getRandomDialogue(errorDialogues),
             }, originalMsg);
             this.scheduleDelete(sock, chatId, errSent.key);

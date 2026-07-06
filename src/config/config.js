@@ -54,6 +54,14 @@ export const config = {
     TMDB_API_KEY: process.env.TMDB_API_KEY?.trim() || '',
     /** HDHub4u movie search API (free-udemy-courses-bot). */
     MOVIES_API_URL: process.env.MOVIES_API_URL?.trim() || 'https://free-udemy-courses-bot.onrender.com/api/movies',
+    /** Movie search — HDHub API timeout (ms). */
+    MOVIE_HD_TIMEOUT_MS: Math.max(12_000, parseInt(process.env.MOVIE_HD_TIMEOUT_MS, 10) || 28_000),
+    /** Movie search — Drive/AtoZ timeout (ms). */
+    MOVIE_SECONDARY_TIMEOUT_MS: Math.max(4_000, parseInt(process.env.MOVIE_SECONDARY_TIMEOUT_MS, 10) || 8_000),
+    /** Movie search — max ms to shorten links before sending results. */
+    MOVIE_SHORTEN_BUDGET_MS: Math.max(5_000, parseInt(process.env.MOVIE_SHORTEN_BUDGET_MS, 10) || 15_000),
+    /** Movie search — cache identical queries (ms). */
+    MOVIE_SEARCH_CACHE_TTL_MS: Math.max(60_000, parseInt(process.env.MOVIE_SEARCH_CACHE_TTL_MS, 10) || 5 * 60_000),
     /** Daily group chat recap (/summaryon groups). */
     GROUP_SUMMARY_ENABLED: process.env.GROUP_SUMMARY_ENABLED !== 'false',
     /** When recap is sent — default 00:00 = midnight IST (end of calendar day). */

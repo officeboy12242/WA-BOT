@@ -6,11 +6,11 @@ import https from 'https';
 import { logger } from './logger.js';
 
 const TINYURL_API = 'https://tinyurl.com/api-create.php?url=';
-const TINYURL_TIMEOUT_MS = 5000;
-const PER_LINK_SHORTEN_MS = 8000;
+const TINYURL_TIMEOUT_MS = 3500;
+const PER_LINK_SHORTEN_MS = 5000;
 const MAX_CACHE_SIZE = 500;
-const SHORTEN_CONCURRENCY = 4;
-const BATCH_PAUSE_MS = 250;
+const SHORTEN_CONCURRENCY = 6;
+const BATCH_PAUSE_MS = 100;
 
 function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
