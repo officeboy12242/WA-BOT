@@ -970,8 +970,9 @@ class GroupManager {
     }
 
     async isSummaryEnabled(groupId) {
+        const normalizedId = jidNormalizedUser(String(groupId).replace(/:\d+(?=@)/, '')) || groupId;
         const row = await this.groups.findOne(
-            { group_id: groupId },
+            { group_id: normalizedId },
             { projection: { summary_enabled: 1 } }
         );
         return row?.summary_enabled === true;

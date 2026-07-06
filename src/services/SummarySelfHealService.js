@@ -14,6 +14,7 @@ import { logger } from '../utils/logger.js';
 import { config } from '../config/config.js';
 import NvidiaDeepSeekService from './NvidiaDeepSeekService.js';
 import GeminiHealService from './GeminiHealService.js';
+import { horoscopeService } from './HoroscopeService.js';
 import { resolveNotificationJid, normalizePhoneNumber } from '../utils/permissions.js';
 
 const execFileAsync = promisify(execFile);
@@ -23,6 +24,7 @@ const SUMMARY_ALLOWED_FILES = [
     'src/controllers/GroupSummaryController.js',
     'src/services/GroupChatLogService.js',
     'src/services/NvidiaDeepSeekService.js',
+    'src/config/config.js',
 ];
 
 const HOROSCOPE_ALLOWED_FILES = [
@@ -33,6 +35,8 @@ const HOROSCOPE_ALLOWED_FILES = [
 
 /** Min gap between auto horoscope heal proposals (avoid spam on every /horo) */
 const HOROSCOPE_HEAL_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+/** Min gap between auto summary heal proposals */
+const SUMMARY_HEAL_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 
 const BLOCKED_PATH_PARTS = ['.env', 'node_modules', 'auth_info', 'credentials', '.git'];
 
@@ -321,6 +325,111 @@ function commandKeyFromName(cmdName) {
     return String(cmdName || '').replace(/^\//, '').toLowerCase();
 }
 
+/**
+ * Rule-based root cause for horoscope failures (shown in auto-heal WhatsApp messages).
+ * @param {{ source: string, ok: boolean, reason?: string }[]} diagnostics
+ */
+function analyzeHoroscopeFailure(diagnostics = []) {
+    const ohmanda = diagnostics.find((d) => /ohmanda/i.test(d.source));
+    const vedika = diagnostics.find((d) => /vedika/i.test(d.source));
+    const app = diagnostics.find((d) => /horoscope-app|vercel/i.test(d.source));
+
+    if (ohmanda && !ohmanda.ok && /empty|whitespace/i.test(String(ohmanda.reason || ''))) {
+        const fallbackOk = Boolean(vedika?.ok || app?.ok);
+        return {
+            rootCause:
+                'Primary API (ohmanda.com) returned HTTP 200 but the horoscope field was empty/whitespace only.',
+            impact:
+                '/horo showed "temporarily unavailable" when the code treated blank Ohmanda text as success and skipped fallbacks.',
+            fixPlan: fallbackOk
+                ? 'Pick the first non-empty result: Vedika or horoscope-app-api when Ohmanda text is blank after trim.'
+                : 'Add multi-API fallback (Ohmanda → Vedika → horoscope-app-api) and reject empty/whitespace responses.',
+            alreadyFixedHint:
+                'HoroscopeService.js should throw on empty Ohmanda and chain fallbacks — if that code is already on main, redeploy Render.',
+        };
+    }
+
+    const failed = diagnostics.filter((d) => !d.ok);
+    if (failed.length === diagnostics.length && diagnostics.length > 0) {
+        const detail = failed.map((d) => `• ${d.source}: ${d.reason || 'failed'}`).join('\n');
+        return {
+            rootCause: 'All horoscope API sources failed.',
+            impact: '/horo cannot return any sign until at least one upstream API responds.',
+            fixPlan: 'Verify network from Render, increase axios timeouts, and keep multiple fallback APIs.',
+            apiDetails: detail,
+        };
+    }
+
+    if (failed.length) {
+        return {
+            rootCause: failed.map((d) => `${d.source}: ${d.reason || 'failed'}`).join('; '),
+            impact: '/horo failed for the requested sign.',
+            fixPlan: 'Ensure HoroscopeService uses the first working non-empty API response.',
+            apiDetails: diagnostics
+                .map((d) => `• ${d.source}: ${d.ok ? 'ok' : d.reason || 'failed'}`)
+                .join('\n'),
+        };
+    }
+
+    return {
+        rootCause: 'Horoscope fetch failed for an unknown reason.',
+        impact: '/horo returned an error to the user.',
+        fixPlan: 'Review HoroscopeService fetch and fallback logic.',
+    };
+}
+
+/**
+ * Rule-based root cause for group summary (/summaryon) failures.
+ */
+function analyzeSummaryFailure(ctx = {}) {
+    const err = String(ctx.errorMessage || '');
+    const count = ctx.messageCount ?? '?';
+    const chunked = ctx.useChunks ? ' (chunked map-reduce)' : '';
+
+    if (/timeout/i.test(err)) {
+        return {
+            rootCause: `NVIDIA recap LLM timed out with ${count} messages${chunked}.`,
+            impact: 'Group got generic heuristic topics instead of a real chat-based recap.',
+            fixPlan:
+                'Shrink prompts in GroupChatLogService, raise GROUP_SUMMARY_LLM_TIMEOUT_MS, or reduce chunk count / sample size.',
+        };
+    }
+    if (/503|502|429|rate/i.test(err)) {
+        return {
+            rootCause: `NVIDIA API unavailable or rate-limited during recap (${count} msgs${chunked}).`,
+            impact: 'Daily recap fell back to heuristic summary or failed silently.',
+            fixPlan: 'Add retry/backoff in NvidiaDeepSeekService.summarizeGroupChat and reduce prompt size.',
+        };
+    }
+    if (/json|parse|invalid/i.test(err)) {
+        return {
+            rootCause: 'Recap LLM returned invalid JSON — parser could not build topics/notable/wrap_up.',
+            impact: 'Group recap used fallback heuristics instead of conversation summary.',
+            fixPlan: 'Harden parseSummaryJson and tighten SUMMARY_SYSTEM_PROMPT output shape.',
+        };
+    }
+    if (/All recap chunks failed/i.test(err)) {
+        return {
+            rootCause: `Every map-reduce chunk failed for a busy day (${count} messages).`,
+            impact: 'Large groups get no LLM recap — only offline heuristic topics.',
+            fixPlan: 'Use fewer/smaller chunks, lower GROUP_SUMMARY_CHUNK_THRESHOLD, or single-sample fallback.',
+        };
+    }
+    if (/NVIDIA_API_KEY|not configured/i.test(err)) {
+        return {
+            rootCause: 'NVIDIA_API_KEY missing or invalid on the server.',
+            impact: '/summaryon groups never get LLM recaps — scheduler skips entirely.',
+            fixPlan: 'Set NVIDIA_API_KEY on Render and restart the bot.',
+        };
+    }
+
+    return {
+        rootCause: err || 'Group recap LLM failed',
+        impact: '/summaryon groups may receive generic fallback recap instead of chat-based summary.',
+        fixPlan: 'Review GroupChatLogService.buildPrompt narrative instructions and NvidiaDeepSeekService summarize retry.',
+    };
+}
+
 function extractJsonObject(raw) {
     let text = String(raw || '')
         .replace(/<think>[\s\S]*?<\/think>/gi, '')
@@ -382,6 +491,7 @@ class SummarySelfHealService {
         this._sock = null;
         this._inflight = false;
         this._horoscopeHealLastAt = 0;
+        this._summaryHealLastAt = 0;
         this.rootDir = process.cwd();
 
         if (mongoDb) {
@@ -437,9 +547,22 @@ class SummarySelfHealService {
     }
 
     isReady() {
+        return this._isHealInfrastructureReady();
+    }
+
+    /** Summary auto-heal feature flag + infrastructure */
+    isSummaryHealReady() {
+        return this.enabled && this._isHealInfrastructureReady();
+    }
+
+    /** Horoscope auto-heal feature flag + infrastructure */
+    isHoroscopeHealReady() {
+        return this.config.HOROSCOPE_SELF_HEAL_ENABLED !== false && this._isHealInfrastructureReady();
+    }
+
+    _isHealInfrastructureReady() {
         const hasLlm = this.gemini.isConfigured() || this.nvidia.isConfigured();
         return (
-            this.enabled &&
             hasLlm &&
             Boolean(this.getGithubToken()) &&
             Boolean(this._collection)
@@ -530,44 +653,50 @@ class SummarySelfHealService {
         return fs.readFile(full, 'utf8');
     }
 
-    async _hasPendingOrRecent() {
+    async _hasPendingOrRecent(source = null) {
         if (!this._collection) return true;
-        const pending = await this._collection.findOne({ status: 'pending' });
+        const pendingQuery = { status: 'pending' };
+        if (source) pendingQuery.source = source;
+        const pending = await this._collection.findOne(pendingQuery);
         if (pending) return true;
 
         const since = new Date(Date.now() - 12 * 60 * 60 * 1000);
-        const recent = await this._collection.findOne({
+        const recentQuery = {
             created_at: { $gte: since },
             status: { $in: ['pending', 'pushed', 'failed'] },
-        });
+        };
+        if (source) recentQuery.source = source;
+        const recent = await this._collection.findOne(recentQuery);
         return Boolean(recent);
     }
 
     /**
      * Called when group summary LLM fails. Non-blocking.
      */
-    triggerFromSummaryFailure({ groupName, dateStr, errorMessage, messageCount }) {
-        if (!this.isReady()) {
-            logger.info('Summary self-heal skipped (disabled or missing GITHUB_TOKEN / Mongo)');
+    triggerFromSummaryFailure(ctx) {
+        if (!this.isSummaryHealReady()) {
+            logger.info('Summary self-heal skipped (disabled or missing GITHUB_TOKEN / Mongo / LLM)');
             return;
         }
         if (this._inflight) {
             logger.info('Summary self-heal already running — skip');
             return;
         }
+        const now = Date.now();
+        if (now - this._summaryHealLastAt < SUMMARY_HEAL_COOLDOWN_MS) {
+            logger.info('Summary self-heal cooldown — skip');
+            return;
+        }
 
-        void this._runHealCycle({ groupName, dateStr, errorMessage, messageCount });
+        void this._runHealCycle(ctx);
     }
 
     /**
      * Called when /horo fails (all APIs down or unexpected error). Non-blocking.
      */
-    triggerFromHoroscopeFailure({ sign, errorMessage, chatId }) {
-        if (this.config.HOROSCOPE_SELF_HEAL_ENABLED === false) {
-            return;
-        }
-        if (!this.isReady()) {
-            logger.info('Horoscope self-heal skipped (disabled or missing GITHUB_TOKEN / Mongo)');
+    triggerFromHoroscopeFailure({ sign, errorMessage, chatId, diagnostics }) {
+        if (!this.isHoroscopeHealReady()) {
+            logger.info('Horoscope self-heal skipped (disabled or missing GITHUB_TOKEN / Mongo / LLM)');
             return;
         }
         if (this._inflight) {
@@ -580,33 +709,134 @@ class SummarySelfHealService {
             return;
         }
 
-        void this._runHoroscopeHealCycle({ sign, errorMessage, chatId });
+        void this._runHoroscopeHealCycle({ sign, errorMessage, chatId, diagnostics });
+    }
+
+    async _isHoroscopeFixAlreadyInCode() {
+        try {
+            const content = await this._readLocalFile('src/services/HoroscopeService.js');
+            return (
+                content.includes('_fetchHoroscopeApp') &&
+                content.includes('_probeSources') &&
+                content.includes('empty horoscope') &&
+                content.includes('vedikaResult.value.horoscope')
+            );
+        } catch {
+            return false;
+        }
+    }
+
+    _formatDiagnosticsBlock(diagnostics = []) {
+        if (!diagnostics.length) return '';
+        return diagnostics
+            .map((d) => `  • ${d.source}: ${d.ok ? '✅ ok' : `❌ ${d.reason || 'failed'}`}`)
+            .join('\n');
+    }
+
+    _formatHoroscopeAnalysisMessage({ sign, analysis, diagnostics, healId, proposal, alreadyFixed }) {
+        const apiBlock = diagnostics?.length
+            ? `\n📡 *API probe:*\n${this._formatDiagnosticsBlock(diagnostics)}\n`
+            : '';
+
+        const proposalBlock = proposal?.files?.length
+            ? `\n📁 *Patch files:*\n${proposal.files.map((f) => `• \`${f.path}\``).join('\n')}\n` +
+              (proposal.changelog?.length
+                  ? `\n📋 *What the patch does:*\n${proposal.changelog.slice(0, 6).map((c) => `• ${c}`).join('\n')}\n`
+                  : '')
+            : '';
+
+        const actionBlock = healId
+            ? `\n🆔 Heal ID: *${healId}*\n` +
+              `✅ \`/heal approve ${healId}\` — push to GitHub\n` +
+              `❌ \`/heal reject ${healId}\` — discard\n`
+            : '';
+
+        const redeployBlock = alreadyFixed
+            ? diagnostics.length > 0 && diagnostics.every((d) => !d.ok)
+                ? `\n⚡ *Action:* Fallback code is already in the repo, but all APIs are down right now. Wait for upstream recovery — no deploy will fix this immediately.\n`
+                : `\n⚡ *Action:* Fix is already in the codebase — *redeploy Render* if production still runs an older build.\n`
+            : '';
+
+        return (
+            `┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n` +
+            `┃  🔮 *HOROSCOPE AUTO-HEAL* 🔮  ┃\n` +
+            `┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n` +
+            `♑ *Sign:* ${sign || 'unknown'}\n\n` +
+            `🔍 *Root cause:*\n${analysis.rootCause}\n\n` +
+            `💥 *Impact:*\n${analysis.impact}\n\n` +
+            `🛠️ *Fix:*\n${analysis.fixPlan}\n` +
+            (analysis.alreadyFixedHint && alreadyFixed ? `\n_${analysis.alreadyFixedHint}_\n` : '') +
+            apiBlock +
+            redeployBlock +
+            proposalBlock +
+            actionBlock +
+            `_Nothing is pushed until you confirm._`
+        );
     }
 
     async _runHoroscopeHealCycle(ctx) {
         this._inflight = true;
+        const status = this._makeStatusTracker('HOROSCOPE AUTO-HEAL');
         try {
-            if (await this._hasPendingOrRecent()) {
-                logger.info('Horoscope self-heal: pending/recent proposal exists — skip');
+            if (await this._hasPendingOrRecent('auto_horoscope')) {
+                logger.info('Horoscope self-heal: pending/recent horoscope heal exists — skip');
+                const analysis = analyzeHoroscopeFailure(ctx.diagnostics || []);
                 await this._notify(
-                    `🔧 *Horoscope self-heal*\nSkipped (pending or recent heal exists).\n` +
-                        `Sign: ${ctx.sign || 'n/a'}\nError: ${String(ctx.errorMessage || '').slice(0, 200)}`
+                    `🔧 *Horoscope self-heal skipped*\n` +
+                        `(Another horoscope heal is pending or ran in the last 12h.)\n\n` +
+                        `🔍 *Root cause:* ${analysis.rootCause}\n` +
+                        `🛠️ *Fix:* ${analysis.fixPlan}`
                 );
+                return;
+            }
+
+            const diagnostics = ctx.diagnostics?.length
+                ? ctx.diagnostics
+                : (await horoscopeService.diagnoseSources(ctx.sign).catch(() => ({ diagnostics: [] })))
+                      .diagnostics || [];
+
+            const analysis = analyzeHoroscopeFailure(diagnostics);
+            const alreadyFixed = await this._isHoroscopeFixAlreadyInCode();
+
+            await status.step(`🔍 *Root cause:* ${analysis.rootCause.slice(0, 120)}…`);
+            await status.step(`🛠️ *Fix plan:* ${analysis.fixPlan.slice(0, 120)}…`);
+            if (diagnostics.length) {
+                await status.step('📡 *API probe:*');
+                for (const d of diagnostics) {
+                    await status.note(`  • ${d.source}: ${d.ok ? 'ok' : d.reason || 'failed'}`);
+                }
+            }
+
+            await this._notify(
+                this._formatHoroscopeAnalysisMessage({
+                    sign: ctx.sign,
+                    analysis,
+                    diagnostics,
+                    alreadyFixed,
+                })
+            );
+
+            if (alreadyFixed) {
+                const allApisDown = diagnostics.length > 0 && diagnostics.every((d) => !d.ok);
+                if (allApisDown) {
+                    await status.step('⚠️ Fallback code exists but all APIs are down — upstream outage, not a code bug');
+                } else {
+                    await status.step('✅ Code fix already in repo — redeploy Render if production still runs old build');
+                }
+                await status.flush();
+                logger.info('Horoscope auto-heal: fix already in code — analysis sent, skipping LLM patch');
+                this._horoscopeHealLastAt = Date.now();
                 return;
             }
 
             const instruction =
                 `Auto-fix /horo horoscope failure: ${ctx.errorMessage}. ` +
                 `Sign: ${ctx.sign || 'unknown'}. ` +
-                'HoroscopeService must try multiple free APIs in parallel and use the first non-empty horoscope text. ' +
-                'If ohmanda returns whitespace-only text, treat it as failure and fall back to vedika or horoscope-app-api.';
+                `Root cause: ${analysis.rootCause} ` +
+                `Fix: ${analysis.fixPlan} ` +
+                'HoroscopeService must try multiple free APIs in parallel and use the first non-empty horoscope text.';
 
-            await this._notify(
-                `🔮 *Horoscope issue detected*\n` +
-                    `Sign: *${ctx.sign || 'unknown'}*\n` +
-                    `Error: ${String(ctx.errorMessage || '').slice(0, 300)}\n\n` +
-                    `_Asking heal agent for a /horo fix…_`
-            );
+            await status.step('🤖 Generating code patch…');
 
             const picked = await this._pickCandidateFiles(instruction);
             const candidates = [...new Set([...HOROSCOPE_ALLOWED_FILES, ...picked])].slice(0, 8);
@@ -618,15 +848,28 @@ class SummarySelfHealService {
                     'Horoscope (/horo) failure report:',
                     `Sign requested: ${ctx.sign || 'unknown'}`,
                     `Error: ${ctx.errorMessage}`,
+                    `Root cause: ${analysis.rootCause}`,
+                    `Recommended fix: ${analysis.fixPlan}`,
+                    `API probe:\n${this._formatDiagnosticsBlock(diagnostics)}`,
                     `Chat: ${ctx.chatId || 'n/a'}`,
                 ],
+                onProgress: (line) => status.step(line),
             });
 
-            proposal = await this._ensureCompleteProposal(instruction, proposal, candidates);
+            proposal = await this._ensureCompleteProposal(
+                instruction,
+                proposal,
+                candidates,
+                (line) => status.step(line)
+            );
 
             if (!proposal?.files?.length) {
+                await status.step('❌ Heal agent found no safe code change');
+                await status.flush();
                 await this._notify(
-                    `🔧 *Horoscope self-heal*\nHeal agent found no safe code change.\nIssue: ${ctx.errorMessage}`
+                    `🔧 *Horoscope self-heal*\nNo code patch produced.\n\n` +
+                        `🔍 *Root cause:* ${analysis.rootCause}\n` +
+                        `🛠️ *Try manually:* \`/fix ${analysis.fixPlan.slice(0, 80)}\``
                 );
                 return;
             }
@@ -635,62 +878,165 @@ class SummarySelfHealService {
                 source: 'auto_horoscope',
                 instruction,
                 error: String(ctx.errorMessage || '').slice(0, 1000),
+                root_cause: analysis.rootCause,
+                fix_plan: analysis.fixPlan,
+                diagnostics,
                 proposal,
             });
 
-            await this._notifyOwnersOnly(this._formatProposalMessage(healId, proposal, {
-                title: 'HOROSCOPE SELF-HEAL',
-                context:
-                    `⚠️ /horo failed — AI proposed a fix.\n` +
-                    `📌 *Sign:* ${ctx.sign || 'unknown'}\n` +
-                    `📌 *Issue:* ${String(ctx.errorMessage || '').slice(0, 200)}`,
-            }));
+            await this._notifyOwnersOnly(
+                this._formatHoroscopeAnalysisMessage({
+                    sign: ctx.sign,
+                    analysis,
+                    diagnostics,
+                    healId,
+                    proposal,
+                    alreadyFixed: false,
+                })
+            );
+            await status.step(`✅ Proposal ready — heal ID *${healId}*`);
+            await status.flush();
             logger.info(`Horoscope self-heal proposal ${healId} awaiting owner approval`);
             this._horoscopeHealLastAt = Date.now();
         } catch (err) {
             logger.error(`Horoscope self-heal cycle failed: ${err.message}`);
-            await this._notify(`🔧 *Horoscope self-heal error*\n${err.message}`).catch(() => {});
+            await this._notify(
+                `🔧 *Horoscope self-heal error*\n${err.message}\n\n` +
+                    `_Check GITHUB_TOKEN, Mongo, and GEMINI_API_KEY on Render._`
+            ).catch(() => {});
         } finally {
             this._inflight = false;
         }
     }
 
+    async _isSummaryNarrativeFixAlreadyInCode() {
+        try {
+            const logSvc = await this._readLocalFile('src/services/GroupChatLogService.js');
+            const nvidia = await this._readLocalFile('src/services/NvidiaDeepSeekService.js');
+            return (
+                logSvc.includes('what people actually discussed') &&
+                logSvc.includes('buildPrompt') &&
+                logSvc.includes('GROUP_SUMMARY_NARRATIVE') &&
+                nvidia.includes('actual WhatsApp group CONVERSATION')
+            );
+        } catch {
+            return false;
+        }
+    }
+
+    _formatSummaryAnalysisMessage({ ctx, analysis, healId, proposal, alreadyFixed }) {
+        const proposalBlock = proposal?.files?.length
+            ? `\n📁 *Patch files:*\n${proposal.files.map((f) => `• \`${f.path}\``).join('\n')}\n` +
+              (proposal.changelog?.length
+                  ? `\n📋 *What the patch does:*\n${proposal.changelog.slice(0, 6).map((c) => `• ${c}`).join('\n')}\n`
+                  : '')
+            : '';
+
+        const actionBlock = healId
+            ? `\n🆔 Heal ID: *${healId}*\n` +
+              `✅ \`/heal approve ${healId}\` — push to GitHub\n` +
+              `❌ \`/heal reject ${healId}\` — discard\n`
+            : '';
+
+        const redeployBlock = alreadyFixed
+            ? `\n⚡ *Action:* Narrative recap prompts are already in the codebase — *redeploy Render* if production still gives generic summaries.\n`
+            : '';
+
+        return (
+            `┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n` +
+            `┃  🗓️ *SUMMARY AUTO-HEAL* 🗓️  ┃\n` +
+            `┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n` +
+            `📢 *Group:* ${ctx.groupName || 'unknown'}\n` +
+            `📅 *Date:* ${ctx.dateStr || 'n/a'}\n` +
+            `💬 *Messages:* ${ctx.messageCount ?? '?'}` +
+            (ctx.useChunks ? ' _(chunked)_' : '') +
+            `\n\n` +
+            `🔍 *Root cause:*\n${analysis.rootCause}\n\n` +
+            `💥 *Impact:*\n${analysis.impact}\n\n` +
+            `🛠️ *Fix:*\n${analysis.fixPlan}\n` +
+            redeployBlock +
+            proposalBlock +
+            actionBlock +
+            `_Nothing is pushed until you confirm._`
+        );
+    }
+
     async _runHealCycle(ctx) {
         this._inflight = true;
+        const status = this._makeStatusTracker('SUMMARY AUTO-HEAL');
         try {
-            if (await this._hasPendingOrRecent()) {
-                logger.info('Summary self-heal: pending/recent proposal exists — skip');
+            const analysis = analyzeSummaryFailure(ctx);
+            const alreadyFixed = await this._isSummaryNarrativeFixAlreadyInCode();
+
+            if (await this._hasPendingOrRecent('auto_summary')) {
+                logger.info('Summary self-heal: pending/recent summary heal exists — skip');
                 await this._notify(
-                    `🔧 *Summary self-heal*\nSkipped new proposal (pending or recent heal exists).\n` +
-                        `Issue: ${ctx.errorMessage}\nGroup: ${ctx.groupName || 'n/a'}`
+                    `🔧 *Summary self-heal skipped*\n` +
+                        `(Another summary heal is pending or ran in the last 12h.)\n\n` +
+                        `🔍 *Root cause:* ${analysis.rootCause}\n` +
+                        `🛠️ *Fix:* ${analysis.fixPlan}\n` +
+                        `📢 *Group:* ${ctx.groupName || 'n/a'}`
                 );
                 return;
             }
 
+            await status.step(`🔍 *Root cause:* ${analysis.rootCause.slice(0, 120)}…`);
+            await status.step(`🛠️ *Fix plan:* ${analysis.fixPlan.slice(0, 120)}…`);
+
             await this._notify(
-                `🔧 *Summary issue detected*\n` +
-                    `Group: *${ctx.groupName || 'unknown'}*\n` +
-                    `Date: ${ctx.dateStr || 'n/a'}\n` +
-                    `Msgs: ${ctx.messageCount ?? '?'}\n` +
-                    `Error: ${String(ctx.errorMessage || '').slice(0, 300)}\n\n` +
-                    `_Asking Nemotron for a summary-only fix…_`
+                this._formatSummaryAnalysisMessage({ ctx, analysis, alreadyFixed })
             );
 
-            const proposal = await this._generateProposal({
-                mode: 'summary',
-                allowedPaths: SUMMARY_ALLOWED_FILES,
-                systemPrompt: SUMMARY_HEAL_SYSTEM_PROMPT,
+            if (alreadyFixed && !/NVIDIA_API_KEY|timeout|503|502|429|chunks failed/i.test(String(ctx.errorMessage || ''))) {
+                await status.step('✅ Narrative recap prompts already in repo — redeploy if prod still generic');
+                await status.flush();
+                logger.info('Summary auto-heal: narrative fix already in code — analysis sent');
+                this._summaryHealLastAt = Date.now();
+                return;
+            }
+
+            const instruction =
+                `Auto-fix group day recap (/summaryon) failure: ${ctx.errorMessage}. ` +
+                `Group: ${ctx.groupName || 'unknown'}, date: ${ctx.dateStr || 'n/a'}, ` +
+                `${ctx.messageCount || 0} messages${ctx.useChunks ? ', chunked mode' : ''}. ` +
+                `Root cause: ${analysis.rootCause} Fix: ${analysis.fixPlan} ` +
+                'Ensure buildPrompt uses narrative conversation instructions (who said what, themes, decisions) not generic event lists.';
+
+            await status.step('🤖 Generating code patch…');
+
+            const picked = await this._pickCandidateFiles(instruction);
+            const candidates = [...new Set([...SUMMARY_ALLOWED_FILES, ...picked])].slice(0, 8);
+
+            let proposal = await this._generateAgentProposal({
+                allowedPaths: candidates,
+                instruction,
                 userPromptParts: [
                     'Summary/recap failure report:',
                     `Group: ${ctx.groupName}`,
                     `Date: ${ctx.dateStr}`,
                     `Message count: ${ctx.messageCount}`,
+                    `Chunked: ${ctx.useChunks ? 'yes' : 'no'}`,
                     `Error: ${ctx.errorMessage}`,
+                    `Root cause: ${analysis.rootCause}`,
+                    `Recommended fix: ${analysis.fixPlan}`,
                 ],
+                onProgress: (line) => status.step(line),
             });
+
+            proposal = await this._ensureCompleteProposal(
+                instruction,
+                proposal,
+                candidates,
+                (line) => status.step(line)
+            );
+
             if (!proposal?.files?.length) {
+                await status.step('❌ Heal agent found no safe code change');
+                await status.flush();
                 await this._notify(
-                    `🔧 *Summary self-heal*\nNemotron found no safe code change.\nIssue: ${ctx.errorMessage}`
+                    `🔧 *Summary self-heal*\nNo code patch produced.\n\n` +
+                        `🔍 *Root cause:* ${analysis.rootCause}\n` +
+                        `🛠️ *Try manually:* \`/fix ${analysis.fixPlan.slice(0, 80)}\``
                 );
                 return;
             }
@@ -701,18 +1047,31 @@ class SummarySelfHealService {
                 group_name: ctx.groupName || '',
                 recap_date: ctx.dateStr || '',
                 error: String(ctx.errorMessage || '').slice(0, 1000),
+                root_cause: analysis.rootCause,
+                fix_plan: analysis.fixPlan,
                 message_count: ctx.messageCount || 0,
                 proposal,
             });
 
-            await this._notifyOwnersOnly(this._formatProposalMessage(healId, proposal, {
-                title: 'SUMMARY SELF-HEAL',
-                context: `⚠️ Summary failed — AI proposed a fix.\n📌 *Issue:* ${String(ctx.errorMessage || '').slice(0, 200)}\n📢 *Group:* ${ctx.groupName || 'n/a'}`,
-            }));
+            await this._notifyOwnersOnly(
+                this._formatSummaryAnalysisMessage({
+                    ctx,
+                    analysis,
+                    healId,
+                    proposal,
+                    alreadyFixed: false,
+                })
+            );
+            await status.step(`✅ Proposal ready — heal ID *${healId}*`);
+            await status.flush();
             logger.info(`Summary self-heal proposal ${healId} awaiting owner approval`);
+            this._summaryHealLastAt = Date.now();
         } catch (err) {
             logger.error(`Summary self-heal cycle failed: ${err.message}`);
-            await this._notify(`🔧 *Summary self-heal error*\n${err.message}`).catch(() => {});
+            await this._notify(
+                `🔧 *Summary self-heal error*\n${err.message}\n\n` +
+                    `_Check GITHUB_TOKEN, Mongo, and GEMINI_API_KEY on Render._`
+            ).catch(() => {});
         } finally {
             this._inflight = false;
         }
@@ -905,6 +1264,9 @@ class SummarySelfHealService {
             group_name: row.group_name || '',
             recap_date: row.recap_date || '',
             error: row.error || '',
+            root_cause: row.root_cause || '',
+            fix_plan: row.fix_plan || '',
+            diagnostics: row.diagnostics || [],
             message_count: row.message_count || 0,
             summary: row.proposal.summary,
             changelog: row.proposal.changelog || [],
@@ -918,7 +1280,7 @@ class SummarySelfHealService {
         return healId;
     }
 
-    _formatProposalMessage(healId, proposal, { title, context }) {
+    _formatProposalMessage(healId, proposal, { title, context, rootCause, fixPlan }) {
         const fileList = proposal.files.map((f) => `• \`${f.path}\``).join('\n');
         const changes = (proposal.changelog || [])
             .slice(0, 8)
@@ -927,6 +1289,11 @@ class SummarySelfHealService {
         const preview = proposal.changePreview
             ? `\n🔎 *Diff preview*\n${proposal.changePreview}\n`
             : '';
+
+        const analysisBlock =
+            rootCause || fixPlan
+                ? `\n🔍 *Root cause:*\n${rootCause || '—'}\n\n🛠️ *Fix:*\n${fixPlan || proposal.summary}\n\n`
+                : '';
 
         const planBlock =
             proposal.agentPlan?.steps?.length
@@ -937,7 +1304,8 @@ class SummarySelfHealService {
             `┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n` +
             `┃  🔧 *${title}* 🔧  ┃\n` +
             `┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n` +
-            `${context}\n\n` +
+            `${context}\n` +
+            analysisBlock +
             `🧠 *Model:* ${proposal.usedModel || this.healModel}\n` +
             `📝 *Summary:* ${proposal.summary}\n\n` +
             planBlock +
@@ -2200,10 +2568,14 @@ class SummarySelfHealService {
             );
 
             const changes = (row.changelog || []).slice(0, 6).map((c) => `• ${c}`).join('\n');
+            const analysisBlock = row.root_cause
+                ? `\n🔍 *Root cause:* ${row.root_cause}\n🛠️ *Fix:* ${row.fix_plan || row.summary}\n`
+                : '';
             const msg =
                 `✅ *Self-heal pushed*\n` +
                 `🆔 ${id}\n` +
                 (row.instruction ? `🗣️ *Asked:* ${row.instruction}\n` : '') +
+                analysisBlock +
                 `📝 ${row.summary}\n` +
                 (changes ? `\n📋 *Changes:*\n${changes}\n` : '') +
                 `📁 ${pushed.join(', ')}\n` +

@@ -359,6 +359,7 @@ class GroupSummaryController {
                 dateStr,
                 errorMessage: err.message,
                 messageCount: messages.length,
+                useChunks,
             });
         }
 
