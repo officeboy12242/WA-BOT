@@ -160,6 +160,28 @@ class NewsController {
 
         return this.sendArticleMessages(sock, chatId, articles, { markPosted: false });
     }
+
+    async sendAdvice(sock, chatId) {
+        logger.info(`Fetching advice for chat ${chatId}...`);
+        try {
+            const response = await fetch('https://api.adviceslip.com/advice');
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            const data = await response.json();
+            const advice = data.slip.advice;
+
+            await sock.sendMessage(chatId, { text: `💡 *Advice for you:*
+
+"${advice}"` });
+            logger.info(`Advice sent to ${chatId}`);
+        } catch (error) {
+            logger.error(`Failed to fetch or send advice to ${chatId}: ${error.message}`);
+            await sock.sendMessage(chatId, {
+                text: '❌ Sorry, I could not fetch advice at this moment. Please try again later.',
+            });
+        }
+    }
 }
 
 export default NewsController;
