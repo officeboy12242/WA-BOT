@@ -117,7 +117,14 @@ QUALITY RULES (mandatory):
 9. Do not touch secrets, .env files, or auth sessions (config.js defaults are OK).
 10. changelog must explain the proper approach (not "emptied function").
 11. NEVER delete the GitHub repository, wipe the project, or empty critical files.
-12. If you cannot do it safely, return files:[].`;
+12. If you cannot do it safely, return files:[].
+
+NEW COMMAND RULES (when owner asks to add /foo or API command):
+A) src/commands/registry.js — add { names, key, scope, role, help } to COMMAND_REGISTRY
+B) src/controllers/CommandController.js — add case 'key': handler in switch
+C) src/services/FeatureService.js — API logic in a dedicated service (axios, timeout, formatMessage)
+D) Do NOT put command handlers inside unrelated controllers (NewsController, MovieController, etc.)
+E) Match patterns of /horo (HoroscopeService + registry + switch case)`;
 
 const COMPLETENESS_SYSTEM_PROMPT = `You review a code change for completeness (like a senior PR review).
 
@@ -136,7 +143,12 @@ REJECT these incomplete patterns:
 PREFER:
 • config.js flag defaults (e.g. MORNING_MESSAGES_ENABLED === 'true' so default is off)
 • Early-return guards that check the flag
-• Stopping schedulers when the flag is false (scheduler already no-ops if flag false — ensure flag is false by default)`;
+• Stopping schedulers when the flag is false (scheduler already no-ops if flag false — ensure flag is false by default)
+
+NEW COMMAND completeness:
+• registry.js must list the command with names/key/help
+• CommandController.js must have switch case for the command key
+• API logic belongs in src/services/*Service.js, not random controllers`;
 
 const REPAIR_SYSTEM_PROMPT = `You repair a failed code patch. The previous patch failed validation or was incomplete/hacky.
 
@@ -169,7 +181,8 @@ RULES:
 • files_to_edit: subset of candidates only (max 6), include ALL entry points (config + controller + scheduler if needed)
 • steps: 2–6 concrete actions the agent will take in order
 • approach: prefer config-first for disable/remove feature requests
-• Do not plan repo deletion or wiping files`;
+• Do not plan repo deletion or wiping files
+• NEW COMMAND: must plan registry.js entry + CommandController switch case + dedicated service (src/services/XxxService.js). Never only patch an unrelated controller.`;
 
 const PER_FILE_HEAL_SYSTEM_PROMPT = `You are a precise coding agent editing ONE file in a WhatsApp bot (Node ESM).
 
@@ -184,6 +197,11 @@ RULES:
 • If a previous attempt failed, fix the old_string to match the file EXACTLY
 • Prefer config flags over deleting logic
 • If nothing to change in this file, return files:[]`;
+
+const NEW_COMMAND_WIRING_FILES = [
+    'src/commands/registry.js',
+    'src/controllers/CommandController.js',
+];
 
 /** Keyword → files that must be considered for a complete fix */
 const FEATURE_FILE_MAP = [
@@ -240,10 +258,44 @@ const FEATURE_FILE_MAP = [
             'src/config/config.js',
         ],
     },
+    {
+        re: /advice|adviceslip/i,
+        files: [
+            'src/services/AdviceService.js',
+            'src/commands/registry.js',
+            'src/controllers/CommandController.js',
+        ],
+    },
+    {
+        re: /\b(add|new|create)\b.{0,40}\b(command|\/[a-z])/i,
+        files: [
+            'src/commands/registry.js',
+            'src/controllers/CommandController.js',
+            'src/services',
+        ],
+    },
 ];
 
 function shortId() {
     return crypto.randomBytes(3).toString('hex');
+}
+
+function isNewCommandInstruction(instruction) {
+    const text = String(instruction || '');
+    return (
+        /\b(add|new|create|implement)\b.{0,40}\b(command|\/[a-z])/i.test(text) ||
+        /\/[a-z][a-z0-9_]*\b.{0,50}\b(api|command|feature|endpoint)/i.test(text) ||
+        /\busing\b.{0,30}\bapi\b/i.test(text) && /\/[a-z]/i.test(text)
+    );
+}
+
+function extractCommandNamesFromInstruction(instruction) {
+    const matches = String(instruction || '').match(/\/[a-z][a-z0-9_]*/gi) || [];
+    return [...new Set(matches.map((m) => m.toLowerCase()))];
+}
+
+function commandKeyFromName(cmdName) {
+    return String(cmdName || '').replace(/^\//, '').toLowerCase();
 }
 
 function extractJsonObject(raw) {
@@ -827,8 +879,19 @@ class SummarySelfHealService {
         for (const feat of FEATURE_FILE_MAP) {
             if (feat.re.test(instruction)) {
                 for (const f of feat.files) {
+                    if (f === 'src/services') continue;
                     if (allSet.has(f)) forced.add(f);
                 }
+            }
+        }
+
+        if (isNewCommandInstruction(instruction)) {
+            for (const f of NEW_COMMAND_WIRING_FILES) {
+                if (allSet.has(f)) forced.add(f);
+            }
+            // Reference pattern for new API commands
+            if (allSet.has('src/services/HoroscopeService.js')) {
+                forced.add('src/services/HoroscopeService.js');
             }
         }
 
@@ -846,6 +909,10 @@ class SummarySelfHealService {
             if (/trade|stock|alert/i.test(instruction) && /trade|market|stock/i.test(low)) score += 8;
             if (/movie|zip/i.test(instruction) && /movie|hdhub/i.test(low)) score += 8;
             if (/morning/i.test(instruction) && /morning/i.test(low)) score += 10;
+            if (/advice/i.test(instruction) && /advice/i.test(low)) score += 10;
+            if (isNewCommandInstruction(instruction) && /registry|commandcontroller|service/i.test(low)) {
+                score += 12;
+            }
             if (/config\.js$/i.test(rel) && /disable|enable|remove|stop|off/i.test(instruction)) {
                 score += 12;
             }
@@ -1171,6 +1238,73 @@ class SummarySelfHealService {
         }
 
         return { ok: errors.length === 0 && notes.length > 0, notes, errors };
+    }
+
+    /**
+     * Ensures "add /foo command" tasks wire registry + dispatcher + service (not a random controller).
+     * @returns {{ ok: boolean, errors: string[], notes: string[] }}
+     */
+    _validateNewCommandWiring(instruction, originals, patchedFiles) {
+        if (!isNewCommandInstruction(instruction)) {
+            return { ok: true, errors: [], notes: [] };
+        }
+
+        const cmdNames = extractCommandNamesFromInstruction(instruction);
+        const errors = [];
+        const notes = [];
+
+        const mergedContent = (rel) => {
+            const patched = patchedFiles.find((f) => f.path === rel);
+            if (patched?.content) return patched.content;
+            return originals.get(rel) || '';
+        };
+
+        const registryContent = mergedContent('src/commands/registry.js');
+        const controllerContent = mergedContent('src/controllers/CommandController.js');
+        const patchedPaths = new Set(patchedFiles.map((f) => f.path));
+
+        if (!patchedPaths.has('src/commands/registry.js')) {
+            errors.push('New command requires editing src/commands/registry.js');
+        }
+        if (!patchedPaths.has('src/controllers/CommandController.js')) {
+            errors.push('New command requires editing src/controllers/CommandController.js');
+        }
+
+        const hasServicePatch = [...patchedPaths].some(
+            (p) => p.startsWith('src/services/') && /Service\.js$/i.test(p),
+        );
+        if (!hasServicePatch) {
+            errors.push(
+                'New API command needs a dedicated src/services/*Service.js (do not put handler in NewsController etc.)',
+            );
+        }
+
+        for (const cmd of cmdNames) {
+            const key = commandKeyFromName(cmd);
+            const inRegistry =
+                registryContent.includes(`'${cmd}'`) ||
+                registryContent.includes(`"${cmd}"`) ||
+                registryContent.includes(`'/${key}'`) ||
+                registryContent.includes(`"/${key}"`) ||
+                registryContent.includes(`key: '${key}'`) ||
+                registryContent.includes(`key: "${key}"`);
+            if (!inRegistry) {
+                errors.push(`registry.js missing entry for ${cmd} (key: ${key})`);
+            }
+
+            const inSwitch =
+                controllerContent.includes(`case '${key}':`) ||
+                controllerContent.includes(`case "${key}":`);
+            if (!inSwitch) {
+                errors.push(`CommandController.js missing case '${key}':`);
+            }
+        }
+
+        if (!errors.length) {
+            notes.push('new command wiring OK (registry + switch + service)');
+        }
+
+        return { ok: errors.length === 0, errors, notes };
     }
 
     async _syntaxCheckJs(content, relPath) {
@@ -1521,14 +1655,27 @@ class SummarySelfHealService {
     async _createHealPlan(instruction, candidatePaths, onProgress) {
         const progress = typeof onProgress === 'function' ? onProgress : async () => {};
         const paths = candidatePaths.slice(0, 8);
+        const cmdHint = isNewCommandInstruction(instruction)
+            ? [
+                  '',
+                  'IMPORTANT — NEW COMMAND CHECKLIST:',
+                  '1) src/commands/registry.js — COMMAND_REGISTRY entry',
+                  '2) src/controllers/CommandController.js — switch case',
+                  '3) src/services/XxxService.js — axios API + formatMessage (like HoroscopeService)',
+                  'Do NOT add handlers to NewsController or other unrelated controllers.',
+              ].join('\n')
+            : '';
         const userPrompt = [
             `Owner instruction: ${instruction}`,
+            cmdHint,
             '',
             'Candidate files (pick subset to edit):',
             ...paths.map((p) => `• ${p}`),
             '',
             'Return the plan JSON only.',
-        ].join('\n');
+        ]
+            .filter(Boolean)
+            .join('\n');
 
         await progress('🧠 Planning (which files + approach)…');
         const { content: raw, model } = await this._callHealLlm(PLAN_SYSTEM_PROMPT, userPrompt, {
@@ -1552,10 +1699,19 @@ class SummarySelfHealService {
             .map((p) => String(p).replace(/\\/g, '/').replace(/^\.\//, ''))
             .filter((p) => paths.includes(p));
 
+        let finalFiles = filesToEdit.length ? filesToEdit.slice(0, 6) : paths.slice(0, 4);
+        if (isNewCommandInstruction(instruction)) {
+            const merged = new Set(finalFiles);
+            for (const f of NEW_COMMAND_WIRING_FILES) {
+                if (paths.includes(f)) merged.add(f);
+            }
+            finalFiles = [...merged].slice(0, 6);
+        }
+
         return {
             summary: String(parsed.summary || 'Code fix').slice(0, 200),
             approach: String(parsed.approach || 'both'),
-            files_to_edit: filesToEdit.length ? filesToEdit.slice(0, 6) : paths.slice(0, 4),
+            files_to_edit: finalFiles,
             steps: (Array.isArray(parsed.steps) ? parsed.steps : [])
                 .map((s) => String(s).trim())
                 .filter(Boolean)
@@ -1731,6 +1887,20 @@ class SummarySelfHealService {
 
         await progress('🛡️ *Step 3/4* — Final validation');
         let validation = await this._validatePatchedFiles(originals, patchedFiles, progress);
+
+        const wiring = this._validateNewCommandWiring(instruction, originals, patchedFiles);
+        if (!wiring.ok) {
+            validation = {
+                ok: false,
+                notes: [...(validation.notes || []), ...(wiring.notes || [])],
+                errors: [...(validation.errors || []), ...wiring.errors],
+            };
+            for (const err of wiring.errors) {
+                await progress(`⚠️ Wiring: ${err}`);
+            }
+        } else if (wiring.notes?.length) {
+            validation.notes = [...(validation.notes || []), ...wiring.notes];
+        }
 
         if (!validation.ok) {
             await progress('⚠️ Final check failed — repair pass…');
