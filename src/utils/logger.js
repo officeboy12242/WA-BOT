@@ -5,19 +5,20 @@
 
 import pino from 'pino';
 
+const logLevel = process.env.LOG_LEVEL || 'info';
+
 export const logger = pino({ 
-    level: 'info',
+    level: logLevel,
     transport: {
         targets: [
             {
                 target: 'pino-pretty',
                 options: {
                     colorize: true,
-                    translateTime: 'SYS:standard',
                     ignore: 'pid,hostname',
                     translateTime: 'yyyy-mm-dd HH:MM:ss'
                 },
-                level: 'info'
+                level: logLevel
             },
             {
                 target: 'pino/file',
@@ -25,7 +26,7 @@ export const logger = pino({
                     destination: './bot.log',
                     mkdir: true
                 },
-                level: 'info'
+                level: logLevel
             }
         ]
     }
