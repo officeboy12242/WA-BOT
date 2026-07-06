@@ -203,7 +203,7 @@ class GroupChatLogService {
      * @param {object[]} messages
      */
     computeStats(messages) {
-        const senders = new Map();
+        const senders = new Map(); // Map<sender_phone, { name: string, count: number }>
         const hourCounts = new Array(24).fill(0);
         const hourFormatter = new Intl.DateTimeFormat('en-IN', {
             timeZone: 'Asia/Kolkata',
@@ -213,7 +213,15 @@ class GroupChatLogService {
 
         for (const row of messages) {
             const name = row.sender_name || 'Member';
-            senders.set(name, (senders.get(name) || 0) + 1);
+            const phone = row.sender_phone;
+
+            if (phone) {
+                const senderStats = senders.get(phone) || { name: name, count: 0 };
+                senderStats.count++;
+                // Ensure the name is updated in case it changed or was initially 'Member'
+                senderStats.name = name;
+                senders.set(phone, senderStats);
+            }
 
             const hour = Number(hourFormatter.format(new Date(row.ts)));
             hourCounts[hour] += 1;
