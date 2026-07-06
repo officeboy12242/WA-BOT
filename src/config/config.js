@@ -88,6 +88,8 @@ export const config = {
     GEMINI_HEAL_MODELS: process.env.GEMINI_HEAL_MODELS?.trim() || 'gemini-2.5-flash,gemini-2.5-pro,gemini-2.0-flash',
     /** Auto-propose summary code fixes (owner must approve push) */
     SUMMARY_SELF_HEAL_ENABLED: process.env.SUMMARY_SELF_HEAL_ENABLED !== 'false',
+    /** Auto-propose /horo fixes when all horoscope APIs fail (owner must approve push) */
+    HOROSCOPE_SELF_HEAL_ENABLED: process.env.HOROSCOPE_SELF_HEAL_ENABLED !== 'false',
     /** GitHub PAT with contents:write for self-heal push */
     GITHUB_TOKEN: process.env.GITHUB_TOKEN?.trim() || '',
     GITHUB_REPO: process.env.GITHUB_REPO?.trim() || 'officeboy12242/WA-BOT',
