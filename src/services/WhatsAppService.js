@@ -28,7 +28,7 @@ import { isStickerForwardReady } from '../utils/stickerDownload.js';
 import { groupMessageTracker } from '../utils/groupMessageTracker.js';
 import { groupParticipantSnapshot } from '../utils/groupParticipantSnapshot.js';
 import { config } from '../config/config.js';
-import { resolveNotificationJid, extractPhoneNumber, isBotSelfChat, getBotSelfSenderJid } from '../utils/permissions.js';
+import { resolveNotificationJid, extractPhoneNumber, isBotSelfChat, getBotSelfSenderJid, isDirectMessage } from '../utils/permissions.js';
 import os from 'os';
 
 
@@ -59,7 +59,8 @@ class WhatsAppService {
         channelStickerPoller = null,
         userManager = null,
         adminPanel = null,
-        groupChatLogService = null
+        groupChatLogService = null,
+        assistService = null
     ) {
         this.sock = null;
         this.isReady = false;
@@ -76,6 +77,7 @@ class WhatsAppService {
         this.userManager = userManager;
         this.adminPanel = adminPanel;
         this.groupChatLogService = groupChatLogService;
+        this.assistService = assistService;
         
         // Message deduplication to prevent double processing
         this._processedMessages = new Set();
@@ -693,6 +695,26 @@ class WhatsAppService {
                     } catch {}
                 });
             return;
+        }
+
+        // DM assist mode — reply as owner (Jacky) via Gemini; never in groups
+        if (
+            messageText &&
+            !messageText.startsWith('/') &&
+            this.assistService &&
+            isDirectMessage(chatId) &&
+            !isBotSelfChat(this.sock, chatId)
+        ) {
+            const handledAssist = await this.assistService.maybeReply(
+                this.sock,
+                chatId,
+                messageText,
+                senderJid,
+                msg
+            );
+            if (handledAssist) {
+                return;
+            }
         }
 
         if (chatId.endsWith('@g.us') && this.groupChatLogService) {

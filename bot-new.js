@@ -41,6 +41,7 @@ import { urlShortener } from './src/utils/urlShortener.js';
 import { pronoobDriveService } from './src/services/PronoobDriveService.js';
 import GroupChatLogService from './src/services/GroupChatLogService.js';
 import GroupSummaryController from './src/controllers/GroupSummaryController.js';
+import AssistService from './src/services/AssistService.js';
 import { startGroupSummaryScheduler } from './src/utils/groupSummaryScheduler.js';
 import TradeAlertController from './src/controllers/TradeAlertController.js';
 import { startTradeAlertScheduler } from './src/utils/tradeAlertScheduler.js';
@@ -90,6 +91,7 @@ class WhatsAppCourseBot {
         this.adminPanel = null;
         this.instanceLock = null;
         this.botSettings = null;
+        this.assistService = null;
         this._isShuttingDown = false;
     }
 
@@ -183,6 +185,9 @@ class WhatsAppCourseBot {
             );
             await this.groupSummaryController.init();
 
+            this.assistService = new AssistService(config, this.botSettings, this.groupManager, mongoDb);
+            await this.assistService.init();
+
             this.tradeAlertController = new TradeAlertController(
                 this.groupManager,
                 config,
@@ -241,6 +246,7 @@ class WhatsAppCourseBot {
             this.commandController.setGroupChatLogService(this.groupChatLogService);
             this.commandController.setGroupSummaryController(this.groupSummaryController);
             this.commandController.setTradeAlertController(this.tradeAlertController);
+            this.commandController.setAssistService(this.assistService);
             
             this.whatsappService = new WhatsAppService(
                 this.commandController,
@@ -251,7 +257,8 @@ class WhatsAppCourseBot {
                 this.channelStickerPoller,
                 this.userManager,
                 this.adminPanel,
-                this.groupChatLogService
+                this.groupChatLogService,
+                this.assistService
             );
             this.commandController.setWhatsAppService(this.whatsappService);
             

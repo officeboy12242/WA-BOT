@@ -48,6 +48,7 @@ import {
 
 import { handleTradelert, handleTradenow } from './handlers/tradeHandlers.js';
 import { handleHeal, handleFix } from './handlers/healHandlers.js';
+import { handleAssist } from './handlers/assistHandlers.js';
 
 import {
     handleAddAdmin,
@@ -113,6 +114,7 @@ class CommandController {
         this.memberScrapeController = memberScrapeController;
         this.warnDatabase = warnDatabase;
         this.authDatabase = authDatabase;
+        this.assistService = null;
         this.pendingClearConfirmations = new Map();
         this.pendingScrapSessions = createScrapSessionStore();
         this.pendingGithubPosts = createGithubPostSessionStore();
@@ -141,6 +143,10 @@ class CommandController {
 
     setGroupSummaryController(groupSummaryController) {
         this.groupSummaryController = groupSummaryController;
+    }
+
+    setAssistService(assistService) {
+        this.assistService = assistService;
     }
 
     setTradeAlertController(tradeAlertController) {
@@ -197,6 +203,7 @@ class CommandController {
             groupChatLogService: this.groupChatLogService,
             groupSummaryController: this.groupSummaryController,
             tradeAlertController: this.tradeAlertController,
+            assistService: this.assistService,
             botStartTime: this.botStartTime,
             isOwnerFromJid: this._isOwnerFromJid,
         };
@@ -301,6 +308,7 @@ class CommandController {
             case 'summarynow': await handleSummaryNow(sock, chatId, senderJid, ctx); break;
             case 'fix':        await handleFix(sock, chatId, senderJid, args, ctx); break;
             case 'heal':       await handleHeal(sock, chatId, senderJid, args, ctx); break;
+            case 'assist':     await handleAssist(sock, chatId, senderJid, args, ctx); break;
             case 'trending':   await handleTrending(sock, chatId, senderJid, args, ctx); break;
             case 'tradelert':  await handleTradelert(sock, chatId, senderJid, args, ctx); break;
             case 'tradenow':   await handleTradenow(sock, chatId, senderJid, args, ctx); break;

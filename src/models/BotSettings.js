@@ -51,6 +51,25 @@ class BotSettings {
             { upsert: true },
         );
     }
+
+    async getAssistModeEnabled() {
+        const doc = await this.collection.findOne({ key: 'assist_mode_enabled' });
+        return Boolean(doc?.value);
+    }
+
+    async setAssistModeEnabled(enabled) {
+        await this.collection.updateOne(
+            { key: 'assist_mode_enabled' },
+            {
+                $set: {
+                    key: 'assist_mode_enabled',
+                    value: Boolean(enabled),
+                    updated_at: new Date(),
+                },
+            },
+            { upsert: true }
+        );
+    }
 }
 
 export default BotSettings;
