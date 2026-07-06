@@ -348,6 +348,7 @@ class CommandController {
                                 sign,
                                 errorMessage: 'All horoscope API sources failed',
                                 chatId,
+                                diagnostics: data.diagnostics,
                             });
                         }
                         const msg = horoscopeService.formatMessage(data);

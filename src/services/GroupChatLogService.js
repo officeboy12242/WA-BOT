@@ -67,6 +67,7 @@ class GroupChatLogService {
         this.llmMaxMessages = Math.max(20, Number(config.GROUP_SUMMARY_LLM_MAX_MESSAGES) || 100);
         this.chunkThreshold = Math.max(80, Number(config.GROUP_SUMMARY_CHUNK_THRESHOLD) || 150);
         this.chunkSize = Math.max(30, Math.min(60, Number(config.GROUP_SUMMARY_CHUNK_SIZE) || 50));
+        this.narrative = config.GROUP_SUMMARY_NARRATIVE !== false;
         /** @type {Set<string>} */
         this._enabledGroups = new Set();
         this._refreshTimer = null;
@@ -333,11 +334,19 @@ class GroupChatLogService {
             ? `\n(Showing ${sampled.length} of ${messages.length} messages — sampled for recap.)`
             : '';
 
+        const narrativeLines = this.narrative
+            ? [
+                  'Below is the actual member conversation for the day (name: message).',
+                  'Summarize what people actually discussed — themes, who said what, questions, opinions, decisions — not just that chatting happened.',
+                  'Extract 3-5 topics with detail on what was discussed and by whom.',
+              ]
+            : ['Extract 3-5 concrete topics with short details from the chat lines below.'];
+
         let body = [
             `Group: ${groupName}`,
             `Date: ${dateLabel}`,
             `Messages (${messages.length}):${sampledNote}`,
-            'Extract 3-5 concrete topics with short details from the chat lines below.',
+            ...narrativeLines,
             lines.join('\n'),
         ].join('\n\n');
 

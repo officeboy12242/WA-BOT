@@ -172,6 +172,88 @@ class HoroscopeService {
         };
     }
 
+    _buildDiagnostics(ohmandaResult, vedikaResult, appResult) {
+        /** @type {{ source: string, ok: boolean, reason?: string, sample?: string }[]} */
+        const items = [];
+
+        if (ohmandaResult.status === 'fulfilled') {
+            items.push({
+                source: 'ohmanda.com',
+                ok: true,
+                reason: 'ok',
+                sample: String(ohmandaResult.value).slice(0, 80),
+            });
+        } else {
+            const reason = ohmandaResult.reason?.message || String(ohmandaResult.reason || 'failed');
+            items.push({
+                source: 'ohmanda.com',
+                ok: false,
+                reason,
+            });
+        }
+
+        if (vedikaResult.status === 'fulfilled') {
+            const text = vedikaResult.value?.horoscope || '';
+            items.push({
+                source: 'vedika.io',
+                ok: Boolean(text),
+                reason: text ? 'ok' : 'empty prediction',
+                sample: text.slice(0, 80),
+            });
+        } else {
+            items.push({
+                source: 'vedika.io',
+                ok: false,
+                reason: vedikaResult.reason?.message || String(vedikaResult.reason || 'failed'),
+            });
+        }
+
+        if (appResult.status === 'fulfilled') {
+            items.push({
+                source: 'horoscope-app-api',
+                ok: true,
+                reason: 'ok',
+                sample: String(appResult.value).slice(0, 80),
+            });
+        } else {
+            items.push({
+                source: 'horoscope-app-api',
+                ok: false,
+                reason: appResult.reason?.message || String(appResult.reason || 'failed'),
+            });
+        }
+
+        return items;
+    }
+
+    async _probeSources(normalizedSign) {
+        const [ohmandaResult, vedikaResult, appResult] = await Promise.allSettled([
+            this._fetchOhmanda(normalizedSign),
+            this._fetchVedikaExtras(normalizedSign),
+            this._fetchHoroscopeApp(normalizedSign),
+        ]);
+
+        return {
+            ohmandaResult,
+            vedikaResult,
+            appResult,
+            diagnostics: this._buildDiagnostics(ohmandaResult, vedikaResult, appResult),
+        };
+    }
+
+    /**
+     * Live probe of all horoscope APIs (for auto-heal diagnostics).
+     */
+    async diagnoseSources(sign) {
+        const normalizedSign = this.normalizeSign(sign);
+        if (!normalizedSign) {
+            return { error: 'invalid_sign', diagnostics: [] };
+        }
+
+        const { diagnostics } = await this._probeSources(normalizedSign);
+        return { sign: normalizedSign, diagnostics };
+    }
+
     /**
      * Fetch horoscope from API
      */
@@ -189,11 +271,8 @@ class HoroscopeService {
             return cached.data;
         }
 
-        const [ohmandaResult, vedikaResult, appResult] = await Promise.allSettled([
-            this._fetchOhmanda(normalizedSign),
-            this._fetchVedikaExtras(normalizedSign),
-            this._fetchHoroscopeApp(normalizedSign),
-        ]);
+        const { ohmandaResult, vedikaResult, appResult, diagnostics } =
+            await this._probeSources(normalizedSign);
 
         const horoscopeText =
             (ohmandaResult.status === 'fulfilled' && ohmandaResult.value)
@@ -206,7 +285,7 @@ class HoroscopeService {
 
         if (!horoscopeText) {
             logger.error(`Horoscope API error for ${normalizedSign}: all sources failed`);
-            return { error: 'api_error' };
+            return { error: 'api_error', diagnostics };
         }
 
         const extras = vedikaResult.status === 'fulfilled'
