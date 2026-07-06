@@ -204,7 +204,23 @@ class GroupSummaryController {
             throw new Error('Group recap is not enabled here');
         }
 
-        const recapDate = dateStr || getRecapDateStrIST(Date.now(), this.summaryHour, this.summaryMinute);
+        let recapDate;
+        if (dateStr) {
+            recapDate = dateStr;
+        } else if (force) {
+            // For /summarynow, always summarize for today
+            const now = new Date();
+            const options = {
+                timeZone: 'Asia/Kolkata',
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit'
+            };
+            recapDate = new Intl.DateTimeFormat('en-CA', options).format(now);
+        } else {
+            // For scheduled summaries, use the recap date logic
+            recapDate = getRecapDateStrIST(Date.now(), this.summaryHour, this.summaryMinute);
+        }
         const dateLabel = formatDateLabelIST(recapDate);
         const timeLabel = `${String(this.summaryHour).padStart(2, '0')}:${String(this.summaryMinute).padStart(2, '0')}`;
 
