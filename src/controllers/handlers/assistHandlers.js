@@ -20,7 +20,8 @@ export async function handleAssist(sock, chatId, senderJid, args, { groupManager
 
     const action = String(args[0] || '').toLowerCase();
     const ownerName = config.ASSIST_OWNER_NAME || 'Jacky';
-    const geminiOk = assistService.isConfigured();
+    const llmOk = assistService.isConfigured();
+    const llmChain = assistService.getProviderChain?.()?.join(' → ') || 'none';
 
     if (!action || action === 'status') {
         const on = await assistService.isEnabled();
@@ -31,7 +32,7 @@ export async function handleAssist(sock, chatId, senderJid, args, { groupManager
                 '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
                 `👤 *Persona:* ${ownerName}\n` +
                 `🔘 *Status:* ${on ? '✅ ON' : '❌ OFF'}\n` +
-                `🧠 *Gemini:* ${geminiOk ? '✅ ready' : '❌ set GEMINI_API_KEY on Render'}\n\n` +
+                `🧠 *AI chain:* ${llmOk ? llmChain : '❌ set GEMINI / GROQ / NVIDIA key on Render'}\n\n` +
                 'When ON, personal DMs get smart replies *as you* (same language as them).\n' +
                 '*Groups are never affected.*\n\n' +
                 '*Commands:*\n' +
@@ -44,9 +45,9 @@ export async function handleAssist(sock, chatId, senderJid, args, { groupManager
     }
 
     if (action === 'on' || action === 'enable') {
-        if (!geminiOk) {
+        if (!llmOk) {
             await sock.sendMessage(chatId, {
-                text: '❌ Cannot enable assist — `GEMINI_API_KEY` is not set on the server.',
+                text: '❌ Cannot enable assist — set `GEMINI_API_KEY`, `GROQ_API_KEY`, or `NVIDIA_API_KEY` on the server.',
             });
             return;
         }

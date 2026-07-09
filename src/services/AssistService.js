@@ -1,11 +1,11 @@
 /**
- * Owner DM assistant — Gemini replies as Jacky when assist mode is on.
+ * Owner DM assistant — multi-provider replies as Jacky when assist mode is on.
  * DMs only; never groups.
  */
 
-import axios from 'axios';
 import { logger } from '../utils/logger.js';
 import { config } from '../config/config.js';
+import AssistLlmRouter from './AssistLlmRouter.js';
 import { buildAssistSystemPrompt } from '../prompts/assistPrompt.js';
 import {
     extractPhoneNumber,
@@ -14,9 +14,6 @@ import {
 } from '../utils/permissions.js';
 import { safeSendMessage } from '../utils/waMessage.js';
 import { extractInstagramUrl } from '../utils/instagramUrl.js';
-
-const API_ROOT = 'https://generativelanguage.googleapis.com/v1beta/models';
-const DEFAULT_MODELS = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.5-pro'];
 
 class AssistService {
     /**
@@ -30,17 +27,9 @@ class AssistService {
         this.botSettings = botSettings;
         this.groupManager = groupManager;
         this.ownerName = (cfg.ASSIST_OWNER_NAME || 'Jacky').trim() || 'Jacky';
-        this.apiKey = (cfg.GEMINI_API_KEY || process.env.GEMINI_API_KEY || '').trim();
-        this.models = String(cfg.ASSIST_GEMINI_MODELS || cfg.ASSIST_GEMINI_MODEL || '')
-            .split(',')
-            .map((s) => s.trim())
-            .filter(Boolean);
-        if (!this.models.length) {
-            this.models = [...DEFAULT_MODELS];
-        }
+        this.llm = new AssistLlmRouter(cfg);
         this.maxHistory = Math.max(4, Number(cfg.ASSIST_MAX_HISTORY) || 12);
         this.cooldownMs = Math.max(1500, Number(cfg.ASSIST_REPLY_COOLDOWN_MS) || 3500);
-        this.timeoutMs = Math.min(60_000, Math.max(15_000, Number(cfg.ASSIST_TIMEOUT_MS) || 45_000));
         this._enabled = false;
         this._lastReplyAt = new Map();
         this._collection = mongoDb ? mongoDb.collection('assist_conversations') : null;
@@ -57,13 +46,18 @@ class AssistService {
         if (this.botSettings) {
             this._enabled = await this.botSettings.getAssistModeEnabled();
             if (this._enabled) {
-                logger.info(`🤖 Assist mode ON — DMs will reply as ${this.ownerName} (Gemini)`);
+                const chain = this.llm.getProviderChain().join(' → ') || 'none';
+                logger.info(`🤖 Assist mode ON — DMs reply as ${this.ownerName} (${chain})`);
             }
         }
     }
 
     isConfigured() {
-        return Boolean(this.apiKey);
+        return this.llm.isConfigured();
+    }
+
+    getProviderChain() {
+        return this.llm.getProviderChain();
     }
 
     async isEnabled() {
@@ -102,7 +96,7 @@ class AssistService {
             return false;
         }
         if (!this.isConfigured()) {
-            logger.warn('Assist mode on but GEMINI_API_KEY missing');
+            logger.warn('Assist mode on but no LLM API key (GEMINI / GROQ / NVIDIA)');
             return false;
         }
 
@@ -144,68 +138,20 @@ class AssistService {
         const history = await this._loadHistory(chatId);
         const systemPrompt = buildAssistSystemPrompt(this.ownerName);
 
-        const contents = [];
-        for (const turn of history) {
-            contents.push({
-                role: turn.role === 'assistant' ? 'model' : 'user',
-                parts: [{ text: turn.text }],
-            });
-        }
+        const userBlock =
+            pushName && pushName !== 'there' ? `[${pushName}]: ${userText}` : userText;
 
-        const userBlock = pushName && pushName !== 'there'
-            ? `[${pushName}]: ${userText}`
-            : userText;
-
-        contents.push({
-            role: 'user',
-            parts: [{ text: userBlock }],
+        const { text, provider, model } = await this.llm.completeChat({
+            systemPrompt,
+            history,
+            userBlock,
+            maxTokens: 512,
+            temperature: 0.75,
         });
 
-        let lastErr;
-        for (const model of this.models) {
-            try {
-                const reply = await this._callGemini(model, systemPrompt, contents);
-                if (!reply) {
-                    throw new Error('Empty Gemini reply');
-                }
-                await this._saveHistory(chatId, userBlock, reply);
-                return reply;
-            } catch (err) {
-                lastErr = err;
-                logger.warn(`Assist Gemini ${model} failed: ${err.message}`);
-            }
-        }
-        throw lastErr || new Error('Assist Gemini failed');
-    }
-
-    async _callGemini(model, systemPrompt, contents) {
-        const url = `${API_ROOT}/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(this.apiKey)}`;
-
-        const { data } = await axios.post(
-            url,
-            {
-                contents,
-                systemInstruction: { parts: [{ text: systemPrompt }] },
-                generationConfig: {
-                    temperature: 0.75,
-                    maxOutputTokens: 512,
-                },
-            },
-            {
-                timeout: this.timeoutMs,
-                headers: { 'Content-Type': 'application/json' },
-                validateStatus: (s) => s >= 200 && s < 300,
-            }
-        );
-
-        const parts = data?.candidates?.[0]?.content?.parts || [];
-        const text = parts.map((p) => p?.text || '').join('').trim();
-
-        if (!text && data?.candidates?.[0]?.finishReason === 'SAFETY') {
-            throw new Error('Gemini safety block');
-        }
-
-        return text.slice(0, 2000);
+        logger.info(`Assist reply via ${provider}/${model.split('/').pop()}`);
+        await this._saveHistory(chatId, userBlock, text);
+        return text;
     }
 
     async _loadHistory(chatId) {
