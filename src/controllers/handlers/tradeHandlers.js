@@ -47,7 +47,8 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
         const defaultSymbols = config.TRADE_ALERT_STOCKS || [];
 
         if (!action || action === 'status') {
-            const geminiOk = tradeAlertController?.isReady?.() ?? false;
+            const llmOk = tradeAlertController?.isReady?.() ?? false;
+            const llmChain = tradeAlertController?.tradeLlm?.getModelChain?.()?.join(' → ') || 'none';
             let symbolLine = mode === 'manual'
                 ? (symbols.length ? symbols.join(', ') : (defaultSymbols.join(', ') || '_env default_'))
                 : '_AI picks daily from live news & top movers_';
@@ -62,7 +63,7 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
             r += `📊 *Symbols:* ${symbolLine}\n`;
             r += `🔔 *Posts:* CE/PE + plan when confluence ≥50 & AI ≥70%\n`;
             r += `🌐 *Data:* NSE macro + hot sectors + Yahoo + news\n`;
-            r += `🤖 *AI:* ${geminiOk ? 'Gemini ready' : 'GEMINI_API_KEY missing'}\n\n`;
+            r += `🤖 *AI:* ${llmOk ? llmChain : 'Set GEMINI / GROQ / NVIDIA API key'}\n\n`;
             r += '*Commands:*\n';
             r += '• `/tradelert on` — enable daily AI scan\n';
             r += '• `/tradelert off` — disable\n';
@@ -77,7 +78,9 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
 
         if (action === 'on') {
             if (!tradeAlertController?.isReady?.()) {
-                await sock.sendMessage(chatId, { text: '❌ Trade alerts need `GEMINI_API_KEY` on the server.' });
+                await sock.sendMessage(chatId, {
+                    text: '❌ Trade alerts need at least one API key: `GEMINI_API_KEY`, `GROQ_API_KEY`, or `NVIDIA_API_KEY`.',
+                });
                 return;
             }
             if (currentlyOn) {
@@ -220,12 +223,14 @@ export async function handleTradenow(sock, chatId, senderJid, args, { tradeAlert
         }
 
         if (!tradeAlertController.tradeLlm?.isConfigured?.()) {
-            await sock.sendMessage(chatId, { text: '❌ `GEMINI_API_KEY` is not set on the server.' });
+            await sock.sendMessage(chatId, {
+                text: '❌ Set `GEMINI_API_KEY`, `GROQ_API_KEY`, or `NVIDIA_API_KEY` on the server.',
+            });
             return;
         }
 
         const loading = await sock.sendMessage(chatId, {
-            text: `📊 _Analyzing ${symbol}…\n🌐 Live price + NSE chain + news · Gemini (~60–120s)_`,
+            text: `📊 _Analyzing ${symbol}…\n🌐 Live price + NSE chain + news · AI (~60–120s)_`,
         });
 
         try {
@@ -235,14 +240,14 @@ export async function handleTradenow(sock, chatId, senderJid, args, { tradeAlert
         } catch (error) {
             logger.error(`Error in tradenow: ${error.message}`);
             let msg;
-            if (/rate limit|429|quota|resource.?exhausted/i.test(error.message)) {
+            if (/rate limit|429|quota|resource.?exhausted|all trade llm/i.test(error.message)) {
                 msg =
-                    '❌ *Gemini rate limit* — too many requests.\n' +
+                    '❌ *AI rate limit* — Gemini/Groq/NVIDIA all busy.\n' +
                     '_Wait 30–60 seconds and try again, or use `/tradenow NIFTY`._';
             } else if (/timeout/i.test(error.message)) {
                 msg =
                     '❌ Analysis timed out after retries.\n' +
-                    '_Gemini API slow — try again in 1–2 min or use a simpler symbol like NIFTY._';
+                    '_AI API slow — try again in 1–2 min or use a simpler symbol like NIFTY._';
             } else {
                 msg = `❌ Analysis failed: ${error.message}`;
             }

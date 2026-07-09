@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import { config } from '../src/config/config.js';
 import { createTradeResearchService } from '../src/services/TradeResearchService.js';
-import GeminiTradeService from '../src/services/GeminiTradeService.js';
+import TradeLlmRouterService from '../src/services/TradeLlmRouterService.js';
 import {
     TRADE_ANALYSIS_SYSTEM_PROMPT,
     buildTradeUserPrompt,
@@ -13,7 +13,7 @@ import { injectTradePlans } from '../src/utils/tradePlanFormatter.js';
 
 const sym = process.argv[2] || 'TITAN';
 const research = createTradeResearchService(config);
-const gemini = new GeminiTradeService(config);
+const gemini = new TradeLlmRouterService(config);
 const intel = await research.gatherIntel(sym);
 const brief = await research.runResearchBrief(intel);
 const prompt = buildTradeUserPrompt({

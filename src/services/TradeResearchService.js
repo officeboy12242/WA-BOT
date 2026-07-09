@@ -1,9 +1,9 @@
 /**
- * Two-step trade intelligence: live feeds → Gemini research → CE/PE analysis.
+ * Two-step trade intelligence: live feeds → LLM research → CE/PE analysis.
  */
 
 import { stockIntelligenceService } from './StockIntelligenceService.js';
-import GeminiTradeService from './GeminiTradeService.js';
+import TradeLlmRouterService from './TradeLlmRouterService.js';
 import {
     TRADE_RESEARCH_SYSTEM_PROMPT,
     buildResearchUserPrompt,
@@ -12,7 +12,7 @@ import { logger } from '../utils/logger.js';
 
 class TradeResearchService {
     constructor(config = {}) {
-        this.gemini = new GeminiTradeService(config);
+        this.tradeLlm = new TradeLlmRouterService(config);
         this.enabled = config.TRADE_TWO_STEP_RESEARCH !== false;
         this.researchTimeoutMs = Math.min(
             90_000,
@@ -26,11 +26,11 @@ class TradeResearchService {
     }
 
     /**
-     * Step 1: Gemini synthesizes live data into CE/PE research brief.
+     * Step 1: LLM synthesizes live data into CE/PE research brief.
      * @param {object} intel
      */
     async runResearchBrief(intel) {
-        if (!this.enabled || !this.gemini.isConfigured()) {
+        if (!this.enabled || !this.tradeLlm.isConfigured()) {
             return null;
         }
 
@@ -45,9 +45,9 @@ class TradeResearchService {
             marketBrief: intel.marketBrief,
         });
 
-        logger.info(`🔬 Gemini research brief for ${intel.symbol}…`);
+        logger.info(`🔬 Research brief for ${intel.symbol}…`);
         try {
-            const brief = await this.gemini.completeTrade(TRADE_RESEARCH_SYSTEM_PROMPT, userPrompt, {
+            const brief = await this.tradeLlm.completeTrade(TRADE_RESEARCH_SYSTEM_PROMPT, userPrompt, {
                 maxTokens: 700,
                 timeoutMs: this.researchTimeoutMs,
             });
