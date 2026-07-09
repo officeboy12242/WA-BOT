@@ -75,7 +75,10 @@ export const config = {
     NVIDIA_API_KEY: process.env.NVIDIA_API_KEY?.trim() || '',
     /** Group summary / recap model */
     NVIDIA_MODEL: process.env.NVIDIA_MODEL?.trim() || 'deepseek-ai/deepseek-v4-flash',
-    /** Trade discovery, research, CE/PE analysis model */
+    /** Trade discovery, research, CE/PE analysis — Gemini (not GLM) */
+    GEMINI_TRADE_MODEL: process.env.GEMINI_TRADE_MODEL?.trim() || 'gemini-2.5-flash',
+    GEMINI_TRADE_MODELS: process.env.GEMINI_TRADE_MODELS?.trim() || 'gemini-2.5-flash,gemini-2.5-pro,gemini-2.0-flash',
+    /** @deprecated Trade alerts use Gemini; kept for group summaries only */
     NVIDIA_TRADE_MODEL: process.env.NVIDIA_TRADE_MODEL?.trim() || 'z-ai/glm-5.2',
     /** Summary self-heal model (code fix proposals) */
     NVIDIA_HEAL_MODEL: process.env.NVIDIA_HEAL_MODEL?.trim() || 'nvidia/nemotron-3-ultra-550b-a55b',
@@ -140,6 +143,8 @@ export const config = {
     TRADE_ALERT_MAX_SENDS: Math.max(1, parseInt(process.env.TRADE_ALERT_MAX_SENDS, 10) || 5),
     /** How many symbols AI discovery picks to scan */
     TRADE_ALERT_DISCOVERY_COUNT: Math.max(8, Math.min(15, parseInt(process.env.TRADE_ALERT_DISCOVERY_COUNT, 10) || 10)),
+    /** Minimum confluence score (0–100) before posting actionable alert */
+    TRADE_ALERT_MIN_CONFLUENCE: Math.max(30, Math.min(80, parseInt(process.env.TRADE_ALERT_MIN_CONFLUENCE, 10) || 50)),
     /** Step-1 AI research brief before CE/PE trade analysis */
     TRADE_TWO_STEP_RESEARCH: process.env.TRADE_TWO_STEP_RESEARCH !== 'false',
     /** Skip daily trade alerts on NSE holidays and weekends (IST) */

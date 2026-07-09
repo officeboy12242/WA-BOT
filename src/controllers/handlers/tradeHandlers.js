@@ -6,6 +6,7 @@ import { logger } from '../../utils/logger.js';
 import { extractPhoneNumber } from '../../utils/permissions.js';
 import { config } from '../../config/config.js';
 import { editMessageText } from '../../utils/waMessage.js';
+import { formatTradeScanPreview } from '../../utils/tradeScanFormatter.js';
 
 function parseSymbolList(raw) {
     return String(raw || '')
@@ -23,15 +24,6 @@ function modeLabel(mode) {
     return mode === 'manual' ? '📋 Manual watchlist' : '🤖 AI auto (live news + movers)';
 }
 
-function formatScannedAt(scannedAt) {
-    if (!scannedAt) return 'just now';
-    const d = scannedAt instanceof Date ? scannedAt : new Date(scannedAt);
-    return d.toLocaleString('en-IN', {
-        timeZone: config.TRADE_ALERT_TIMEZONE || 'Asia/Kolkata',
-        dateStyle: 'medium',
-        timeStyle: 'short',
-    });
-}
 
 async function getGroupName(sock, chatId, groupManager) {
     try {
@@ -55,7 +47,7 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
         const defaultSymbols = config.TRADE_ALERT_STOCKS || [];
 
         if (!action || action === 'status') {
-            const nvidiaOk = tradeAlertController?.isReady?.() ?? false;
+            const geminiOk = tradeAlertController?.isReady?.() ?? false;
             let symbolLine = mode === 'manual'
                 ? (symbols.length ? symbols.join(', ') : (defaultSymbols.join(', ') || '_env default_'))
                 : '_AI picks daily from live news & top movers_';
@@ -68,9 +60,9 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
             r += `🧠 *Mode:* ${modeLabel(mode)}\n`;
             r += `🕐 *Daily time:* ${formatAlertTime()} IST (trading days only)\n`;
             r += `📊 *Symbols:* ${symbolLine}\n`;
-            r += `🔔 *Posts:* Full CE + PE + multi-target plan (50/30/20)\n`;
-            r += `🌐 *Data:* Live Yahoo prices + Google News RSS\n`;
-            r += `🤖 *AI:* ${nvidiaOk ? 'ready' : 'NVIDIA_API_KEY missing'}\n\n`;
+            r += `🔔 *Posts:* CE/PE + plan when confluence ≥50 & AI ≥70%\n`;
+            r += `🌐 *Data:* NSE macro + hot sectors + Yahoo + news\n`;
+            r += `🤖 *AI:* ${geminiOk ? 'Gemini ready' : 'GEMINI_API_KEY missing'}\n\n`;
             r += '*Commands:*\n';
             r += '• `/tradelert on` — enable daily AI scan\n';
             r += '• `/tradelert off` — disable\n';
@@ -84,8 +76,8 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
         }
 
         if (action === 'on') {
-            if (!tradeAlertController?.nvidia?.isConfigured?.()) {
-                await sock.sendMessage(chatId, { text: '❌ Trade alerts need `NVIDIA_API_KEY` on the server.' });
+            if (!tradeAlertController?.isReady?.()) {
+                await sock.sendMessage(chatId, { text: '❌ Trade alerts need `GEMINI_API_KEY` on the server.' });
                 return;
             }
             if (currentlyOn) {
@@ -156,31 +148,16 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
         }
 
         if (action === 'scan') {
-            if (!tradeAlertController?.nvidia?.isConfigured?.()) {
-                await sock.sendMessage(chatId, { text: '❌ `NVIDIA_API_KEY` required for AI scan.' });
-                return;
-            }
             const loading = await sock.sendMessage(chatId, {
-                text: '📡 _Running live market scan + AI discovery… (~60–90s)_',
+                text: '📡 _Running enhanced market scan (sectors · macro · smart money)… (~60–120s)_',
             });
             try {
                 const preview = await tradeAlertController.previewDiscovery();
-                let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-                r += '📡 *AI WATCHLIST PREVIEW* 📡\n';
-                r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
-                r += `🕐 *Scanned:* ${formatScannedAt(preview.scannedAt)} IST\n`;
-                r += `📈 *Picks (today's top movers):* ${preview.symbols.join(', ')}\n`;
-                if (preview.moversBrief) {
-                    r += `📊 *Live movers*\n${preview.moversBrief}\n`;
-                }
-                if (preview.hiddenGem) {
-                    r += `💎 *Hidden gem:* ${preview.hiddenGem}`;
-                    if (preview.hiddenGemReason) r += ` — _${preview.hiddenGemReason}_`;
-                    r += '\n';
-                }
-                r += '\n';
-                r += `📰 *Market news*\n${preview.marketNews}\n\n`;
-                r += '_Full analysis runs at daily alert time; only BUY ≥70% gets posted._';
+                const r = formatTradeScanPreview({
+                    ...preview,
+                    hiddenGem: preview.hiddenGem,
+                    hiddenGemReason: preview.hiddenGemReason,
+                });
                 await editMessageText(sock, chatId, loading?.key, r);
             } catch (err) {
                 await editMessageText(sock, chatId, loading?.key, `❌ Scan failed: ${err.message}`);
@@ -242,13 +219,13 @@ export async function handleTradenow(sock, chatId, senderJid, args, { tradeAlert
             return;
         }
 
-        if (!tradeAlertController.nvidia.isConfigured()) {
-            await sock.sendMessage(chatId, { text: '❌ `NVIDIA_API_KEY` is not set on the server.' });
+        if (!tradeAlertController.tradeLlm?.isConfigured?.()) {
+            await sock.sendMessage(chatId, { text: '❌ `GEMINI_API_KEY` is not set on the server.' });
             return;
         }
 
         const loading = await sock.sendMessage(chatId, {
-            text: `📊 _Analyzing ${symbol}…\n🌐 Live price + NSE chain + news (~60–120s)_`,
+            text: `📊 _Analyzing ${symbol}…\n🌐 Live price + NSE chain + news · Gemini (~60–120s)_`,
         });
 
         try {

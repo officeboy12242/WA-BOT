@@ -132,3 +132,86 @@ export function getIndianMarketClosedReason(dateMs = Date.now(), config = {}) {
 
     return 'market closed';
 }
+
+/** @typedef {'PREMARKET'|'PREOPEN'|'MARKET_HOURS'|'AFTER_HOURS'|'RESEARCH'} MarketMode */
+
+/**
+ * India session mode (trading-copilot + IMT style).
+ * @param {number} [dateMs]
+ * @returns {{ mode: MarketMode, label: string, allowsLiveEntry: boolean, watchOnly: boolean }}
+ */
+export function getIndiaMarketMode(dateMs = Date.now()) {
+    if (!isIndianEquityTradingDay(dateMs, {})) {
+        return {
+            mode: 'RESEARCH',
+            label: '🔬 Research (market closed)',
+            allowsLiveEntry: false,
+            watchOnly: true,
+        };
+    }
+
+    const parts = new Intl.DateTimeFormat('en-GB', {
+        timeZone: 'Asia/Kolkata',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+    }).formatToParts(new Date(dateMs));
+    const hour = Number(parts.find((p) => p.type === 'hour')?.value || 0);
+    const minute = Number(parts.find((p) => p.type === 'minute')?.value || 0);
+    const mins = hour * 60 + minute;
+
+    if (mins >= 7 * 60 + 45 && mins < 9 * 60 + 15) {
+        return {
+            mode: 'PREMARKET',
+            label: '🌅 Premarket (watch only)',
+            allowsLiveEntry: false,
+            watchOnly: true,
+        };
+    }
+    if (mins >= 9 * 60 && mins < 9 * 60 + 15) {
+        return {
+            mode: 'PREOPEN',
+            label: '⏳ Pre-open (no live entry)',
+            allowsLiveEntry: false,
+            watchOnly: true,
+        };
+    }
+    if (mins >= 9 * 60 + 15 && mins < 15 * 60 + 30) {
+        return {
+            mode: 'MARKET_HOURS',
+            label: '🟢 Market hours',
+            allowsLiveEntry: true,
+            watchOnly: false,
+        };
+    }
+    if (mins >= 15 * 60 + 30 && mins < 21 * 60) {
+        return {
+            mode: 'AFTER_HOURS',
+            label: '🌙 After hours (next-session watch)',
+            allowsLiveEntry: false,
+            watchOnly: true,
+        };
+    }
+
+    return {
+        mode: 'RESEARCH',
+        label: '🔬 Research mode',
+        allowsLiveEntry: false,
+        watchOnly: true,
+    };
+}
+
+/**
+ * @param {Date} scannedAt
+ * @param {number} [maxAgeMs=5*60*1000]
+ */
+export function checkQuoteFreshness(scannedAt, maxAgeMs = 5 * 60 * 1000) {
+    if (!scannedAt) {
+        return { ok: false, message: 'no scan timestamp' };
+    }
+    const age = Date.now() - new Date(scannedAt).getTime();
+    if (age > maxAgeMs) {
+        return { ok: false, message: `data ${Math.round(age / 60000)}m old` };
+    }
+    return { ok: true, message: 'fresh' };
+}
