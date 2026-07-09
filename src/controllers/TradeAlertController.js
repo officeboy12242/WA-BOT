@@ -5,7 +5,7 @@
 import { logger } from '../utils/logger.js';
 import { formatDateLabelIST, formatNowLabelIST, getTodayDateStrIST } from '../utils/dateIST.js';
 import NvidiaDeepSeekService from '../services/NvidiaDeepSeekService.js';
-import GeminiTradeService, { isGeminiRateLimitError } from '../services/GeminiTradeService.js';
+import TradeLlmRouterService, { isTradeLlmRateLimitError } from '../services/TradeLlmRouterService.js';
 import { createTradeResearchService } from '../services/TradeResearchService.js';
 import { marketScanService } from '../services/MarketScanService.js';
 import { createTradeDiscoveryEngine } from '../services/TradeDiscoveryEngine.js';
@@ -48,8 +48,7 @@ class TradeAlertController {
         this.config = config;
         this.mongoDb = mongoDb;
         this.nvidia = new NvidiaDeepSeekService(config);
-        this.gemini = new GeminiTradeService(config);
-        this.tradeLlm = this.gemini;
+        this.tradeLlm = new TradeLlmRouterService(config);
         this.research = createTradeResearchService(config);
         this.twoStepResearch = config.TRADE_TWO_STEP_RESEARCH !== false;
         this.enabled = config.TRADE_ALERT_ENABLED !== false;
@@ -128,7 +127,7 @@ class TradeAlertController {
         });
 
         logger.info(
-            `Trade analysis LLM for ${intel.symbol} (Gemini ${this.gemini.tradeModel}, ` +
+            `Trade analysis LLM for ${intel.symbol} (${this.tradeLlm.getPrimaryLabel()}, ` +
                 `prompt ${userPrompt.length} chars, research=${researchBrief ? 'yes' : 'no'})…`
         );
 
@@ -243,20 +242,20 @@ class TradeAlertController {
     async analyzeSymbol(rawSymbol, { mode = 'live', skipResearch = false } = {}) {
         const symbol = String(rawSymbol || '').trim().toUpperCase();
         if (!symbol) throw new Error('Stock symbol required');
-        if (!this.tradeLlm.isConfigured()) throw new Error('GEMINI_API_KEY is not set on the server');
+        if (!this.tradeLlm.isConfigured()) throw new Error('No trade LLM configured (GEMINI, GROQ, or NVIDIA API key)');
 
         try {
             const result = await this._runAnalysis(symbol, { mode, skipResearch });
             return result.text;
         } catch (err) {
-            if (!skipResearch && (this.isTimeoutError(err) || isGeminiRateLimitError(err))) {
+            if (!skipResearch && (this.isTimeoutError(err) || isTradeLlmRateLimitError(err))) {
                 logger.warn(`Trade analysis retry for ${symbol} (skip research): ${err.message}`);
-                await new Promise((r) => setTimeout(r, isGeminiRateLimitError(err) ? 3000 : 0));
+                await new Promise((r) => setTimeout(r, isTradeLlmRateLimitError(err) ? 3000 : 0));
                 const result = await this._runAnalysis(symbol, { mode, skipResearch: true });
                 return result.text;
             }
-            if (isGeminiRateLimitError(err)) {
-                throw new Error('Gemini rate limit — wait 30–60 seconds and try `/tradenow` again.');
+            if (isTradeLlmRateLimitError(err)) {
+                throw new Error('All trade LLM providers rate limited — wait 30–60 seconds and try `/tradenow` again.');
             }
             throw err;
         }
@@ -490,7 +489,7 @@ class TradeAlertController {
             return;
         }
         if (!this.tradeLlm.isConfigured()) {
-            logger.warn('Trade alert: GEMINI_API_KEY missing');
+            logger.warn('Trade alert: no trade LLM API key (GEMINI, GROQ, or NVIDIA)');
             return;
         }
 

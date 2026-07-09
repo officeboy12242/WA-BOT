@@ -8,7 +8,7 @@ import 'dotenv/config';
 import { config } from '../src/config/config.js';
 import { createTradeDiscoveryEngine } from '../src/services/TradeDiscoveryEngine.js';
 import { createTradeResearchService } from '../src/services/TradeResearchService.js';
-import GeminiTradeService from '../src/services/GeminiTradeService.js';
+import TradeLlmRouterService from '../src/services/TradeLlmRouterService.js';
 import {
     TRADE_ANALYSIS_SYSTEM_PROMPT,
     buildTradeUserPrompt,
@@ -22,7 +22,7 @@ import { marketScanService } from '../src/services/MarketScanService.js';
 import { parseDiscoveryResult } from '../src/utils/tradeSignalParser.js';
 import { STOCK_DISCOVERY_SYSTEM_PROMPT, buildDiscoveryUserPrompt } from '../src/prompts/stockDiscoveryPrompt.js';
 
-const gemini = new GeminiTradeService(config);
+const gemini = new TradeLlmRouterService(config);
 const research = createTradeResearchService(config);
 const engine = createTradeDiscoveryEngine(config, null);
 
@@ -32,7 +32,7 @@ async function main() {
         process.exit(1);
     }
 
-    console.log(`Using Gemini models: ${gemini.getModelChain().join(' → ')}\n`);
+    console.log(`Using AI chain: ${gemini.getModelChain().join(' → ')}\n`);
     console.log('='.repeat(60));
     console.log('STEP 1 — LIVE MARKET SCAN (NSE + sectors + smart money)');
     console.log('='.repeat(60));
