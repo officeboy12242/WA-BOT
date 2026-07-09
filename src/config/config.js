@@ -99,6 +99,13 @@ export const config = {
     ASSIST_OWNER_NAME: process.env.ASSIST_OWNER_NAME?.trim() || 'Jacky',
     ASSIST_GEMINI_MODEL: process.env.ASSIST_GEMINI_MODEL?.trim() || 'gemini-2.5-flash',
     ASSIST_GEMINI_MODELS: process.env.ASSIST_GEMINI_MODELS?.trim() || 'gemini-2.5-flash,gemini-2.0-flash,gemini-2.5-pro',
+    /** Assist fallback — Groq / NVIDIA (same keys as trade) */
+    ASSIST_GROQ_MODEL: process.env.ASSIST_GROQ_MODEL?.trim() || 'llama-3.1-8b-instant',
+    ASSIST_GROQ_MODELS: process.env.ASSIST_GROQ_MODELS?.trim() || 'llama-3.1-8b-instant,llama-3.3-70b-versatile',
+    ASSIST_NVIDIA_MODEL: process.env.ASSIST_NVIDIA_MODEL?.trim() || '',
+    ASSIST_NVIDIA_MODELS: process.env.ASSIST_NVIDIA_MODELS?.trim() || '',
+    /** Provider order for /assist DMs: gemini,groq,nvidia */
+    ASSIST_LLM_PROVIDERS: (process.env.ASSIST_LLM_PROVIDERS || process.env.TRADE_LLM_PROVIDERS || 'gemini,groq,nvidia').trim(),
     ASSIST_MAX_HISTORY: Math.max(4, parseInt(process.env.ASSIST_MAX_HISTORY, 10) || 12),
     ASSIST_REPLY_COOLDOWN_MS: Math.max(1500, parseInt(process.env.ASSIST_REPLY_COOLDOWN_MS, 10) || 3500),
     ASSIST_TIMEOUT_MS: Math.min(60_000, Math.max(15_000, parseInt(process.env.ASSIST_TIMEOUT_MS, 10) || 45_000)),
