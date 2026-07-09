@@ -5,7 +5,7 @@
 import { logger } from '../utils/logger.js';
 import { formatDateLabelIST, formatNowLabelIST, getTodayDateStrIST } from '../utils/dateIST.js';
 import NvidiaDeepSeekService from '../services/NvidiaDeepSeekService.js';
-import GeminiTradeService from '../services/GeminiTradeService.js';
+import GeminiTradeService, { isGeminiRateLimitError } from '../services/GeminiTradeService.js';
 import { createTradeResearchService } from '../services/TradeResearchService.js';
 import { marketScanService } from '../services/MarketScanService.js';
 import { createTradeDiscoveryEngine } from '../services/TradeDiscoveryEngine.js';
@@ -109,7 +109,8 @@ class TradeAlertController {
         const intel = await this.research.gatherIntel(symbol, { includeMarketBrief: false });
 
         let researchBrief = null;
-        if (this.twoStepResearch && !skipResearch) {
+        // Live /tradenow: skip research brief (half the Gemini calls, faster response).
+        if (this.twoStepResearch && !skipResearch && mode === 'daily') {
             researchBrief = await this.research.runResearchBrief(intel);
         }
 
@@ -248,10 +249,14 @@ class TradeAlertController {
             const result = await this._runAnalysis(symbol, { mode, skipResearch });
             return result.text;
         } catch (err) {
-            if (!skipResearch && this.isTimeoutError(err)) {
-                logger.warn(`Trade analysis timeout for ${symbol}, retrying without research step…`);
+            if (!skipResearch && (this.isTimeoutError(err) || isGeminiRateLimitError(err))) {
+                logger.warn(`Trade analysis retry for ${symbol} (skip research): ${err.message}`);
+                await new Promise((r) => setTimeout(r, isGeminiRateLimitError(err) ? 3000 : 0));
                 const result = await this._runAnalysis(symbol, { mode, skipResearch: true });
                 return result.text;
+            }
+            if (isGeminiRateLimitError(err)) {
+                throw new Error('Gemini rate limit — wait 30–60 seconds and try `/tradenow` again.');
             }
             throw err;
         }
