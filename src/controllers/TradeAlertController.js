@@ -5,8 +5,21 @@
 import { logger } from '../utils/logger.js';
 import { formatDateLabelIST, formatNowLabelIST, getTodayDateStrIST } from '../utils/dateIST.js';
 import NvidiaDeepSeekService from '../services/NvidiaDeepSeekService.js';
+import GeminiTradeService from '../services/GeminiTradeService.js';
 import { createTradeResearchService } from '../services/TradeResearchService.js';
 import { marketScanService } from '../services/MarketScanService.js';
+import { createTradeDiscoveryEngine } from '../services/TradeDiscoveryEngine.js';
+import { scoreConfluence, getMinConfluenceScore } from '../utils/tradeConfluenceScore.js';
+import {
+    getIndiaMarketMode,
+    checkQuoteFreshness,
+} from '../utils/indianMarketCalendar.js';
+import { computeEntryState, ENTRY_STATES } from '../utils/tradeEntryState.js';
+import {
+    formatDailyScanIntro,
+    formatAlertMetaFooter,
+} from '../utils/tradeScanFormatter.js';
+import { parsePremium, parseTargets } from '../utils/tradePlanFormatter.js';
 import {
     TRADE_ANALYSIS_SYSTEM_PROMPT,
     buildTradeUserPrompt,
@@ -35,6 +48,8 @@ class TradeAlertController {
         this.config = config;
         this.mongoDb = mongoDb;
         this.nvidia = new NvidiaDeepSeekService(config);
+        this.gemini = new GeminiTradeService(config);
+        this.tradeLlm = this.gemini;
         this.research = createTradeResearchService(config);
         this.twoStepResearch = config.TRADE_TWO_STEP_RESEARCH !== false;
         this.enabled = config.TRADE_ALERT_ENABLED !== false;
@@ -60,11 +75,15 @@ class TradeAlertController {
             moversBrief: '',
             marketNews: '',
             scannedAt: null,
+            intelligence: null,
         };
+        this.discoveryEngine = null;
+        this.minConfluence = getMinConfluenceScore(config);
     }
 
     async init() {
         if (!this.mongoDb) return;
+        this.discoveryEngine = createTradeDiscoveryEngine(this.config, this.mongoDb);
         this._sentCollection = this.mongoDb.collection('trade_alert_sent');
         this._discoveryCollection = this.mongoDb.collection('trade_discovery_cache');
         await this._sentCollection.createIndex(
@@ -82,7 +101,7 @@ class TradeAlertController {
     }
 
     isReady() {
-        return this.enabled && this.nvidia.isConfigured();
+        return this.enabled && this.tradeLlm.isConfigured();
     }
 
     async _runAnalysis(symbol, { mode = 'live', skipResearch = false, isHiddenGem = false } = {}) {
@@ -108,12 +127,12 @@ class TradeAlertController {
         });
 
         logger.info(
-            `Trade analysis LLM for ${intel.symbol} (${this.nvidia.tradeModel}, ` +
+            `Trade analysis LLM for ${intel.symbol} (Gemini ${this.gemini.tradeModel}, ` +
                 `prompt ${userPrompt.length} chars, research=${researchBrief ? 'yes' : 'no'})…`
         );
 
-        let body = await this.nvidia.completeTradeAnalysis(TRADE_ANALYSIS_SYSTEM_PROMPT, userPrompt, {
-            maxTokens: 2200,
+        let body = await this.tradeLlm.completeTradeAnalysis(TRADE_ANALYSIS_SYSTEM_PROMPT, userPrompt, {
+            maxTokens: 8192,
         });
 
         body = enforceLiveSpotPrice(body, intel.quote);
@@ -125,11 +144,66 @@ class TradeAlertController {
         logger.info(`Trade analysis done for ${intel.symbol} in ${Date.now() - startedAt}ms`);
 
         const signal = parseTradeSignal(body);
+        const marketMode = getIndiaMarketMode();
+        const entryState = this._computeEntryStateFromBody(body, intel.quote, marketMode);
         const text = wrapTradeAlertMessage(intel.symbol, body, {
             isDaily: mode === 'daily',
             isHiddenGem: isHiddenGem && mode === 'daily',
+            meta: {
+                entryState,
+                confluence: null,
+                freshness: intel.quote?.price != null ? 'live quote' : null,
+            },
         });
-        return { text, body, signal, symbol: intel.symbol };
+        return { text, body, signal, symbol: intel.symbol, entryState };
+    }
+
+    _computeEntryStateFromBody(body, quote, marketMode) {
+        const text = String(body || '');
+        const ceBlock = text.match(/━━━\s*CALL\s*\(CE\)\s*SETUP[\s\S]*?(?=━━━\s*PUT|Primary Pick:|$)/i)?.[0] || '';
+        const entryRaw = ceBlock.match(/Entry:\s*(.+)/i)?.[1] || '';
+        const entryNums = entryRaw.match(/(\d+(?:\.\d+)?)/g)?.map(Number) || [];
+        const entryLow = entryNums.length ? Math.min(...entryNums) : null;
+        const entryHigh = entryNums.length ? Math.max(...entryNums) : null;
+        const premiumMatch = ceBlock.match(/Premium:\s*([\d,.]+)/i);
+        const entry = premiumMatch ? parsePremium(premiumMatch[1]) : entryLow;
+        const targets = parseTargets(ceBlock, entry);
+        return computeEntryState({
+            marketMode: marketMode.mode,
+            quote,
+            entryLow: entryLow ?? entry,
+            entryHigh: entryHigh ?? entry,
+            target1: targets.t1,
+        });
+    }
+
+    _passesSendGates({ signal, confluence, entryState, marketMode, discovery }) {
+        const gates = discovery?.gates || {};
+        const minConf = gates.minConfidence ?? 70;
+        const minConv = gates.minConfluence ?? this.minConfluence;
+
+        if (marketMode.watchOnly && gates.allowsLiveEntry === false) {
+            return { pass: false, reason: 'watch-only session' };
+        }
+        if (discovery?.freshness?.ok === false) {
+            return { pass: false, reason: discovery.freshness.message || 'stale data' };
+        }
+        if (!signal.isActionable || signal.confidence < minConf) {
+            return { pass: false, reason: `AI < ${minConf}%` };
+        }
+        if (confluence?.blocked) {
+            return { pass: false, reason: `catalyst AVOID (${confluence.blockReason})` };
+        }
+        if (confluence && confluence.score < minConv) {
+            return { pass: false, reason: `confluence ${confluence.score} < ${minConv}` };
+        }
+        if (
+            entryState?.state === ENTRY_STATES.ENTRY_MISSED ||
+            entryState?.state === ENTRY_STATES.NO_ACTIVE_ENTRY
+        ) {
+            return { pass: false, reason: entryState.label };
+        }
+        return { pass: true, reason: null };
     }
 
     async _runDailyAnalysis(symbol, { isHiddenGem = false } = {}) {
@@ -168,7 +242,7 @@ class TradeAlertController {
     async analyzeSymbol(rawSymbol, { mode = 'live', skipResearch = false } = {}) {
         const symbol = String(rawSymbol || '').trim().toUpperCase();
         if (!symbol) throw new Error('Stock symbol required');
-        if (!this.nvidia.isConfigured()) throw new Error('NVIDIA_API_KEY is not set on the server');
+        if (!this.tradeLlm.isConfigured()) throw new Error('GEMINI_API_KEY is not set on the server');
 
         try {
             const result = await this._runAnalysis(symbol, { mode, skipResearch });
@@ -216,77 +290,79 @@ class TradeAlertController {
                         moversBrief: row.movers_brief || '',
                         marketNews: row.market_news || '',
                         scannedAt: row.created_at || null,
+                        intelligence: row.intelligence || null,
                     };
                     return this._discoveryResultFromCache();
                 }
             }
         }
 
-        if (!this.nvidia.isConfigured()) {
-            const symbols = this.defaultSymbols.slice(0, this.discoveryCount);
-            return {
-                symbols,
-                hiddenGem: null,
-                hiddenGemReason: null,
-                moversBrief: 'n/a',
-                marketNews: 'n/a',
-                scannedAt: new Date(),
-            };
+        if (!this.discoveryEngine) {
+            this.discoveryEngine = createTradeDiscoveryEngine(this.config, this.mongoDb);
         }
 
         logger.info(
             forceRefresh
-                ? '📡 Fresh trade scan requested (bypassing cache)…'
-                : '🤖 AI stock discovery: scanning market + news…'
+                ? '📡 Fresh enhanced trade scan (sectors + macro + smart money)…'
+                : '🤖 Enhanced trade discovery…'
         );
 
-        const snapshot = await marketScanService.buildDiscoverySnapshot();
-        logger.info(`📊 Today's top movers: ${marketScanService.formatTopMoversLine(snapshot.movers)}`);
-
-        const userPrompt = buildDiscoveryUserPrompt(snapshot.context, this.discoveryCount);
+        const intel = await this.discoveryEngine.run({ forceRefresh });
 
         let discovery = { symbols: [], hiddenGem: null, hiddenGemReason: null };
-        try {
-            const raw = await this.nvidia.completeTrade(STOCK_DISCOVERY_SYSTEM_PROMPT, userPrompt, {
-                maxTokens: 900,
-                timeoutMs: 90_000,
-            });
-            discovery = parseDiscoveryResult(raw);
-        } catch (err) {
-            logger.warn(`AI discovery skipped, using movers-only watchlist: ${err.message}`);
+        if (this.tradeLlm.isConfigured()) {
+            const userPrompt = buildDiscoveryUserPrompt(intel.context, this.discoveryCount);
+            try {
+                const raw = await this.tradeLlm.completeTrade(STOCK_DISCOVERY_SYSTEM_PROMPT, userPrompt, {
+                    maxTokens: 900,
+                    timeoutMs: 90_000,
+                });
+                discovery = parseDiscoveryResult(raw);
+            } catch (err) {
+                logger.warn(`AI discovery overlay skipped: ${err.message}`);
+            }
         }
 
+        const baseRows = intel.universeRows || [];
         const gemPick = marketScanService.pickHiddenGem(
-            snapshot.universeRows,
-            snapshot.movers,
-            snapshot.marketNews,
+            baseRows,
+            intel.movers,
+            intel.marketNews,
             discovery.hiddenGem,
             discovery.hiddenGemReason
         );
-        const hiddenGem = gemPick.hiddenGem;
-        const hiddenGemReason = gemPick.hiddenGemReason;
 
-        let symbols = marketScanService.buildFreshMoversWatchlist(
-            snapshot.universeRows,
-            this.discoveryCount,
-            { hiddenGem }
-        );
-        symbols = marketScanService.finalizeWatchlist(symbols, snapshot.universeRows, this.discoveryCount);
+        let symbols = [...intel.symbols];
+        if (gemPick.hiddenGem && !symbols.includes(gemPick.hiddenGem)) {
+            symbols = [gemPick.hiddenGem, ...symbols].slice(0, this.discoveryCount);
+        }
+        symbols = marketScanService.finalizeWatchlist(symbols, baseRows, this.discoveryCount);
 
-        const moversBrief = marketScanService.formatMoversBrief(snapshot.movers);
-        const marketNews = snapshot.marketNews.split('\n').slice(0, 5).join('\n');
-        const scannedAt = new Date();
-
-        this._discoveryCache = {
-            date: dateStr,
+        const scannedAt = intel.scannedAt || new Date();
+        const result = {
             symbols,
-            hiddenGem,
-            hiddenGemReason,
-            movers: snapshot.movers,
-            moversBrief,
-            marketNews,
+            hiddenGem: gemPick.hiddenGem,
+            hiddenGemReason: gemPick.hiddenGemReason,
+            movers: intel.movers,
+            moversBrief: intel.moversBrief,
+            marketNews: intel.marketNews,
             scannedAt,
+            macro: intel.macro,
+            hotSectors: intel.hotSectors,
+            phase4Picks: intel.phase4Picks,
+            momentumAlerts: intel.momentumAlerts,
+            smartMoney: intel.smartMoney,
+            catalystHighlights: intel.catalystHighlights,
+            symbolMeta: intel.symbolMeta,
+            delta: intel.delta,
+            marketMode: intel.marketMode,
+            marketModeLabel: intel.marketModeLabel,
+            freshness: intel.freshness,
+            gates: intel.gates,
+            intelligence: intel,
         };
+
+        this._discoveryCache = { date: dateStr, ...result };
 
         if (persist && this._discoveryCollection) {
             await this._discoveryCollection.updateOne(
@@ -294,12 +370,21 @@ class TradeAlertController {
                 {
                     $set: {
                         symbols,
-                        hidden_gem: hiddenGem,
-                        hidden_gem_reason: hiddenGemReason,
-                        movers: snapshot.movers,
-                        movers_brief: moversBrief,
-                        market_news: marketNews,
-                        raw_response: discovery.symbols?.length ? String(discovery.hiddenGem || '') : 'movers-only',
+                        hidden_gem: gemPick.hiddenGem,
+                        hidden_gem_reason: gemPick.hiddenGemReason,
+                        movers: intel.movers,
+                        movers_brief: intel.moversBrief,
+                        market_news: intel.marketNews,
+                        intelligence: {
+                            macro: intel.macro,
+                            hotSectors: intel.hotSectors,
+                            phase4Picks: intel.phase4Picks,
+                            momentumAlerts: intel.momentumAlerts,
+                            catalystHighlights: intel.catalystHighlights,
+                            delta: intel.delta,
+                            gates: intel.gates,
+                            marketMode: intel.marketMode,
+                        },
                         created_at: scannedAt,
                     },
                 },
@@ -307,20 +392,9 @@ class TradeAlertController {
             );
         }
 
-        const gemNote = hiddenGem ? ` · 💎 gem: ${hiddenGem}` : '';
-        logger.info(
-            `🤖 Fresh movers watchlist (${symbols.length}): ${symbols.join(', ')}${gemNote} ` +
-                `[${marketScanService.formatTopMoversLine(snapshot.movers)}]`
-        );
-        return {
-            symbols,
-            hiddenGem,
-            hiddenGemReason,
-            movers: snapshot.movers,
-            moversBrief,
-            marketNews,
-            scannedAt,
-        };
+        const gemNote = gemPick.hiddenGem ? ` · 💎 ${gemPick.hiddenGem}` : '';
+        logger.info(`🤖 Enhanced watchlist (${symbols.length}): ${symbols.join(', ')}${gemNote}`);
+        return result;
     }
 
     _discoveryResultFromCache() {
@@ -332,18 +406,32 @@ class TradeAlertController {
             moversBrief: this._discoveryCache.moversBrief || 'n/a',
             marketNews: this._discoveryCache.marketNews || 'n/a',
             scannedAt: this._discoveryCache.scannedAt || null,
+            macro: this._discoveryCache.intelligence?.macro || this._discoveryCache.macro || null,
+            hotSectors: this._discoveryCache.intelligence?.hotSectors || this._discoveryCache.hotSectors || null,
+            phase4Picks: this._discoveryCache.intelligence?.phase4Picks || this._discoveryCache.phase4Picks || [],
+            momentumAlerts: this._discoveryCache.intelligence?.momentumAlerts || this._discoveryCache.momentumAlerts || [],
+            smartMoney: this._discoveryCache.smartMoney || null,
+            catalystHighlights: this._discoveryCache.intelligence?.catalystHighlights || this._discoveryCache.catalystHighlights || [],
+            symbolMeta: this._discoveryCache.symbolMeta || [],
+            delta: this._discoveryCache.intelligence?.delta || this._discoveryCache.delta || null,
+            marketMode: this._discoveryCache.intelligence?.marketMode || this._discoveryCache.marketMode,
+            marketModeLabel: this._discoveryCache.marketModeLabel,
+            freshness: this._discoveryCache.freshness,
+            gates: this._discoveryCache.intelligence?.gates || this._discoveryCache.gates,
         };
     }
 
     _formatScanResultLine(entry) {
         const gemTag = entry.isHiddenGem ? ' 💎' : '';
+        const confTag = entry.confluence != null ? ` · conf ${entry.confluence}` : '';
         if (entry.posted) {
-            return `✅ *${entry.symbol}*${gemTag} — ${entry.recommendation} (${entry.confidence}%)`;
+            return `✅ *${entry.symbol}*${gemTag} — ${entry.recommendation} (${entry.confidence}%)${confTag}`;
         }
         if (entry.isActionable) {
-            return `⚠️ ${entry.symbol}${gemTag} — ${entry.recommendation} (${entry.confidence}%) · not posted (daily limit)`;
+            return `⚠️ ${entry.symbol}${gemTag} — ${entry.recommendation} (${entry.confidence}%)${confTag} · not posted (daily limit)`;
         }
-        return `— ${entry.symbol}${gemTag} — NO TRADE (CE ${entry.ceConfidence}% / PE ${entry.peConfidence}%)`;
+        const why = entry.gateReason ? ` · ${entry.gateReason}` : '';
+        return `— ${entry.symbol}${gemTag} — NO TRADE (CE ${entry.ceConfidence}% / PE ${entry.peConfidence}%)${why}`;
     }
 
     async wasDailySent(groupId, symbol, dateStr) {
@@ -396,8 +484,8 @@ class TradeAlertController {
             logger.warn('Trade alert: no socket');
             return;
         }
-        if (!this.nvidia.isConfigured()) {
-            logger.warn('Trade alert: NVIDIA_API_KEY missing');
+        if (!this.tradeLlm.isConfigured()) {
+            logger.warn('Trade alert: GEMINI_API_KEY missing');
             return;
         }
 
@@ -457,22 +545,18 @@ class TradeAlertController {
             let actionableGem = null;
 
             if (mode === 'auto') {
-                let intro =
-                    `📡 *AI Market Scan* · ${dateLabel}\n` +
-                    `Scanning: *${symbols.join(', ')}*\n`;
-                if (hiddenGemSymbol) {
-                    intro +=
-                        `💎 *Hidden gem hunt:* *${hiddenGemSymbol}*` +
-                        (hiddenGemReason ? `\n_${hiddenGemReason}_` : '') +
-                        '\n';
-                    intro += `_Posts: up to 4 standard + 1 gem when gem ≥70%, else up to ${this.maxSendsPerGroup} standard._\n`;
-                } else {
-                    intro += `_CE + PE analysis posted when Primary Pick ≥70% (max ${this.maxSendsPerGroup}/day)._\n`;
-                }
-                intro += '_Analyzing one by one — may take several minutes._';
+                const intro = formatDailyScanIntro(autoDiscovery, {
+                    symbols,
+                    hiddenGem: hiddenGemSymbol,
+                    hiddenGemReason,
+                    maxSends: this.maxSendsPerGroup,
+                });
                 await sock.sendMessage(group.group_id, { text: intro }).catch(() => {});
                 await new Promise((r) => setTimeout(r, 800));
             }
+
+            const marketMode = getIndiaMarketMode();
+            const discoveryFreshness = checkQuoteFreshness(autoDiscovery?.scannedAt);
 
             for (const symbol of symbols) {
                 try {
@@ -481,7 +565,32 @@ class TradeAlertController {
                     }
 
                     const isHiddenGem = Boolean(hiddenGemSymbol && symbol === hiddenGemSymbol);
-                    const { text, signal } = await this._runDailyAnalysis(symbol, { isHiddenGem });
+                    const { text, signal, entryState } = await this._runDailyAnalysis(symbol, { isHiddenGem });
+
+                    const metaRow = autoDiscovery?.symbolMeta?.find((m) => m.symbol === symbol);
+                    const confluence = metaRow
+                        ? {
+                              score: metaRow.confluence,
+                              blocked: metaRow.blocked,
+                              blockReason: metaRow.blocked ? 'catalyst' : null,
+                              passes: metaRow.confluencePass,
+                          }
+                        : scoreConfluence({
+                              symbol,
+                              movers: autoDiscovery?.movers,
+                              macro: autoDiscovery?.macro,
+                          });
+
+                    const gate = this._passesSendGates({
+                        signal,
+                        confluence,
+                        entryState,
+                        marketMode,
+                        discovery: {
+                            ...autoDiscovery,
+                            freshness: discoveryFreshness,
+                        },
+                    });
 
                     const resultEntry = {
                         symbol,
@@ -489,14 +598,17 @@ class TradeAlertController {
                         confidence: signal.confidence,
                         ceConfidence: signal.ceConfidence,
                         peConfidence: signal.peConfidence,
-                        isActionable: signal.isActionable,
+                        isActionable: signal.isActionable && gate.pass,
+                        confluence: confluence.score,
+                        gateReason: gate.pass ? null : gate.reason,
                         isHiddenGem,
                         posted: false,
                     };
 
-                    if (this.onlyBuySignals && !signal.isActionable) {
+                    if (this.onlyBuySignals && !resultEntry.isActionable) {
                         const cePe = `CE ${signal.ceConfidence}% / PE ${signal.peConfidence}%`;
-                        skipped.push(`${symbol} (NO TRADE · ${cePe})`);
+                        const why = gate.pass ? '' : ` · ${gate.reason}`;
+                        skipped.push(`${symbol} (${gate.pass ? 'NO TRADE' : 'blocked'} · ${cePe}${why})`);
                         scanResults.push(resultEntry);
                         await this.markDailySent(group.group_id, symbol, dateStr, {
                             skipped: true,
@@ -589,7 +701,8 @@ class TradeAlertController {
 
     /** Manual preview — always fresh live scan (does not reuse all-day cache). */
     async previewDiscovery() {
-        return this.runDiscovery({ forceRefresh: true, persist: false });
+        const result = await this.runDiscovery({ forceRefresh: true, persist: false });
+        return result;
     }
 }
 

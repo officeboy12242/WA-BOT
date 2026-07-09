@@ -1,9 +1,9 @@
 /**
- * Two-step trade intelligence: live feeds → AI research → CE/PE analysis.
+ * Two-step trade intelligence: live feeds → Gemini research → CE/PE analysis.
  */
 
 import { stockIntelligenceService } from './StockIntelligenceService.js';
-import NvidiaDeepSeekService from './NvidiaDeepSeekService.js';
+import GeminiTradeService from './GeminiTradeService.js';
 import {
     TRADE_RESEARCH_SYSTEM_PROMPT,
     buildResearchUserPrompt,
@@ -12,7 +12,7 @@ import { logger } from '../utils/logger.js';
 
 class TradeResearchService {
     constructor(config = {}) {
-        this.nvidia = new NvidiaDeepSeekService(config);
+        this.gemini = new GeminiTradeService(config);
         this.enabled = config.TRADE_TWO_STEP_RESEARCH !== false;
         this.researchTimeoutMs = Math.min(
             90_000,
@@ -26,11 +26,11 @@ class TradeResearchService {
     }
 
     /**
-     * Step 1: AI synthesizes live data into CE/PE research brief.
+     * Step 1: Gemini synthesizes live data into CE/PE research brief.
      * @param {object} intel
      */
     async runResearchBrief(intel) {
-        if (!this.enabled || !this.nvidia.isConfigured()) {
+        if (!this.enabled || !this.gemini.isConfigured()) {
             return null;
         }
 
@@ -45,9 +45,9 @@ class TradeResearchService {
             marketBrief: intel.marketBrief,
         });
 
-        logger.info(`🔬 AI research brief for ${intel.symbol}…`);
+        logger.info(`🔬 Gemini research brief for ${intel.symbol}…`);
         try {
-            const brief = await this.nvidia.completeTrade(TRADE_RESEARCH_SYSTEM_PROMPT, userPrompt, {
+            const brief = await this.gemini.completeTrade(TRADE_RESEARCH_SYSTEM_PROMPT, userPrompt, {
                 maxTokens: 700,
                 timeoutMs: this.researchTimeoutMs,
             });

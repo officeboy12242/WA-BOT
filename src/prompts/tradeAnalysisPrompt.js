@@ -4,6 +4,7 @@
  */
 
 import { formatNowLabelIST } from '../utils/dateIST.js';
+import { formatAlertMetaFooter } from '../utils/tradeScanFormatter.js';
 
 export const TRADE_ANALYSIS_SYSTEM_PROMPT = `You are an expert options trader for the Indian stock market (NSE/BSE) specializing in FUTURES & OPTIONS.
 
@@ -162,7 +163,7 @@ export function buildTradeUserPrompt({
     return lines.join('\n');
 }
 
-export function wrapTradeAlertMessage(symbol, body, { isDaily = false, isHiddenGem = false } = {}) {
+export function wrapTradeAlertMessage(symbol, body, { isDaily = false, isHiddenGem = false, meta = null } = {}) {
     let text = '';
     text += '┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n';
     if (isHiddenGem && isDaily) {
@@ -173,7 +174,14 @@ export function wrapTradeAlertMessage(symbol, body, { isDaily = false, isHiddenG
     text += '┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n';
     if (isDaily) {
         const tag = isHiddenGem ? '💎 Hidden gem scan' : 'Morning scan';
-        text += `🕐 _${tag} · ${symbol} · ${formatNowLabelIST()}_\n\n`;
+        text += `🕐 _${tag} · ${symbol} · ${formatNowLabelIST()}_\n`;
+        if (meta) {
+            const footer = formatAlertMetaFooter(meta);
+            if (footer) text += footer.replace(/^\n/, '');
+            text += '\n';
+        } else {
+            text += '\n';
+        }
     }
     text += body.trim();
     text += '\n\n─────────────────────────────\n';
