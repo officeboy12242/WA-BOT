@@ -234,9 +234,18 @@ export async function handleTradenow(sock, chatId, senderJid, args, { tradeAlert
             logger.info(`📈 Tradenow ${symbol} in ${chatId} by ${senderPhone}`);
         } catch (error) {
             logger.error(`Error in tradenow: ${error.message}`);
-            const msg = /timeout/i.test(error.message)
-                ? '❌ Analysis timed out after retries.\n_NVIDIA API slow — try again in 1–2 min or use a simpler symbol like NIFTY._'
-                : `❌ Analysis failed: ${error.message}`;
+            let msg;
+            if (/rate limit|429|quota|resource.?exhausted/i.test(error.message)) {
+                msg =
+                    '❌ *Gemini rate limit* — too many requests.\n' +
+                    '_Wait 30–60 seconds and try again, or use `/tradenow NIFTY`._';
+            } else if (/timeout/i.test(error.message)) {
+                msg =
+                    '❌ Analysis timed out after retries.\n' +
+                    '_Gemini API slow — try again in 1–2 min or use a simpler symbol like NIFTY._';
+            } else {
+                msg = `❌ Analysis failed: ${error.message}`;
+            }
             await editMessageText(sock, chatId, loading?.key, msg);
         }
     } catch (error) {

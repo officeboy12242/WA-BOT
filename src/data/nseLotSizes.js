@@ -66,6 +66,13 @@ export const NSE_LOT_SIZES = {
     BEL: 2850,
     DLF: 825,
     VEDL: 1150,
+    IRFC: 5425,
+    RVNL: 1375,
+    POLYCAB: 125,
+    HAL: 150,
+    PNB: 8000,
+    BANKBARODA: 2925,
+    JIOFIN: 2350,
 };
 
 /**
