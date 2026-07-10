@@ -15,7 +15,7 @@ import { hdHubMoviesService } from '../services/HdHubMoviesService.js';
 import { pronoobDriveService } from '../services/PronoobDriveService.js';
 import { urlShortener } from '../utils/urlShortener.js';
 import { safeSendMessage, safeDeleteMessage, plainSendMessage, fastSendMessage, editMessageText } from '../utils/waMessage.js';
-import { createProgressBar } from '../utils/progressBar.js';
+import { formatProgressLine } from '../utils/progressBar.js';
 import { audioFromFilename, qualityFromFilename } from '../utils/movieMetadata.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -314,22 +314,25 @@ function getRandomDialogue(arr) {
 }
 
 function formatSourceLine(emoji, label, status, detail = '') {
+    let line;
     if (status === 'done') {
-        return `${emoji} ${label} ✓${detail ? ` (${detail})` : ''}`;
+        line = `${emoji} ${label} ✓${detail ? ` (${detail})` : ''}`;
+    } else if (status === 'loading') {
+        line = `${emoji} ${label} …`;
+    } else {
+        line = `${emoji} ${label} …`;
     }
-    if (status === 'loading') {
-        return `${emoji} ${label} …`;
-    }
-    return `${emoji} ${label} …`;
+    return `> ${line}`;
 }
 
 function formatMovieSearchProgress(dialogue, query, state) {
-    const percent = Math.round(state.percent ?? 0);
-    const bar = createProgressBar(percent);
+    const percent = state.percent ?? 0;
 
     let msg = `${dialogue}\n\n`;
-    msg += `🔍 *SEARCHING* *${query}*\n`;
-    msg += `SRC  [${bar}] ${percent}%\n`;
+    msg += `*$ movie --search*\n`;
+    msg += `> *${query}*\n`;
+    msg += `${formatProgressLine('SRC', percent, { decimals: 1 })}\n`;
+    msg += `\n*$ sources*\n`;
 
     if (state.hd !== undefined) {
         const detail = state.hdCount != null ? `${state.hdCount} found` : '';
@@ -344,7 +347,7 @@ function formatMovieSearchProgress(dialogue, query, state) {
         msg += `${formatSourceLine('📺', 'AtoZ cinema', state.atoz, detail)}\n`;
     }
     if (state.shorten === 'loading') {
-        msg += '🔗 Shortening links…\n';
+        msg += '> 🔗 Shortening links…\n';
     }
 
     return msg.trimEnd();
