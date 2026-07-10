@@ -33,6 +33,30 @@ class BotSettings {
         );
     }
 
+    async setCoursesPauseSnapshot(courseIds = []) {
+        const ids = [...new Set(courseIds.map((id) => String(id)).filter(Boolean))];
+        await this.collection.updateOne(
+            { key: 'courses_pause_snapshot' },
+            {
+                $set: {
+                    key: 'courses_pause_snapshot',
+                    value: ids,
+                    updated_at: new Date(),
+                },
+            },
+            { upsert: true }
+        );
+    }
+
+    async getCoursesPauseSnapshot() {
+        const doc = await this.collection.findOne({ key: 'courses_pause_snapshot' });
+        return Array.isArray(doc?.value) ? doc.value.map(String) : [];
+    }
+
+    async clearCoursesPauseSnapshot() {
+        await this.collection.deleteOne({ key: 'courses_pause_snapshot' });
+    }
+
     async getDriveSources() {
         const doc = await this.collection.findOne({ key: 'drive_sources' });
         return Array.isArray(doc?.value) ? doc.value : [];

@@ -176,7 +176,21 @@ export const COMMAND_REGISTRY = [
         key: 'newsoff',
         scope: 'group_only',
         role: 'staff',
-        help: 'Disable tech news only — courses continue',
+        help: 'Disable tech news only — use /coursesoff for courses',
+    },
+    {
+        names: ['/courson', '/courseson'],
+        key: 'courson',
+        scope: 'group_only',
+        role: 'staff',
+        help: 'Enable automatic course posting in this group',
+    },
+    {
+        names: ['/coursesoff', '/courseoff'],
+        key: 'coursesoff',
+        scope: 'group_only',
+        role: 'staff',
+        help: 'Disable courses in this group — news can stay on',
     },
     {
         names: ['/githubon'],

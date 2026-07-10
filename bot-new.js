@@ -50,6 +50,8 @@ import { deployNotificationService } from './src/services/DeployNotificationServ
 // Bot state
 const botState = {
     isPaused: false,
+    skipCourseBacklogOnce: false,
+    coursePauseSnapshotIds: null,
     lastCheckTime: null,
     lastNewsCheckTime: null,
     lastNewsPostSlot: null,
@@ -209,9 +211,16 @@ class WhatsAppCourseBot {
                 this.githubTrendingController,
                 this.memberScrapeController,
                 this.warnDatabase,
-                this.authDatabase
+                this.authDatabase,
+                this.courseAPI
             );
-            this.courseController = new CourseController(this.database, this.courseAPI, config, this.groupManager);
+            this.courseController = new CourseController(
+                this.database,
+                this.courseAPI,
+                config,
+                this.groupManager,
+                this.botSettings
+            );
             const morningScraper = new MorningMessageScraper(this.morningDatabase);
             this.morningController = new MorningMessageController(
                 this.morningDatabase,

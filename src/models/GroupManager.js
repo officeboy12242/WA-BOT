@@ -691,6 +691,7 @@ class GroupManager {
                     activated_by: activatedBy,
                     activated_at: new Date(),
                     is_active: true,
+                    courses_enabled: true,
                     news_enabled: true,
                     github_trending: true,
                 },
@@ -794,7 +795,7 @@ class GroupManager {
     async deactivateGroup(groupId) {
         const result = await this.groups.updateOne(
             { group_id: groupId },
-            { $set: { is_active: false } }
+            { $set: { is_active: false, courses_enabled: false, news_enabled: false } }
         );
         logger.info(`🛑 Group deactivated: ${groupId}`);
         return result.matchedCount > 0;
@@ -811,6 +812,46 @@ class GroupManager {
     async getActiveGroups() {
         return this.groups
             .find({ is_active: true }, { projection: { _id: 0 } })
+            .sort({ activated_at: -1 })
+            .toArray();
+    }
+
+    async setCoursesEnabled(groupId, groupName, enabled, setBy) {
+        await this.groups.updateOne(
+            { group_id: groupId },
+            {
+                $set: {
+                    group_name: groupName,
+                    courses_enabled: enabled,
+                    courses_set_by: setBy,
+                    courses_set_at: new Date(),
+                },
+                $setOnInsert: { group_id: groupId, is_active: false },
+            },
+            { upsert: true }
+        );
+        logger.info(
+            `${enabled ? '🎓 Courses ON' : '🎓 Courses OFF'}: ${groupName} (${groupId}) by ${setBy}`
+        );
+    }
+
+    async isCoursesEnabled(groupId) {
+        const row = await this.groups.findOne(
+            { group_id: groupId },
+            { projection: { courses_enabled: 1, is_active: 1 } }
+        );
+        if (!row?.is_active) {
+            return false;
+        }
+        return row.courses_enabled !== false;
+    }
+
+    async getCourseEnabledGroups() {
+        return this.groups
+            .find(
+                { is_active: true, courses_enabled: { $ne: false } },
+                { projection: { _id: 0 } }
+            )
             .sort({ activated_at: -1 })
             .toArray();
     }

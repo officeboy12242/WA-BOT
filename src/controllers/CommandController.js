@@ -32,6 +32,8 @@ import {
     handleStickerOff,
     handleNewsOn,
     handleNewsOff,
+    handleCoursesOn,
+    handleCoursesOff,
     handleGithubOn,
     handleGithubOff,
     handleGroups,
@@ -101,7 +103,7 @@ import {
 import { handleDelLast } from './handlers/deleteHandlers.js';
 
 class CommandController {
-    constructor(database, botState, groupManager, newsController = null, movieController = null, userManager = null, stickerController = null, botSettings = null, githubTrendingController = null, memberScrapeController = null, warnDatabase = null, authDatabase = null) {
+    constructor(database, botState, groupManager, newsController = null, movieController = null, userManager = null, stickerController = null, botSettings = null, githubTrendingController = null, memberScrapeController = null, warnDatabase = null, authDatabase = null, courseAPI = null) {
         this.database = database;
         this.botState = botState;
         this.groupManager = groupManager;
@@ -114,6 +116,7 @@ class CommandController {
         this.memberScrapeController = memberScrapeController;
         this.warnDatabase = warnDatabase;
         this.authDatabase = authDatabase;
+        this.courseAPI = courseAPI;
         this.assistService = null;
         this.pendingClearConfirmations = new Map();
         this.pendingScrapSessions = createScrapSessionStore();
@@ -205,6 +208,7 @@ class CommandController {
             tradeAlertController: this.tradeAlertController,
             assistService: this.assistService,
             botStartTime: this.botStartTime,
+            courseAPI: this.courseAPI,
             isOwnerFromJid: this._isOwnerFromJid,
         };
     }
@@ -289,6 +293,10 @@ class CommandController {
             case 'stickeroff': await handleStickerOff(sock, chatId, senderJid, ctx); break;
             case 'newson':     await handleNewsOn(sock, chatId, senderJid, ctx); break;
             case 'newsoff':    await handleNewsOff(sock, chatId, senderJid, ctx); break;
+            case 'courson':
+            case 'courseson':  await handleCoursesOn(sock, chatId, senderJid, ctx); break;
+            case 'coursesoff':
+            case 'courseoff':  await handleCoursesOff(sock, chatId, senderJid, ctx); break;
             case 'githubon':   await handleGithubOn(sock, chatId, senderJid, ctx); break;
             case 'githuboff':  await handleGithubOff(sock, chatId, senderJid, ctx); break;
             case 'groups':     await handleGroups(sock, chatId, senderJid, ctx); break;
