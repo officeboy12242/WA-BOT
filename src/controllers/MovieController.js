@@ -14,7 +14,8 @@ import { atozService } from '../services/AtoZService.js';
 import { hdHubMoviesService } from '../services/HdHubMoviesService.js';
 import { pronoobDriveService } from '../services/PronoobDriveService.js';
 import { urlShortener } from '../utils/urlShortener.js';
-import { safeSendMessage, safeDeleteMessage, plainSendMessage, fastSendMessage } from '../utils/waMessage.js';
+import { safeSendMessage, safeDeleteMessage, plainSendMessage, fastSendMessage, editMessageText } from '../utils/waMessage.js';
+import { createProgressBar } from '../utils/progressBar.js';
 import { audioFromFilename, qualityFromFilename } from '../utils/movieMetadata.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -310,6 +311,95 @@ const NO_RESULTS_DIALOGUES = [
 
 function getRandomDialogue(arr) {
     return arr[Math.floor(Math.random() * arr.length)];
+}
+
+function formatSourceLine(emoji, label, status, detail = '') {
+    if (status === 'done') {
+        return `${emoji} ${label} ✓${detail ? ` (${detail})` : ''}`;
+    }
+    if (status === 'loading') {
+        return `${emoji} ${label} …`;
+    }
+    return `${emoji} ${label} …`;
+}
+
+function formatMovieSearchProgress(dialogue, query, state) {
+    const percent = Math.round(state.percent ?? 0);
+    const bar = createProgressBar(percent);
+
+    let msg = `${dialogue}\n\n`;
+    msg += `🔍 *SEARCHING* *${query}*\n`;
+    msg += `SRC  [${bar}] ${percent}%\n`;
+
+    if (state.hd !== undefined) {
+        const detail = state.hdCount != null ? `${state.hdCount} found` : '';
+        msg += `${formatSourceLine('📡', 'HDHub4u', state.hd, detail)}\n`;
+    }
+    if (state.drive !== undefined) {
+        const detail = state.driveCount != null ? `${state.driveCount} found` : '';
+        msg += `${formatSourceLine('💾', 'Drive vault', state.drive, detail)}\n`;
+    }
+    if (state.atoz !== undefined) {
+        const detail = state.atozCount != null ? `${state.atozCount} found` : '';
+        msg += `${formatSourceLine('📺', 'AtoZ cinema', state.atoz, detail)}\n`;
+    }
+    if (state.shorten === 'loading') {
+        msg += '🔗 Shortening links…\n';
+    }
+
+    return msg.trimEnd();
+}
+
+function makeMovieProgressEditor(sock, chatId, messageKey, dialogue, query) {
+    let lastEditAt = 0;
+    let pulseId = null;
+    let currentState = {
+        percent: 10,
+        hd: 'loading',
+        drive: 'pending',
+        atoz: 'pending',
+    };
+
+    const format = () => formatMovieSearchProgress(dialogue, query, currentState);
+
+    const stopPulse = () => {
+        if (pulseId) {
+            clearInterval(pulseId);
+            pulseId = null;
+        }
+    };
+
+    const flush = async (patch = {}) => {
+        currentState = { ...currentState, ...patch };
+        stopPulse();
+        lastEditAt = 0;
+        if (!messageKey?.id) return;
+        await editMessageText(sock, chatId, messageKey, format());
+    };
+
+    const update = async (patch = {}, { minGapMs = 1400, force = false } = {}) => {
+        currentState = { ...currentState, ...patch };
+        const now = Date.now();
+        if (!force && now - lastEditAt < minGapMs) return;
+        lastEditAt = now;
+        if (!messageKey?.id) return;
+        await editMessageText(sock, chatId, messageKey, format());
+    };
+
+    const startPulse = (from = 18, to = 38) => {
+        stopPulse();
+        let p = from;
+        pulseId = setInterval(() => {
+            if (p < to && currentState.hd === 'loading') {
+                p += 4;
+                void update({ percent: p }, { minGapMs: 1500 });
+            } else {
+                stopPulse();
+            }
+        }, 1600);
+    };
+
+    return { update, flush, startPulse, stopPulse, format };
 }
 
 function cleanTitle(raw) {
@@ -1049,10 +1139,13 @@ class MovieController {
     /**
      * HDHub first; secondary sources only when needed or within a short grace window.
      */
-    async _searchMovieSources(query) {
+    async _searchMovieSources(query, progress = null) {
         const hdTimeout = config.MOVIE_HD_TIMEOUT_MS || 28_000;
         const secTimeout = config.MOVIE_SECONDARY_TIMEOUT_MS || 8_000;
         const enrichGraceMs = 2_000;
+
+        progress?.startPulse?.();
+        await progress?.update?.({ percent: 15, hd: 'loading', drive: 'pending', atoz: 'pending' }, { force: true });
 
         const hdPromise = this._withTimeout(
             hdHubMoviesService.searchMovies(query, 8),
@@ -1076,6 +1169,14 @@ class MovieController {
         ).catch(() => []);
 
         const hdResults = await hdPromise;
+        progress?.stopPulse?.();
+        await progress?.flush?.({
+            percent: 45,
+            hd: 'done',
+            hdCount: hdResults.length,
+            drive: 'loading',
+            atoz: 'loading',
+        });
 
         let driveResults = [];
         let atozResults = [];
@@ -1088,6 +1189,16 @@ class MovieController {
         } else {
             [driveResults, atozResults] = await Promise.all([drivePromise, atozPromise]);
         }
+
+        await progress?.flush?.({
+            percent: 72,
+            hd: 'done',
+            hdCount: hdResults.length,
+            drive: 'done',
+            driveCount: driveResults.length,
+            atoz: 'done',
+            atozCount: atozResults.length,
+        });
 
         return { hdResults, driveResults, atozResults };
     }
@@ -1112,7 +1223,13 @@ class MovieController {
         }
 
         const dialogue = getRandomDialogue(SEARCH_DIALOGUES);
-        const searchingMsgPromise = movieQuickSend(sock, chatId, { text: dialogue }, originalMsg);
+        const initialProgress = formatMovieSearchProgress(dialogue, query, {
+            percent: 10,
+            hd: 'loading',
+            drive: 'pending',
+            atoz: 'pending',
+        });
+        const searchingMsgPromise = movieQuickSend(sock, chatId, { text: initialProgress }, originalMsg);
 
         const userId = await this._resolvePhoneNumber(sock, chatId, senderJid);
         const normalizedUserId = normalizePhoneNumber(userId);
@@ -1146,12 +1263,13 @@ class MovieController {
 
         const remaining = unlimited ? '∞' : (DAILY_LIMIT - currentCount - 1);
         const searchingMsg = await searchingMsgPromise;
+        const progress = makeMovieProgressEditor(sock, chatId, searchingMsg?.key, dialogue, query);
 
         try {
             const SHORTEN_BUDGET_MS = config.MOVIE_SHORTEN_BUDGET_MS || 15_000;
             let results = [];
 
-            const { hdResults, driveResults, atozResults } = await this._searchMovieSources(query);
+            const { hdResults, driveResults, atozResults } = await this._searchMovieSources(query, progress);
 
             if (hdResults.length > 0) {
                 results.push(...hdResults);
@@ -1175,6 +1293,7 @@ class MovieController {
             const sources = [...new Set(results.map((r) => r.source).filter(Boolean))];
 
             if (!results?.length) {
+                progress.stopPulse();
                 void safeDeleteMessage(sock, chatId, searchingMsg.key);
 
                 const noResult = getRandomDialogue(NO_RESULTS_DIALOGUES);
@@ -1189,7 +1308,28 @@ class MovieController {
             if (!unlimited) await this.incrementSearchCount(normalizedUserId);
             void this.logSearch(normalizedUserId, query, results.length, chatId);
 
+            await progress.flush({
+                percent: 82,
+                hd: 'done',
+                hdCount: hdResults.length,
+                drive: 'done',
+                driveCount: driveResults.length,
+                atoz: 'done',
+                atozCount: atozResults.length,
+            });
+
             try {
+                await progress.flush({
+                    percent: 90,
+                    hd: 'done',
+                    hdCount: hdResults.length,
+                    drive: 'done',
+                    driveCount: driveResults.length,
+                    atoz: 'done',
+                    atozCount: atozResults.length,
+                    shorten: 'loading',
+                });
+
                 await Promise.race([
                     urlShortener.shortenMovieResults(results, SHORTEN_BUDGET_MS),
                     new Promise((resolve) => {
@@ -1259,10 +1399,12 @@ class MovieController {
             }
 
             void safeDeleteMessage(sock, chatId, searchingMsg.key);
+            progress.stopPulse();
 
             logger.info(`🎬 Movie search "${query}" by ${userId} → ${results.length} results from [${sources.join(', ')}] (${sentCount}/${resultMessages.length} msg(s), ${remaining} left)`);
             void this._notifySearchLog(sock, normalizedUserId, query, results.length, chatId, pushName);
         } catch (err) {
+            progress?.stopPulse?.();
             void safeDeleteMessage(sock, chatId, searchingMsg.key);
 
             const errorDialogues = [
