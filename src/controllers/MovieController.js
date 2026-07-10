@@ -13,6 +13,7 @@ import { config } from '../config/config.js';
 import { atozService } from '../services/AtoZService.js';
 import { hdHubMoviesService } from '../services/HdHubMoviesService.js';
 import { pronoobDriveService } from '../services/PronoobDriveService.js';
+import { movieCacheService, cloneMovieResults } from '../services/MovieCacheService.js';
 import { urlShortener } from '../utils/urlShortener.js';
 import { safeSendMessage, safeDeleteMessage, plainSendMessage, fastSendMessage, editMessageText } from '../utils/waMessage.js';
 import { formatProgressLine } from '../utils/progressBar.js';
@@ -332,6 +333,28 @@ function formatMovieSearchProgress(dialogue, query, state) {
     msg += `*$ movie --search*\n`;
     msg += `> *${query}*\n`;
     msg += `${formatProgressLine('SRC', percent, { decimals: 1 })}\n`;
+
+    if (state.cacheMode) {
+        msg += `> 📦 Vault cache · ${state.resultCount ?? 0} title(s)`;
+        if (state.ageHours != null) {
+            msg += ` · ${state.ageHours}h old`;
+        }
+        msg += '\n';
+        if (state.fuzzyMatch) {
+            msg += '> 🔎 Fuzzy vault match\n';
+        }
+        if (state.staleCache) {
+            msg += '> ⚠️ Saved links — APIs slow/offline\n';
+        }
+        if (state.refreshing) {
+            msg += '> 🔄 Refreshing vault in background\n';
+        }
+        if (state.shorten === 'loading') {
+            msg += '> 🔗 Shortening links…\n';
+        }
+        return msg.trimEnd();
+    }
+
     msg += `\n*$ sources*\n`;
 
     if (state.hd !== undefined) {
@@ -502,7 +525,7 @@ function formatMovieResultsFooter() {
     return text;
 }
 
-function formatMovieResultsHeader(query, totalResults, pushName, sources, { totalPages = 1 } = {}) {
+function formatMovieResultsHeader(query, totalResults, pushName, sources, { totalPages = 1, cacheNote = '' } = {}) {
     let text = '';
 
     if (pushName) {
@@ -517,6 +540,9 @@ function formatMovieResultsHeader(query, totalResults, pushName, sources, { tota
         text += ` _(${totalPages} messages)_`;
     }
     text += '\n';
+    if (cacheNote) {
+        text += `${cacheNote}\n`;
+    }
     if (sources.length > 0) {
         text += `🌐 *Sources:* ${sources.join(', ')}\n`;
     }
@@ -528,7 +554,7 @@ function formatMovieResultsContinuation(from, to, totalResults) {
     return `📄 *Results ${from}-${to} of ${totalResults}*\n─────────────────────────────\n\n`;
 }
 
-function formatMovieResults(query, results, pushName = '', sources = []) {
+function formatMovieResults(query, results, pushName = '', sources = [], { cacheNote = '' } = {}) {
     if (!results.length) return [];
 
     const footer = formatMovieResultsFooter();
@@ -546,7 +572,7 @@ function formatMovieResults(query, results, pushName = '', sources = []) {
         while (i < blocks.length) {
             const chunkEnd = i + 1;
             const header = isFirst
-                ? formatMovieResultsHeader(query, totalResults, pushName, sources)
+                ? formatMovieResultsHeader(query, totalResults, pushName, sources, { cacheNote })
                 : formatMovieResultsContinuation(chunkStart + 1, chunkEnd, totalResults);
             const atEnd = chunkEnd === blocks.length;
             const candidate = header + body + blocks[i] + (atEnd ? footer : '');
@@ -559,7 +585,7 @@ function formatMovieResults(query, results, pushName = '', sources = []) {
 
         const chunkEnd = i;
         const header = isFirst
-            ? formatMovieResultsHeader(query, totalResults, pushName, sources)
+            ? formatMovieResultsHeader(query, totalResults, pushName, sources, { cacheNote })
             : formatMovieResultsContinuation(chunkStart + 1, chunkEnd, totalResults);
 
         let text = header + body;
@@ -572,9 +598,10 @@ function formatMovieResults(query, results, pushName = '', sources = []) {
     }
 
     if (messages.length > 1) {
-        const baseHeader = formatMovieResultsHeader(query, totalResults, pushName, sources);
+        const baseHeader = formatMovieResultsHeader(query, totalResults, pushName, sources, { cacheNote });
         const multiHeader = formatMovieResultsHeader(query, totalResults, pushName, sources, {
             totalPages: messages.length,
+            cacheNote,
         });
         messages[0] = multiHeader + messages[0].slice(baseHeader.length);
     }
@@ -626,7 +653,10 @@ class MovieController {
             { name: 'search_log_query' }
         );
 
+        await movieCacheService.init(this.mongoDb);
+
         this._startKeepAlive();
+        this._scheduleVaultPrewarm();
         this._scheduleDailySummary();
         this._scheduleWeeklyTrending();
         this._scheduleWeeklyUpcoming();
@@ -1206,6 +1236,166 @@ class MovieController {
         return { hdResults, driveResults, atozResults };
     }
 
+    async _fetchMovieResultsFromApis(query) {
+        const { hdResults, driveResults, atozResults } = await this._searchMovieSources(query, null);
+
+        let results = [];
+        if (hdResults.length > 0) results.push(...hdResults);
+        if (driveResults.length > 0) results.push(...driveResults);
+        if (atozResults.length > 0) results.push(...atozResults);
+
+        results = rankMovieResults(results, query);
+        const sources = [...new Set(results.map((r) => r.source).filter(Boolean))];
+        return { results, sources, hdResults, driveResults, atozResults };
+    }
+
+    _backgroundRefreshVault(query) {
+        void movieCacheService.runBackgroundRefresh(query, async (q) => this._fetchMovieResultsFromApis(q));
+    }
+
+    async _getTopQueriesForPrewarm(limit = 20) {
+        if (!this.searchLog) return [];
+
+        const weekAgo = new Date();
+        weekAgo.setDate(weekAgo.getDate() - 7);
+
+        const rows = await this.searchLog.aggregate([
+            { $match: { created_at: { $gte: weekAgo }, result_count: { $gt: 0 } } },
+            { $group: { _id: '$query_lower', query: { $first: '$query' }, count: { $sum: 1 } } },
+            { $sort: { count: -1 } },
+            { $limit: limit },
+        ]).toArray();
+
+        return rows.map((r) => r.query).filter(Boolean);
+    }
+
+    async _runVaultPrewarm() {
+        if (!movieCacheService.enabled() || config.MOVIE_CACHE_PREWARM_ENABLED === false) return;
+
+        const topN = config.MOVIE_CACHE_PREWARM_TOP || 20;
+        const queries = await this._getTopQueriesForPrewarm(topN);
+        if (!queries.length) {
+            logger.info('Movie vault pre-warm: no popular queries yet');
+            return;
+        }
+
+        logger.info(`Movie vault pre-warm: refreshing top ${queries.length} queries…`);
+        for (const query of queries) {
+            const cached = await movieCacheService.lookup(query);
+            if (cached?.fresh) continue;
+            this._backgroundRefreshVault(query);
+            await new Promise((r) => setTimeout(r, 2500));
+        }
+    }
+
+    _scheduleVaultPrewarm() {
+        if (config.MOVIE_CACHE_PREWARM_ENABLED === false) return;
+
+        const hour = config.MOVIE_CACHE_PREWARM_HOUR ?? 3;
+        const minute = config.MOVIE_CACHE_PREWARM_MINUTE ?? 30;
+
+        const scheduleNext = () => {
+            const now = new Date();
+            const ist = new Date(now.getTime() + (5.5 * 60 * 60 * 1000));
+            const target = new Date(ist);
+            target.setHours(hour, minute, 0, 0);
+            if (target <= ist) target.setDate(target.getDate() + 1);
+
+            const delayMs = target.getTime() - ist.getTime();
+            logger.info(`🎬 Movie vault pre-warm at ${hour}:${String(minute).padStart(2, '0')} IST (in ${Math.round(delayMs / 60000)}m)`);
+
+            this._prewarmTimer = setTimeout(async () => {
+                await this._runVaultPrewarm();
+                scheduleNext();
+            }, delayMs);
+        };
+
+        scheduleNext();
+    }
+
+    /**
+     * Fast path: any vault hit → serve instantly; refresh APIs in background when aging.
+     */
+    async _resolveMovieResults(query, progress) {
+        const cached = await movieCacheService.lookup(query);
+
+        if (cached?.results?.length) {
+            const needsRefresh = movieCacheService.shouldRevalidate(cached);
+
+            await progress.flush({
+                percent: cached.fresh ? 75 : 68,
+                cacheMode: true,
+                resultCount: cached.results.length,
+                ageHours: cached.ageHours,
+                staleCache: cached.stale,
+                fuzzyMatch: cached.fuzzy,
+                refreshing: needsRefresh,
+            });
+
+            void movieCacheService.recordHit(query);
+            if (needsRefresh) {
+                this._backgroundRefreshVault(query);
+            }
+
+            logger.info(
+                `Movie vault HIT for "${query}" — ${cached.results.length} title(s)`
+                + `${cached.fuzzy ? ' (fuzzy)' : ''}${needsRefresh ? ' + bg refresh' : ''}`,
+            );
+
+            return {
+                results: cached.results,
+                sources: [...cached.sources, 'Vault'],
+                servedFromCache: true,
+                staleCache: cached.stale,
+                fuzzyMatch: cached.fuzzy,
+                hdResults: [],
+                driveResults: [],
+                atozResults: [],
+            };
+        }
+
+        const { results, sources, hdResults, driveResults, atozResults } =
+            await this._fetchMovieResultsFromApisWithProgress(query, progress);
+
+        if (results.length > 0) {
+            void movieCacheService.upsert(query, results, sources);
+            return {
+                results,
+                sources,
+                servedFromCache: false,
+                staleCache: false,
+                fuzzyMatch: false,
+                hdResults,
+                driveResults,
+                atozResults,
+            };
+        }
+
+        return {
+            results: [],
+            sources: [],
+            servedFromCache: false,
+            staleCache: false,
+            fuzzyMatch: false,
+            hdResults,
+            driveResults,
+            atozResults,
+        };
+    }
+
+    async _fetchMovieResultsFromApisWithProgress(query, progress) {
+        const { hdResults, driveResults, atozResults } = await this._searchMovieSources(query, progress);
+
+        let results = [];
+        if (hdResults.length > 0) results.push(...hdResults);
+        if (driveResults.length > 0) results.push(...driveResults);
+        if (atozResults.length > 0) results.push(...atozResults);
+
+        results = rankMovieResults(results, query);
+        const sources = [...new Set(results.map((r) => r.source).filter(Boolean))];
+        return { results, sources, hdResults, driveResults, atozResults };
+    }
+
     async handleMovieSearch(sock, chatId, senderJid, args, pushName = '', originalMsg = null) {
         const query = args.join(' ').trim();
         if (!query) {
@@ -1270,30 +1460,33 @@ class MovieController {
 
         try {
             const SHORTEN_BUDGET_MS = config.MOVIE_SHORTEN_BUDGET_MS || 15_000;
-            let results = [];
 
-            const { hdResults, driveResults, atozResults } = await this._searchMovieSources(query, progress);
+            const resolved = await this._resolveMovieResults(query, progress);
+            let results = cloneMovieResults(resolved.results);
+            const { hdResults, driveResults, atozResults, servedFromCache, staleCache, fuzzyMatch } = resolved;
 
             if (hdResults.length > 0) {
-                results.push(...hdResults);
                 logger.info(`HDHub: ${hdResults.length} results for "${query}"`);
-            } else {
+            } else if (!servedFromCache) {
                 logger.warn(`HDHub: no results for "${query}"`);
             }
 
             if (driveResults.length > 0) {
-                results.push(...driveResults);
                 logger.info(`Drive: ${driveResults.length} results for "${query}"`);
             }
 
             if (atozResults.length > 0) {
-                results.push(...atozResults);
                 logger.info(`AtoZ: ${atozResults.length} results for "${query}"`);
             }
 
-            results = rankMovieResults(results, query);
-
-            const sources = [...new Set(results.map((r) => r.source).filter(Boolean))];
+            const sources = [...new Set(resolved.sources.filter(Boolean))];
+            const cacheNote = servedFromCache
+                ? (staleCache
+                    ? '📦 _Instant vault — saved links (APIs slow/offline)_'
+                    : fuzzyMatch
+                        ? '📦 _Instant vault — fuzzy match_'
+                        : '📦 _Instant vault — skipping APIs_')
+                : '';
 
             if (!results?.length) {
                 progress.stopPulse();
@@ -1311,27 +1504,31 @@ class MovieController {
             if (!unlimited) await this.incrementSearchCount(normalizedUserId);
             void this.logSearch(normalizedUserId, query, results.length, chatId);
 
-            await progress.flush({
-                percent: 82,
-                hd: 'done',
-                hdCount: hdResults.length,
-                drive: 'done',
-                driveCount: driveResults.length,
-                atoz: 'done',
-                atozCount: atozResults.length,
-            });
-
-            try {
+            if (!servedFromCache) {
                 await progress.flush({
-                    percent: 90,
+                    percent: 82,
                     hd: 'done',
                     hdCount: hdResults.length,
                     drive: 'done',
                     driveCount: driveResults.length,
                     atoz: 'done',
                     atozCount: atozResults.length,
-                    shorten: 'loading',
                 });
+            }
+
+            try {
+                await progress.flush(servedFromCache
+                    ? { percent: 88, cacheMode: true, resultCount: results.length, shorten: 'loading' }
+                    : {
+                        percent: 90,
+                        hd: 'done',
+                        hdCount: hdResults.length,
+                        drive: 'done',
+                        driveCount: driveResults.length,
+                        atoz: 'done',
+                        atozCount: atozResults.length,
+                        shorten: 'loading',
+                    });
 
                 await Promise.race([
                     urlShortener.shortenMovieResults(results, SHORTEN_BUDGET_MS),
@@ -1346,7 +1543,7 @@ class MovieController {
                 logger.warn(`URL shorten skipped (sending results anyway): ${err?.message || err}`);
             }
 
-            const resultMessages = formatMovieResults(query, results, pushName, sources);
+            const resultMessages = formatMovieResults(query, results, pushName, sources, { cacheNote });
             logger.info(`Formatted ${resultMessages.length} message(s) for "${query}" (${resultMessages.reduce((a, m) => a + m.length, 0)} chars)`);
 
             if (!resultMessages.length) {

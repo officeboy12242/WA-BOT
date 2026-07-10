@@ -60,8 +60,21 @@ export const config = {
     MOVIE_SECONDARY_TIMEOUT_MS: Math.max(4_000, parseInt(process.env.MOVIE_SECONDARY_TIMEOUT_MS, 10) || 8_000),
     /** Movie search — max ms to shorten links before sending results. */
     MOVIE_SHORTEN_BUDGET_MS: Math.max(5_000, parseInt(process.env.MOVIE_SHORTEN_BUDGET_MS, 10) || 15_000),
-    /** Movie search — cache identical queries (ms). */
+    /** In-memory HDHub query dedupe (ms). */
     MOVIE_SEARCH_CACHE_TTL_MS: Math.max(60_000, parseInt(process.env.MOVIE_SEARCH_CACHE_TTL_MS, 10) || 5 * 60_000),
+    /** MongoDB vault — skip APIs when a fresh cached search exists. */
+    MOVIE_CACHE_ENABLED: process.env.MOVIE_CACHE_ENABLED !== 'false',
+    /** Vault considered fresh — serve without calling APIs (default 24h). */
+    MOVIE_CACHE_FRESH_MS: Math.max(60_000, parseInt(process.env.MOVIE_CACHE_FRESH_MS, 10) || 24 * 60 * 60 * 1000),
+    /** Vault stale grace — serve instantly if APIs fail (default 7d). */
+    MOVIE_CACHE_STALE_MS: Math.max(3600_000, parseInt(process.env.MOVIE_CACHE_STALE_MS, 10) || 7 * 24 * 60 * 60 * 1000),
+    /** Background refresh vault after this age (default 6h) while still serving cached links. */
+    MOVIE_CACHE_REVALIDATE_MS: Math.max(60_000, parseInt(process.env.MOVIE_CACHE_REVALIDATE_MS, 10) || 6 * 60 * 60 * 1000),
+    /** Nightly pre-warm top searches into vault (default 3:30 AM IST). */
+    MOVIE_CACHE_PREWARM_ENABLED: process.env.MOVIE_CACHE_PREWARM_ENABLED !== 'false',
+    MOVIE_CACHE_PREWARM_HOUR: Math.min(23, Math.max(0, parseInt(process.env.MOVIE_CACHE_PREWARM_HOUR, 10) || 3)),
+    MOVIE_CACHE_PREWARM_MINUTE: Math.min(59, Math.max(0, parseInt(process.env.MOVIE_CACHE_PREWARM_MINUTE, 10) || 30)),
+    MOVIE_CACHE_PREWARM_TOP: Math.max(5, parseInt(process.env.MOVIE_CACHE_PREWARM_TOP, 10) || 20),
     /** Daily group chat recap (/summaryon groups). */
     GROUP_SUMMARY_ENABLED: process.env.GROUP_SUMMARY_ENABLED !== 'false',
     /** When recap is sent — default 00:00 = midnight IST (end of calendar day). */
