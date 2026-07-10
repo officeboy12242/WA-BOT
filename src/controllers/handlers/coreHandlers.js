@@ -10,7 +10,7 @@ import { formatHelpText } from '../../commands/registry.js';
 import { sendAndDelete } from '../../utils/autoDelete.js';
 import { safeSendMessage } from '../../utils/waMessage.js';
 import { fetchMonthlyBandwidthMB, formatBandwidth } from '../../utils/renderMetrics.js';
-import { createProgressBar } from '../../utils/progressBar.js';
+import { formatProgressLine } from '../../utils/progressBar.js';
 
 function formatUptime(milliseconds) {
     const seconds = Math.floor(milliseconds / 1000);
@@ -60,8 +60,6 @@ export async function handlePing(sock, chatId, { botState, botStartTime, origina
             timeStyle: 'short',
         });
 
-        const cpuBar = createProgressBar(parseFloat(stats.cpuUsage));
-        const memBar = createProgressBar(parseFloat(stats.memUsage));
         const bandwidthText = bandwidthMB == null ? null : formatBandwidth(bandwidthMB);
 
         let r = `        ⚡ *SASSY BOT TERMINAL* v2.0
@@ -72,8 +70,8 @@ export async function handlePing(sock, chatId, { botState, botStartTime, origina
 > ⏱️ Uptime: *${uptimeFormatted}*
 
 *$ monitor --resources*
-> CPU  [${cpuBar}] ${stats.cpuUsage}%
-> MEM  [${memBar}] ${stats.memUsage}%
+${formatProgressLine('CPU', stats.cpuUsage, { decimals: 1 })}
+${formatProgressLine('MEM', stats.memUsage, { decimals: 1 })}
 > PROC: ${stats.processMemMB} MB | CORES: ${stats.cores}
 ${bandwidthText ? `> BW   ${bandwidthText} this month\n` : ''}
 
