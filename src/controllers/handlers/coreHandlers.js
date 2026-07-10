@@ -10,6 +10,7 @@ import { formatHelpText } from '../../commands/registry.js';
 import { sendAndDelete } from '../../utils/autoDelete.js';
 import { safeSendMessage } from '../../utils/waMessage.js';
 import { fetchMonthlyBandwidthMB, formatBandwidth } from '../../utils/renderMetrics.js';
+import { createProgressBar } from '../../utils/progressBar.js';
 
 function formatUptime(milliseconds) {
     const seconds = Math.floor(milliseconds / 1000);
@@ -39,13 +40,6 @@ function getSystemStats() {
     const processMemMB = Math.round(process.memoryUsage().rss / 1024 / 1024);
     
     return { cpuUsage, memUsage, processMemMB, cores: cpus.length, platform: os.platform(), arch: os.arch() };
-}
-
-function createProgressBar(percent, length = 10) {
-    const filled = Math.round((percent / 100) * length);
-    const empty = length - filled;
-    const bar = '█'.repeat(filled) + '░'.repeat(empty);
-    return bar;
 }
 
 export async function handlePing(sock, chatId, { botState, botStartTime, originalMsg }) {
