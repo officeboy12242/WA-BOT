@@ -7,11 +7,12 @@ import { logger } from '../utils/logger.js';
 import { formatCourseMessage } from '../utils/messageFormatter.js';
 
 class CourseController {
-    constructor(database, courseAPI, config, groupManager) {
+    constructor(database, courseAPI, config, groupManager, botSettings = null) {
         this.database = database;
         this.courseAPI = courseAPI;
         this.config = config;
         this.groupManager = groupManager;
+        this.botSettings = botSettings;
     }
 
     async postCourseToGroup(sock, course, groupId) {
@@ -95,11 +96,11 @@ class CourseController {
                 return;
             }
 
-            // Get all active groups
-            const activeGroups = await this.groupManager.getActiveGroups();
+            // Groups with courses explicitly enabled (/activate, not /coursesoff)
+            const activeGroups = await this.groupManager.getCourseEnabledGroups();
 
             if (activeGroups.length === 0) {
-                logger.warn('⚠️ No active groups. Use /activate in a group to start posting.');
+                logger.warn('⚠️ No course-enabled groups. Use /activate in a group (and avoid /coursesoff).');
                 return;
             }
 
@@ -156,8 +157,23 @@ class CourseController {
 
         logger.info('─── 🔍 Checking for new courses ───');
         botState.lastCheckTime = Date.now();
-        
-        const newCourses = await this.courseAPI.fetchNewCourses();
+
+        let newCourses = await this.courseAPI.fetchNewCourses();
+
+        if (botState.skipCourseBacklogOnce) {
+            const snapshot = botState.coursePauseSnapshotIds?.length
+                ? botState.coursePauseSnapshotIds
+                : (this.botSettings ? await this.botSettings.getCoursesPauseSnapshot() : []);
+            const snapSet = new Set(snapshot.map(String));
+            const before = newCourses.length;
+            newCourses = newCourses.filter((c) => !snapSet.has(String(c.id)));
+            botState.skipCourseBacklogOnce = false;
+            botState.coursePauseSnapshotIds = null;
+            if (this.botSettings) {
+                await this.botSettings.clearCoursesPauseSnapshot();
+            }
+            logger.info(`▶️ Resume: skipped ${before - newCourses.length} backlog course(s); only new ones will post`);
+        }
 
         if (newCourses.length > 0) {
             logger.info(`📬 ${newCourses.length} new course(s) to post.`);

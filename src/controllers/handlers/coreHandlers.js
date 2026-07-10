@@ -217,7 +217,7 @@ export async function handleCancel(sock, chatId, senderJid, { pendingClearConfir
     }
 }
 
-export async function handlePause(sock, chatId, { botState, botSettings, originalMsg }) {
+export async function handlePause(sock, chatId, { botState, botSettings, courseAPI, originalMsg }) {
     try {
         if (botState.isPaused) {
             await safeSendMessage(sock, chatId, {
@@ -229,21 +229,37 @@ export async function handlePause(sock, chatId, { botState, botSettings, origina
         }
 
         botState.isPaused = true;
+
+        let snapshotIds = [];
+        if (courseAPI) {
+            try {
+                const pending = await courseAPI.fetchNewCourses();
+                snapshotIds = pending.map((c) => String(c.id)).filter(Boolean);
+            } catch (err) {
+                logger.warn(`Could not snapshot courses on pause: ${err.message}`);
+            }
+        }
+        botState.coursePauseSnapshotIds = snapshotIds;
+
         if (botSettings) {
             await botSettings.setCoursesPaused(true);
+            if (snapshotIds.length) {
+                await botSettings.setCoursesPauseSnapshot(snapshotIds);
+            }
         }
 
         let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
         r += '⏸️ *COURSES PAUSED* ⏸️\n';
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
-        r += '🛑 Automatic *course* posting has been paused.\n\n';
-        r += '📰 *Tech news* will continue posting on schedule.\n';
+        r += '🛑 Automatic *course* posting has been paused globally.\n\n';
+        r += '📰 *Tech news* will continue in news-enabled groups.\n';
+        r += '🎓 Per-group: `/coursesoff` still applies when you resume.\n';
         r += '💬 Commands still work normally.\n\n';
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-        r += '💡 Use `/resume` to resume course posting';
+        r += '💡 Use `/resume` to resume — backlog won\'t flood all groups';
 
         await safeSendMessage(sock, chatId, { text: r }, originalMsg);
-        logger.info(`⏸️ Course posting paused by ${chatId}`);
+        logger.info(`⏸️ Course posting paused by ${chatId} (snapshot ${snapshotIds.length} ids)`);
     } catch (error) {
         logger.error(`Error pausing bot: ${error.message}`);
     }
@@ -261,20 +277,27 @@ export async function handleResume(sock, chatId, { botState, botSettings, origin
         }
 
         botState.isPaused = false;
+        botState.skipCourseBacklogOnce = true;
+
         if (botSettings) {
             await botSettings.setCoursesPaused(false);
+            if (!botState.coursePauseSnapshotIds?.length) {
+                botState.coursePauseSnapshotIds = await botSettings.getCoursesPauseSnapshot();
+            }
         }
 
         let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
         r += '▶️ *COURSES RESUMED* ▶️\n';
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
-        r += '✅ Automatic *course* posting has been resumed.\n\n';
-        r += '📰 Tech news continues on its normal schedule.\n\n';
+        r += '✅ Automatic *course* posting is active again.\n\n';
+        r += '🎓 Posts only to groups with courses ON (`/courson`).\n';
+        r += '📰 Tech news continues on its normal schedule.\n';
+        r += '⏭️ Courses queued during pause will *not* flood on resume.\n\n';
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-        r += '💡 Use `/pause` to pause courses only';
+        r += '💡 Use `/coursesoff` in a group to stop courses there only';
 
         await safeSendMessage(sock, chatId, { text: r }, originalMsg);
-        logger.info(`▶️ Course posting resumed by ${chatId}`);
+        logger.info(`▶️ Course posting resumed by ${chatId} (backlog skip enabled)`);
     } catch (error) {
         logger.error(`Error resuming bot: ${error.message}`);
     }
