@@ -50,6 +50,8 @@ class HoroscopeService {
     constructor() {
         this._cache = new Map();
         this._cacheExpiry = 6 * 60 * 60 * 1000; // 6 hours cache
+        /** Bump when response shape changes (e.g. luck extras fix) */
+        this._cacheVersion = 'v2';
     }
 
     /**
@@ -89,7 +91,7 @@ class HoroscopeService {
      */
     _getCacheKey(sign) {
         const today = new Date().toISOString().split('T')[0];
-        return `${sign}_${today}`;
+        return `${this._cacheVersion}_${sign}_${today}`;
     }
 
     _formatDate() {
@@ -99,6 +101,41 @@ class HoroscopeService {
             month: 'long',
             day: 'numeric',
         });
+    }
+
+    /**
+     * Parse lucky number/color/compatibility from prediction text when API omits fields.
+     */
+    _parseExtrasFromText(text) {
+        if (!text) return {};
+
+        const extras = {};
+        const numMatch = text.match(/lucky number[:\s]+(\d+)/i);
+        const colorMatch = text.match(/lucky color[:\s]+([A-Za-z ]+?)(?:[,.]|$|\s+lucky|\s+compatible)/i);
+        const compatMatch = text.match(/compatible sign[:\s]+([A-Za-z]+)/i);
+
+        if (numMatch) extras.luckyNumber = Number(numMatch[1]);
+        if (colorMatch) extras.luckyColor = colorMatch[1].trim();
+        if (compatMatch) extras.compatibility = compatMatch[1].trim();
+
+        return extras;
+    }
+
+    /**
+     * Merge Vedika (or parsed) extras with deterministic daily luck for any missing fields.
+     */
+    _resolveExtras(vedikaPayload, sign) {
+        const generated = this._generateDailyLuck(sign);
+        if (!vedikaPayload) return generated;
+
+        const parsed = this._parseExtrasFromText(vedikaPayload.horoscope || '');
+
+        return {
+            luckyNumber: vedikaPayload.luckyNumber ?? parsed.luckyNumber ?? generated.luckyNumber,
+            luckyColor: vedikaPayload.luckyColor ?? parsed.luckyColor ?? generated.luckyColor,
+            mood: vedikaPayload.mood ?? generated.mood,
+            compatibility: vedikaPayload.compatibility ?? parsed.compatibility ?? generated.compatibility,
+        };
     }
 
     /**
@@ -165,10 +202,10 @@ class HoroscopeService {
 
         return {
             horoscope: data.prediction?.trim() || '',
-            luckyNumber: data.lucky_number,
-            luckyColor: data.lucky_color,
+            luckyNumber: data.luckyNumber ?? data.lucky_number,
+            luckyColor: data.luckyColor ?? data.lucky_color,
             mood: data.mood,
-            compatibility: data.compatibility,
+            compatibility: data.compatibility ?? data.compatibleSign ?? data.compatible_sign,
         };
     }
 
@@ -288,9 +325,10 @@ class HoroscopeService {
             return { error: 'api_error', diagnostics };
         }
 
-        const extras = vedikaResult.status === 'fulfilled'
-            ? vedikaResult.value
-            : this._generateDailyLuck(normalizedSign);
+        const extras = this._resolveExtras(
+            vedikaResult.status === 'fulfilled' ? vedikaResult.value : null,
+            normalizedSign,
+        );
 
         const data = {
             sign: normalizedSign,
