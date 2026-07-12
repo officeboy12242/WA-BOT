@@ -123,7 +123,7 @@ export const config = {
     ASSIST_REPLY_COOLDOWN_MS: Math.max(1500, parseInt(process.env.ASSIST_REPLY_COOLDOWN_MS, 10) || 3500),
     ASSIST_TIMEOUT_MS: Math.min(60_000, Math.max(15_000, parseInt(process.env.ASSIST_TIMEOUT_MS, 10) || 45_000)),
     /** Auto-propose summary code fixes (owner must approve push) */
-    SUMMARY_SELF_HEAL_ENABLED: process.env.SUMMARY_SELF_HEAL_ENABLED !== 'false',
+    SUMMARY_SELF_HEAL_ENABLED: process.env.SUMMARY_SELF_HEAL_ENABLED === 'true',
     /** Auto-propose /horo fixes when all horoscope APIs fail (owner must approve push) */
     HOROSCOPE_SELF_HEAL_ENABLED: process.env.HOROSCOPE_SELF_HEAL_ENABLED !== 'false',
     /** GitHub PAT with contents:write for self-heal push */
