@@ -354,13 +354,7 @@ class GroupSummaryController {
         } catch (err) {
             logger.error(`NVIDIA recap failed for ${groupName}: ${err.message}`);
             summary = null;
-            this.selfHeal.triggerFromSummaryFailure({
-                groupName,
-                dateStr,
-                errorMessage: err.message,
-                messageCount: messages.length,
-                useChunks,
-            });
+            this.selfHeal.triggerFromSummaryFailure(groupName, dateStr, err.message);
         }
 
         // Always show topics — fill gaps from chat activity if LLM timed out or returned empty
