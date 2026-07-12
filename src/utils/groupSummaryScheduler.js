@@ -64,11 +64,13 @@ export function startGroupSummaryScheduler({ getSock, botState, groupSummaryCont
     scheduleNext();
 
     // Catch up if bot restarted after midnight and missed the scheduled run
-    setTimeout(() => {
-        void groupSummaryController.runCatchUpIfNeeded(getSock()).catch((err) => {
-            logger.error(`Group summary catch-up failed: ${err.message}`);
-        });
-    }, 60_000);
+    if (config.GROUP_SUMMARY_CATCHUP_ENABLED !== false) {
+        setTimeout(() => {
+            void groupSummaryController.runCatchUpIfNeeded(getSock()).catch((err) => {
+                logger.error(`Group summary catch-up failed: ${err.message}`);
+            });
+        }, 60_000);
+    }
 
     return {
         stop() {
