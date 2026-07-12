@@ -87,7 +87,7 @@ export const config = {
     GROUP_SUMMARY_MAX_MESSAGES: parseInt(process.env.GROUP_SUMMARY_MAX_MESSAGES, 10) || 400,
     NVIDIA_API_KEY: process.env.NVIDIA_API_KEY?.trim() || '',
     /** Group summary / recap model */
-    NVIDIA_MODEL: process.env.NVIDIA_MODEL?.trim() || 'deepseek-ai/deepseek-v4-flash',
+    NVIDIA_MODEL: process.env.NVIDIA_MODEL?.trim() || 'deepseek-ai/deepseek-r1',
     /** Trade discovery, research, CE/PE analysis — Gemini (not GLM) */
     GEMINI_TRADE_MODEL: process.env.GEMINI_TRADE_MODEL?.trim() || 'gemini-2.5-flash',
     GEMINI_TRADE_MODELS: process.env.GEMINI_TRADE_MODELS?.trim() || 'gemini-2.5-flash,gemini-2.5-pro,gemini-2.0-flash',
