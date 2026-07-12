@@ -342,19 +342,13 @@ class GroupChatLogService {
               ]
             : ['Extract 3-5 concrete topics with short details from the chat lines below.'];
 
-        let body = [
+        const body = [
             `Group: ${groupName}`,
             `Date: ${dateLabel}`,
             `Messages (${messages.length}):${sampledNote}`,
             ...narrativeLines,
             lines.join('\n'),
         ].join('\n\n');
-
-        // Keep prompts small so DeepSeek finishes within timeout
-        const maxChars = messages.length > 150 ? 4500 : messages.length > 80 ? 5500 : 8000;
-        if (body.length > maxChars) {
-            body = `${body.slice(0, maxChars)}\n\n[...truncated...]`;
-        }
 
         return body;
     }
