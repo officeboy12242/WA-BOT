@@ -36,7 +36,7 @@ const HOROSCOPE_ALLOWED_FILES = [
 /** Min gap between auto horoscope heal proposals (avoid spam on every /horo) */
 const HOROSCOPE_HEAL_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 /** Min gap between auto summary heal proposals */
-const SUMMARY_HEAL_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+const SUMMARY_HEAL_COOLDOWN_MS = config.summarySelfHealEnabled ? (6 * 60 * 60 * 1000) : Infinity;
 
 const BLOCKED_PATH_PARTS = ['.env', 'node_modules', 'auth_info', 'credentials', '.git'];
 
