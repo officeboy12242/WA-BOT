@@ -83,6 +83,8 @@ export function formatJobHuntStatus({
     enabledDm,
     groupCount,
     companyCount,
+    sourceLabel,
+    mode,
     minScore,
     topN,
     busy,
@@ -93,7 +95,8 @@ export function formatJobHuntStatus({
     msg += `╚════════════════════════════╝\n\n`;
     msg += `📩 *Owner DM alerts:* ${enabledDm ? '✅ ON' : '❌ OFF'}\n`;
     msg += `👥 *Groups enabled:* ${groupCount ?? 0}\n`;
-    msg += `🏢 *Companies:* ${companyCount ?? 0}\n`;
+    msg += `🇮🇳 *Mode:* ${mode || 'india'}\n`;
+    msg += `🔎 *Sources:* ${sourceLabel || `companies (${companyCount ?? 0})`}\n`;
     msg += `🎯 *min_score / top_n:* ${minScore}/${topN}\n`;
     msg += `⚙️ *Scan:* ${busy ? '🟡 running…' : '🟢 idle'}\n`;
     if (lastRun) {

@@ -88,7 +88,10 @@ export async function handleJobHunt(sock, chatId, senderJid, args, ctx) {
                 return;
             }
             await sock.sendMessage(chatId, {
-                text: '🚀 Starting job hunt scan…\n_30–90 min for full company list. Digest will be sent when done._',
+                text:
+                    '🚀 Starting *India* job hunt…\n' +
+                    '🔎 Naukri → Indeed → LinkedIn\n' +
+                    '_Usually 5–15 min. Digest arrives when done._',
             }, { quoted: originalMsg });
             void jobHuntController.runAndNotify(sock).catch(async (err) => {
                 logger.error(`JobHunt manual scan failed: ${err.message}`);
