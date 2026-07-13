@@ -31,7 +31,9 @@ desktop.ini
 # IDE / editor
 .vscode/
 .idea/
-.cursor/
+.cursor/*
+!.cursor/rules/
+!.cursor/rules/**
 *.swp
 *.swo
 *~
