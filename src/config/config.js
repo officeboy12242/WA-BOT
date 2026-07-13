@@ -187,6 +187,37 @@ export const config = {
     TRADE_ALERT_EXTRA_HOLIDAYS: (process.env.TRADE_ALERT_EXTRA_HOLIDAYS || '').trim(),
     /** Force run on specific dates (e.g. budget Sunday) YYYY-MM-DD, comma-separated */
     TRADE_ALERT_FORCE_TRADING_DAYS: (process.env.TRADE_ALERT_FORCE_TRADING_DAYS || '').trim(),
+    /** Job hunt (TinyFish discover + LLM score → WhatsApp digest). */
+    JOB_HUNT_ENABLED: process.env.JOB_HUNT_ENABLED !== 'false',
+    JOB_HUNT_TIME: (process.env.JOB_HUNT_TIME || '02:30').trim(),
+    JOB_HUNT_TIMEZONE: process.env.JOB_HUNT_TIMEZONE || 'Asia/Kolkata',
+    JOB_HUNT_OWNER_DM: process.env.JOB_HUNT_OWNER_DM !== 'false',
+    JOB_HUNT_MIN_SCORE: Math.max(0, Math.min(100, parseInt(process.env.JOB_HUNT_MIN_SCORE, 10) || 60)),
+    JOB_HUNT_TOP_N: Math.max(1, Math.min(20, parseInt(process.env.JOB_HUNT_TOP_N, 10) || 5)),
+    JOB_HUNT_MAX_COMPANIES: (() => {
+        const n = parseInt(process.env.JOB_HUNT_MAX_COMPANIES, 10);
+        return Number.isFinite(n) && n > 0 ? n : null;
+    })(),
+    JOB_HUNT_FETCH_DELAY_MS: Math.max(500, parseInt(process.env.JOB_HUNT_FETCH_DELAY_MS, 10) || 2500),
+    JOB_HUNT_SEARCH_DELAY_MS: Math.max(2000, parseInt(process.env.JOB_HUNT_SEARCH_DELAY_MS, 10) || 13000),
+    TINYFISH_API_KEY: process.env.TINYFISH_API_KEY?.trim() || '',
+    OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY?.trim() || '',
+    OPENROUTER_MODEL: process.env.OPENROUTER_MODEL?.trim() || 'meta-llama/llama-3.3-70b-instruct:free',
+    OPENROUTER_FALLBACK_MODELS: (process.env.OPENROUTER_FALLBACK_MODELS || '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean),
+    OPENROUTER_JOB_MODELS: (process.env.OPENROUTER_JOB_MODELS || '').trim(),
+    JOB_HUNT_GEMINI_MODELS: (process.env.JOB_HUNT_GEMINI_MODELS || '').trim(),
+    JOB_HUNT_GROQ_MODELS: (process.env.JOB_HUNT_GROQ_MODELS || '').trim(),
+    JOB_HUNT_CANDIDATE_NAME: (process.env.JOB_HUNT_CANDIDATE_NAME || '').trim(),
+    JOB_HUNT_PROFILE: (process.env.JOB_HUNT_PROFILE || '').trim(),
+    JOB_HUNT_SEEKING: (process.env.JOB_HUNT_SEEKING || '').trim(),
+    JOB_HUNT_NOT_SUITABLE: (process.env.JOB_HUNT_NOT_SUITABLE || '').trim(),
+    JOB_HUNT_SEARCH_SENIORITY: (process.env.JOB_HUNT_SEARCH_SENIORITY || '').trim(),
+    JOB_HUNT_SEARCH_KEYWORDS: (process.env.JOB_HUNT_SEARCH_KEYWORDS || '').trim(),
+    JOB_HUNT_RELOCATION_NOTE: (process.env.JOB_HUNT_RELOCATION_NOTE || '').trim(),
+    JOB_HUNT_RESUME: (process.env.JOB_HUNT_RESUME || '').trim(),
     /** Multi-target trade plan on CE/PE sections (1 lot, ₹ P&L) */
     TRADE_PLAN_ENABLED: process.env.TRADE_PLAN_ENABLED !== 'false',
     /** Partial booking % at T1,T2,T3 e.g. 50,30,20 */
