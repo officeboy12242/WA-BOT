@@ -10,6 +10,7 @@ import {
     DEFAULT_HEADER_TEMPLATE,
     formatWelcomeStatus,
     isValidParticipantJid,
+    mentionDisplayToken,
     normalizeCustomWelcomePart,
     normalizeParticipantEntry,
     previewWelcomeMessage,
@@ -21,6 +22,16 @@ import {
 } from '../../utils/groupParticipantSnapshot.js';
 import { config } from '../../config/config.js';
 import { getYesterdayDateStrIST } from '../../utils/dateIST.js';
+
+/** Primary owner phone for tappable @mentions (opens their DM). */
+function getPrimaryOwnerPhone() {
+    const phones = (config.OWNER_NUMBERS || [])
+        .map((n) => String(n || '').replace(/\D/g, ''))
+        .filter((n) => /^\d{10,15}$/.test(n));
+    if (phones[0]) return phones[0];
+    const notify = String(config.SUMMARY_SELF_HEAL_NOTIFY || '').replace(/\D/g, '');
+    return /^\d{10,15}$/.test(notify) ? notify : '917887499710';
+}
 
 /** Dedupe welcome when both stub message + participants.update fire */
 const recentWelcomes = new Map();
@@ -344,10 +355,16 @@ export async function handleActivate(sock, chatId, senderJid, { groupManager, or
 
         await groupManager.activateGroup(chatId, groupName, senderPhone);
 
+        const ownerPhone = getPrimaryOwnerPhone();
+        const ownerJid = `${ownerPhone}@s.whatsapp.net`;
+        const ownerMention = mentionDisplayToken(ownerJid);
+
         let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
         r += '✅ *GROUP ACTIVATED* ✅\n';
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
-        r += `📢 *Group:* ${groupName}\n\n`;
+        r += `📢 *Group:* ${groupName}\n`;
+        r += `👑 *Owner:* ${ownerMention}\n`;
+        r += '_Tap the name above to open DM_\n\n';
         r += '🎓 This group will now receive free course updates!\n';
         r += '📰 Tech news digests at *10:00 AM* & *10:00 PM* (IST)!\n';
         r += '🐙 GitHub trending repos daily at *9:00, 11:30, 2:00, 4:30 & 7:00 PM* (IST)!\n\n';
@@ -356,7 +373,10 @@ export async function handleActivate(sock, chatId, senderJid, { groupManager, or
         r += '💡 Use `/instaon` for auto Instagram downloads\n';
         r += '💡 Use `/deactivate` to stop all updates';
 
-        await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
+        await sock.sendMessage(chatId, {
+            text: r,
+            mentions: [ownerJid],
+        }, { quoted: originalMsg });
         logger.info(`✅ Group activated: ${groupName} (${chatId}) by ${senderPhone}`);
     } catch (error) {
         logger.error(`Error activating group: ${error.message}`);
