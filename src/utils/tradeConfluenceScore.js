@@ -4,7 +4,7 @@
 
 import { catalystRadarService } from '../services/CatalystRadarService.js';
 
-const DEFAULT_MIN = 50;
+const DEFAULT_MIN = 40;
 
 export function scoreConfluence({
     symbol,

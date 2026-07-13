@@ -42,12 +42,12 @@ class TradeOutcomeService {
 
     async getCalibration() {
         if (!this._tuneCol) {
-            return { minConfidence: 70, minConfluence: 50, blacklistedSectors: [] };
+            return { minConfidence: 70, minConfluence: 40, blacklistedSectors: [] };
         }
         const row = await this._tuneCol.findOne({ key: 'global' });
         return {
             minConfidence: row?.min_confidence ?? 70,
-            minConfluence: row?.min_confluence ?? 50,
+            minConfluence: row?.min_confluence ?? 40,
             blacklistedSectors: row?.blacklisted_sectors || [],
         };
     }
@@ -64,14 +64,14 @@ class TradeOutcomeService {
         const winRate = resolved.length ? wins / resolved.length : null;
 
         let minConfidence = 70;
-        let minConfluence = 50;
+        let minConfluence = 40;
         if (winRate != null) {
             if (winRate > 0.6) {
                 minConfidence = 68;
-                minConfluence = 48;
+                minConfluence = 35;
             } else if (winRate < 0.4) {
                 minConfidence = 75;
-                minConfluence = 55;
+                minConfluence = 50;
             }
         }
 

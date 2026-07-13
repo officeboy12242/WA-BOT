@@ -78,6 +78,10 @@ class TradeAlertController {
         };
         this.discoveryEngine = null;
         this.minConfluence = getMinConfluenceScore(config);
+        this.softDailyFallback = config.TRADE_ALERT_DAILY_SOFT_FALLBACK !== false;
+        this.softMinConfluence = Number.isFinite(config.TRADE_ALERT_DAILY_SOFT_MIN_CONFLUENCE)
+            ? config.TRADE_ALERT_DAILY_SOFT_MIN_CONFLUENCE
+            : 25;
     }
 
     async init() {
@@ -204,6 +208,26 @@ class TradeAlertController {
             return { pass: false, reason: entryState.label };
         }
         return { pass: true, reason: null };
+    }
+
+    _isSoftDailyEligible({ signal, confluence, gate, discovery }) {
+        if (!this.softDailyFallback) return false;
+        if (!signal?.isActionable) return false;
+        const minConf = discovery?.gates?.minConfidence ?? 70;
+        if ((signal.confidence || 0) < minConf) return false;
+        if (confluence?.blocked) return false;
+        if ((confluence?.score ?? 0) < this.softMinConfluence) return false;
+        // Only fill from confluence misses — not watch-only / stale / entry-missed
+        return /confluence\s+\d+\s*</i.test(String(gate?.reason || ''));
+    }
+
+    _wrapSoftDailyAlert(text, { symbol, confluence, strictMin }) {
+        const score = confluence?.score ?? '?';
+        return (
+            `⚡ *DAILY ALERT (soft gate)* — *${symbol}*\n` +
+            `_AI ≥70% · confluence ${score} (strict ≥${strictMin}). Size smaller / manage risk._\n\n` +
+            String(text || '').trim()
+        );
     }
 
     async _runDailyAnalysis(symbol, { isHiddenGem = false } = {}) {
@@ -429,7 +453,8 @@ class TradeAlertController {
         const gemTag = entry.isHiddenGem ? ' 💎' : '';
         const confTag = entry.confluence != null ? ` · conf ${entry.confluence}` : '';
         if (entry.posted) {
-            return `✅ *${entry.symbol}*${gemTag} — ${entry.recommendation} (${entry.confidence}%)${confTag}`;
+            const softTag = entry.softGate ? ' ⚡soft' : '';
+            return `✅ *${entry.symbol}*${gemTag}${softTag} — ${entry.recommendation} (${entry.confidence}%)${confTag}`;
         }
         if (entry.isActionable) {
             return `⚠️ ${entry.symbol}${gemTag} — ${entry.recommendation} (${entry.confidence}%)${confTag} · not posted (daily limit)`;
@@ -546,7 +571,9 @@ class TradeAlertController {
             const actionableSent = [];
             const scanResults = [];
             const actionableRegular = [];
+            const softRegular = [];
             let actionableGem = null;
+            let softGem = null;
 
             if (mode === 'auto') {
                 const intro = formatDailyScanIntro(autoDiscovery, {
@@ -561,6 +588,7 @@ class TradeAlertController {
 
             const marketMode = getIndiaMarketMode();
             const discoveryFreshness = checkQuoteFreshness(autoDiscovery?.scannedAt);
+            const strictMinConv = autoDiscovery?.gates?.minConfluence ?? this.minConfluence;
 
             for (const symbol of symbols) {
                 try {
@@ -585,15 +613,16 @@ class TradeAlertController {
                               macro: autoDiscovery?.macro,
                           });
 
+                    const discoveryForGates = {
+                        ...autoDiscovery,
+                        freshness: discoveryFreshness,
+                    };
                     const gate = this._passesSendGates({
                         signal,
                         confluence,
                         entryState,
                         marketMode,
-                        discovery: {
-                            ...autoDiscovery,
-                            freshness: discoveryFreshness,
-                        },
+                        discovery: discoveryForGates,
                     });
 
                     const resultEntry = {
@@ -607,22 +636,46 @@ class TradeAlertController {
                         gateReason: gate.pass ? null : gate.reason,
                         isHiddenGem,
                         posted: false,
+                        softGate: false,
                     };
 
                     if (this.onlyBuySignals && !resultEntry.isActionable) {
+                        const softOk = this._isSoftDailyEligible({
+                            signal,
+                            confluence,
+                            gate,
+                            discovery: discoveryForGates,
+                        });
                         const cePe = `CE ${signal.ceConfidence}% / PE ${signal.peConfidence}%`;
                         const why = gate.pass ? '' : ` · ${gate.reason}`;
                         skipped.push(`${symbol} (${gate.pass ? 'NO TRADE' : 'blocked'} · ${cePe}${why})`);
                         scanResults.push(resultEntry);
-                        await this.markDailySent(group.group_id, symbol, dateStr, {
-                            skipped: true,
-                            signal: signal.recommendation,
-                            confidence: signal.confidence,
-                        });
+
+                        if (softOk) {
+                            const softItem = {
+                                symbol,
+                                text: this._wrapSoftDailyAlert(text, {
+                                    symbol,
+                                    confluence,
+                                    strictMin: strictMinConv,
+                                }),
+                                signal,
+                                resultEntry,
+                                softGate: true,
+                            };
+                            if (isHiddenGem) softGem = softItem;
+                            else softRegular.push(softItem);
+                        } else {
+                            await this.markDailySent(group.group_id, symbol, dateStr, {
+                                skipped: true,
+                                signal: signal.recommendation,
+                                confidence: signal.confidence,
+                            });
+                        }
                         continue;
                     }
 
-                    const item = { symbol, text, signal, resultEntry };
+                    const item = { symbol, text, signal, resultEntry, softGate: false };
                     if (isHiddenGem) {
                         actionableGem = item;
                     } else {
@@ -635,23 +688,57 @@ class TradeAlertController {
                 }
             }
 
-            const toPost = this._selectDailyPosts(actionableRegular, actionableGem);
+            let toPost = this._selectDailyPosts(actionableRegular, actionableGem);
+            let usedSoftFallback = false;
+
+            if (!toPost.length && this.softDailyFallback) {
+                softRegular.sort(
+                    (a, b) =>
+                        (b.signal.confidence || 0) - (a.signal.confidence || 0) ||
+                        (b.resultEntry.confluence || 0) - (a.resultEntry.confluence || 0)
+                );
+                toPost = this._selectDailyPosts(softRegular, softGem);
+                usedSoftFallback = toPost.length > 0;
+                if (usedSoftFallback) {
+                    logger.info(
+                        `📈 Daily soft fallback: posting ${toPost.length} AI≥70% alert(s) (confluence ≥${this.softMinConfluence})`
+                    );
+                }
+            }
+
+            // Soft candidates not selected → mark skipped
+            for (const item of [...softRegular, ...(softGem ? [softGem] : [])]) {
+                if (toPost.some((p) => p.symbol === item.symbol)) continue;
+                await this.markDailySent(group.group_id, item.symbol, dateStr, {
+                    skipped: true,
+                    reason: usedSoftFallback ? 'soft_not_selected' : 'confluence',
+                    signal: item.signal.recommendation,
+                    confidence: item.signal.confidence,
+                }).catch(() => {});
+            }
+
             const postSymbols = new Set(toPost.map((p) => p.symbol));
 
             for (const item of toPost) {
                 try {
                     await sock.sendMessage(group.group_id, { text: item.text });
                     item.resultEntry.posted = true;
+                    item.resultEntry.softGate = Boolean(item.softGate);
+                    item.resultEntry.isActionable = true;
                     await this.markDailySent(group.group_id, item.symbol, dateStr, {
                         skipped: false,
+                        soft_gate: Boolean(item.softGate),
                         signal: item.signal.recommendation,
                         confidence: item.signal.confidence,
                         hidden_gem: item.resultEntry.isHiddenGem,
                     });
                     sentCount += 1;
-                    actionableSent.push(item.resultEntry.isHiddenGem ? `${item.symbol} 💎` : item.symbol);
+                    const softTag = item.softGate ? ' ⚡' : '';
+                    actionableSent.push(
+                        `${item.resultEntry.isHiddenGem ? `${item.symbol} 💎` : item.symbol}${softTag}`
+                    );
                     logger.info(
-                        `✅ Trade alert sent: ${item.symbol}${item.resultEntry.isHiddenGem ? ' 💎' : ''} → ${group.group_name || group.group_id}`
+                        `✅ Trade alert sent: ${item.symbol}${item.resultEntry.isHiddenGem ? ' 💎' : ''}${item.softGate ? ' (soft)' : ''} → ${group.group_name || group.group_id}`
                     );
                     await new Promise((r) => setTimeout(r, 2000));
                 } catch (err) {
@@ -680,10 +767,14 @@ class TradeAlertController {
                     : hiddenGemSymbol
                       ? `\n_No hidden gem posted — ${hiddenGemSymbol} did not reach ≥70%._`
                       : '';
+                const softNote = usedSoftFallback
+                    ? `\n_⚡ Soft gate day — AI ≥70% with confluence ≥${this.softMinConfluence} (strict ≥${strictMinConv})._`
+                    : '';
                 await sock.sendMessage(group.group_id, {
                     text:
                         `📈 *Daily F&O scan complete*\n` +
-                        `Posted *${sentCount}* actionable alert(s): *${actionableSent.join(', ')}*` +
+                        `Posted *${sentCount}* alert(s): *${actionableSent.join(', ')}*` +
+                        softNote +
                         gemNote +
                         scanSummary +
                         `\n\n_Use \`/tradenow SYMBOL\` anytime for full analysis._`,
@@ -695,7 +786,7 @@ class TradeAlertController {
                 await sock.sendMessage(group.group_id, {
                     text:
                         `📈 *Daily F&O scan complete*\n` +
-                        `No high-confidence BUY setups (≥70%) today.${skipNote}` +
+                        `No BUY setups today (AI ≥70% + confluence ≥${this.softMinConfluence}).${skipNote}` +
                         scanSummary +
                         `\n\nUse \`/tradenow SYMBOL\` for full analysis including NO TRADE.`,
                 }).catch(() => {});
