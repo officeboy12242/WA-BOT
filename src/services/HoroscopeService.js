@@ -50,8 +50,8 @@ class HoroscopeService {
     constructor() {
         this._cache = new Map();
         this._cacheExpiry = 6 * 60 * 60 * 1000; // 6 hours cache
-        /** Bump when response shape changes (e.g. luck extras fix) */
-        this._cacheVersion = 'v2';
+        /** Bump when luck extras logic changes */
+        this._cacheVersion = 'v3';
     }
 
     /**
@@ -122,11 +122,22 @@ class HoroscopeService {
     }
 
     /**
-     * Merge Vedika (or parsed) extras with deterministic daily luck for any missing fields.
+     * Merge Vedika extras only when the API actually returned the requested sign.
+     * Vedika sandbox often ignores `sign` and repeats the same luck fields for everyone.
      */
     _resolveExtras(vedikaPayload, sign) {
         const generated = this._generateDailyLuck(sign);
         if (!vedikaPayload) return generated;
+
+        const apiSign = this.normalizeSign(vedikaPayload.apiSign);
+        const signMatched = apiSign === sign;
+
+        if (!signMatched) {
+            logger.debug(
+                `Vedika luck ignored for ${sign} (API returned ${vedikaPayload.apiSign || 'unknown'}) — using daily seed`
+            );
+            return generated;
+        }
 
         const parsed = this._parseExtrasFromText(vedikaPayload.horoscope || '');
 
@@ -139,24 +150,35 @@ class HoroscopeService {
     }
 
     /**
-     * Deterministic daily luck when extras API is unavailable
+     * Deterministic per-sign daily luck (stable for the day, different across signs).
      */
     _generateDailyLuck(sign) {
         const today = new Date().toISOString().split('T')[0];
-        const seed = `${sign}_${today}`;
-        let hash = 0;
+        const signIndex = Math.max(0, ZODIAC_SIGNS.indexOf(sign));
 
-        for (let i = 0; i < seed.length; i++) {
-            hash = ((hash << 5) - hash) + seed.charCodeAt(i);
-            hash |= 0;
-        }
+        const hashSeed = (seed) => {
+            let hash = 2166136261;
+            for (let i = 0; i < seed.length; i++) {
+                hash ^= seed.charCodeAt(i);
+                hash = Math.imul(hash, 16777619);
+            }
+            return Math.abs(hash >>> 0);
+        };
 
-        const abs = Math.abs(hash);
+        const numHash = hashSeed(`${sign}|num|${today}`);
+        const colorHash = hashSeed(`${sign}|color|${today}`);
+        const moodHash = hashSeed(`${sign}|mood|${today}`);
+        const matchHash = hashSeed(`${sign}|match|${today}`);
+
+        const moods = ['Optimistic', 'Focused', 'Calm', 'Energetic', 'Reflective', 'Confident', 'Creative'];
+        // Avoid matching the same sign as itself
+        const matchIndex = (signIndex + 1 + (matchHash % (ZODIAC_SIGNS.length - 1))) % ZODIAC_SIGNS.length;
+
         return {
-            luckyNumber: (abs % 99) + 1,
-            luckyColor: LUCKY_COLORS[abs % LUCKY_COLORS.length],
-            mood: ['Optimistic', 'Focused', 'Calm', 'Energetic', 'Reflective'][abs % 5],
-            compatibility: ZODIAC_SIGNS[(abs + 3) % ZODIAC_SIGNS.length],
+            luckyNumber: (numHash % 99) + 1,
+            luckyColor: LUCKY_COLORS[colorHash % LUCKY_COLORS.length],
+            mood: moods[moodHash % moods.length],
+            compatibility: ZODIAC_SIGNS[matchIndex],
         };
     }
 
@@ -202,6 +224,7 @@ class HoroscopeService {
 
         return {
             horoscope: data.prediction?.trim() || '',
+            apiSign: data.sign || null,
             luckyNumber: data.luckyNumber ?? data.lucky_number,
             luckyColor: data.luckyColor ?? data.lucky_color,
             mood: data.mood,
@@ -311,10 +334,15 @@ class HoroscopeService {
         const { ohmandaResult, vedikaResult, appResult, diagnostics } =
             await this._probeSources(normalizedSign);
 
+        const vedikaOk =
+            vedikaResult.status === 'fulfilled'
+            && vedikaResult.value?.horoscope
+            && this.normalizeSign(vedikaResult.value.apiSign) === normalizedSign;
+
         const horoscopeText =
             (ohmandaResult.status === 'fulfilled' && ohmandaResult.value)
                 ? ohmandaResult.value
-                : (vedikaResult.status === 'fulfilled' && vedikaResult.value.horoscope)
+                : vedikaOk
                     ? vedikaResult.value.horoscope
                     : (appResult.status === 'fulfilled' && appResult.value)
                         ? appResult.value
@@ -326,7 +354,7 @@ class HoroscopeService {
         }
 
         const extras = this._resolveExtras(
-            vedikaResult.status === 'fulfilled' ? vedikaResult.value : null,
+            vedikaOk ? vedikaResult.value : null,
             normalizedSign,
         );
 
