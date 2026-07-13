@@ -82,6 +82,36 @@ function parseJsonArray(raw) {
     return JSON.parse(raw.slice(start, end));
 }
 
+/** Closed / 404 ATS pages (Lever, Greenhouse, etc.) */
+function isDeadJobPage(text = '', title = '', statusCode = null) {
+    if (statusCode === 404 || statusCode === 410) return true;
+    const blob = `${title}\n${text}`.toLowerCase();
+    if (!blob.trim()) return true;
+    return (
+        /couldn't find anything here/.test(blob) ||
+        /404 error/.test(blob) ||
+        /page not found/.test(blob) ||
+        /job posting you're looking for might have closed/.test(blob) ||
+        /this job (is )?(no longer|has been) (available|open|active)/.test(blob) ||
+        /position has been filled/.test(blob) ||
+        /job (has been )?(closed|removed|expired|deleted)/.test(blob) ||
+        /no longer accepting applications/.test(blob) ||
+        /sorry,? we couldn.?t find/.test(blob)
+    );
+}
+
+function resultForUrl(results, url) {
+    const list = results || [];
+    const exact = list.find((r) => r.url === url || r.final_url === url || r.request_url === url);
+    if (exact) return exact;
+    // TinyFish sometimes returns only final_url after redirects
+    const path = String(url).replace(/\/$/, '');
+    return list.find((r) => {
+        const u = String(r.url || r.final_url || '').replace(/\/$/, '');
+        return u === path || u.endsWith(path.split('/').slice(-2).join('/'));
+    });
+}
+
 export class JobHuntScanner {
     constructor(config, mongoDb) {
         this.config = config;
@@ -169,22 +199,44 @@ export class JobHuntScanner {
 
     async fetchDetails(jobs) {
         const enriched = [];
+        const deadUrls = [];
         for (let i = 0; i < jobs.length; i += 10) {
             const batch = jobs.slice(i, i + 10);
             const resp = await this.tf.getContents(
                 batch.map((j) => j.url),
                 { format: 'markdown' },
             );
-            const byUrl = new Map((resp.results || []).map((r) => [r.url || r.final_url, r]));
+            const errByUrl = new Map();
+            for (const e of resp.errors || []) {
+                const u = e.url || e.request_url;
+                if (u) errByUrl.set(u, e);
+            }
             for (const job of batch) {
-                const r = byUrl.get(job.url);
-                if (r?.text) {
-                    job.content = String(r.text).slice(0, 3000);
-                    job.title = r.title || job.title;
+                const r = resultForUrl(resp.results, job.url);
+                const err = errByUrl.get(job.url);
+                const statusCode = r?.status_code ?? r?.status ?? err?.status_code ?? err?.status ?? null;
+                const text = r?.text ? String(r.text) : '';
+                const title = r?.title || job.title || '';
+
+                if (!r || isDeadJobPage(text, title, statusCode)) {
+                    deadUrls.push(job.url);
+                    logger.info(`JobHunt drop dead/404: ${job.company} — ${job.url}`);
+                    continue;
                 }
+                // Need real JD text to score — skip empty shells
+                if (text.trim().length < 80) {
+                    deadUrls.push(job.url);
+                    continue;
+                }
+
+                job.content = text.slice(0, 3000);
+                job.title = title || job.title;
+                if (r.final_url && r.final_url !== job.url) job.url = r.final_url;
                 enriched.push(job);
             }
         }
+        // Remember dead links so search doesn't keep rediscovering them
+        if (deadUrls.length) await this.markSeen(deadUrls);
         return enriched;
     }
 
@@ -374,13 +426,64 @@ export class JobHuntScanner {
     }
 
     async getLatestScanJobs(limit = 20) {
-        const latest = await this._jobs.findOne({}, { sort: { created_at: -1 } });
-        if (!latest?.scan_date) return [];
+        const latest = await this._jobs.findOne({ dead: { $ne: true } }, { sort: { created_at: -1 } });
+        if (!latest?.scan_date) {
+            const any = await this._jobs.findOne({}, { sort: { created_at: -1 } });
+            if (!any?.scan_date) return [];
+            return this._jobs
+                .find({ scan_date: any.scan_date, dead: { $ne: true } })
+                .sort({ score: -1 })
+                .limit(limit)
+                .toArray();
+        }
         return this._jobs
-            .find({ scan_date: latest.scan_date })
+            .find({ scan_date: latest.scan_date, dead: { $ne: true } })
             .sort({ score: -1 })
             .limit(limit)
             .toArray();
+    }
+
+    /**
+     * Re-fetch JD pages and drop closed/404 links (also marks them dead in Mongo).
+     */
+    async revalidateJobs(jobs = []) {
+        if (!jobs.length || !this.tf.isConfigured()) return jobs;
+        const live = [];
+        const deadIds = [];
+        const deadUrls = [];
+
+        for (let i = 0; i < jobs.length; i += 10) {
+            const batch = jobs.slice(i, i + 10);
+            let resp;
+            try {
+                resp = await this.tf.getContents(
+                    batch.map((j) => j.url),
+                    { format: 'markdown' },
+                );
+            } catch (err) {
+                logger.warn(`JobHunt revalidate fetch failed: ${err.message}`);
+                return jobs; // keep list if TinyFish is down
+            }
+            for (const job of batch) {
+                const r = resultForUrl(resp.results, job.url);
+                const text = r?.text ? String(r.text) : '';
+                const title = r?.title || job.title || '';
+                const statusCode = r?.status_code ?? r?.status ?? null;
+                if (!r || isDeadJobPage(text, title, statusCode) || text.trim().length < 80) {
+                    if (job._id) deadIds.push(job._id);
+                    if (job.url) deadUrls.push(job.url);
+                    logger.info(`JobHunt revalidate drop: ${job.company} — ${job.url}`);
+                    continue;
+                }
+                live.push(job);
+            }
+        }
+
+        if (deadIds.length) {
+            await this._jobs.updateMany({ _id: { $in: deadIds } }, { $set: { dead: true, dead_at: new Date() } });
+        }
+        if (deadUrls.length) await this.markSeen(deadUrls);
+        return live;
     }
 }
 

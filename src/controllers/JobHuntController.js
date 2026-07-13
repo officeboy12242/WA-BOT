@@ -128,20 +128,28 @@ class JobHuntController {
             );
         }
 
-        const digest = formatJobHuntDigest(result.topJobs, { scanDate: result.scanDate });
+        let topJobs = result.topJobs || [];
+        try {
+            topJobs = await this.scanner.revalidateJobs(topJobs);
+        } catch (err) {
+            logger.warn(`JobHunt digest revalidate skipped: ${err.message}`);
+        }
+
+        const digest = formatJobHuntDigest(topJobs, { scanDate: result.scanDate });
         const sent = await this._broadcast(sock, digest);
         logger.info(
-            `JobHunt done — ${result.topJobs.length} top / ${result.allJobs.length} total → ${sent} chat(s)`,
+            `JobHunt done — ${topJobs.length} live top / ${result.allJobs.length} total → ${sent} chat(s)`,
         );
-        return result;
+        return { ...result, topJobs };
     }
 
     async draftForIndex(index1Based) {
-        const jobs = await this.scanner.getLatestScanJobs(20);
+        let jobs = await this.scanner.getLatestScanJobs(20);
+        jobs = await this.scanner.revalidateJobs(jobs);
         const idx = Number(index1Based) - 1;
-        if (!jobs.length) throw new Error('No scan results yet. Run `/jobhunt scan` first.');
+        if (!jobs.length) throw new Error('No live scan results. Run `/jobhunt scan` again — old links may have closed.');
         if (idx < 0 || idx >= jobs.length) {
-            throw new Error(`Job #${index1Based} not found (have ${jobs.length} in latest scan).`);
+            throw new Error(`Job #${index1Based} not found (have ${jobs.length} live in latest scan).`);
         }
         const job = jobs[idx];
         const candidate = this.getCandidate();
