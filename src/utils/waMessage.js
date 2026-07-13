@@ -677,15 +677,16 @@ export async function safeDeleteMessage(sock, chatId, messageKey) {
 }
 
 /**
- * Edit a bot message in place (e.g. loading → result). Falls back to a new send if edit fails.
+ * Edit a bot message in place (e.g. loading → result).
  * @param {import('baileys').WASocket} sock
  * @param {string} chatId
  * @param {import('baileys').proto.IMessageKey} messageKey
  * @param {string} text
+ * @param {{ fallback?: boolean }} [opts] fallback=true sends a new message if edit fails
  */
-export async function editMessageText(sock, chatId, messageKey, text) {
+export async function editMessageText(sock, chatId, messageKey, text, { fallback = true } = {}) {
     if (!sock?.sendMessage || !messageKey?.id) {
-        return plainSendMessage(sock, chatId, { text });
+        return fallback ? plainSendMessage(sock, chatId, { text }) : null;
     }
     const jid = resolveOutboundJid(messageKey, chatId);
     try {
@@ -698,6 +699,10 @@ export async function editMessageText(sock, chatId, messageKey, text) {
         if (sent) return sent;
         throw new Error('edit returned empty');
     } catch (err) {
+        if (!fallback) {
+            logger.warn(`Message edit failed for ${jid} (no fallback): ${err?.message || err}`);
+            return null;
+        }
         logger.warn(`Message edit failed for ${jid}, sending new: ${err?.message || err}`);
         return plainSendMessage(sock, chatId, { text }, messageKey);
     }
