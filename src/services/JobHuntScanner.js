@@ -1,5 +1,7 @@
 /**
- * Job discovery + LLM scoring (ported from autopilot-jobhunt, Node).
+ * Job discovery + LLM scoring.
+ * Default mode: India boards (Naukri → Indeed → LinkedIn) to stay within TinyFish limits.
+ * Optional mode: company career pages (jobHuntCompanies.json).
  */
 
 import { readFileSync } from 'fs';
@@ -18,11 +20,16 @@ const ATS_JOB_RE =
 const ATS_LISTING_RE =
     /^https?:\/\/(jobs\.lever\.co|boards\.greenhouse\.io|apply\.workable\.com|jobs\.smartrecruiters\.com)\/[^/?#]+\/?(\?.*)?$/i;
 
-const DEFAULT_SENIORITY = 'senior OR staff OR principal OR lead';
-const DEFAULT_KEYWORDS =
-    '"data scientist" OR "ML engineer" OR "machine learning engineer" OR "AI engineer" OR MLOps OR "deep learning" OR "software engineer" OR backend OR fullstack';
+const INDIA_BOARD_URL_RE =
+    /(?:naukri\.com\/(?:job-listings-|[^?\s]*job)|(?:in\.|www\.)?indeed\.(?:co\.in|com)\/(?:viewjob|rc\/clk|jobs\/)|linkedin\.com\/jobs\/(?:view|collections|search))/i;
 
-const SCORE_PROMPT = `You are evaluating job postings for a candidate. Output ONLY a JSON array, no other text.
+const DEFAULT_SENIORITY = 'senior OR mid OR engineer OR developer';
+const DEFAULT_KEYWORDS =
+    '"software engineer" OR backend OR fullstack OR "node.js" OR python OR "full stack" OR "software developer"';
+const INDIA_LOC =
+    '(India OR Bangalore OR Bengaluru OR Hyderabad OR Pune OR Mumbai OR Chennai OR Noida OR Gurugram OR Gurgaon OR Remote OR "work from home")';
+
+const SCORE_PROMPT = `You are evaluating job postings for a candidate in India. Prefer India / remote-India roles. Output ONLY a JSON array, no other text.
 
 CANDIDATE:
 {candidate_profile}
@@ -45,20 +52,29 @@ For each job output:
 }
 
 Scoring: 80-100 near-perfect; 60-79 good fit; 40-59 partial; <40 poor.
+Down-rank non-India / overseas-only roles unless explicitly remote-friendly for India.
 Set worth_applying=true only if score >= {min_score}.
 Include ALL jobs. Output ONLY the JSON array.`;
 
 function isJobUrl(url) {
-    return JOB_URL_RE.test(url) || ATS_JOB_RE.test(url);
+    return JOB_URL_RE.test(url) || ATS_JOB_RE.test(url) || INDIA_BOARD_URL_RE.test(url);
 }
 
 function isAtsListing(url) {
     return ATS_LISTING_RE.test(url);
 }
 
-function loadCompanies() {
-    const path = resolve(__dirname, '../data/jobHuntCompanies.json');
-    return JSON.parse(readFileSync(path, 'utf8'));
+function isIndiaBoardUrl(url, board) {
+    if (!url || !INDIA_BOARD_URL_RE.test(url)) return false;
+    const u = String(url).toLowerCase();
+    if (board?.id === 'naukri') return u.includes('naukri.com');
+    if (board?.id === 'indeed') return u.includes('indeed.');
+    if (board?.id === 'linkedin') return u.includes('linkedin.com/jobs');
+    return true;
+}
+
+function loadJson(rel) {
+    return JSON.parse(readFileSync(resolve(__dirname, rel), 'utf8'));
 }
 
 function buildCandidateProfile(candidate = {}) {
@@ -66,6 +82,7 @@ function buildCandidateProfile(candidate = {}) {
     if (candidate.profile) lines.push(`- ${candidate.profile}`);
     if (candidate.seeking) lines.push(`- Seeking: ${candidate.seeking}`);
     if (candidate.notSuitable) lines.push(`- NOT suitable: ${candidate.notSuitable}`);
+    lines.push('- Preference: India locations / India-remote first');
     return lines.join('\n');
 }
 
@@ -75,6 +92,17 @@ function buildSearchQuery(domain, candidate = {}) {
     return `site:${domain} (${seniority}) (${keywords})`;
 }
 
+function buildIndiaQueries(board, candidate = {}) {
+    const seniority = candidate.searchSeniority || DEFAULT_SENIORITY;
+    const keywords = candidate.searchKeywords || DEFAULT_KEYWORDS;
+    const domain = board.domain;
+    // 2 focused queries per board — keeps TinyFish search count tiny
+    return [
+        `site:${domain} (${keywords}) ${INDIA_LOC}`,
+        `site:${domain} (${seniority}) (${keywords}) India`,
+    ];
+}
+
 function parseJsonArray(raw) {
     const start = raw.indexOf('[');
     const end = raw.lastIndexOf(']') + 1;
@@ -82,7 +110,6 @@ function parseJsonArray(raw) {
     return JSON.parse(raw.slice(start, end));
 }
 
-/** Closed / 404 ATS pages (Lever, Greenhouse, etc.) */
 function isDeadJobPage(text = '', title = '', statusCode = null) {
     if (statusCode === 404 || statusCode === 410) return true;
     const blob = `${title}\n${text}`.toLowerCase();
@@ -96,7 +123,8 @@ function isDeadJobPage(text = '', title = '', statusCode = null) {
         /position has been filled/.test(blob) ||
         /job (has been )?(closed|removed|expired|deleted)/.test(blob) ||
         /no longer accepting applications/.test(blob) ||
-        /sorry,? we couldn.?t find/.test(blob)
+        /sorry,? we couldn.?t find/.test(blob) ||
+        /this job has expired/.test(blob)
     );
 }
 
@@ -104,12 +132,23 @@ function resultForUrl(results, url) {
     const list = results || [];
     const exact = list.find((r) => r.url === url || r.final_url === url || r.request_url === url);
     if (exact) return exact;
-    // TinyFish sometimes returns only final_url after redirects
     const path = String(url).replace(/\/$/, '');
     return list.find((r) => {
         const u = String(r.url || r.final_url || '').replace(/\/$/, '');
         return u === path || u.endsWith(path.split('/').slice(-2).join('/'));
     });
+}
+
+function guessTitleFromUrl(url, searchTitle) {
+    if (searchTitle && String(searchTitle).trim().length > 3) return String(searchTitle).trim();
+    try {
+        const last = decodeURIComponent(url.split('/').pop() || '')
+            .replace(/[-_+]/g, ' ')
+            .replace(/\?.*/, '');
+        return last.slice(0, 120) || 'Role';
+    } catch {
+        return 'Role';
+    }
 }
 
 export class JobHuntScanner {
@@ -118,10 +157,14 @@ export class JobHuntScanner {
         this.mongoDb = mongoDb;
         this.tf = new TinyFishClient(config.TINYFISH_API_KEY, {
             fetchDelayMs: config.JOB_HUNT_FETCH_DELAY_MS || 2500,
-            searchDelayMs: config.JOB_HUNT_SEARCH_DELAY_MS || 13000,
+            searchDelayMs: config.JOB_HUNT_SEARCH_DELAY_MS || 8000,
         });
         this.llm = new JobHuntLlmService(config);
-        this.companies = loadCompanies();
+        this.companies = loadJson('../data/jobHuntCompanies.json');
+        this.indiaBoards = loadJson('../data/jobHuntIndiaBoards.json');
+        this.mode = String(config.JOB_HUNT_MODE || 'india').toLowerCase() === 'companies' ? 'companies' : 'india';
+        this.maxJobsPerScan = Math.max(5, Math.min(40, config.JOB_HUNT_MAX_JOBS || 20));
+        this.maxPerBoard = Math.max(3, Math.min(15, config.JOB_HUNT_MAX_PER_BOARD || 8));
         this._seen = null;
         this._jobs = null;
         this._runs = null;
@@ -138,11 +181,22 @@ export class JobHuntScanner {
             this._jobs.createIndex({ url: 1 }),
             this._runs.createIndex({ started_at: -1 }),
         ]);
-        logger.info(`Job hunt scanner ready (${this.companies.length} companies)`);
+        const src =
+            this.mode === 'india'
+                ? `India boards: ${this.indiaBoards.map((b) => b.name).join(' → ')}`
+                : `${this.companies.length} companies`;
+        logger.info(`Job hunt scanner ready (${this.mode}) — ${src}`);
     }
 
     isBusy() {
         return this._scanning;
+    }
+
+    getSourceLabel() {
+        if (this.mode === 'india') {
+            return this.indiaBoards.map((b) => b.name).join(' · ');
+        }
+        return `${this.companies.length} companies`;
     }
 
     async getSeenUrls() {
@@ -160,6 +214,48 @@ export class JobHuntScanner {
             },
         }));
         await this._seen.bulkWrite(ops, { ordered: false }).catch(() => {});
+    }
+
+    async discoverIndiaBoards(seenUrls, candidate, onProgress = null) {
+        const found = [];
+        const boards = [...this.indiaBoards].sort((a, b) => (a.priority || 99) - (b.priority || 99));
+
+        for (const board of boards) {
+            onProgress?.(`Searching ${board.name} (India)…`);
+            logger.info(`JobHunt board: ${board.name}`);
+            const perBoard = new Map();
+            const queries = buildIndiaQueries(board, candidate);
+
+            for (const query of queries) {
+                if (perBoard.size >= this.maxPerBoard) break;
+                try {
+                    const search = await this.tf.search(query);
+                    for (const r of search.results || []) {
+                        const url = r.url || r.link;
+                        if (!url || seenUrls.has(url) || perBoard.has(url)) continue;
+                        if (!isIndiaBoardUrl(url, board)) continue;
+                        perBoard.set(url, {
+                            url,
+                            title: guessTitleFromUrl(url, r.title || r.name),
+                            snippet: r.snippet || r.description || '',
+                            company: board.name,
+                            source: board.id,
+                            location: board.location,
+                            region: 'IN',
+                        });
+                        if (perBoard.size >= this.maxPerBoard) break;
+                    }
+                } catch (err) {
+                    if (err.code === 'TINYFISH_LIMIT') throw err;
+                    logger.warn(`JobHunt ${board.name} search failed: ${err.message}`);
+                }
+            }
+
+            found.push(...perBoard.values());
+            if (found.length >= this.maxJobsPerScan) break;
+        }
+
+        return found.slice(0, this.maxJobsPerScan);
     }
 
     async discoverCompany(company, seenUrls, candidate) {
@@ -189,7 +285,7 @@ export class JobHuntScanner {
 
         return [...found].map((url) => ({
             url,
-            title: url.split('/').pop()?.replace(/[-_]/g, ' ') || 'Role',
+            title: guessTitleFromUrl(url),
             snippet: '',
             company: company.name,
             location: company.location,
@@ -223,9 +319,14 @@ export class JobHuntScanner {
                     logger.info(`JobHunt drop dead/404: ${job.company} — ${job.url}`);
                     continue;
                 }
-                // Need real JD text to score — skip empty shells
                 if (text.trim().length < 80) {
-                    deadUrls.push(job.url);
+                    // Keep search snippet as weak content for India boards behind login walls
+                    if ((job.snippet || '').trim().length >= 40) {
+                        job.content = String(job.snippet).slice(0, 1500);
+                        enriched.push(job);
+                    } else {
+                        deadUrls.push(job.url);
+                    }
                     continue;
                 }
 
@@ -235,7 +336,6 @@ export class JobHuntScanner {
                 enriched.push(job);
             }
         }
-        // Remember dead links so search doesn't keep rediscovering them
         if (deadUrls.length) await this.markSeen(deadUrls);
         return enriched;
     }
@@ -246,7 +346,7 @@ export class JobHuntScanner {
         const jobsText = jobs
             .map(
                 (j, i) =>
-                    `JOB ${i + 1}:\nCompany: ${j.company} | Location: ${j.location}\n` +
+                    `JOB ${i + 1}:\nCompany/Source: ${j.company} | Location: ${j.location}\n` +
                     `Title: ${j.title}\nURL: ${j.url}\n` +
                     `Content:\n${(j.content || j.snippet || '').slice(0, 1500)}`,
             )
@@ -289,9 +389,23 @@ export class JobHuntScanner {
         return results.sort((a, b) => (b.score || 0) - (a.score || 0));
     }
 
-    /**
-     * Full or partial scan. Calls onProgress optionally.
-     */
+    async _scoreAndCollect(newJobs, seenUrls, resume, candidate, allScored, limitWarnings) {
+        if (!newJobs.length) return 0;
+        newJobs = await this.fetchDetails(newJobs);
+        await this.markSeen(newJobs.map((j) => j.url));
+        newJobs.forEach((j) => seenUrls.add(j.url));
+
+        let scoredCount = 0;
+        for (let b = 0; b < newJobs.length; b += 10) {
+            const batch = newJobs.slice(b, b + 10);
+            const batchScored = await this.scoreJobs(batch, resume, candidate);
+            allScored.push(...batchScored);
+            scoredCount += batchScored.length;
+            limitWarnings.push(...this.llm.takeLimitWarnings());
+        }
+        return scoredCount;
+    }
+
     async runScan({
         candidate,
         resume,
@@ -308,59 +422,82 @@ export class JobHuntScanner {
 
         this._scanning = true;
         const startedAt = new Date();
-        const companies = this.companies.slice(0, maxCompanies || this.companies.length);
         const seenUrls = await this.getSeenUrls();
         const allScored = [];
         const errors = [];
         const limitWarnings = [];
-        let companiesWithJobs = 0;
+        let sourcesWithJobs = 0;
+        const mode = this.mode;
+
+        const sourceTotal = mode === 'india' ? this.indiaBoards.length : this.companies.slice(0, maxCompanies || this.companies.length).length;
 
         await this._runs.insertOne({
             started_at: startedAt,
             status: 'running',
-            company_total: companies.length,
+            mode,
+            company_total: sourceTotal,
         });
 
         try {
-            for (let i = 0; i < companies.length; i++) {
-                const company = companies[i];
+            if (mode === 'india') {
+                onProgress?.('India boards: Naukri → Indeed → LinkedIn…');
+                logger.info(`JobHunt India mode — max ${this.maxJobsPerScan} jobs (${this.maxPerBoard}/board)`);
                 try {
-                    onProgress?.(`Scanning ${company.name} (${i + 1}/${companies.length})…`);
-                    logger.info(`JobHunt [${i + 1}/${companies.length}] ${company.name}`);
-
-                    let newJobs = await this.discoverCompany(company, seenUrls, candidate);
-                    if (!newJobs.length) continue;
-
-                    newJobs = await this.fetchDetails(newJobs);
-                    await this.markSeen(newJobs.map((j) => j.url));
-                    newJobs.forEach((j) => seenUrls.add(j.url));
-
-                    const scored = [];
-                    for (let b = 0; b < newJobs.length; b += 10) {
-                        const batch = newJobs.slice(b, b + 10);
-                        const batchScored = await this.scoreJobs(batch, resume, candidate);
-                        scored.push(...batchScored);
-                        limitWarnings.push(...this.llm.takeLimitWarnings());
-                    }
-
-                    if (scored.length) {
-                        companiesWithJobs += 1;
-                        allScored.push(...scored);
-                    }
+                    let newJobs = await this.discoverIndiaBoards(seenUrls, candidate, onProgress);
+                    logger.info(`JobHunt India discovered ${newJobs.length} URLs`);
+                    const n = await this._scoreAndCollect(
+                        newJobs,
+                        seenUrls,
+                        resume,
+                        candidate,
+                        allScored,
+                        limitWarnings,
+                    );
+                    if (n > 0) sourcesWithJobs = 1;
                 } catch (err) {
-                    const msg = `${company.name}: ${err.message}`;
-                    errors.push(msg);
-                    logger.error(`JobHunt company failed — ${msg}`);
+                    errors.push(`India boards: ${err.message}`);
+                    logger.error(`JobHunt India failed — ${err.message}`);
                     if (abortOnTinyFishLimit && err.code === 'TINYFISH_LIMIT') {
                         limitWarnings.push(`TinyFish: rate/quota limit — scan stopped early (${err.message})`);
-                        errors.push('TinyFish rate limit — scan stopped early');
-                        break;
                     }
                     if (err.code === 'JOB_HUNT_LLM_EXHAUSTED') {
                         limitWarnings.push(...this.llm.takeLimitWarnings());
                         limitWarnings.push(`LLM: all providers exhausted — ${err.message}`);
-                        errors.push('All LLMs exhausted — scan stopped early');
-                        break;
+                    }
+                }
+            } else {
+                const companies = this.companies.slice(0, maxCompanies || this.companies.length);
+                for (let i = 0; i < companies.length; i++) {
+                    const company = companies[i];
+                    try {
+                        onProgress?.(`Scanning ${company.name} (${i + 1}/${companies.length})…`);
+                        logger.info(`JobHunt [${i + 1}/${companies.length}] ${company.name}`);
+                        let newJobs = await this.discoverCompany(company, seenUrls, candidate);
+                        if (!newJobs.length) continue;
+                        const n = await this._scoreAndCollect(
+                            newJobs,
+                            seenUrls,
+                            resume,
+                            candidate,
+                            allScored,
+                            limitWarnings,
+                        );
+                        if (n > 0) sourcesWithJobs += 1;
+                    } catch (err) {
+                        const msg = `${company.name}: ${err.message}`;
+                        errors.push(msg);
+                        logger.error(`JobHunt company failed — ${msg}`);
+                        if (abortOnTinyFishLimit && err.code === 'TINYFISH_LIMIT') {
+                            limitWarnings.push(`TinyFish: rate/quota limit — scan stopped early (${err.message})`);
+                            errors.push('TinyFish rate limit — scan stopped early');
+                            break;
+                        }
+                        if (err.code === 'JOB_HUNT_LLM_EXHAUSTED') {
+                            limitWarnings.push(...this.llm.takeLimitWarnings());
+                            limitWarnings.push(`LLM: all providers exhausted — ${err.message}`);
+                            errors.push('All LLMs exhausted — scan stopped early');
+                            break;
+                        }
                     }
                 }
             }
@@ -377,6 +514,7 @@ export class JobHuntScanner {
                     passing.map((j) => ({
                         ...j,
                         scan_date: scanDate,
+                        mode,
                         created_at: new Date(),
                     })),
                 );
@@ -394,7 +532,7 @@ export class JobHuntScanner {
                         finished_at: new Date(),
                         jobs_found: passing.length,
                         top_count: topJobs.length,
-                        companies_with_jobs: companiesWithJobs,
+                        companies_with_jobs: sourcesWithJobs,
                         errors,
                         limit_warnings: uniqueWarnings,
                     },
@@ -406,9 +544,10 @@ export class JobHuntScanner {
                 allJobs: passing,
                 errors,
                 limitWarnings: uniqueWarnings,
-                companiesScanned: companies.length,
-                companiesWithJobs,
+                companiesScanned: sourceTotal,
+                companiesWithJobs: sourcesWithJobs,
                 scanDate,
+                mode,
             };
         } catch (err) {
             await this._runs.updateOne(
@@ -422,7 +561,7 @@ export class JobHuntScanner {
     }
 
     async getLatestTop(limit = 5) {
-        return this._jobs.find({}).sort({ created_at: -1, score: -1 }).limit(limit).toArray();
+        return this._jobs.find({ dead: { $ne: true } }).sort({ created_at: -1, score: -1 }).limit(limit).toArray();
     }
 
     async getLatestScanJobs(limit = 20) {
@@ -443,9 +582,6 @@ export class JobHuntScanner {
             .toArray();
     }
 
-    /**
-     * Re-fetch JD pages and drop closed/404 links (also marks them dead in Mongo).
-     */
     async revalidateJobs(jobs = []) {
         if (!jobs.length || !this.tf.isConfigured()) return jobs;
         const live = [];
@@ -462,17 +598,24 @@ export class JobHuntScanner {
                 );
             } catch (err) {
                 logger.warn(`JobHunt revalidate fetch failed: ${err.message}`);
-                return jobs; // keep list if TinyFish is down
+                return jobs;
             }
             for (const job of batch) {
                 const r = resultForUrl(resp.results, job.url);
                 const text = r?.text ? String(r.text) : '';
                 const title = r?.title || job.title || '';
                 const statusCode = r?.status_code ?? r?.status ?? null;
-                if (!r || isDeadJobPage(text, title, statusCode) || text.trim().length < 80) {
+                // LinkedIn/Naukri often login-wall — keep if we already scored it and page isn't clearly 404
+                const clearlyDead = isDeadJobPage(text, title, statusCode);
+                if (clearlyDead && !(job.snippet || job.content)) {
                     if (job._id) deadIds.push(job._id);
                     if (job.url) deadUrls.push(job.url);
                     logger.info(`JobHunt revalidate drop: ${job.company} — ${job.url}`);
+                    continue;
+                }
+                if (clearlyDead && text.trim().length > 0 && !/(naukri|indeed|linkedin)/i.test(job.url || '')) {
+                    if (job._id) deadIds.push(job._id);
+                    if (job.url) deadUrls.push(job.url);
                     continue;
                 }
                 live.push(job);

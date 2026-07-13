@@ -38,13 +38,13 @@ class JobHuntController {
         return {
             name: this.config.JOB_HUNT_CANDIDATE_NAME || 'Candidate',
             profile: this.config.JOB_HUNT_PROFILE || '',
-            seeking: this.config.JOB_HUNT_SEEKING || 'Remote / hybrid tech roles',
-            notSuitable: this.config.JOB_HUNT_NOT_SUITABLE || 'Pure junior / non-technical',
+            seeking: this.config.JOB_HUNT_SEEKING || 'India / remote-India software roles',
+            notSuitable: this.config.JOB_HUNT_NOT_SUITABLE || 'Pure junior / non-technical / overseas-only',
             searchSeniority: this.config.JOB_HUNT_SEARCH_SENIORITY || '',
             searchKeywords: this.config.JOB_HUNT_SEARCH_KEYWORDS || '',
             minScore: this.config.JOB_HUNT_MIN_SCORE || 60,
             topN: this.config.JOB_HUNT_TOP_N || 5,
-            relocationNote: this.config.JOB_HUNT_RELOCATION_NOTE || '',
+            relocationNote: this.config.JOB_HUNT_RELOCATION_NOTE || 'Based in India; open to remote / hybrid India',
         };
     }
 
@@ -112,7 +112,10 @@ class JobHuntController {
 
         await this._broadcast(
             sock,
-            `💼 *Job Hunt scan started*\n🏢 Companies: ${max || this.scanner.companies.length}\n_This can take 30–90 min — results will be sent here._`,
+            `💼 *Job Hunt scan started*\n` +
+                `🇮🇳 Mode: *${this.scanner.mode}*\n` +
+                `🔎 Sources: ${this.scanner.getSourceLabel()}\n` +
+                `_India boards finish in ~5–15 min (vs 30–90 for full company crawl)._`,
         );
 
         const result = await this.scanner.runScan({
@@ -204,6 +207,8 @@ class JobHuntController {
             enabledDm: dm,
             groupCount: groups.length,
             companyCount: this.scanner.companies.length,
+            sourceLabel: this.scanner.getSourceLabel(),
+            mode: this.scanner.mode,
             minScore: this.getCandidate().minScore,
             topN: this.getCandidate().topN,
             busy: this.scanner.isBusy(),
