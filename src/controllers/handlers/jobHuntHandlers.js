@@ -67,7 +67,12 @@ export async function handleJobHunt(sock, chatId, senderJid, args, ctx) {
         }
 
         if (action === 'top') {
-            const jobs = await jobHuntController.scanner.getLatestScanJobs(jobHuntController.getCandidate().topN);
+            await sock.sendMessage(chatId, { text: '🔎 Checking links are still live…' }, { quoted: originalMsg });
+            let jobs = await jobHuntController.scanner.getLatestScanJobs(
+                Math.max(jobHuntController.getCandidate().topN * 3, 15),
+            );
+            jobs = await jobHuntController.scanner.revalidateJobs(jobs);
+            jobs = jobs.slice(0, jobHuntController.getCandidate().topN);
             const text = formatJobHuntDigest(jobs, { scanDate: jobs[0]?.scan_date });
             await sock.sendMessage(chatId, { text }, { quoted: originalMsg });
             return;
