@@ -203,8 +203,11 @@ function getContextInfo(message) {
     }
 
     for (const value of Object.values(c)) {
-        if (value && typeof value === 'object' && value.contextInfo?.quotedMessage) {
-            return value.contextInfo;
+        if (value && typeof value === 'object' && value.contextInfo) {
+            const ci = value.contextInfo;
+            if (ci.quotedMessage || (Array.isArray(ci.mentionedJid) && ci.mentionedJid.length)) {
+                return ci;
+            }
         }
     }
 

@@ -31,6 +31,7 @@ import { config } from '../config/config.js';
 import { resolveNotificationJid, extractPhoneNumber, isBotSelfChat, getBotSelfSenderJid, isDirectMessage } from '../utils/permissions.js';
 import {
     formatOwnerAboutReply,
+    isBotDirectedOwnerQuestion,
     looksLikeOwnerAboutQuestion,
     messageMentionsBot,
 } from '../utils/ownerProfile.js';
@@ -702,11 +703,15 @@ class WhatsAppService {
             return;
         }
 
-        // "Who is the owner?" — DM always; groups only when bot is @mentioned
+        // "Who is the owner?" — DM always; groups when @bot or clearly aimed at the bot ("ur/your owner")
         if (
             messageText
             && looksLikeOwnerAboutQuestion(messageText)
-            && (isDirectMessage(chatId) || messageMentionsBot(this.sock, msg))
+            && (
+                isDirectMessage(chatId)
+                || messageMentionsBot(this.sock, msg)
+                || isBotDirectedOwnerQuestion(messageText)
+            )
         ) {
             const about = formatOwnerAboutReply();
             try {

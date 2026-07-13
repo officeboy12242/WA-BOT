@@ -3,7 +3,7 @@
  */
 
 import { config } from '../config/config.js';
-import { extractPhoneNumber } from './permissions.js';
+import { isBotSelfTarget } from './permissions.js';
 import { getMentionedJids } from './waMessage.js';
 import { mentionDisplayToken } from './welcomeMessage.js';
 
@@ -61,36 +61,60 @@ export function formatOwnerAboutReply() {
     return { text, mentions: [jid], name };
 }
 
+/** Drop leading @mentions so "@Bot who is ur owner" still matches. */
+function normalizeOwnerQuestionText(text) {
+    return String(text || '')
+        .replace(/^(?:@\S+\s*)+/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
 /** Clear “who is the owner / who made this bot” style questions. */
 export function looksLikeOwnerAboutQuestion(text) {
-    const t = String(text || '').trim();
+    const t = normalizeOwnerQuestionText(text);
     if (!t || t.startsWith('/')) return false;
     return (
-        /\bwho\s+is\s+the\s+owner(\s+(of\s+(this|the)\s+bot|here))?\s*\??\s*$/i.test(t)
-        || /\bwho\s+(made|created|built|runs|owns)\s+(this|the)\s+bot\b/i.test(t)
+        /\bwho\s+is\s+(the\s+|ur\s+|your\s+|u+r\s+)?owner\b/i.test(t)
+        || /\bwho\s*(?:'s|s)\s+(ur|your)\s+owner\b/i.test(t)
+        || /\bwho\s+(made|created|built|runs|owns)\s+(this|the|you|u)\b/i.test(t)
         || /\bwho\s+(made|created|built)\s+this\b/i.test(t)
         || /\babout\s+(the\s+)?(owner|creator)\b/i.test(t)
         || /\bcontact\s+(the\s+)?owner\b/i.test(t)
         || /\bwhose\s+bot\s+is\s+this\b/i.test(t)
+        || /\b(ur|your)\s+owner\s*(kaun|hai|kon)?\b/i.test(t)
         || /\b(owner\s+kaun|kisne\s+banaya|bot\s+ka\s+owner|creator\s+kaun|maalik\s+kaun)\b/i.test(t)
         || /\b(मालिक कौन|किसने बनाया|ओनर कौन)\b/.test(t)
     );
 }
 
+/** “Your/ur owner” / “who made you” — clearly aimed at the bot, even without @mention. */
+export function isBotDirectedOwnerQuestion(text) {
+    const t = normalizeOwnerQuestionText(text);
+    if (!t) return false;
+    return (
+        /\bwho\s+is\s+(ur|your)\s+owner\b/i.test(t)
+        || /\bwho\s+(made|created|built)\s+you\b/i.test(t)
+        || /\bwho\s*(?:'s|s)\s+your\s+owner\b/i.test(t)
+    );
+}
+
+/** True when the message @mentions the connected bot (phone or LID). */
 export function messageMentionsBot(sock, waMessage) {
     if (!sock?.user || !waMessage) return false;
-    const botPhone = extractPhoneNumber(sock.user.id || '');
-    if (!botPhone) return false;
-    return getMentionedJids(waMessage).some((jid) => extractPhoneNumber(jid) === botPhone);
+    return getMentionedJids(waMessage).some((jid) => isBotSelfTarget(sock, jid));
 }
 
 // ponytail: one assert check — fails if owner-about detector regresses
 if (process.argv[1] && /ownerProfile\.js$/.test(String(process.argv[1]).replace(/\\/g, '/'))) {
     const ok =
         looksLikeOwnerAboutQuestion('who is the owner?')
+        && looksLikeOwnerAboutQuestion('who is ur owner')
+        && looksLikeOwnerAboutQuestion('@BotName who is ur owner')
+        && isBotDirectedOwnerQuestion('who is ur owner')
         && looksLikeOwnerAboutQuestion('who made this bot')
         && looksLikeOwnerAboutQuestion('bot ka owner kaun hai')
-        && !looksLikeOwnerAboutQuestion('who is the owner of Tesla stock');
+        && !looksLikeOwnerAboutQuestion('who is the owner of Tesla stock')
+        && !isBotDirectedOwnerQuestion('who is the owner');
     if (!ok) {
         console.error('ownerProfile self-check failed');
         process.exit(1);
