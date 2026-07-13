@@ -1117,6 +1117,40 @@ class GroupManager {
         return m === 'manual' ? 'manual' : m === 'auto' ? 'auto' : null;
     }
 
+    async setJobHuntEnabled(groupId, groupName, enabled, setBy) {
+        const normalizedId = jidNormalizedUser(String(groupId).replace(/:\d+(?=@)/, '')) || groupId;
+        await this.groups.updateOne(
+            { group_id: normalizedId },
+            {
+                $set: {
+                    group_name: groupName,
+                    job_hunt_enabled: enabled,
+                    job_hunt_set_by: setBy,
+                    job_hunt_set_at: new Date(),
+                },
+                $setOnInsert: { group_id: normalizedId, is_active: false },
+            },
+            { upsert: true }
+        );
+        logger.info(
+            `${enabled ? '💼 Job hunt ON' : '💼 Job hunt OFF'}: ${groupName} (${normalizedId}) by ${setBy}`
+        );
+    }
+
+    async isJobHuntEnabled(groupId) {
+        const row = await this.groups.findOne(
+            { group_id: groupId },
+            { projection: { job_hunt_enabled: 1 } }
+        );
+        return row?.job_hunt_enabled === true;
+    }
+
+    async getJobHuntGroups() {
+        return this.groups
+            .find({ job_hunt_enabled: true }, { projection: { _id: 0 } })
+            .toArray();
+    }
+
     async setWeeklyTrendingEnabled(groupId, groupName, enabled, setBy) {
         await this.groups.updateOne(
             { group_id: groupId },

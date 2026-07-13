@@ -49,6 +49,7 @@ import {
 } from './handlers/groupHandlers.js';
 
 import { handleTradelert, handleTradenow } from './handlers/tradeHandlers.js';
+import { handleJobHunt } from './handlers/jobHuntHandlers.js';
 import { handleHeal, handleFix } from './handlers/healHandlers.js';
 import { handleAssist } from './handlers/assistHandlers.js';
 
@@ -126,6 +127,7 @@ class CommandController {
         this.groupChatLogService = null;
         this.groupSummaryController = null;
         this.tradeAlertController = null;
+        this.jobHuntController = null;
         this.botStartTime = Date.now();
         this.stickerForwarder = null;
 
@@ -154,6 +156,10 @@ class CommandController {
 
     setTradeAlertController(tradeAlertController) {
         this.tradeAlertController = tradeAlertController;
+    }
+
+    setJobHuntController(jobHuntController) {
+        this.jobHuntController = jobHuntController;
     }
 
     setGetSock(getSock) {
@@ -206,6 +212,7 @@ class CommandController {
             groupChatLogService: this.groupChatLogService,
             groupSummaryController: this.groupSummaryController,
             tradeAlertController: this.tradeAlertController,
+            jobHuntController: this.jobHuntController,
             assistService: this.assistService,
             botStartTime: this.botStartTime,
             courseAPI: this.courseAPI,
@@ -320,6 +327,7 @@ class CommandController {
             case 'trending':   await handleTrending(sock, chatId, senderJid, args, ctx); break;
             case 'tradelert':  await handleTradelert(sock, chatId, senderJid, args, ctx); break;
             case 'tradenow':   await handleTradenow(sock, chatId, senderJid, args, ctx); break;
+            case 'jobhunt':    await handleJobHunt(sock, chatId, senderJid, args, ctx); break;
 
             /* ── Admin management ── */
             case 'addadmin':    await handleAddAdmin(sock, chatId, senderJid, args, originalMsg, ctx); break;
