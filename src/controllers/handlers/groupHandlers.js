@@ -22,16 +22,7 @@ import {
 } from '../../utils/groupParticipantSnapshot.js';
 import { config } from '../../config/config.js';
 import { getYesterdayDateStrIST } from '../../utils/dateIST.js';
-
-/** Primary owner phone for tappable @mentions (opens their DM). */
-function getPrimaryOwnerPhone() {
-    const phones = (config.OWNER_NUMBERS || [])
-        .map((n) => String(n || '').replace(/\D/g, ''))
-        .filter((n) => /^\d{10,15}$/.test(n));
-    if (phones[0]) return phones[0];
-    const notify = String(config.SUMMARY_SELF_HEAL_NOTIFY || '').replace(/\D/g, '');
-    return /^\d{10,15}$/.test(notify) ? notify : '917887499710';
-}
+import { getPrimaryOwnerPhone } from '../../utils/ownerProfile.js';
 
 /** Dedupe welcome when both stub message + participants.update fire */
 const recentWelcomes = new Map();

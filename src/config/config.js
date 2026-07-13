@@ -110,6 +110,8 @@ export const config = {
     GEMINI_HEAL_MODELS: process.env.GEMINI_HEAL_MODELS?.trim() || 'gemini-2.5-flash,gemini-2.5-pro,gemini-2.0-flash',
     /** Owner DM assistant — replies as ASSIST_OWNER_NAME in personal chats when /assist on */
     ASSIST_OWNER_NAME: process.env.ASSIST_OWNER_NAME?.trim() || 'Jacky',
+    /** Short bio the AI shares when people ask about the owner (optional override) */
+    ASSIST_OWNER_ABOUT: process.env.ASSIST_OWNER_ABOUT?.trim() || '',
     ASSIST_GEMINI_MODEL: process.env.ASSIST_GEMINI_MODEL?.trim() || 'gemini-2.5-flash',
     ASSIST_GEMINI_MODELS: process.env.ASSIST_GEMINI_MODELS?.trim() || 'gemini-2.5-flash,gemini-2.0-flash,gemini-2.5-pro',
     /** Assist fallback — Groq / NVIDIA (same keys as trade) */
