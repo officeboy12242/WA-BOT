@@ -4,7 +4,8 @@
 
 import { logger } from '../utils/logger.js';
 import { formatDateLabelIST, getRecapDateStrIST } from '../utils/dateIST.js';
-import NvidiaDeepSeekService from '../services/NvidiaDeepSeekService.js';
+import NvidiaDeepSeekService, { SUMMARY_SYSTEM_PROMPT } from '../services/NvidiaDeepSeekService.js';
+import OpenRouterLlmService from '../services/OpenRouterLlmService.js';
 import SummarySelfHealService from '../services/SummarySelfHealService.js';
 
 function parseSummaryTime(timeStr) {
@@ -112,6 +113,7 @@ class GroupSummaryController {
         this.config = config;
         this.mongoDb = mongoDb;
         this.nvidia = new NvidiaDeepSeekService(config);
+        this.openrouter = new OpenRouterLlmService(config);
         this.selfHeal = new SummarySelfHealService(config, mongoDb);
         this.minMessages = Math.max(1, Number(config.GROUP_SUMMARY_MIN_MESSAGES) || 3);
         this.enabled = config.GROUP_SUMMARY_ENABLED !== false;
@@ -121,6 +123,22 @@ class GroupSummaryController {
         this.summaryMinute = minute;
         this._sock = null;
         this._sentCollection = null;
+    }
+
+    _hasLlm() {
+        return this.nvidia.isConfigured() || this.openrouter.isConfigured();
+    }
+
+    async _summarizeViaOpenRouter(prompt) {
+        const { text, model } = await this.openrouter.chat({
+            system: SUMMARY_SYSTEM_PROMPT,
+            user: prompt,
+            temperature: 0.2,
+            maxTokens: 1200,
+            timeoutMs: this.config.GROUP_SUMMARY_LLM_TIMEOUT_MS || this.config.OPENROUTER_TIMEOUT_MS || 90_000,
+        });
+        logger.info(`Group summary: OpenRouter fallback via ${model}`);
+        return this.nvidia.parseSummaryJson(text);
     }
 
     async init() {
@@ -161,7 +179,7 @@ class GroupSummaryController {
 
     /** Morning catch-up if bot missed the midnight run (restart/deploy). */
     async runCatchUpIfNeeded(sock = this._sock) {
-        if (!this.enabled || !sock || !this.nvidia.isConfigured()) {
+        if (!this.enabled || !sock || !this._hasLlm()) {
             return;
         }
 
@@ -194,8 +212,8 @@ class GroupSummaryController {
         if (!this.enabled || !sock) {
             throw new Error('Recap service not ready');
         }
-        if (!this.nvidia.isConfigured()) {
-            throw new Error('NVIDIA_API_KEY is not set on the server');
+        if (!this._hasLlm()) {
+            throw new Error('No summary LLM configured (set NVIDIA_API_KEY or OPENROUTER_API_KEY)');
         }
 
         const groups = await this.groupManager.getSummaryEnabledGroups();
@@ -247,8 +265,8 @@ class GroupSummaryController {
             logger.warn('Group summary: no socket, skipping');
             return;
         }
-        if (!this.nvidia.isConfigured()) {
-            logger.warn('Group summary: NVIDIA_API_KEY missing, skipping');
+        if (!this._hasLlm()) {
+            logger.warn('Group summary: no NVIDIA/OpenRouter key, skipping');
             return;
         }
 
@@ -337,22 +355,51 @@ class GroupSummaryController {
                     `Group summary: ${groupName} — ${messages.length} msgs, ` +
                         `${chunkPrompts.length} chunk(s) for map-reduce`
                 );
-                summary = await this.nvidia.summarizeGroupChatChunks(chunkPrompts, {
-                    groupName,
-                    dateLabel,
-                    totalMessages: messages.length,
-                });
+                if (this.nvidia.isConfigured()) {
+                    try {
+                        summary = await this.nvidia.summarizeGroupChatChunks(chunkPrompts, {
+                            groupName,
+                            dateLabel,
+                            totalMessages: messages.length,
+                        });
+                    } catch (err) {
+                        logger.warn(`NVIDIA chunk recap failed for ${groupName}: ${err.message}`);
+                        if (this.openrouter.isConfigured()) {
+                            // Single-pass with first chunk merge via OpenRouter if NVIDIA fails
+                            const prompt = this.chatLog.buildPrompt(messages, groupName, dateLabel);
+                            summary = await this._summarizeViaOpenRouter(prompt);
+                        } else {
+                            throw err;
+                        }
+                    }
+                } else {
+                    const prompt = this.chatLog.buildPrompt(messages, groupName, dateLabel);
+                    summary = await this._summarizeViaOpenRouter(prompt);
+                }
             } else {
                 const prompt = this.chatLog.buildPrompt(messages, groupName, dateLabel);
                 logger.info(
                     `Group summary: ${groupName} — ${messages.length} msgs, ` +
                         `prompt ${prompt.length} chars`
                 );
-                summary = await this.nvidia.summarizeGroupChat(prompt);
+                if (this.nvidia.isConfigured()) {
+                    try {
+                        summary = await this.nvidia.summarizeGroupChat(prompt);
+                    } catch (err) {
+                        logger.warn(`NVIDIA recap failed for ${groupName}: ${err.message}`);
+                        if (this.openrouter.isConfigured()) {
+                            summary = await this._summarizeViaOpenRouter(prompt);
+                        } else {
+                            throw err;
+                        }
+                    }
+                } else {
+                    summary = await this._summarizeViaOpenRouter(prompt);
+                }
             }
             logger.info(`Group summary: ${groupName} LLM done in ${Date.now() - startedAt}ms`);
         } catch (err) {
-            logger.error(`NVIDIA recap failed for ${groupName}: ${err.message}`);
+            logger.error(`Recap LLM failed for ${groupName}: ${err.message}`);
             summary = null;
             this.selfHeal.triggerFromSummaryFailure(groupName, dateStr, err.message);
         }

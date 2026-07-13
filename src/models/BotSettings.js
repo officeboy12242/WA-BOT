@@ -94,45 +94,6 @@ class BotSettings {
             { upsert: true }
         );
     }
-
-    async getJobHuntDmEnabled() {
-        const doc = await this.collection.findOne({ key: 'job_hunt_dm_enabled' });
-        if (!doc) return null;
-        return Boolean(doc.value);
-    }
-
-    async setJobHuntDmEnabled(enabled) {
-        await this.collection.updateOne(
-            { key: 'job_hunt_dm_enabled' },
-            {
-                $set: {
-                    key: 'job_hunt_dm_enabled',
-                    value: Boolean(enabled),
-                    updated_at: new Date(),
-                },
-            },
-            { upsert: true }
-        );
-    }
-
-    async getJobHuntResume() {
-        const doc = await this.collection.findOne({ key: 'job_hunt_resume' });
-        return typeof doc?.value === 'string' ? doc.value : '';
-    }
-
-    async setJobHuntResume(text) {
-        await this.collection.updateOne(
-            { key: 'job_hunt_resume' },
-            {
-                $set: {
-                    key: 'job_hunt_resume',
-                    value: String(text || ''),
-                    updated_at: new Date(),
-                },
-            },
-            { upsert: true }
-        );
-    }
 }
 
 export default BotSettings;

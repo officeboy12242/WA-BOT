@@ -434,14 +434,6 @@ export const COMMAND_REGISTRY = [
         category: 'trade',
     },
     {
-        names: ['/jobhunt', '/jobs'],
-        key: 'jobhunt',
-        scope: 'any',
-        role: 'anyone',
-        help: 'Job hunt — `/jobhunt on|off`, `dm on|off`, `scan`, `top`, `draft N`, `resume`',
-        category: 'jobs',
-    },
-    {
         names: ['/addpremium'],
         key: 'addpremium',
         scope: 'any',

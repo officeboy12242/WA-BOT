@@ -1,5 +1,5 @@
 /**
- * Assist DM chat router: Gemini → Groq → NVIDIA with conversation history.
+ * Assist DM chat router: Gemini → Groq → NVIDIA → OpenRouter.
  */
 
 import axios from 'axios';
@@ -8,6 +8,7 @@ import { config } from '../config/config.js';
 import { isGeminiRateLimitError } from './GeminiTradeService.js';
 import { isGroqRateLimitError } from './GroqTradeService.js';
 import NvidiaDeepSeekService from './NvidiaDeepSeekService.js';
+import OpenRouterLlmService, { isOpenRouterRateLimitError } from './OpenRouterLlmService.js';
 
 const GEMINI_ROOT = 'https://generativelanguage.googleapis.com/v1beta/models';
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
@@ -15,7 +16,7 @@ const NVIDIA_URL = 'https://integrate.api.nvidia.com/v1/chat/completions';
 
 const DEFAULT_GEMINI = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.5-pro'];
 const DEFAULT_GROQ = ['llama-3.1-8b-instant', 'llama-3.3-70b-versatile'];
-const DEFAULT_PROVIDERS = ['gemini', 'groq', 'nvidia'];
+const DEFAULT_PROVIDERS = ['gemini', 'groq', 'nvidia', 'openrouter'];
 
 function parseList(raw, fallback) {
     const parts = String(raw || '')
@@ -32,7 +33,7 @@ function sleep(ms) {
 export function isAssistLlmFallbackError(err) {
     const msg = String(err?.message || err);
     const status = err?.response?.status;
-    if (isGeminiRateLimitError(err) || isGroqRateLimitError(err)) return true;
+    if (isGeminiRateLimitError(err) || isGroqRateLimitError(err) || isOpenRouterRateLimitError(err)) return true;
     if (status === 429 || status === 503 || status === 502 || status === 504) return true;
     return /rate limit|quota|timeout|ETIMEDOUT|ECONNABORTED|empty response|overloaded|unavailable/i.test(msg);
 }
@@ -62,13 +63,14 @@ export default class AssistLlmRouter {
             cfg.ASSIST_NVIDIA_MODELS || cfg.ASSIST_NVIDIA_MODEL || cfg.NVIDIA_MODEL,
             ['deepseek-ai/deepseek-v4-flash']
         );
+        this.openrouter = new OpenRouterLlmService(cfg);
         this.providerOrder = parseList(cfg.ASSIST_LLM_PROVIDERS || cfg.TRADE_LLM_PROVIDERS, DEFAULT_PROVIDERS);
         this.timeoutMs = Math.min(60_000, Math.max(15_000, Number(cfg.ASSIST_TIMEOUT_MS) || 45_000));
         this.nvidia = new NvidiaDeepSeekService(cfg);
     }
 
     isConfigured() {
-        return Boolean(this.geminiKey || this.groqKey || this.nvidiaKey);
+        return Boolean(this.geminiKey || this.groqKey || this.nvidiaKey || this.openrouter.isConfigured());
     }
 
     getProviderChain() {
@@ -82,6 +84,9 @@ export default class AssistLlmRouter {
         if (this.nvidiaKey && this.providerOrder.includes('nvidia')) {
             out.push(`NVIDIA ${this.nvidiaModels[0].split('/').pop()}`);
         }
+        if (this.openrouter.isConfigured() && this.providerOrder.includes('openrouter')) {
+            out.push(`OpenRouter ${this.openrouter.tradeModel}`);
+        }
         return out;
     }
 
@@ -90,11 +95,12 @@ export default class AssistLlmRouter {
             if (p === 'gemini') return Boolean(this.geminiKey);
             if (p === 'groq') return Boolean(this.groqKey);
             if (p === 'nvidia') return Boolean(this.nvidiaKey);
+            if (p === 'openrouter') return this.openrouter.isConfigured();
             return false;
         });
 
         if (!providers.length) {
-            throw new Error('No assist LLM configured (GEMINI, GROQ, or NVIDIA API key)');
+            throw new Error('No assist LLM configured (GEMINI, GROQ, NVIDIA, or OPENROUTER API key)');
         }
 
         let lastErr;
@@ -105,12 +111,15 @@ export default class AssistLlmRouter {
                     ? this.geminiModels
                     : provider === 'groq'
                       ? this.groqModels
-                      : this.nvidiaModels;
+                      : provider === 'openrouter'
+                        ? ['openrouter']
+                        : this.nvidiaModels;
 
             for (const model of models) {
                 for (let rateTry = 0; rateTry < 2; rateTry++) {
                     try {
                         let text;
+                        let usedModel = model;
                         if (provider === 'gemini') {
                             text = await this._callGemini(model, systemPrompt, history, userBlock, {
                                 maxTokens,
@@ -121,6 +130,15 @@ export default class AssistLlmRouter {
                                 maxTokens,
                                 temperature,
                             });
+                        } else if (provider === 'openrouter') {
+                            const res = await this.openrouter.chat({
+                                messages: toOpenAiMessages(systemPrompt, history, userBlock),
+                                temperature,
+                                maxTokens,
+                                timeoutMs: this.timeoutMs,
+                            });
+                            text = res.text;
+                            usedModel = res.model;
                         } else {
                             text = await this._callNvidia(model, systemPrompt, history, userBlock, {
                                 maxTokens,
@@ -133,9 +151,9 @@ export default class AssistLlmRouter {
                         }
 
                         if (pi > 0) {
-                            logger.info(`Assist fallback succeeded via ${provider}/${model}`);
+                            logger.info(`Assist fallback succeeded via ${provider}/${usedModel}`);
                         }
-                        return { text: text.trim().slice(0, 2000), provider, model };
+                        return { text: text.trim().slice(0, 2000), provider, model: usedModel };
                     } catch (err) {
                         lastErr = err;
                         if (isAssistLlmFallbackError(err) && rateTry < 1) {

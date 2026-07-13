@@ -22,6 +22,8 @@ const SUMMARY_SYSTEM_PROMPT = [
     'keep topics to 3-5 items; notable to 0-3 items; friendly tone; English unless chat is mostly Hindi.',
 ].join(' ');
 
+export { SUMMARY_SYSTEM_PROMPT };
+
 function clampTimeoutMs(raw, cap = MAX_TIMEOUT_MS) {
     const n = Number(raw);
     if (!Number.isFinite(n) || n <= 0) {
