@@ -74,10 +74,12 @@ export function looksLikeOwnerAboutQuestion(text) {
     const t = normalizeOwnerQuestionText(text);
     if (!t || t.startsWith('/')) return false;
     return (
-        /\bwho\s+is\s+(the\s+|ur\s+|your\s+|u+r\s+)?owner\b/i.test(t)
+        /\bwho\s+is\s+(ur|your)\s+owner\b/i.test(t)
+        || /\bwho\s+is\s+the\s+owner(\s+(of\s+(this|the)\s+bot|here))?\s*\??\s*$/i.test(t)
+        || /\bwho\s+is\s+owner\s*\??\s*$/i.test(t)
         || /\bwho\s*(?:'s|s)\s+(ur|your)\s+owner\b/i.test(t)
-        || /\bwho\s+(made|created|built|runs|owns)\s+(this|the|you|u)\b/i.test(t)
-        || /\bwho\s+(made|created|built)\s+this\b/i.test(t)
+        || /\bwho\s+(made|created|built|runs|owns)\s+(this|the)\s+bot\b/i.test(t)
+        || /\bwho\s+(made|created|built)\s+(this|you|u)\b/i.test(t)
         || /\babout\s+(the\s+)?(owner|creator)\b/i.test(t)
         || /\bcontact\s+(the\s+)?owner\b/i.test(t)
         || /\bwhose\s+bot\s+is\s+this\b/i.test(t)
