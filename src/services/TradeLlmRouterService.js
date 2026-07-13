@@ -1,5 +1,5 @@
 /**
- * Trade LLM router: Gemini → Groq → NVIDIA fallback chain.
+ * Trade LLM router: Gemini → Groq → NVIDIA → OpenRouter fallback chain.
  */
 
 import { logger } from '../utils/logger.js';
@@ -7,13 +7,15 @@ import { config } from '../config/config.js';
 import GeminiTradeService, { isGeminiRateLimitError } from './GeminiTradeService.js';
 import GroqTradeService, { isGroqRateLimitError } from './GroqTradeService.js';
 import NvidiaDeepSeekService from './NvidiaDeepSeekService.js';
+import OpenRouterLlmService, { isOpenRouterRateLimitError } from './OpenRouterLlmService.js';
 
-const DEFAULT_PROVIDER_ORDER = ['gemini', 'groq', 'nvidia'];
+const DEFAULT_PROVIDER_ORDER = ['gemini', 'groq', 'nvidia', 'openrouter'];
 
 export function isTradeLlmRateLimitError(err) {
     return (
         isGeminiRateLimitError(err) ||
         isGroqRateLimitError(err) ||
+        isOpenRouterRateLimitError(err) ||
         err?.response?.status === 429 ||
         /rate limit|quota|resource.?exhausted|too many requests/i.test(String(err?.message || err))
     );
@@ -36,6 +38,7 @@ export default class TradeLlmRouterService {
         this.gemini = new GeminiTradeService(cfg);
         this.groq = new GroqTradeService(cfg);
         this.nvidia = new NvidiaDeepSeekService(cfg);
+        this.openrouter = new OpenRouterLlmService(cfg);
         this.providerOrder = this._parseProviderOrder(cfg.TRADE_LLM_PROVIDERS);
         this.lastProvider = null;
     }
@@ -57,6 +60,11 @@ export default class TradeLlmRouterService {
                 name: 'nvidia',
                 svc: this.nvidia,
                 label: () => `NVIDIA ${this.nvidia.tradeModel}`,
+            },
+            openrouter: {
+                name: 'openrouter',
+                svc: this.openrouter,
+                label: () => `OpenRouter ${this.openrouter.tradeModel}`,
             },
         };
         return this.providerOrder
@@ -85,7 +93,9 @@ export default class TradeLlmRouterService {
     async _route(method, systemPrompt, userPrompt, opts = {}) {
         const providers = this._providers();
         if (!providers.length) {
-            throw new Error('No trade LLM configured (set GEMINI_API_KEY, GROQ_API_KEY, or NVIDIA_API_KEY)');
+            throw new Error(
+                'No trade LLM configured (set GEMINI_API_KEY, GROQ_API_KEY, NVIDIA_API_KEY, or OPENROUTER_API_KEY)',
+            );
         }
 
         let lastErr;
