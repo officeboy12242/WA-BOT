@@ -162,7 +162,7 @@ export function formatTradeScanPreview(discovery) {
 
     lines.push('─────────────────────────────');
     lines.push(
-        `_Gates: confluence ≥${d.gates?.minConfluence ?? 50} · AI confidence ≥${d.gates?.minConfidence ?? 70}%_`
+        `_Gates: confluence ≥${d.gates?.minConfluence ?? 40} · AI confidence ≥${d.gates?.minConfidence ?? 70}%_`
     );
     lines.push('_Full CE+PE analysis at alert time; only VALID high-confluence BUYs posted._');
     lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━');

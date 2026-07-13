@@ -61,7 +61,7 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
             r += `🧠 *Mode:* ${modeLabel(mode)}\n`;
             r += `🕐 *Daily time:* ${formatAlertTime()} IST (trading days only)\n`;
             r += `📊 *Symbols:* ${symbolLine}\n`;
-            r += `🔔 *Posts:* CE/PE + plan when confluence ≥50 & AI ≥70%\n`;
+            r += `🔔 *Posts:* CE/PE when AI ≥70% · confluence ≥40 (soft ≥25 if quiet day)\n`;
             r += `🌐 *Data:* NSE macro + hot sectors + Yahoo + news\n`;
             r += `🤖 *AI:* ${llmOk ? llmChain : 'Set GEMINI / GROQ / NVIDIA API key'}\n\n`;
             r += '*Commands:*\n';
@@ -95,7 +95,7 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
             r += `🕐 Daily scan at *${formatAlertTime()}* IST\n`;
             r += `🧠 *Mode:* ${modeLabel(mode)}\n`;
             r += '🌐 Scans *live news*, earnings/results headlines, top gainers/losers\n';
-            r += '🔔 Posts full *CE + PE* analysis when Primary Pick ≥70%\n';
+            r += '🔔 Posts *CE/PE* when AI ≥70% · prefers confluence ≥40 (soft fill ≥25)\n';
             r += '📅 Skips *weekends & NSE holidays* — use `/tradenow` anytime\n';
             r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
             r += '💡 `/tradelert scan` — preview watchlist now\n';

@@ -169,8 +169,15 @@ export const config = {
     TRADE_ALERT_MAX_SENDS: Math.max(1, parseInt(process.env.TRADE_ALERT_MAX_SENDS, 10) || 5),
     /** How many symbols AI discovery picks to scan */
     TRADE_ALERT_DISCOVERY_COUNT: Math.max(8, Math.min(15, parseInt(process.env.TRADE_ALERT_DISCOVERY_COUNT, 10) || 10)),
-    /** Minimum confluence score (0–100) before posting actionable alert */
-    TRADE_ALERT_MIN_CONFLUENCE: Math.max(30, Math.min(80, parseInt(process.env.TRADE_ALERT_MIN_CONFLUENCE, 10) || 50)),
+    /** Strict confluence floor (0–100) for high-quality daily posts */
+    TRADE_ALERT_MIN_CONFLUENCE: Math.max(25, Math.min(80, parseInt(process.env.TRADE_ALERT_MIN_CONFLUENCE, 10) || 40)),
+    /** If no strict posts, still send daily AI≥70% picks with softer confluence */
+    TRADE_ALERT_DAILY_SOFT_FALLBACK: process.env.TRADE_ALERT_DAILY_SOFT_FALLBACK !== 'false',
+    /** Soft confluence floor used only when filling empty daily alert days */
+    TRADE_ALERT_DAILY_SOFT_MIN_CONFLUENCE: Math.max(
+        0,
+        Math.min(50, parseInt(process.env.TRADE_ALERT_DAILY_SOFT_MIN_CONFLUENCE, 10) || 25)
+    ),
     /** Step-1 AI research brief before CE/PE trade analysis */
     TRADE_TWO_STEP_RESEARCH: process.env.TRADE_TWO_STEP_RESEARCH !== 'false',
     /** Skip daily trade alerts on NSE holidays and weekends (IST) */
