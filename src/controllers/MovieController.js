@@ -379,6 +379,9 @@ function formatMovieSearchProgress(dialogue, query, state) {
 function makeMovieProgressEditor(sock, chatId, messageKey, dialogue, query) {
     let lastEditAt = 0;
     let pulseId = null;
+    let closed = false;
+    // ponytail: serialize edits — concurrent edit+fallback was spawning orphan loading msgs
+    let editChain = Promise.resolve();
     let currentState = {
         percent: 10,
         hd: 'loading',
@@ -395,27 +398,44 @@ function makeMovieProgressEditor(sock, chatId, messageKey, dialogue, query) {
         }
     };
 
+    const queueEdit = () => {
+        if (closed || !messageKey?.id) return editChain;
+        const text = format();
+        editChain = editChain
+            .then(async () => {
+                if (closed) return;
+                await editMessageText(sock, chatId, messageKey, text, { fallback: false });
+            })
+            .catch(() => {});
+        return editChain;
+    };
+
     const flush = async (patch = {}) => {
+        if (closed) return;
         currentState = { ...currentState, ...patch };
         stopPulse();
-        lastEditAt = 0;
-        if (!messageKey?.id) return;
-        await editMessageText(sock, chatId, messageKey, format());
+        lastEditAt = Date.now();
+        await queueEdit();
     };
 
     const update = async (patch = {}, { minGapMs = 1400, force = false } = {}) => {
+        if (closed) return;
         currentState = { ...currentState, ...patch };
         const now = Date.now();
         if (!force && now - lastEditAt < minGapMs) return;
         lastEditAt = now;
-        if (!messageKey?.id) return;
-        await editMessageText(sock, chatId, messageKey, format());
+        await queueEdit();
     };
 
     const startPulse = (from = 18, to = 38) => {
+        if (closed) return;
         stopPulse();
         let p = from;
         pulseId = setInterval(() => {
+            if (closed) {
+                stopPulse();
+                return;
+            }
             if (p < to && currentState.hd === 'loading') {
                 p += 4;
                 void update({ percent: p }, { minGapMs: 1500 });
@@ -425,7 +445,13 @@ function makeMovieProgressEditor(sock, chatId, messageKey, dialogue, query) {
         }, 1600);
     };
 
-    return { update, flush, startPulse, stopPulse, format };
+    const close = async () => {
+        closed = true;
+        stopPulse();
+        await editChain.catch(() => {});
+    };
+
+    return { update, flush, startPulse, stopPulse, close, format };
 }
 
 function cleanTitle(raw) {
@@ -1489,7 +1515,7 @@ class MovieController {
                 : '';
 
             if (!results?.length) {
-                progress.stopPulse();
+                await progress.close();
                 void safeDeleteMessage(sock, chatId, searchingMsg.key);
 
                 const noResult = getRandomDialogue(NO_RESULTS_DIALOGUES);
@@ -1547,6 +1573,7 @@ class MovieController {
             logger.info(`Formatted ${resultMessages.length} message(s) for "${query}" (${resultMessages.reduce((a, m) => a + m.length, 0)} chars)`);
 
             if (!resultMessages.length) {
+                await progress.close();
                 void safeDeleteMessage(sock, chatId, searchingMsg.key);
                 const errSent = await movieQuickSend(sock, chatId, {
                     text: '⚠️ Found movies but could not format results. Try again.',
@@ -1554,6 +1581,9 @@ class MovieController {
                 this.scheduleDelete(sock, chatId, errSent.key);
                 return;
             }
+
+            await progress.close();
+            void safeDeleteMessage(sock, chatId, searchingMsg.key);
 
             const footer = unlimited
                 ? '\n\n⭐ _Unlimited searches (Premium/Staff)_'
@@ -1598,13 +1628,10 @@ class MovieController {
                 }
             }
 
-            void safeDeleteMessage(sock, chatId, searchingMsg.key);
-            progress.stopPulse();
-
             logger.info(`🎬 Movie search "${query}" by ${userId} → ${results.length} results from [${sources.join(', ')}] (${sentCount}/${resultMessages.length} msg(s), ${remaining} left)`);
             void this._notifySearchLog(sock, normalizedUserId, query, results.length, chatId, pushName);
         } catch (err) {
-            progress?.stopPulse?.();
+            await progress?.close?.();
             void safeDeleteMessage(sock, chatId, searchingMsg.key);
 
             const errorDialogues = [
