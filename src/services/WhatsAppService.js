@@ -29,6 +29,11 @@ import { groupMessageTracker } from '../utils/groupMessageTracker.js';
 import { groupParticipantSnapshot } from '../utils/groupParticipantSnapshot.js';
 import { config } from '../config/config.js';
 import { resolveNotificationJid, extractPhoneNumber, isBotSelfChat, getBotSelfSenderJid, isDirectMessage } from '../utils/permissions.js';
+import {
+    formatOwnerAboutReply,
+    looksLikeOwnerAboutQuestion,
+    messageMentionsBot,
+} from '../utils/ownerProfile.js';
 import os from 'os';
 
 
@@ -695,6 +700,24 @@ class WhatsAppService {
                     } catch {}
                 });
             return;
+        }
+
+        // "Who is the owner?" — DM always; groups only when bot is @mentioned
+        if (
+            messageText
+            && looksLikeOwnerAboutQuestion(messageText)
+            && (isDirectMessage(chatId) || messageMentionsBot(this.sock, msg))
+        ) {
+            const about = formatOwnerAboutReply();
+            try {
+                await safeSendMessage(this.sock, chatId, {
+                    text: about.text,
+                    mentions: about.mentions,
+                }, msg);
+                return;
+            } catch (err) {
+                logger.warn(`Owner-about reply failed: ${err?.message || err}`);
+            }
         }
 
         // DM assist mode — reply as owner (Jacky) via Gemini; never in groups
