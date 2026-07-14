@@ -297,11 +297,11 @@ export const COMMAND_REGISTRY = [
         help: 'Pause automatic course posting only (tech news continues)',
     },
     {
-        names: ['/resume'],
-        key: 'resume',
+        names: ['/resumecourses', '/unpausecourses'],
+        key: 'resumecourses',
         scope: 'any',
         role: 'admins',
-        help: 'Resume automatic course posting',
+        help: 'Resume automatic course posting (after `/pause`)',
     },
     {
         names: ['/clear'],
@@ -557,6 +557,30 @@ export const COMMAND_REGISTRY = [
         scope: 'any',
         role: 'owner',
         help: 'Trigger Render redeploy of latest commit (owner only)',
+    },
+    {
+        names: ['/resume', '/cv', '/setcv', '/mycv'],
+        key: 'resume',
+        scope: 'any',
+        role: 'anyone',
+        help: 'Tailor resume to a JD — upload PDF/DOC/DOCX/TXT, then reply with the job description',
+        category: 'resume',
+    },
+    {
+        names: ['/tailor', '/tailorcv', '/jd'],
+        key: 'tailor',
+        scope: 'any',
+        role: 'anyone',
+        help: 'Reuse saved resume: skip upload and jump to JD step',
+        category: 'resume',
+    },
+    {
+        names: ['/cover', '/coverletter'],
+        key: 'cover',
+        scope: 'any',
+        role: 'anyone',
+        help: 'Cover letter from last tailored JD (or attach/paste JD)',
+        category: 'resume',
     },
 ];
 
