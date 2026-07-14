@@ -16,6 +16,7 @@ import { pronoobDriveService } from '../services/PronoobDriveService.js';
 import { movieCacheService, cloneMovieResults } from '../services/MovieCacheService.js';
 import { urlShortener } from '../utils/urlShortener.js';
 import { safeSendMessage, plainSendMessage, fastSendMessage, resolveOutboundJid } from '../utils/waMessage.js';
+import { formatProgressLine } from '../utils/progressBar.js';
 import { audioFromFilename, qualityFromFilename } from '../utils/movieMetadata.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -313,18 +314,126 @@ function getRandomDialogue(arr) {
     return arr[Math.floor(Math.random() * arr.length)];
 }
 
+function formatSourceLine(emoji, label, status, detail = '') {
+    let line;
+    if (status === 'done') {
+        line = `${emoji} ${label} ✓${detail ? ` (${detail})` : ''}`;
+    } else {
+        line = `${emoji} ${label} …`;
+    }
+    return `> ${line}`;
+}
+
+function formatMovieSearchProgress(dialogue, query, state) {
+    const percent = state.percent ?? 0;
+
+    let msg = `${dialogue}\n\n`;
+    msg += `*$ movie --search*\n`;
+    msg += `> *${query}*\n`;
+    msg += `${formatProgressLine('SRC', percent, { decimals: 1 })}\n`;
+
+    if (state.cacheMode) {
+        msg += `> 📦 Vault cache · ${state.resultCount ?? 0} title(s)`;
+        if (state.ageHours != null) {
+            msg += ` · ${state.ageHours}h old`;
+        }
+        msg += '\n';
+        if (state.fuzzyMatch) {
+            msg += '> 🔎 Fuzzy vault match\n';
+        }
+        if (state.staleCache) {
+            msg += '> ⚠️ Saved links — APIs slow/offline\n';
+        }
+        if (state.refreshing) {
+            msg += '> 🔄 Refreshing vault in background\n';
+        }
+        if (state.shorten === 'loading') {
+            msg += '> 🔗 Shortening links…\n';
+        }
+        return msg.trimEnd();
+    }
+
+    msg += `\n*$ sources*\n`;
+
+    if (state.hd !== undefined) {
+        const detail = state.hdCount != null ? `${state.hdCount} found` : '';
+        msg += `${formatSourceLine('📡', 'HDHub4u', state.hd, detail)}\n`;
+    }
+    if (state.drive !== undefined) {
+        const detail = state.driveCount != null ? `${state.driveCount} found` : '';
+        msg += `${formatSourceLine('💾', 'Drive vault', state.drive, detail)}\n`;
+    }
+    if (state.atoz !== undefined) {
+        const detail = state.atozCount != null ? `${state.atozCount} found` : '';
+        msg += `${formatSourceLine('📺', 'AtoZ cinema', state.atoz, detail)}\n`;
+    }
+    if (state.shorten === 'loading') {
+        msg += '> 🔗 Shortening links…\n';
+    }
+
+    return msg.trimEnd();
+}
+
 /**
- * Progress stub — WhatsApp edits of the loading message caused stuck/duplicate loaders
- * (Baileys retry re-sends the original body after edit/delete). Keep one static loader, never edit.
+ * Progress bar via rare milestone edits only (no pulse).
+ * Fully await each edit — never Promise.race-abandon (late edits resurrect deleted loaders).
  */
-const MOVIE_PROGRESS_NOOP = {
-    update: async () => {},
-    flush: async () => {},
-    startPulse: () => {},
-    stopPulse: () => {},
-    close: async () => {},
-    format: () => '',
-};
+function makeMovieProgressEditor(sock, chatId, messageKey, dialogue, query) {
+    let closed = false;
+    let editTail = Promise.resolve();
+    let lastText = '';
+    let currentState = {
+        percent: 10,
+        hd: 'loading',
+        drive: 'pending',
+        atoz: 'pending',
+    };
+
+    const format = () => formatMovieSearchProgress(dialogue, query, currentState);
+
+    const queueEdit = () => {
+        if (closed || !messageKey?.id || !sock?.sendMessage) return editTail;
+        const text = format();
+        if (text === lastText) return editTail;
+        lastText = text;
+        const key = normalizeOwnMessageKey(messageKey, chatId);
+        const jid = resolveOutboundJid(key, chatId);
+        editTail = editTail
+            .then(async () => {
+                if (closed) return;
+                try {
+                    await sock.sendMessage(jid, { text, edit: key, linkPreview: false });
+                } catch (err) {
+                    logger.warn(`Movie progress edit skipped: ${err?.message || err}`);
+                }
+            })
+            .catch(() => {});
+        return editTail;
+    };
+
+    const flush = async (patch = {}) => {
+        if (closed) return;
+        currentState = { ...currentState, ...patch };
+        await queueEdit();
+    };
+
+    const update = async (patch = {}, { force = false } = {}) => {
+        if (!force) return;
+        await flush(patch);
+    };
+
+    const startPulse = () => {};
+    const stopPulse = () => {};
+
+    const close = async () => {
+        closed = true;
+        await editTail.catch(() => {});
+        // Let WhatsApp ack the last edit before revoke — cuts Baileys retry ghosts
+        await new Promise((r) => setTimeout(r, 600));
+    };
+
+    return { update, flush, startPulse, stopPulse, close, format };
+}
 
 function normalizeOwnMessageKey(messageKey, chatId) {
     if (!messageKey?.id) return null;
@@ -1363,8 +1472,12 @@ class MovieController {
 
         return withMovieSearchLock(chatId, async () => {
         const dialogue = getRandomDialogue(SEARCH_DIALOGUES);
-        // Static loader only — editing this message caused Baileys to re-send duplicates
-        const initialProgress = `${dialogue}\n\n*$ movie --search*\n> *${query}*\n_Searching sources…_`;
+        const initialProgress = formatMovieSearchProgress(dialogue, query, {
+            percent: 10,
+            hd: 'loading',
+            drive: 'pending',
+            atoz: 'pending',
+        });
         const searchingMsgPromise = movieQuickSend(sock, chatId, { text: initialProgress }, originalMsg);
 
         const userId = await this._resolvePhoneNumber(sock, chatId, senderJid);
@@ -1399,7 +1512,7 @@ class MovieController {
 
         const remaining = unlimited ? '∞' : (DAILY_LIMIT - currentCount - 1);
         const searchingMsg = await searchingMsgPromise;
-        const progress = MOVIE_PROGRESS_NOOP;
+        const progress = makeMovieProgressEditor(sock, chatId, searchingMsg?.key, dialogue, query);
 
         try {
             const SHORTEN_BUDGET_MS = config.MOVIE_SHORTEN_BUDGET_MS || 15_000;
@@ -1447,7 +1560,32 @@ class MovieController {
             if (!unlimited) await this.incrementSearchCount(normalizedUserId);
             void this.logSearch(normalizedUserId, query, results.length, chatId);
 
+            if (!servedFromCache) {
+                await progress.flush({
+                    percent: 82,
+                    hd: 'done',
+                    hdCount: hdResults.length,
+                    drive: 'done',
+                    driveCount: driveResults.length,
+                    atoz: 'done',
+                    atozCount: atozResults.length,
+                });
+            }
+
             try {
+                await progress.flush(servedFromCache
+                    ? { percent: 88, cacheMode: true, resultCount: results.length, shorten: 'loading' }
+                    : {
+                        percent: 90,
+                        hd: 'done',
+                        hdCount: hdResults.length,
+                        drive: 'done',
+                        driveCount: driveResults.length,
+                        atoz: 'done',
+                        atozCount: atozResults.length,
+                        shorten: 'loading',
+                    });
+
                 await Promise.race([
                     urlShortener.shortenMovieResults(results, SHORTEN_BUDGET_MS),
                     new Promise((resolve) => {
