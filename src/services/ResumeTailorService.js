@@ -1,5 +1,5 @@
 /**
- * JD → tailored resume via AssistLlmRouter (Gemini → Groq → NVIDIA → OpenRouter).
+ * JD → full resume rewrite via AssistLlmRouter (modes: exact | related).
  */
 
 import AssistLlmRouter from './AssistLlmRouter.js';
@@ -41,7 +41,10 @@ export default class ResumeTailorService {
         return this.llm.isConfigured();
     }
 
-    async tailor({ baseResume, jobDescription }) {
+    /**
+     * @param {{ baseResume: string, jobDescription: string, mode?: 'exact'|'related' }} opts
+     */
+    async tailor({ baseResume, jobDescription, mode = 'related' }) {
         if (!this.isConfigured()) {
             throw new Error('No LLM configured (set GEMINI / GROQ / NVIDIA / OPENROUTER key)');
         }
@@ -52,18 +55,22 @@ export default class ResumeTailorService {
             throw new Error('No job description provided');
         }
 
+        const rewriteMode = mode === 'exact' ? 'exact' : 'related';
+
         const { text, provider, model } = await this.llm.completeChat({
-            systemPrompt: buildResumeTailorSystemPrompt(),
+            systemPrompt: buildResumeTailorSystemPrompt(rewriteMode),
             history: [],
-            userBlock: buildTailorUserBlock(baseResume, jobDescription),
-            maxTokens: 4096,
-            temperature: 0.35,
-            maxChars: 16_000,
+            userBlock: buildTailorUserBlock(baseResume, jobDescription, rewriteMode),
+            maxTokens: 8192,
+            temperature: rewriteMode === 'exact' ? 0.45 : 0.35,
+            maxChars: 28_000,
         });
 
         const parsed = parseTailorOutput(text);
-        logger.info(`Resume tailor via ${provider}/${model} (${parsed.tailored.length} chars)`);
-        return { ...parsed, provider, model };
+        logger.info(
+            `Resume tailor (${rewriteMode}) via ${provider}/${model} (${parsed.tailored.length} chars)`
+        );
+        return { ...parsed, provider, model, mode: rewriteMode };
     }
 
     async coverLetter({ baseResume, jobDescription }) {
@@ -73,7 +80,7 @@ export default class ResumeTailorService {
         const { text, provider, model } = await this.llm.completeChat({
             systemPrompt: buildCoverLetterSystemPrompt(),
             history: [],
-            userBlock: buildTailorUserBlock(baseResume, jobDescription),
+            userBlock: buildTailorUserBlock(baseResume, jobDescription, 'related'),
             maxTokens: 1200,
             temperature: 0.4,
             maxChars: 4000,
