@@ -15,7 +15,7 @@ import { hdHubMoviesService } from '../services/HdHubMoviesService.js';
 import { pronoobDriveService } from '../services/PronoobDriveService.js';
 import { movieCacheService, cloneMovieResults } from '../services/MovieCacheService.js';
 import { urlShortener } from '../utils/urlShortener.js';
-import { safeSendMessage, safeDeleteMessage, plainSendMessage, fastSendMessage, editMessageText } from '../utils/waMessage.js';
+import { safeSendMessage, safeDeleteMessage, plainSendMessage, fastSendMessage, resolveOutboundJid } from '../utils/waMessage.js';
 import { formatProgressLine } from '../utils/progressBar.js';
 import { audioFromFilename, qualityFromFilename } from '../utils/movieMetadata.js';
 
@@ -377,11 +377,9 @@ function formatMovieSearchProgress(dialogue, query, state) {
 }
 
 function makeMovieProgressEditor(sock, chatId, messageKey, dialogue, query) {
-    let lastEditAt = 0;
-    let pulseId = null;
     let closed = false;
-    // ponytail: serialize edits — concurrent edit+fallback was spawning orphan loading msgs
-    let editChain = Promise.resolve();
+    // ponytail: never Promise.race-abandon edits — late finishes re-show deleted loading msgs (Baileys retry)
+    let editTail = Promise.resolve();
     let currentState = {
         percent: 10,
         hd: 'loading',
@@ -391,67 +389,52 @@ function makeMovieProgressEditor(sock, chatId, messageKey, dialogue, query) {
 
     const format = () => formatMovieSearchProgress(dialogue, query, currentState);
 
-    const stopPulse = () => {
-        if (pulseId) {
-            clearInterval(pulseId);
-            pulseId = null;
-        }
-    };
-
     const queueEdit = () => {
-        if (closed || !messageKey?.id) return editChain;
+        if (closed || !messageKey?.id || !sock?.sendMessage) return editTail;
         const text = format();
-        editChain = editChain
+        const jid = resolveOutboundJid(messageKey, chatId);
+        editTail = editTail
             .then(async () => {
                 if (closed) return;
-                await editMessageText(sock, chatId, messageKey, text, { fallback: false });
+                try {
+                    await sock.sendMessage(jid, { text, edit: messageKey, linkPreview: false });
+                } catch (err) {
+                    logger.warn(`Movie progress edit skipped: ${err?.message || err}`);
+                }
             })
             .catch(() => {});
-        return editChain;
+        return editTail;
     };
 
     const flush = async (patch = {}) => {
         if (closed) return;
         currentState = { ...currentState, ...patch };
-        stopPulse();
-        lastEditAt = Date.now();
         await queueEdit();
     };
 
-    const update = async (patch = {}, { minGapMs = 1400, force = false } = {}) => {
-        if (closed) return;
-        currentState = { ...currentState, ...patch };
-        const now = Date.now();
-        if (!force && now - lastEditAt < minGapMs) return;
-        lastEditAt = now;
-        await queueEdit();
+    // Soft updates ignored — pulse spam caused duplicate/stuck loading msgs
+    const update = async (patch = {}, { force = false } = {}) => {
+        if (!force) return;
+        await flush(patch);
     };
 
-    const startPulse = (from = 18, to = 38) => {
-        if (closed) return;
-        stopPulse();
-        let p = from;
-        pulseId = setInterval(() => {
-            if (closed) {
-                stopPulse();
-                return;
-            }
-            if (p < to && currentState.hd === 'loading') {
-                p += 4;
-                void update({ percent: p }, { minGapMs: 1500 });
-            } else {
-                stopPulse();
-            }
-        }, 1600);
-    };
+    const startPulse = () => {};
+    const stopPulse = () => {};
 
     const close = async () => {
         closed = true;
-        stopPulse();
-        await editChain.catch(() => {});
+        await editTail.catch(() => {});
     };
 
     return { update, flush, startPulse, stopPulse, close, format };
+}
+
+/** Await delete (+ one retry). void-delete raced results and left loading msgs stuck. */
+async function deleteMovieProgressMessage(sock, chatId, messageKey) {
+    if (!messageKey?.id) return;
+    await safeDeleteMessage(sock, chatId, messageKey);
+    await new Promise((r) => setTimeout(r, 400));
+    await safeDeleteMessage(sock, chatId, messageKey);
 }
 
 function cleanTitle(raw) {
@@ -1460,7 +1443,7 @@ class MovieController {
 
         if (!unlimited && currentCount >= DAILY_LIMIT) {
             const searchingMsg = await searchingMsgPromise;
-            void safeDeleteMessage(sock, chatId, searchingMsg?.key);
+            await deleteMovieProgressMessage(sock, chatId, searchingMsg?.key);
 
             const limitMsg = formatLimitReached();
             const sent = await movieQuickSend(sock, chatId, { text: limitMsg }, originalMsg);
@@ -1516,7 +1499,7 @@ class MovieController {
 
             if (!results?.length) {
                 await progress.close();
-                void safeDeleteMessage(sock, chatId, searchingMsg.key);
+                await deleteMovieProgressMessage(sock, chatId, searchingMsg?.key);
 
                 const noResult = getRandomDialogue(NO_RESULTS_DIALOGUES);
                 const noSent = await movieQuickSend(sock, chatId, { text: noResult, linkPreview: false }, originalMsg);
@@ -1574,7 +1557,7 @@ class MovieController {
 
             if (!resultMessages.length) {
                 await progress.close();
-                void safeDeleteMessage(sock, chatId, searchingMsg.key);
+                await deleteMovieProgressMessage(sock, chatId, searchingMsg?.key);
                 const errSent = await movieQuickSend(sock, chatId, {
                     text: '⚠️ Found movies but could not format results. Try again.',
                 }, originalMsg);
@@ -1583,7 +1566,7 @@ class MovieController {
             }
 
             await progress.close();
-            void safeDeleteMessage(sock, chatId, searchingMsg.key);
+            await deleteMovieProgressMessage(sock, chatId, searchingMsg?.key);
 
             const footer = unlimited
                 ? '\n\n⭐ _Unlimited searches (Premium/Staff)_'
@@ -1632,7 +1615,7 @@ class MovieController {
             void this._notifySearchLog(sock, normalizedUserId, query, results.length, chatId, pushName);
         } catch (err) {
             await progress?.close?.();
-            void safeDeleteMessage(sock, chatId, searchingMsg.key);
+            await deleteMovieProgressMessage(sock, chatId, searchingMsg?.key);
 
             const errorDialogues = [
                 "🎭 _\"Technical difficulties... even JARVIS needs a break!\"_\n\n⚠️ Search failed. Try again in a moment!",
