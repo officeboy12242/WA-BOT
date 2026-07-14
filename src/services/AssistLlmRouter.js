@@ -90,7 +90,8 @@ export default class AssistLlmRouter {
         return out;
     }
 
-    async completeChat({ systemPrompt, history, userBlock, maxTokens = 512, temperature = 0.75 }) {
+    async completeChat({ systemPrompt, history, userBlock, maxTokens = 512, temperature = 0.75, maxChars = 2000 }) {
+        const outLimit = Math.min(50_000, Math.max(200, Number(maxChars) || 2000));
         const providers = this.providerOrder.filter((p) => {
             if (p === 'gemini') return Boolean(this.geminiKey);
             if (p === 'groq') return Boolean(this.groqKey);
@@ -153,7 +154,7 @@ export default class AssistLlmRouter {
                         if (pi > 0) {
                             logger.info(`Assist fallback succeeded via ${provider}/${usedModel}`);
                         }
-                        return { text: text.trim().slice(0, 2000), provider, model: usedModel };
+                        return { text: text.trim().slice(0, outLimit), provider, model: usedModel };
                     } catch (err) {
                         lastErr = err;
                         if (isAssistLlmFallbackError(err) && rateTry < 1) {

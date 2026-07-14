@@ -101,6 +101,13 @@ import {
 } from './handlers/warnHandlers.js';
 
 import { handleDelLast } from './handlers/deleteHandlers.js';
+import {
+    handleCv,
+    handleTailor,
+    handleCover,
+    handlePendingResumeInput,
+    createResumeSessionStore,
+} from './handlers/resumeHandlers.js';
 
 class CommandController {
     constructor(database, botState, groupManager, newsController = null, movieController = null, userManager = null, stickerController = null, botSettings = null, githubTrendingController = null, memberScrapeController = null, warnDatabase = null, authDatabase = null, courseAPI = null) {
@@ -118,9 +125,12 @@ class CommandController {
         this.authDatabase = authDatabase;
         this.courseAPI = courseAPI;
         this.assistService = null;
+        this.resumeStore = null;
+        this.resumeTailorService = null;
         this.pendingClearConfirmations = new Map();
         this.pendingScrapSessions = createScrapSessionStore();
         this.pendingGithubPosts = createGithubPostSessionStore();
+        this.pendingResumeSessions = createResumeSessionStore();
         this.getSock = null;
         this.whatsappService = null;
         this.groupChatLogService = null;
@@ -130,6 +140,11 @@ class CommandController {
         this.stickerForwarder = null;
 
         this._isOwnerFromJid = this._isOwnerFromJid.bind(this);
+    }
+
+    setResumeTailor(resumeStore, resumeTailorService) {
+        this.resumeStore = resumeStore;
+        this.resumeTailorService = resumeTailorService;
     }
 
     setStickerForwarder(stickerForwarder) {
@@ -201,6 +216,9 @@ class CommandController {
             pendingClearConfirmations: this.pendingClearConfirmations,
             pendingScrapSessions: this.pendingScrapSessions,
             pendingGithubPosts: this.pendingGithubPosts,
+            pendingResumeSessions: this.pendingResumeSessions,
+            resumeStore: this.resumeStore,
+            resumeTailorService: this.resumeTailorService,
             getSock: this.getSock,
             whatsappService: this.whatsappService,
             groupChatLogService: this.groupChatLogService,
@@ -214,11 +232,22 @@ class CommandController {
     }
 
     async tryHandlePendingInput(sock, chatId, messageText, senderJid, originalMsg = null) {
-        if (!messageText?.trim() || messageText.trim().startsWith('/')) {
+        if (messageText?.trim()?.startsWith('/')) {
             return false;
         }
 
         const ctx = { ...this._ctx(), originalMsg };
+        const handledResume = await handlePendingResumeInput(
+            sock, chatId, senderJid, messageText || '', ctx,
+        );
+        if (handledResume) {
+            return true;
+        }
+
+        if (!messageText?.trim()) {
+            return false;
+        }
+
         const handledGithub = await handlePendingGithubConfirmation(
             sock, chatId, senderJid, messageText.trim(), ctx,
         );
@@ -279,7 +308,7 @@ class CommandController {
             case 'confirm':  await handleConfirm(sock, chatId, ctx); break;
             case 'cancel':  await handleCancel(sock, chatId, senderJid, ctx); break;
             case 'pause':    await handlePause(sock, chatId, ctx); break;
-            case 'resume':   await handleResume(sock, chatId, ctx); break;
+            case 'resumecourses': await handleResume(sock, chatId, ctx); break;
             case 'status':   await handleStatus(sock, chatId, ctx); break;
             case 'facts':    await handleFacts(sock, chatId, ctx); break;
             case 'help':     await handleHelp(sock, chatId, senderJid, ctx); break;
@@ -317,6 +346,9 @@ class CommandController {
             case 'fix':        await handleFix(sock, chatId, senderJid, args, ctx); break;
             case 'heal':       await handleHeal(sock, chatId, senderJid, args, ctx); break;
             case 'assist':     await handleAssist(sock, chatId, senderJid, args, ctx); break;
+            case 'resume':     await handleCv(sock, chatId, senderJid, args, ctx); break;
+            case 'tailor':     await handleTailor(sock, chatId, senderJid, args, ctx); break;
+            case 'cover':      await handleCover(sock, chatId, senderJid, args, ctx); break;
             case 'trending':   await handleTrending(sock, chatId, senderJid, args, ctx); break;
             case 'tradelert':  await handleTradelert(sock, chatId, senderJid, args, ctx); break;
             case 'tradenow':   await handleTradenow(sock, chatId, senderJid, args, ctx); break;

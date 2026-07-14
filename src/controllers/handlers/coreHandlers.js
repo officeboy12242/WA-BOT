@@ -223,7 +223,7 @@ export async function handlePause(sock, chatId, { botState, botSettings, courseA
             await safeSendMessage(sock, chatId, {
                 text:
                     '━━━━━━━━━━━━━━━━━━━━━━━━━━━\nℹ️ *ALREADY PAUSED* ℹ️\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
-                    'Course posting is already paused.\nUse `/resume` to continue.',
+                    'Course posting is already paused.\nUse `/resumecourses` to continue.',
             }, originalMsg);
             return;
         }
@@ -256,7 +256,7 @@ export async function handlePause(sock, chatId, { botState, botSettings, courseA
         r += '🎓 Per-group: `/coursesoff` still applies when you resume.\n';
         r += '💬 Commands still work normally.\n\n';
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-        r += '💡 Use `/resume` to resume — backlog won\'t flood all groups';
+        r += '💡 Use `/resumecourses` to resume — backlog won\'t flood all groups';
 
         await safeSendMessage(sock, chatId, { text: r }, originalMsg);
         logger.info(`⏸️ Course posting paused by ${chatId} (snapshot ${snapshotIds.length} ids)`);
@@ -322,7 +322,7 @@ export async function handleStatus(sock, chatId, { database, botState, originalM
         r += `📅 *Today:* ${stats.today} courses\n\n`;
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
         r += botState.isPaused
-            ? '💡 Use `/resume` to resume course posting'
+            ? '💡 Use `/resumecourses` to resume course posting'
             : '💡 Use `/pause` to pause courses only';
         r += '\n_⏰ Auto-deletes in 5 hours_';
 

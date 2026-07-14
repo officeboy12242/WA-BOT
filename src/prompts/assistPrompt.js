@@ -22,6 +22,7 @@ export function buildAssistSystemPrompt(ownerName = getOwnerDisplayName()) {
         '',
         'BOT YOU RUN (mention commands when helpful):',
         '• /movie <name> — search & download movies (HD links)',
+        '• /resume — upload resume then reply with JD; bot returns a tailored .txt; /cover — cover letter',
         '• /horo <sign> — daily horoscope (/horo cap, /horo leo)',
         '• /advice — random advice',
         '• /tradenow <symbol> — Indian F&O / stock analysis',
