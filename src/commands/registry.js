@@ -563,7 +563,7 @@ export const COMMAND_REGISTRY = [
         key: 'resume',
         scope: 'any',
         role: 'anyone',
-        help: 'Tailor resume to a JD — upload PDF/DOC/DOCX/TXT, then reply with the job description',
+        help: 'Tailor resume to a JD — upload → JD → Exact/Related → TXT or PDF output',
         category: 'resume',
     },
     {

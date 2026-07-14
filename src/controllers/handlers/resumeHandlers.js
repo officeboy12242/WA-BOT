@@ -8,6 +8,8 @@ import { safeSendMessage } from '../../utils/waMessage.js';
 import { hasWaDocument, downloadWaDocument } from '../../utils/waDocument.js';
 import { extractResumeText } from '../../utils/resumeTextExtract.js';
 import { formatProgressLine } from '../../utils/progressBar.js';
+import { parseRewriteMode, parseExportFormat } from '../../prompts/resumeTailorPrompt.js';
+import { buildResumePdfBuffer } from '../../utils/resumePdfExport.js';
 import { logger } from '../../utils/logger.js';
 
 const SESSION_TTL_MS = 15 * 60 * 1000;
@@ -68,12 +70,13 @@ async function loadTextFromMsg(sock, originalMsg, pastedText) {
 
 function formatResumeProgress(state) {
     const percent = state.percent ?? 0;
+    const modeLabel = state.mode === 'exact' ? 'EXACT JD match' : 'RELATED to JD';
     let msg = '✏️ *$ resume --tailor*\n';
-    msg += `> Matching your resume to the JD\n`;
+    msg += `> Full rewrite · ${modeLabel}\n`;
     msg += `${formatProgressLine('EDIT', percent, { decimals: 0 })}\n\n`;
     msg += `$ steps\n`;
     msg += `> ${state.stepRead || '⏳'} Read resume & JD\n`;
-    msg += `> ${state.stepRewrite || '⏳'} Rewrite (facts only)\n`;
+    msg += `> ${state.stepRewrite || '⏳'} Rewrite all sections\n`;
     msg += `> ${state.stepPack || '⏳'} Package result\n`;
     if (state.detail) {
         msg += `\n_${state.detail}_`;
@@ -170,9 +173,58 @@ async function askForJd(sock, chatId, originalMsg, meta, pendingResumeSessions, 
                 '✅ *Resume received*\n\n' +
                 `📄 ${src}\n` +
                 `🔤 ~${meta.textLength || resumeText.length} chars saved\n\n` +
-                '🎯 *Next step:* reply to *this* message with the *job description*\n' +
+                '🎯 *Next:* reply to *this* message with the *job description*\n' +
                 '(paste JD text, or attach PDF/DOC/DOCX/TXT).\n\n' +
-                '_Waiting 15 minutes… cancel with `/resume cancel`_',
+                '_Waiting 15 minutes… `/resume cancel` to stop_',
+        },
+        originalMsg
+    );
+}
+
+async function askForMode(sock, chatId, originalMsg, pendingResumeSessions, senderJid, phone, resumeText, jdText) {
+    setSession(pendingResumeSessions, chatId, senderJid, {
+        mode: 'await_mode',
+        phone,
+        resumeText,
+        jdText,
+    });
+
+    await safeSendMessage(
+        sock,
+        chatId,
+        {
+            text:
+                '✅ *JD received*\n\n' +
+                'How should I rewrite the *whole* resume?\n\n' +
+                '1️⃣ *Exact* — rewrite every section to match the JD as closely as possible (max ATS/keyword fit)\n' +
+                '2️⃣ *Related* — full rewrite that stays natural but clearly aligned to the JD\n\n' +
+                'Reply with `1` or `2` (or `exact` / `related`).\n\n' +
+                '_Waiting 15 minutes… `/resume cancel` to stop_',
+        },
+        originalMsg
+    );
+}
+
+async function askForFormat(sock, chatId, originalMsg, pendingResumeSessions, senderJid, phone, resumeText, jdText, rewriteMode) {
+    setSession(pendingResumeSessions, chatId, senderJid, {
+        mode: 'await_format',
+        phone,
+        resumeText,
+        jdText,
+        rewriteMode,
+    });
+
+    await safeSendMessage(
+        sock,
+        chatId,
+        {
+            text:
+                '📦 *Output format*\n\n' +
+                'How should I send the revised resume?\n\n' +
+                '1️⃣ *TXT* — plain text (layout as text)\n' +
+                '2️⃣ *PDF* — classic resume PDF keeping your section order, headers, skills lines, title/date rows, and bullets\n\n' +
+                'Reply with `1` or `2` (or `txt` / `pdf`).\n\n' +
+                '_Waiting 15 minutes… `/resume cancel` to stop_',
         },
         originalMsg
     );
@@ -249,9 +301,9 @@ export async function handleCv(sock, chatId, senderJid, args, ctx) {
         {
             text:
                 '📄 *Resume tailor*\n\n' +
-                'Step 1/2 — send your resume as *PDF*, *DOC*, *DOCX*, or *TXT*\n' +
+                'Step 1/4 — send your resume as *PDF*, *DOC*, *DOCX*, or *TXT*\n' +
                 '(or paste the full resume text).\n\n' +
-                'After that I’ll ask for the job description.\n\n' +
+                'Then: JD → rewrite style (*exact*/*related*) → output (*txt*/*pdf*).\n\n' +
                 '_Waiting 15 minutes… `/resume cancel` to stop_',
         },
         originalMsg
@@ -288,7 +340,7 @@ export async function handleTailor(sock, chatId, senderJid, args, ctx) {
     }
 
     if (jdText) {
-        await runTailor(sock, chatId, phone, profile.text, jdText, ctx);
+        await askForMode(sock, chatId, originalMsg, pendingResumeSessions, senderJid, phone, profile.text, jdText);
         return;
     }
 
@@ -300,13 +352,15 @@ export async function handleTailor(sock, chatId, senderJid, args, ctx) {
     }, pendingResumeSessions, senderJid, phone, profile.text);
 }
 
-async function runTailor(sock, chatId, phone, baseText, jdText, ctx) {
+async function runTailor(sock, chatId, phone, baseText, jdText, rewriteMode, exportFormat, ctx) {
     const { resumeStore, resumeTailorService, originalMsg } = ctx;
+    const mode = rewriteMode === 'exact' ? 'exact' : 'related';
+    const format = exportFormat === 'pdf' ? 'pdf' : 'txt';
 
     const searchingMsg = await safeSendMessage(
         sock,
         chatId,
-        { text: formatResumeProgress({ percent: 8, stepRead: '🔄', stepRewrite: '⏳', stepPack: '⏳' }) },
+        { text: formatResumeProgress({ percent: 8, mode, stepRead: '🔄', stepRewrite: '⏳', stepPack: '⏳' }) },
         originalMsg
     );
     const progress = makeResumeProgressEditor(sock, chatId, searchingMsg?.key);
@@ -314,25 +368,32 @@ async function runTailor(sock, chatId, phone, baseText, jdText, ctx) {
     try {
         await progress.flush({
             percent: 20,
+            mode,
             stepRead: '✅',
             stepRewrite: '🔄',
-            detail: 'Sending to AI…',
+            detail: mode === 'exact' ? 'Full exact rewrite…' : 'Full related rewrite…',
         });
 
         const resultPromise = resumeTailorService.tailor({
             baseResume: baseText,
             jobDescription: jdText,
+            mode,
         });
 
-        // Milestone edits while LLM runs (same idea as movie loader)
-        await progress.flush({ percent: 45, stepRewrite: '🔄', detail: 'Rewriting bullets…' });
+        await progress.flush({
+            percent: 45,
+            mode,
+            stepRewrite: '🔄',
+            detail: 'Rewriting summary, skills, experience, projects…',
+        });
         const result = await resultPromise;
 
         await progress.flush({
             percent: 85,
+            mode,
             stepRewrite: '✅',
             stepPack: '🔄',
-            detail: 'Saving & packaging…',
+            detail: format === 'pdf' ? 'Building PDF…' : 'Saving TXT…',
         });
 
         await resumeStore.saveTailorResult(phone, chatId, {
@@ -341,20 +402,39 @@ async function runTailor(sock, chatId, phone, baseText, jdText, ctx) {
             gapsText: result.gaps,
         });
 
-        await progress.flush({ percent: 100, stepPack: '✅', detail: 'Done' });
+        const baseName = mode === 'exact' ? 'resume-exact-jd' : 'resume-related-jd';
+        let fileBuffer;
+        let mimetype;
+        let fileName;
+
+        if (format === 'pdf') {
+            fileBuffer = await buildResumePdfBuffer(result.tailored, {
+                title: baseName,
+                baseText,
+            });
+            mimetype = 'application/pdf';
+            fileName = `${baseName}.pdf`;
+        } else {
+            fileBuffer = Buffer.from(result.tailored, 'utf8');
+            mimetype = 'text/plain';
+            fileName = `${baseName}.txt`;
+        }
+
+        await progress.flush({ percent: 100, mode, stepPack: '✅', detail: 'Done' });
         await progress.close();
         await deleteProgressMessage(sock, chatId, searchingMsg?.key);
 
         const gapsPreview = (result.gaps || '').slice(0, 1200);
+        const modeTitle = mode === 'exact' ? 'Exact JD match' : 'Related to JD';
         await safeSendMessage(
             sock,
             chatId,
             {
                 text:
-                    `✅ *Revised resume ready*\n\n` +
+                    `✅ *Full revised resume ready* (${modeTitle} · ${format.toUpperCase()})\n\n` +
                     `*Gaps vs JD:*\n${gapsPreview || 'None'}\n\n` +
                     (result.keywords ? `*Keywords:* ${result.keywords.slice(0, 400)}\n\n` : '') +
-                    '📄 Edited version attached as `tailored-resume.txt`.\n' +
+                    `📄 Complete rewrite attached as \`${fileName}\`.\n` +
                     'Run `/resume` again for another JD, or `/cover` for a cover letter.',
             },
             originalMsg
@@ -364,15 +444,17 @@ async function runTailor(sock, chatId, phone, baseText, jdText, ctx) {
             sock,
             chatId,
             {
-                document: Buffer.from(result.tailored, 'utf8'),
-                mimetype: 'text/plain',
-                fileName: 'tailored-resume.txt',
+                document: fileBuffer,
+                mimetype,
+                fileName,
             },
             originalMsg
         );
     } catch (err) {
         logger.error(`Resume tailor failed: ${err.message}`);
-        await progress.close().catch?.(() => {});
+        try {
+            await progress.close();
+        } catch {}
         await deleteProgressMessage(sock, chatId, searchingMsg?.key);
         await safeSendMessage(sock, chatId, { text: `❌ Tailor failed: ${err.message}` }, originalMsg);
     }
@@ -430,7 +512,7 @@ export async function handleCover(sock, chatId, senderJid, args, ctx) {
 }
 
 /**
- * Pending steps after /resume (resume file → JD).
+ * Pending steps after /resume (resume → JD → mode).
  * @returns {Promise<boolean>}
  */
 export async function handlePendingResumeInput(sock, chatId, senderJid, messageText, ctx) {
@@ -442,6 +524,75 @@ export async function handlePendingResumeInput(sock, chatId, senderJid, messageT
 
     const hasDoc = hasWaDocument(originalMsg);
     const pasted = String(messageText || '').trim();
+
+    // Short choices ("1" / "2") — handle before the length gate
+    if (session.mode === 'await_mode') {
+        const rewriteMode = parseRewriteMode(pasted);
+        if (!rewriteMode) {
+            await safeSendMessage(
+                sock,
+                chatId,
+                { text: 'Reply with `1` (*exact*) or `2` (*related*).' },
+                originalMsg
+            );
+            return true;
+        }
+
+        const phone = session.phone || resolveUserPhone(chatId, senderJid);
+        let baseText = session.resumeText;
+        if (!baseText) {
+            const profile = await resumeStore.getByPhone(phone);
+            baseText = profile?.text || '';
+        }
+        if (!baseText || !session.jdText) {
+            pendingResumeSessions.delete(sessionKey(chatId, senderJid));
+            await safeSendMessage(sock, chatId, { text: '❌ Session incomplete — start over with `/resume`.' }, originalMsg);
+            return true;
+        }
+
+        await askForFormat(
+            sock,
+            chatId,
+            originalMsg,
+            pendingResumeSessions,
+            senderJid,
+            phone,
+            baseText,
+            session.jdText,
+            rewriteMode
+        );
+        return true;
+    }
+
+    if (session.mode === 'await_format') {
+        const exportFormat = parseExportFormat(pasted);
+        if (!exportFormat) {
+            await safeSendMessage(
+                sock,
+                chatId,
+                { text: 'Reply with `1` (*txt*) or `2` (*pdf*).' },
+                originalMsg
+            );
+            return true;
+        }
+
+        pendingResumeSessions.delete(sessionKey(chatId, senderJid));
+
+        const phone = session.phone || resolveUserPhone(chatId, senderJid);
+        let baseText = session.resumeText;
+        if (!baseText) {
+            const profile = await resumeStore.getByPhone(phone);
+            baseText = profile?.text || '';
+        }
+        if (!baseText || !session.jdText || !session.rewriteMode) {
+            await safeSendMessage(sock, chatId, { text: '❌ Session incomplete — start over with `/resume`.' }, originalMsg);
+            return true;
+        }
+
+        await runTailor(sock, chatId, phone, baseText, session.jdText, session.rewriteMode, exportFormat, ctx);
+        return true;
+    }
+
     if (!hasDoc && pasted.length < 40) {
         return false;
     }
@@ -530,7 +681,7 @@ export async function handlePendingResumeInput(sock, chatId, senderJid, messageT
             return true;
         }
 
-        await runTailor(sock, chatId, phone, baseText, jdText, ctx);
+        await askForMode(sock, chatId, originalMsg, pendingResumeSessions, senderJid, phone, baseText, jdText);
         return true;
     }
 

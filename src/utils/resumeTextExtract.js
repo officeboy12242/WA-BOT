@@ -5,6 +5,7 @@
 import mammoth from 'mammoth';
 import WordExtractor from 'word-extractor';
 import pdfParse from 'pdf-parse/lib/pdf-parse.js';
+import { normalizeResumeExtract } from './resumeStructure.js';
 
 const MAX_CHARS = 80_000;
 
@@ -75,7 +76,7 @@ export async function extractResumeText(buffer, meta = {}) {
         text = buffer.toString('utf8');
     }
 
-    text = cleanText(text);
+    text = normalizeResumeExtract(cleanText(text));
     if (text.length < 40) {
         throw new Error('Could not read enough text from that file. Try TXT or a text-based PDF.');
     }
