@@ -1,5 +1,8 @@
 /**
  * Entry state for trade alerts (trading-copilot style).
+ *
+ * CE/PE Entry & T1 in our prompts are option *premiums* (₹), while quote.price is
+ * underlying spot. Comparing spot >= premium T1 false-triggers "past T1" and blocks alerts.
  */
 
 export const ENTRY_STATES = {
@@ -9,6 +12,16 @@ export const ENTRY_STATES = {
     PREMARKET_WATCH: 'PREMARKET_WATCH',
     NO_ACTIVE_ENTRY: 'NO_ACTIVE_ENTRY',
 };
+
+/** Levels that are clearly option premiums vs cash spot (not the same unit). */
+export function levelsLookLikeOptionPremiums(spot, ...levels) {
+    const s = Number(spot);
+    if (!Number.isFinite(s) || s <= 0) return false;
+    const vals = levels.map(Number).filter((v) => Number.isFinite(v) && v > 0);
+    if (!vals.length) return false;
+    // Premiums are a small fraction of underlying for liquid F&O names
+    return vals.every((v) => v < s * 0.25);
+}
 
 export function computeEntryState({
     marketMode,
@@ -31,6 +44,11 @@ export function computeEntryState({
 
     if (!Number.isFinite(price)) {
         return { state: ENTRY_STATES.NO_ACTIVE_ENTRY, label: '⛔ No active entry' };
+    }
+
+    // F&O alerts: Entry/T1 are premiums — do not mark missed against cash spot
+    if (levelsLookLikeOptionPremiums(price, low, high, t1)) {
+        return { state: ENTRY_STATES.VALID_ENTRY, label: '✅ Valid entry' };
     }
 
     if (Number.isFinite(t1) && price >= t1) {
