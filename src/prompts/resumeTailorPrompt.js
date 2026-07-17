@@ -40,13 +40,20 @@ export function buildResumeTailorSystemPrompt(mode = 'related') {
     if (exact) {
         return [
             'You completely rewrite resumes so the WHOLE document matches a job description as closely as possible.',
-            'MODE: EXACT — maximum JD match, same visual structure as BASE.',
+            'MODE: EXACT — ~75% JD language / framing, ~25% BASE facts, same visual structure as BASE.',
+            '',
+            'BLEND TARGET (critical):',
+            '- About 75% of summary, skills phrasing, headlines, and EVERY experience/project bullet must use JD vocabulary, responsibilities, and priority order.',
+            '- About 25% stays from BASE: only hard facts (employers, schools, degrees, real dates, metrics you already had) and layout locks.',
+            '- Do NOT lightly polish BASE bullets. Replace them. If a BASE bullet is unrelated to the JD, drop or heavily rewrite it into a JD-aligned bullet supported by BASE scope.',
+            '- Prefer JD synonyms and keyword density over keeping original sentence structure.',
+            '- Summary and skills lists should read like they were written for THIS JD first; BASE is only the evidence source.',
             '',
             'GOALS:',
-            '- Mirror JD wording wherever BASE facts support it.',
+            '- Mirror JD wording wherever BASE facts support it (stack, domain, duties, soft skills named in JD).',
             '- Reframe titles toward JD-aligned titles ONLY when BASE work scope supports it.',
-            '- Rewrite nearly every experience bullet.',
-            '- Missing requirements go in GAPS only.',
+            '- Rewrite nearly every experience bullet from scratch in JD voice — not copy-edit.',
+            '- Missing requirements go in GAPS only (never invent employers/tools into Experience).',
             '',
             ...sharedRules,
         ].join('\n');
@@ -54,12 +61,22 @@ export function buildResumeTailorSystemPrompt(mode = 'related') {
 
     return [
         'You fully rewrite resumes so the WHOLE document is strongly related to a job description.',
-        'MODE: RELATED — thorough natural alignment, same visual structure as BASE.',
+        'MODE: RELATED — natural HR-ready voice + strong ATS keyword coverage, same visual structure as BASE.',
+        '',
+        'ATS + HR OPTIMIZATION (critical for Related):',
+        '- Extract JD must-have skills, tools, domains, and soft skills; weave the important ones naturally through summary, skills, and bullets (exact phrases + common ATS synonyms).',
+        '- Put JD-priority skills first in skill categories; demote or shorten BASE skills irrelevant to this JD.',
+        '- Write bullets HR likes: strong action verb + what you built/owned + scope/stack + outcome/impact (use BASE metrics when present).',
+        '- Use clean, scannable phrasing — no fluff, no first person, no keyword stuffing or awkward JD paste.',
+        '- Mirror JD role language where BASE scope supports it (e.g. "backend services", "ETL", "REST APIs") so ATS token match rises without sounding fake.',
+        '- Summary should read as a short pitch for THIS role: 3–5 lines, JD keywords included naturally.',
+        '- Recycle high-value JD nouns into multiple sections (skills + 1–2 bullets + summary) so ATS and recruiters both see them.',
+        '- List every high-value JD keyword you actually used in ===KEYWORDS===; put unsupported must-haves only in ===GAPS===.',
         '',
         'GOALS:',
-        '- Rewrite all sections to relate clearly to the JD.',
-        '- Emphasize transferable work; demote unrelated fluff.',
-        '- Keep voice professional and believable.',
+        '- Rewrite all sections so they clearly relate to the JD while staying believable.',
+        '- Emphasize transferable work; cut or shrink unrelated fluff.',
+        '- Keep professional, conversational tone — optimized for both ATS parsers and human HR skim.',
         '',
         ...sharedRules,
     ].join('\n');
@@ -77,27 +94,39 @@ export function buildCoverLetterSystemPrompt() {
 }
 
 export function buildTailorUserBlock(baseResume, jobDescription, mode = 'related') {
-    const modeLine =
-        mode === 'exact'
-            ? 'REWRITE MODE: EXACT — full JD match, keep BASE layout/format locks.'
-            : 'REWRITE MODE: RELATED — full related rewrite, keep BASE layout/format locks.';
+    const exact = mode === 'exact';
+    const modeLine = exact
+        ? 'REWRITE MODE: EXACT — target ~75% JD wording/priorities and ~25% BASE hard facts; keep BASE layout/format locks. Do not preserve original bullet phrasing.'
+        : 'REWRITE MODE: RELATED — natural rewrite optimized for ATS keyword match + HR readability; keep BASE layout/format locks. Weave JD keywords throughout without stuffing.';
+
+    const baseLabel = exact
+        ? 'BASE RESUME (facts + layout only — Exact mode: do not keep most original wording):'
+        : 'BASE RESUME (facts, proof points, and layout — Related mode: rewrite in stronger HR/ATS language):';
+
+    const jdLabel = exact
+        ? 'JOB DESCRIPTION (Exact mode: primary source for wording, keywords, and emphasis — ~75% of rewrite):'
+        : 'JOB DESCRIPTION (Related mode: source of priority keywords and role language to weave in naturally for ATS + HR):';
+
+    const closer = exact
+        ? 'Produce the full layout-locked rewritten resume under ===TAILORED_RESUME=== now. Exact: heavy JD rewrite; keep only BASE employers/dates/schools/real metrics.'
+        : 'Produce the full layout-locked rewritten resume under ===TAILORED_RESUME=== now. Related: strong ATS keyword coverage + clear HR-friendly bullets; list woven keywords in ===KEYWORDS===.';
 
     return [
         modeLine,
         '',
         buildLayoutLockBlock(baseResume),
         '',
-        'BASE RESUME:',
+        baseLabel,
         '---',
         String(baseResume || '').slice(0, 60_000),
         '---',
         '',
-        'JOB DESCRIPTION:',
+        jdLabel,
         '---',
         String(jobDescription || '').slice(0, 20_000),
         '---',
         '',
-        'Produce the full layout-locked rewritten resume under ===TAILORED_RESUME=== now.',
+        closer,
     ].join('\n');
 }
 
