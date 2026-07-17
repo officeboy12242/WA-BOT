@@ -4,10 +4,10 @@ import pdfParse from 'pdf-parse/lib/pdf-parse.js';
 import {
     normalizeResumeExtract,
     extractHeaderLines,
-    extractSectionTitles,
     detectResumeLayoutProfile,
 } from '../src/utils/resumeStructure.js';
 import { extractPdfColorPalette } from '../src/utils/resumePdfColors.js';
+import { extractPdfTypography, resolveResumeFontPair } from '../src/utils/resumePdfFonts.js';
 import { buildResumePdfBuffer } from '../src/utils/resumePdfExport.js';
 
 const path = 'c:/Users/jaikishanbagul/Downloads/Jaikishan_Bagul_ATS_Resume (1).pdf';
@@ -15,17 +15,27 @@ const origBuf = fs.readFileSync(path);
 const orig = (await pdfParse(origBuf)).text;
 const norm = normalizeResumeExtract(orig);
 const palette = extractPdfColorPalette(origBuf);
-console.log('palette', palette);
+const typography = extractPdfTypography(origBuf);
+const fonts = resolveResumeFontPair(typography.family);
+
+console.log('typography', typography);
+console.log('fonts', fonts);
 console.log('profile', detectResumeLayoutProfile(norm));
 console.log('header', extractHeaderLines(norm));
-console.log('sections', extractSectionTitles(norm));
 
-const pdf = await buildResumePdfBuffer(norm, { baseText: norm, title: 'ats-check', palette });
+const pdf = await buildResumePdfBuffer(norm, {
+    baseText: norm,
+    title: 'ats-check',
+    palette,
+    typography,
+});
 fs.writeFileSync('scripts/_ats-format-out.pdf', pdf);
+const check = await pdfParse(pdf);
+console.log('pages', check.numpages);
 
-function sampleColors(buf) {
+function sampleScn(buf) {
     const colors = new Map();
-    const addRgb = (r, g, b) => {
+    const add = (r, g, b) => {
         const hex =
             '#' +
             [r, g, b]
@@ -33,12 +43,6 @@ function sampleColors(buf) {
                 .join('');
         colors.set(hex, (colors.get(hex) || 0) + 1);
     };
-    const scan = (t) => {
-        for (const m of t.matchAll(/([0-9.]+)\s+([0-9.]+)\s+([0-9.]+)\s+(?:rg|scn)\b/gi)) {
-            addRgb(m[1], m[2], m[3]);
-        }
-    };
-    scan(buf.toString('latin1'));
     for (let i = 0; i < buf.length - 6; i++) {
         if (buf.toString('ascii', i, i + 6) !== 'stream') continue;
         let start = i + 6;
@@ -58,22 +62,31 @@ function sampleColors(buf) {
         } catch {
             data = buf.subarray(start, end);
         }
-        scan(data.toString('latin1'));
+        const t = data.toString('latin1');
+        for (const m of t.matchAll(/([0-9.]+)\s+([0-9.]+)\s+([0-9.]+)\s+(?:rg|scn)\b/gi)) {
+            add(m[1], m[2], m[3]);
+        }
     }
     return colors;
 }
 
-const outColors = sampleColors(pdf);
-console.log('out colors', [...outColors.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12));
+const outColors = sampleScn(pdf);
+const ascii = pdf.toString('latin1');
+const hasArial = /Arial|ResumeRegular|ResumeBold/i.test(ascii) || fonts.embedded;
 
 const fails = [];
-if (detectResumeLayoutProfile(norm).style !== 'ats') fails.push('profile not ats');
-if (!palette?.name || palette.name !== '#003a57') fails.push(`name color ${palette?.name}`);
-if (!palette?.accent || palette.accent !== '#005682') fails.push(`accent ${palette?.accent}`);
-const hasTeal = [...outColors.keys()].some((c) => c === '#003a57' || c === '#005682');
-if (!hasTeal) fails.push('output missing teal accents');
+if (typography?.family !== 'Arial') fails.push(`font family ${typography?.family}`);
+if (typography?.headerAlign !== 'center') fails.push(`align ${typography?.headerAlign}`);
+if (detectResumeLayoutProfile(norm).headerAlign !== 'center') fails.push('profile not center');
+if (check.numpages !== 1) fails.push(`pages ${check.numpages}`);
+if (!hasArial) fails.push('arial font not embedded');
+if (![...outColors.keys()].some((c) => c === '#003a57' || c === '#005682')) {
+    fails.push('missing teal');
+}
+if (!/JAIKISHAN/i.test(check.text)) fails.push('name missing');
+
 if (fails.length) {
     console.error('FAIL:', fails);
     process.exit(1);
 }
-console.log('ats format+color check ok');
+console.log('ats center+font+1page check ok');
