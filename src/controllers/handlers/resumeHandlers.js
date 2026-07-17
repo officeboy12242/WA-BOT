@@ -152,11 +152,12 @@ async function deleteProgressMessage(sock, chatId, messageKey) {
     }
 }
 
-async function askForJd(sock, chatId, originalMsg, meta, pendingResumeSessions, senderJid, phone, resumeText) {
+async function askForJd(sock, chatId, originalMsg, meta, pendingResumeSessions, senderJid, phone, resumeText, palette = null) {
     setSession(pendingResumeSessions, chatId, senderJid, {
         mode: 'await_jd',
         phone,
         resumeText,
+        palette: palette || meta.palette || null,
         fileName: meta.fileName || '',
         kind: meta.kind || '',
     });
@@ -181,12 +182,13 @@ async function askForJd(sock, chatId, originalMsg, meta, pendingResumeSessions, 
     );
 }
 
-async function askForMode(sock, chatId, originalMsg, pendingResumeSessions, senderJid, phone, resumeText, jdText) {
+async function askForMode(sock, chatId, originalMsg, pendingResumeSessions, senderJid, phone, resumeText, jdText, palette = null) {
     setSession(pendingResumeSessions, chatId, senderJid, {
         mode: 'await_mode',
         phone,
         resumeText,
         jdText,
+        palette,
     });
 
     await safeSendMessage(
@@ -205,13 +207,14 @@ async function askForMode(sock, chatId, originalMsg, pendingResumeSessions, send
     );
 }
 
-async function askForFormat(sock, chatId, originalMsg, pendingResumeSessions, senderJid, phone, resumeText, jdText, rewriteMode) {
+async function askForFormat(sock, chatId, originalMsg, pendingResumeSessions, senderJid, phone, resumeText, jdText, rewriteMode, palette = null) {
     setSession(pendingResumeSessions, chatId, senderJid, {
         mode: 'await_format',
         phone,
         resumeText,
         jdText,
         rewriteMode,
+        palette,
     });
 
     await safeSendMessage(
@@ -222,7 +225,7 @@ async function askForFormat(sock, chatId, originalMsg, pendingResumeSessions, se
                 '📦 *Output format*\n\n' +
                 'How should I send the revised resume?\n\n' +
                 '1️⃣ *TXT* — plain text (layout as text)\n' +
-                '2️⃣ *PDF* — classic resume PDF keeping your section order, headers, skills lines, title/date rows, and bullets\n\n' +
+                '2️⃣ *PDF* — resume PDF matching your layout family, section order, and colors when available\n\n' +
                 'Reply with `1` or `2` (or `txt` / `pdf`).\n\n' +
                 '_Waiting 15 minutes… `/resume cancel` to stop_',
         },
@@ -282,11 +285,12 @@ export async function handleCv(sock, chatId, senderJid, args, ctx) {
             text: loaded.text,
             fileName: loaded.fileName,
             kind: loaded.kind,
+            palette: loaded.palette || null,
         });
         await askForJd(sock, chatId, originalMsg, {
             ...loaded,
             textLength: loaded.text.length,
-        }, pendingResumeSessions, senderJid, phone, loaded.text);
+        }, pendingResumeSessions, senderJid, phone, loaded.text, loaded.palette || null);
         return;
     }
 
@@ -340,7 +344,17 @@ export async function handleTailor(sock, chatId, senderJid, args, ctx) {
     }
 
     if (jdText) {
-        await askForMode(sock, chatId, originalMsg, pendingResumeSessions, senderJid, phone, profile.text, jdText);
+        await askForMode(
+            sock,
+            chatId,
+            originalMsg,
+            pendingResumeSessions,
+            senderJid,
+            phone,
+            profile.text,
+            jdText,
+            profile.palette || null
+        );
         return;
     }
 
@@ -349,13 +363,20 @@ export async function handleTailor(sock, chatId, senderJid, args, ctx) {
         kind: profile.kind || 'txt',
         fileName: profile.file_name || '',
         textLength: profile.text.length,
-    }, pendingResumeSessions, senderJid, phone, profile.text);
+        palette: profile.palette || null,
+    }, pendingResumeSessions, senderJid, phone, profile.text, profile.palette || null);
 }
 
-async function runTailor(sock, chatId, phone, baseText, jdText, rewriteMode, exportFormat, ctx) {
+async function runTailor(sock, chatId, phone, baseText, jdText, rewriteMode, exportFormat, ctx, palette = null) {
     const { resumeStore, resumeTailorService, originalMsg } = ctx;
     const mode = rewriteMode === 'exact' ? 'exact' : 'related';
     const format = exportFormat === 'pdf' ? 'pdf' : 'txt';
+
+    let resolvedPalette = palette;
+    if (!resolvedPalette && resumeStore) {
+        const profile = await resumeStore.getByPhone(phone);
+        resolvedPalette = profile?.palette || null;
+    }
 
     const searchingMsg = await safeSendMessage(
         sock,
@@ -411,6 +432,7 @@ async function runTailor(sock, chatId, phone, baseText, jdText, rewriteMode, exp
             fileBuffer = await buildResumePdfBuffer(result.tailored, {
                 title: baseName,
                 baseText,
+                palette: resolvedPalette,
             });
             mimetype = 'application/pdf';
             fileName = `${baseName}.pdf`;
@@ -559,7 +581,8 @@ export async function handlePendingResumeInput(sock, chatId, senderJid, messageT
             phone,
             baseText,
             session.jdText,
-            rewriteMode
+            rewriteMode,
+            session.palette || null
         );
         return true;
     }
@@ -580,16 +603,18 @@ export async function handlePendingResumeInput(sock, chatId, senderJid, messageT
 
         const phone = session.phone || resolveUserPhone(chatId, senderJid);
         let baseText = session.resumeText;
+        let palette = session.palette || null;
         if (!baseText) {
             const profile = await resumeStore.getByPhone(phone);
             baseText = profile?.text || '';
+            palette = palette || profile?.palette || null;
         }
         if (!baseText || !session.jdText || !session.rewriteMode) {
             await safeSendMessage(sock, chatId, { text: '❌ Session incomplete — start over with `/resume`.' }, originalMsg);
             return true;
         }
 
-        await runTailor(sock, chatId, phone, baseText, session.jdText, session.rewriteMode, exportFormat, ctx);
+        await runTailor(sock, chatId, phone, baseText, session.jdText, session.rewriteMode, exportFormat, ctx, palette);
         return true;
     }
 
@@ -627,12 +652,13 @@ export async function handlePendingResumeInput(sock, chatId, senderJid, messageT
             text: loaded.text,
             fileName: loaded.fileName,
             kind: loaded.kind,
+            palette: loaded.palette || null,
         });
 
         await askForJd(sock, chatId, originalMsg, {
             ...loaded,
             textLength: loaded.text.length,
-        }, pendingResumeSessions, senderJid, phone, loaded.text);
+        }, pendingResumeSessions, senderJid, phone, loaded.text, loaded.palette || null);
         return true;
     }
 
@@ -651,6 +677,7 @@ export async function handlePendingResumeInput(sock, chatId, senderJid, messageT
                 mode: 'await_jd',
                 phone: session.phone,
                 resumeText: session.resumeText,
+                palette: session.palette || null,
             });
             return true;
         }
@@ -660,6 +687,7 @@ export async function handlePendingResumeInput(sock, chatId, senderJid, messageT
                 mode: 'await_jd',
                 phone: session.phone,
                 resumeText: session.resumeText,
+                palette: session.palette || null,
             });
             await safeSendMessage(
                 sock,
@@ -672,16 +700,18 @@ export async function handlePendingResumeInput(sock, chatId, senderJid, messageT
 
         const phone = session.phone || resolveUserPhone(chatId, senderJid);
         let baseText = session.resumeText;
+        let palette = session.palette || null;
         if (!baseText) {
             const profile = await resumeStore.getByPhone(phone);
             baseText = profile?.text || '';
+            palette = palette || profile?.palette || null;
         }
         if (!baseText) {
             await safeSendMessage(sock, chatId, { text: '❌ Resume missing — start over with `/resume`.' }, originalMsg);
             return true;
         }
 
-        await askForMode(sock, chatId, originalMsg, pendingResumeSessions, senderJid, phone, baseText, jdText);
+        await askForMode(sock, chatId, originalMsg, pendingResumeSessions, senderJid, phone, baseText, jdText, palette);
         return true;
     }
 
