@@ -62,7 +62,7 @@ export default class ResumeTailorService {
             history: [],
             userBlock: buildTailorUserBlock(baseResume, jobDescription, rewriteMode),
             maxTokens: 8192,
-            temperature: rewriteMode === 'exact' ? 0.45 : 0.35,
+            temperature: rewriteMode === 'exact' ? 0.55 : 0.42,
             maxChars: 28_000,
         });
 

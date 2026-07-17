@@ -200,8 +200,8 @@ async function askForMode(sock, chatId, originalMsg, pendingResumeSessions, send
             text:
                 '✅ *JD received*\n\n' +
                 'How should I rewrite the *whole* resume?\n\n' +
-                '1️⃣ *Exact* — rewrite every section to match the JD as closely as possible (max ATS/keyword fit)\n' +
-                '2️⃣ *Related* — full rewrite that stays natural but clearly aligned to the JD\n\n' +
+                '1️⃣ *Exact* — ~75% JD wording / ~25% your hard facts (aggressive ATS rewrite)\n' +
+                '2️⃣ *Related* — natural rewrite with stronger ATS keywords + HR-friendly bullets\n\n' +
                 'Reply with `1` or `2` (or `exact` / `related`).\n\n' +
                 '_Waiting 15 minutes… `/resume cancel` to stop_',
         },
