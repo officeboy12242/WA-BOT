@@ -312,7 +312,8 @@ export function detectResumeLayoutProfile(text) {
     return {
         style,
         bullet: /•/.test(sample) ? '•' : '–',
-        headerAlign: style === 'ats' ? 'left' : 'center',
+        // Word ATS templates center the name/headline/contact block
+        headerAlign: 'center',
     };
 }
 
@@ -328,13 +329,14 @@ export function buildLayoutLockBlock(baseText) {
 
     const atsRules =
         profile.style === 'ats'
-            ? [
+              ? [
                   '- LAYOUT FAMILY: ATS single-column (like modern ATS resumes).',
-                  '- Header: ALL CAPS name, then "Role | skills" headline, then "phone | email | links" — left-aligned style in text.',
+                  '- Header: ALL CAPS name, then "Role | skills" headline, then "phone | email | links" — CENTERED.',
                   '- Experience rows: "Job Title | Company<TAB>Mon YYYY - Mon YYYY" on ONE line (dates after a tab).',
                   '- Optional year bands under a role (e.g. "2025", "2024", "Sep 2023 - Dec 2023") then bullets.',
                   '- Projects: "Project Name | tech, stack | github.com/..." then bullets.',
                   `- Bullets must use "${profile.bullet}" (same character as BASE).`,
+                  '- Keep the resume concise enough for ONE page (prefer tighter bullets over dropping sections).',
               ]
             : [
                   '- LAYOUT FAMILY: classic resume (name/contact header, section banners, role then dates).',
