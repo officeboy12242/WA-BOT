@@ -6,6 +6,7 @@ import mammoth from 'mammoth';
 import WordExtractor from 'word-extractor';
 import pdfParse from 'pdf-parse/lib/pdf-parse.js';
 import { normalizeResumeExtract } from './resumeStructure.js';
+import { extractPdfColorPalette } from './resumePdfColors.js';
 
 const MAX_CHARS = 80_000;
 
@@ -49,7 +50,7 @@ function cleanText(raw) {
 /**
  * @param {Buffer} buffer
  * @param {{ fileName?: string, mimetype?: string }} meta
- * @returns {Promise<{ text: string, kind: string }>}
+ * @returns {Promise<{ text: string, kind: string, palette?: object|null }>}
  */
 export async function extractResumeText(buffer, meta = {}) {
     if (!Buffer.isBuffer(buffer) || !buffer.length) {
@@ -62,9 +63,11 @@ export async function extractResumeText(buffer, meta = {}) {
     }
 
     let text = '';
+    let palette = null;
     if (kind === 'pdf') {
         const data = await pdfParse(buffer);
         text = data?.text || '';
+        palette = extractPdfColorPalette(buffer);
     } else if (kind === 'docx') {
         const result = await mammoth.extractRawText({ buffer });
         text = result?.value || '';
@@ -81,5 +84,5 @@ export async function extractResumeText(buffer, meta = {}) {
         throw new Error('Could not read enough text from that file. Try TXT or a text-based PDF.');
     }
 
-    return { text, kind };
+    return { text, kind, palette };
 }

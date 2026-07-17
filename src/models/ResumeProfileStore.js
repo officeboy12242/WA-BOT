@@ -27,8 +27,9 @@ class ResumeProfileStore {
      * @param {string} params.text
      * @param {string} [params.fileName]
      * @param {string} [params.kind]
+     * @param {object|null} [params.palette] sampled PDF colors for export match
      */
-    async saveBase({ phone, chatId, text, fileName, kind }) {
+    async saveBase({ phone, chatId, text, fileName, kind, palette }) {
         const key = normalizePhoneNumber(phone) || String(phone || '').trim();
         if (!key) throw new Error('Missing phone for resume profile');
 
@@ -41,6 +42,7 @@ class ResumeProfileStore {
                     text: String(text || ''),
                     file_name: fileName || '',
                     kind: kind || '',
+                    palette: palette && typeof palette === 'object' ? palette : null,
                     updated_at: new Date(),
                 },
                 $setOnInsert: { created_at: new Date() },

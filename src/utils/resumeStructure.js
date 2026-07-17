@@ -145,13 +145,22 @@ export function extractSectionTitles(text) {
             }
         }
 
-        // Skip name/contact block at top (first lines before any real section)
+        // Skip name/contact/headline block at top (ATS: ALL CAPS name → headline | skills → contact)
         if (titles.length === 0 && i < 8) {
             if (/@|linkedin|github/i.test(t)) continue;
             const contactNear =
-                /@|linkedin|github|\d{8,}/i.test(next) || /@|linkedin|github|\d{8,}/i.test(next2);
+                /@|linkedin|github|\d{8,}|\+\d/i.test(next) || /@|linkedin|github|\d{8,}|\+\d/i.test(next2);
+            // ALL CAPS person name before headline/contact
+            if (
+                isAllCapsHeading(t) &&
+                next &&
+                ((/\|/.test(next) && !/@/.test(next)) || contactNear)
+            ) {
+                continue;
+            }
             if (contactNear && !isAllCapsHeading(t)) continue;
-            // Location line under name (City / Country) before email further down
+            // Headline: Role | skills (not a section)
+            if (/\|/.test(t) && !/@/.test(t) && contactNear) continue;
             if (
                 !isAllCapsHeading(t) &&
                 next &&
@@ -193,12 +202,27 @@ export function normalizeResumeExtract(raw) {
     text = text
         .split('\n')
         .map((line) => {
-            if (line.includes('@')) return line;
+            if (line.includes('@')) return line.replace(/ {2,}/g, ' ');
             let l = line;
+            // ATS: "Title | Company    Sep 2023 - Present" → keep date on same line via tab
+            l = l.replace(
+                /\s{2,}((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{4}.*)$/i,
+                '\t$1'
+            );
+            if (/\|/.test(l) && !l.includes('\t')) {
+                l = l.replace(
+                    /^(.+\|.+?)\s+((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{4}(?:\s*[-–—\(].*)?)$/i,
+                    '$1\t$2'
+                );
+            }
             l = l.replace(/([A-Za-z\)])(\d{4})(\s*[–\-—]\s*(?:Present|\d{4})|\s*$)/g, '$1\t$2$3');
             l = l.replace(/(\d)([A-Z][a-z]{2,})/g, '$1 $2');
             l = l.replace(/\)([A-Z][a-z]{2,})/g, ') $1');
-            l = l.replace(/ {2,}/g, ' ');
+            // Collapse spaces but keep tabs (date separators)
+            l = l
+                .split('\t')
+                .map((part) => part.replace(/ {2,}/g, ' ').trim())
+                .join('\t');
             return l;
         })
         .join('\n');
@@ -237,6 +261,28 @@ export function extractHeaderLines(text) {
             prevBlank = false;
             break;
         }
+
+        // ATS name line (ALL CAPS) before headline/contact — keep in header
+        if (
+            header.length === 0 &&
+            isAllCapsHeading(line) &&
+            next &&
+            ((/\|/.test(next) && !/@/.test(next)) || /@|github|linkedin|\+\d|\d{8,}/i.test(next))
+        ) {
+            header.push(line);
+            continue;
+        }
+        // Headline under ATS name
+        if (
+            header.length === 1 &&
+            /\|/.test(line) &&
+            !/@/.test(line) &&
+            /@|github|linkedin|\+\d/i.test(next)
+        ) {
+            header.push(line);
+            continue;
+        }
+
         if (looksLikeSectionHeader(line, [], { nextLine: next, next2, prevBlank })) break;
         header.push(line);
     }
@@ -244,13 +290,56 @@ export function extractHeaderLines(text) {
 }
 
 /**
- * LAYOUT LOCK from THIS user's base resume (dynamic sections).
+ * Detect visual layout family from the uploaded resume (ATS vs classic/centered).
+ * @param {string} text
+ * @returns {{ style: 'ats'|'classic', bullet: string, headerAlign: 'left'|'center' }}
+ */
+export function detectResumeLayoutProfile(text) {
+    const normalized = normalizeResumeExtract(text);
+    const lines = normalized.split('\n').map((l) => l.trim()).filter(Boolean);
+    const head = lines.slice(0, 6);
+    const sample = lines.slice(0, 50).join('\n');
+
+    let ats = 0;
+    if (head[0] && isAllCapsHeading(head[0]) && head[0].split(/\s+/).length <= 5) ats += 2;
+    if (head[1] && /\|/.test(head[1]) && !/@/.test(head[1])) ats += 2;
+    if (head.some((l) => /@/.test(l) && /\|/.test(l) && /(\+?\d|github|linkedin)/i.test(l))) ats += 2;
+    if (/^•\s|•\s/m.test(sample)) ats += 1;
+    if (/\|\s*[^|\n]{2,60}\t?(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/i.test(sample)) ats += 2;
+    if (/^[A-Za-z].+\|.+\|.+/m.test(sample)) ats += 1; // project: name | stack | link
+
+    const style = ats >= 4 ? 'ats' : 'classic';
+    return {
+        style,
+        bullet: /•/.test(sample) ? '•' : '–',
+        headerAlign: style === 'ats' ? 'left' : 'center',
+    };
+}
+
+/**
+ * LAYOUT LOCK from THIS user's base resume (dynamic sections + layout family).
  * @param {string} baseText
  */
 export function buildLayoutLockBlock(baseText) {
     const normalized = normalizeResumeExtract(baseText);
     const sections = extractSectionTitles(normalized);
     const header = extractHeaderLines(normalized);
+    const profile = detectResumeLayoutProfile(normalized);
+
+    const atsRules =
+        profile.style === 'ats'
+            ? [
+                  '- LAYOUT FAMILY: ATS single-column (like modern ATS resumes).',
+                  '- Header: ALL CAPS name, then "Role | skills" headline, then "phone | email | links" — left-aligned style in text.',
+                  '- Experience rows: "Job Title | Company<TAB>Mon YYYY - Mon YYYY" on ONE line (dates after a tab).',
+                  '- Optional year bands under a role (e.g. "2025", "2024", "Sep 2023 - Dec 2023") then bullets.',
+                  '- Projects: "Project Name | tech, stack | github.com/..." then bullets.',
+                  `- Bullets must use "${profile.bullet}" (same character as BASE).`,
+              ]
+            : [
+                  '- LAYOUT FAMILY: classic resume (name/contact header, section banners, role then dates).',
+                  `- Bullets must use "${profile.bullet}" (same character as BASE).`,
+              ];
 
     return [
         'LAYOUT LOCK (must follow — mirror THIS candidate\'s own resume shape):',
@@ -261,10 +350,11 @@ export function buildLayoutLockBlock(baseText) {
             ? `- Section titles in order (copy exactly): ${sections.map((s) => JSON.stringify(s)).join(' → ')}`
             : '- Infer section titles only from BASE; keep them verbatim.',
         header.length ? `- Header lines to keep: ${header.map((h) => JSON.stringify(h)).join(' | ')}` : '',
-        '- Preserve BASE patterns: skill lines, Title<TAB>Dates, company lines, bullet characters.',
+        ...atsRules,
+        '- Preserve BASE skill "Category: items" lines when present.',
         '- Do not invent new sections; do not drop existing BASE sections.',
         '- Plain text only. Each section title alone on its own line (exact casing as BASE).',
-        '- Do not put dates alone on the line under a job/project title.',
+        '- Do not put dates alone on the line under a job/project title when BASE had them on the same line.',
     ]
         .filter(Boolean)
         .join('\n');
