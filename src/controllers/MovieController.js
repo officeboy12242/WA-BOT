@@ -1269,13 +1269,25 @@ class MovieController {
         let driveResults = [];
         let atozResults = [];
 
+        // Movies API already includes AtoZ with NullDrop mirrors — skip local scrape then
+        const hdHasAtoz = hdResults.some((r) => /^atoz$/i.test(String(r?.source || '').trim()));
+
         if (hdResults.length >= 3) {
             [driveResults, atozResults] = await Promise.all([
                 this._withTimeout(drivePromise, enrichGraceMs, 'drive grace').catch(() => []),
-                this._withTimeout(atozPromise, enrichGraceMs, 'atoz grace').catch(() => []),
+                hdHasAtoz
+                    ? Promise.resolve([])
+                    : this._withTimeout(atozPromise, enrichGraceMs, 'atoz grace').catch(() => []),
             ]);
         } else {
-            [driveResults, atozResults] = await Promise.all([drivePromise, atozPromise]);
+            [driveResults, atozResults] = await Promise.all([
+                drivePromise,
+                hdHasAtoz ? Promise.resolve([]) : atozPromise,
+            ]);
+        }
+
+        if (hdHasAtoz && atozResults.length) {
+            atozResults = [];
         }
 
         await progress?.flush?.({
