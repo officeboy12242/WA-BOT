@@ -36,6 +36,8 @@ import {
     handleCoursesOff,
     handleGithubOn,
     handleGithubOff,
+    handleAwesomeOn,
+    handleAwesomeOff,
     handleGroups,
     handleSetWelcome,
     handleGroupParticipantsUpdate as _handleGroupParticipantsUpdate,
@@ -77,6 +79,9 @@ import {
     handleGithub,
     handlePendingGithubConfirmation,
     createGithubPostSessionStore,
+    handleAwesome,
+    handlePendingAwesomeConfirmation,
+    createAwesomePostSessionStore,
 } from './handlers/instaHandlers.js';
 
 import {
@@ -110,7 +115,7 @@ import {
 } from './handlers/resumeHandlers.js';
 
 class CommandController {
-    constructor(database, botState, groupManager, newsController = null, movieController = null, userManager = null, stickerController = null, botSettings = null, githubTrendingController = null, memberScrapeController = null, warnDatabase = null, authDatabase = null, courseAPI = null) {
+    constructor(database, botState, groupManager, newsController = null, movieController = null, userManager = null, stickerController = null, botSettings = null, githubTrendingController = null, memberScrapeController = null, warnDatabase = null, authDatabase = null, courseAPI = null, awesomeListsController = null) {
         this.database = database;
         this.botState = botState;
         this.groupManager = groupManager;
@@ -120,6 +125,7 @@ class CommandController {
         this.stickerController = stickerController;
         this.botSettings = botSettings;
         this.githubTrendingController = githubTrendingController;
+        this.awesomeListsController = awesomeListsController;
         this.memberScrapeController = memberScrapeController;
         this.warnDatabase = warnDatabase;
         this.authDatabase = authDatabase;
@@ -130,6 +136,7 @@ class CommandController {
         this.pendingClearConfirmations = new Map();
         this.pendingScrapSessions = createScrapSessionStore();
         this.pendingGithubPosts = createGithubPostSessionStore();
+        this.pendingAwesomePosts = createAwesomePostSessionStore();
         this.pendingResumeSessions = createResumeSessionStore();
         this.getSock = null;
         this.whatsappService = null;
@@ -205,6 +212,7 @@ class CommandController {
             groupManager: this.groupManager,
             newsController: this.newsController,
             githubTrendingController: this.githubTrendingController,
+            awesomeListsController: this.awesomeListsController,
             memberScrapeController: this.memberScrapeController,
             warnDatabase: this.warnDatabase,
             movieController: this.movieController,
@@ -216,6 +224,7 @@ class CommandController {
             pendingClearConfirmations: this.pendingClearConfirmations,
             pendingScrapSessions: this.pendingScrapSessions,
             pendingGithubPosts: this.pendingGithubPosts,
+            pendingAwesomePosts: this.pendingAwesomePosts,
             pendingResumeSessions: this.pendingResumeSessions,
             resumeStore: this.resumeStore,
             resumeTailorService: this.resumeTailorService,
@@ -252,6 +261,13 @@ class CommandController {
             sock, chatId, senderJid, messageText.trim(), ctx,
         );
         if (handledGithub) {
+            return true;
+        }
+
+        const handledAwesome = await handlePendingAwesomeConfirmation(
+            sock, chatId, senderJid, messageText.trim(), ctx,
+        );
+        if (handledAwesome) {
             return true;
         }
 
@@ -328,6 +344,8 @@ class CommandController {
             case 'courseoff':  await handleCoursesOff(sock, chatId, senderJid, ctx); break;
             case 'githubon':   await handleGithubOn(sock, chatId, senderJid, ctx); break;
             case 'githuboff':  await handleGithubOff(sock, chatId, senderJid, ctx); break;
+            case 'awesomeon':  await handleAwesomeOn(sock, chatId, senderJid, ctx); break;
+            case 'awesomeoff': await handleAwesomeOff(sock, chatId, senderJid, ctx); break;
             case 'groups':     await handleGroups(sock, chatId, senderJid, ctx); break;
             case 'setwc':      await handleSetWelcome(sock, chatId, senderJid, command.trim(), ctx); break;
             case 'warn':       await handleWarn(sock, chatId, senderJid, args, originalMsg, ctx); break;
@@ -383,6 +401,7 @@ class CommandController {
             case 'insta': await _handleInsta(sock, chatId, args, originalMsg); break;
             case 'news':  await handleNews(sock, chatId, senderJid, ctx); break;
             case 'github': await handleGithub(sock, chatId, senderJid, ctx); break;
+            case 'awesome': await handleAwesome(sock, chatId, senderJid, ctx); break;
             case 'horo':
                 try {
                     const sign = args[0];

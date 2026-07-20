@@ -361,3 +361,138 @@ export async function handlePendingGithubConfirmation(sock, chatId, senderJid, t
 
     return true;
 }
+
+const AWESOME_POST_CONFIRM_MS = 2 * 60 * 1000;
+
+export function createAwesomePostSessionStore() {
+    return new Map();
+}
+
+function awesomeSessionKey(chatId, senderJid) {
+    return `${chatId}:${senderJid}`;
+}
+
+export async function handleAwesome(sock, chatId, senderJid, { awesomeListsController, groupManager, pendingAwesomePosts }) {
+    try {
+        if (!awesomeListsController) {
+            await sock.sendMessage(chatId, { text: 'Awesome lists are not configured on this bot.' });
+            return;
+        }
+
+        const lists = await awesomeListsController.fetchPreviewLists();
+        if (!lists.length) {
+            await sock.sendMessage(chatId, { text: '📭 No awesome lists found right now. Try again later.' });
+            return;
+        }
+
+        const previewLists = await awesomeListsController.filterUnpostedLists(lists, chatId);
+        const toPreview = (previewLists.length ? previewLists : lists).slice(0, 5);
+
+        const { sent } = await awesomeListsController.previewAll(sock, chatId, toPreview);
+        logger.info(`Awesome preview (${sent} list(s)) sent to ${chatId}`);
+
+        if (!sent) {
+            await sock.sendMessage(chatId, {
+                text: 'ℹ️ These lists were already sent here. Try again later for fresh picks.',
+            });
+            return;
+        }
+
+        const canPost = await groupManager.canManualPostNews(senderJid);
+        if (!canPost) {
+            return;
+        }
+
+        const awesomeGroups = await groupManager.getAwesomeListsGroups();
+        if (!awesomeGroups.length) {
+            await sock.sendMessage(chatId, {
+                text: 'ℹ️ Preview only — no groups with awesome lists enabled. Use `/activate` and `/awesomeon` first.',
+            });
+            return;
+        }
+
+        const freshLists = await awesomeListsController.selectFreshLists(lists);
+        if (!freshLists.length) {
+            await sock.sendMessage(chatId, {
+                text: 'ℹ️ All fetched lists were already posted to awesome-enabled groups.',
+            });
+            return;
+        }
+
+        if (pendingAwesomePosts) {
+            pendingAwesomePosts.set(awesomeSessionKey(chatId, senderJid), {
+                lists,
+                expiresAt: Date.now() + AWESOME_POST_CONFIRM_MS,
+            });
+        }
+
+        await sock.sendMessage(chatId, {
+            text:
+                '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'
+                + '⭐ *POST THESE AWESOME LISTS?*\n'
+                + '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n'
+                + `📢 *${freshLists.length}* fresh list(s) ready for *${awesomeGroups.length}* awesome-enabled group(s).\n\n`
+                + 'Reply *yes* to post · *no* to cancel\n'
+                + '⏱️ Expires in 2 minutes',
+        });
+    } catch (error) {
+        logger.error(`Error handling awesome command: ${error.message}`);
+        await sock.sendMessage(chatId, { text: 'Could not fetch awesome lists right now. Try again later.' });
+    }
+}
+
+export async function handlePendingAwesomeConfirmation(sock, chatId, senderJid, text, ctx) {
+    const { pendingAwesomePosts, awesomeListsController } = ctx;
+    if (!pendingAwesomePosts || !awesomeListsController) {
+        return false;
+    }
+
+    const key = awesomeSessionKey(chatId, senderJid);
+    const session = pendingAwesomePosts.get(key);
+    if (!session) {
+        return false;
+    }
+
+    if (Date.now() > session.expiresAt) {
+        pendingAwesomePosts.delete(key);
+        await sock.sendMessage(chatId, { text: '⏱️ Awesome post request expired. Run `/awesome` again.' });
+        return true;
+    }
+
+    const reply = text.trim().toLowerCase();
+    if (['no', 'n', 'cancel'].includes(reply)) {
+        pendingAwesomePosts.delete(key);
+        await sock.sendMessage(chatId, { text: '❌ Awesome post cancelled.' });
+        return true;
+    }
+
+    if (!['yes', 'y', 'post', 'confirm'].includes(reply)) {
+        return false;
+    }
+
+    pendingAwesomePosts.delete(key);
+
+    try {
+        const freshLists = await awesomeListsController.selectFreshLists(session.lists);
+        if (!freshLists.length) {
+            await sock.sendMessage(chatId, {
+                text: 'ℹ️ All lists were already posted. Run `/awesome` again for fresh picks.',
+            });
+            return true;
+        }
+
+        const { posted, messages } = await awesomeListsController.postAllListsIndividually(sock, freshLists);
+        if (messages > 0) {
+            await sock.sendMessage(chatId, {
+                text: `✅ Posted *${messages}* awesome list(s) across *${posted}* group(s).`,
+            });
+        } else {
+            await sock.sendMessage(chatId, { text: 'ℹ️ Could not post to any awesome-enabled groups.' });
+        }
+    } catch (error) {
+        logger.error(`Awesome post confirmation failed: ${error.message}`);
+        await sock.sendMessage(chatId, { text: '⚠️ Failed to post awesome lists. Try `/awesome` again.' });
+    }
+
+    return true;
+}

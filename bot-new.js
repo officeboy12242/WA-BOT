@@ -22,6 +22,7 @@ import StickerForwarder from './src/services/StickerForwarder.js';
 import ChannelStickerPoller from './src/services/ChannelStickerPoller.js';
 import { startNewsScheduler } from './src/utils/newsScheduler.js';
 import { startGithubScheduler } from './src/utils/githubScheduler.js';
+import { startAwesomeScheduler } from './src/utils/awesomeScheduler.js';
 import { startMorningScheduler } from './src/utils/morningScheduler.js';
 import MorningMessageDatabase from './src/models/MorningMessageDatabase.js';
 import MorningMessageScraper from './src/services/MorningMessageScraper.js';
@@ -29,6 +30,8 @@ import MorningMessageController from './src/controllers/MorningMessageController
 import MovieController from './src/controllers/MovieController.js';
 import GitHubTrendingController from './src/controllers/GitHubTrendingController.js';
 import GitHubTrendingDatabase from './src/models/GitHubTrendingDatabase.js';
+import AwesomeListsController from './src/controllers/AwesomeListsController.js';
+import AwesomeListsDatabase from './src/models/AwesomeListsDatabase.js';
 import GroupMemberDatabase from './src/models/GroupMemberDatabase.js';
 import WarnDatabase from './src/models/WarnDatabase.js';
 import MemberScrapeController from './src/controllers/MemberScrapeController.js';
@@ -62,6 +65,7 @@ const botState = {
     lastGithubPostSlots: {},
     lastGithubCheckTime: null,
     githubTrendingCache: null,
+    lastAwesomePostSlots: {},
     lastGroupSummarySlot: null,
     lastTradeAlertSlot: null,
 };
@@ -84,6 +88,7 @@ class WhatsAppCourseBot {
         this.checkInterval = null;
         this.newsScheduler = null;
         this.githubScheduler = null;
+        this.awesomeScheduler = null;
         this.morningScheduler = null;
         this.groupSummaryScheduler = null;
         this.groupChatLogService = null;
@@ -112,6 +117,7 @@ class WhatsAppCourseBot {
             this.database = new DatabaseModel(mongoDb);
             this.newsDatabase = new NewsDatabase(mongoDb);
             this.githubTrendingDatabase = new GitHubTrendingDatabase(mongoDb);
+            this.awesomeListsDatabase = new AwesomeListsDatabase(mongoDb);
             this.groupMemberDatabase = new GroupMemberDatabase(mongoDb);
             this.warnDatabase = new WarnDatabase(mongoDb);
             this.morningDatabase = new MorningMessageDatabase(mongoDb);
@@ -122,6 +128,7 @@ class WhatsAppCourseBot {
                 this.database.init(),
                 this.newsDatabase.init(),
                 this.githubTrendingDatabase.init(),
+                this.awesomeListsDatabase.init(),
                 this.groupMemberDatabase.init(),
                 this.warnDatabase.init(),
                 this.morningDatabase.init(),
@@ -172,6 +179,11 @@ class WhatsAppCourseBot {
                 this.groupManager,
                 this.githubTrendingDatabase
             );
+            this.awesomeListsController = new AwesomeListsController(
+                config,
+                this.groupManager,
+                this.awesomeListsDatabase
+            );
             this.memberScrapeController = new MemberScrapeController(
                 this.groupMemberDatabase,
                 this.userManager
@@ -217,7 +229,8 @@ class WhatsAppCourseBot {
                 this.memberScrapeController,
                 this.warnDatabase,
                 this.authDatabase,
-                this.courseAPI
+                this.courseAPI,
+                this.awesomeListsController
             );
             this.courseController = new CourseController(
                 this.database,
@@ -298,8 +311,11 @@ class WhatsAppCourseBot {
             const githubInfo = config.GITHUB_TRENDING_ENABLED
                 ? ` GitHub trending (${config.GITHUB_TRENDING_COUNT} repos) at ${config.GITHUB_TRENDING_TIMES.join(', ')} (${config.GITHUB_TRENDING_TIMEZONE}).`
                 : '';
+            const awesomeInfo = config.AWESOME_LISTS_ENABLED
+                ? ` Awesome lists (1 random/slot) at ${config.AWESOME_LISTS_TIMES.join(', ')} (${config.AWESOME_LISTS_TIMEZONE}).`
+                : '';
             logger.info(
-                `🤖 Bot is ready! Courses every ${config.CHECK_INTERVAL}s. Tech news at ${config.NEWS_POST_TIMES.join(', ')} (${config.NEWS_TIMEZONE}).${githubInfo}${morningInfo}`
+                `🤖 Bot is ready! Courses every ${config.CHECK_INTERVAL}s. Tech news at ${config.NEWS_POST_TIMES.join(', ')} (${config.NEWS_TIMEZONE}).${githubInfo}${awesomeInfo}${morningInfo}`
             );
 
             const sock = this.whatsappService.getSock();
@@ -329,6 +345,13 @@ class WhatsAppCourseBot {
                 getSock: () => this.whatsappService.getSock(),
                 botState,
                 githubController: this.githubTrendingController,
+                config,
+            });
+
+            this.awesomeScheduler = startAwesomeScheduler({
+                getSock: () => this.whatsappService.getSock(),
+                botState,
+                awesomeController: this.awesomeListsController,
                 config,
             });
 
@@ -385,6 +408,9 @@ class WhatsAppCourseBot {
         }
         if (this.githubScheduler) {
             this.githubScheduler.stop();
+        }
+        if (this.awesomeScheduler) {
+            this.awesomeScheduler.stop();
         }
         if (this.morningScheduler) {
             this.morningScheduler.stop();

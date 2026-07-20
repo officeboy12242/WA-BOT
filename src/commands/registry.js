@@ -123,6 +123,13 @@ export const COMMAND_REGISTRY = [
         help: 'Preview GitHub repos; staff reply yes/no to post to github-enabled groups',
     },
     {
+        names: ['/awesome'],
+        key: 'awesome',
+        scope: 'any',
+        role: 'anyone',
+        help: 'Preview awesome-* lists; staff reply yes/no to post to awesome-enabled groups',
+    },
+    {
         names: ['/horo', '/horoscope'],
         key: 'horo',
         scope: 'any',
@@ -205,6 +212,20 @@ export const COMMAND_REGISTRY = [
         scope: 'group_only',
         role: 'staff',
         help: 'Disable GitHub trending only — courses continue',
+    },
+    {
+        names: ['/awesomeon'],
+        key: 'awesomeon',
+        scope: 'group_only',
+        role: 'staff',
+        help: 'Enable daily awesome-list posts in this group',
+    },
+    {
+        names: ['/awesomeoff'],
+        key: 'awesomeoff',
+        scope: 'group_only',
+        role: 'staff',
+        help: 'Disable awesome lists only — GitHub continues',
     },
     {
         names: ['/instaon'],
