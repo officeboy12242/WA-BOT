@@ -29,6 +29,7 @@ const SYSTEM_PROMPT = [
     '- Keep question + each option short enough for a WhatsApp poll (options under ~90 chars).',
     '- Include explanation, approach, and complexity when relevant (DSA/algorithms).',
     '- For Behavioral/Aptitude, timeComplexity/spaceComplexity may be empty strings.',
+    '- Valid strict JSON: double quotes only, escape any " inside strings as \\", no trailing commas, no raw newlines inside strings.',
 ].join('\n');
 
 function pickCategory(slotIndex = 0) {
@@ -37,16 +38,105 @@ function pickCategory(slotIndex = 0) {
     return INTERVIEW_CATEGORIES[idx];
 }
 
-function extractJsonObject(raw) {
-    const text = String(raw || '').trim();
+/** Strip fences / think tags and isolate the outermost `{...}`. */
+function sliceJsonObject(raw) {
+    let text = String(raw || '')
+        .replace(/<think>[\s\S]*?<\/think>/gi, '')
+        .trim();
     const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-    const body = (fenced?.[1] || text).trim();
-    const start = body.indexOf('{');
-    const end = body.lastIndexOf('}');
+    text = (fenced?.[1] || text).trim();
+    const start = text.indexOf('{');
+    const end = text.lastIndexOf('}');
     if (start < 0 || end <= start) {
         throw new Error('No JSON object in AI response');
     }
-    return JSON.parse(body.slice(start, end + 1));
+    return text.slice(start, end + 1);
+}
+
+/**
+ * Repair common LLM JSON mistakes: smart quotes, trailing commas,
+ * raw control chars in strings, and unescaped " inside string values.
+ * Fixes errors like: expected " after property value in JSON at position N
+ */
+export function repairLlmJson(jsonText) {
+    let s = String(jsonText || '')
+        .replace(/^\uFEFF/, '')
+        .replace(/[\u201C\u201D]/g, '"')
+        .replace(/[\u2018\u2019]/g, "'")
+        .replace(/,\s*([}\]])/g, '$1');
+
+    let out = '';
+    let inString = false;
+    for (let i = 0; i < s.length; i++) {
+        const c = s[i];
+
+        if (!inString) {
+            if (c === '"') inString = true;
+            out += c;
+            continue;
+        }
+
+        // inside a JSON string
+        if (c === '\\') {
+            const next = s[i + 1];
+            if (next !== undefined) {
+                out += c + next;
+                i++;
+            } else {
+                out += '\\\\';
+            }
+            continue;
+        }
+
+        if (c === '"') {
+            // Real closer if next non-ws is structural; otherwise escape.
+            let j = i + 1;
+            while (j < s.length && /[ \t\r\n]/.test(s[j])) j++;
+            const next = s[j];
+            if (next === undefined || next === ',' || next === '}' || next === ']' || next === ':') {
+                inString = false;
+                out += c;
+            } else {
+                out += '\\"';
+            }
+            continue;
+        }
+
+        if (c === '\n') {
+            out += '\\n';
+            continue;
+        }
+        if (c === '\r') {
+            out += '\\r';
+            continue;
+        }
+        if (c === '\t') {
+            out += '\\t';
+            continue;
+        }
+        // drop other control chars that break JSON.parse
+        if (c.charCodeAt(0) < 0x20) {
+            continue;
+        }
+
+        out += c;
+    }
+
+    return out;
+}
+
+export function extractJsonObject(raw) {
+    const sliced = sliceJsonObject(raw);
+    try {
+        return JSON.parse(sliced);
+    } catch {
+        const repaired = repairLlmJson(sliced);
+        try {
+            return JSON.parse(repaired);
+        } catch (err) {
+            throw new Error(`Invalid AI JSON: ${err.message}`);
+        }
+    }
 }
 
 /**
@@ -147,6 +237,25 @@ export function pollValues(q) {
     ].map((v) => v.slice(0, 100));
 }
 
+/** Build a Baileys quoted stub so the answer replies to the poll. */
+export function buildPollQuote(doc, q) {
+    const key = doc?.poll_message_key;
+    const id = key?.id || doc?.poll_message_id;
+    if (!id) return null;
+
+    return {
+        key: {
+            remoteJid: key?.remoteJid || doc.jid,
+            id,
+            fromMe: key?.fromMe !== false,
+            ...(key?.participant ? { participant: key.participant } : {}),
+        },
+        message: {
+            conversation: formatPollName(q).slice(0, 120),
+        },
+    };
+}
+
 class InterviewQuestionService {
     /**
      * @param {object} opts
@@ -183,22 +292,36 @@ class InterviewQuestionService {
             `Category/type must be: ${type}`,
             `Vary difficulty across Easy/Medium/Hard.`,
             `Return JSON with keys: type, difficulty, topic, question, options{A,B,C,D}, correctOption, properAnswer, explanation, hint, approach, timeComplexity, spaceComplexity, commonMistake.`,
+            `Strict JSON only — escape inner double-quotes; no trailing commas.`,
         ].join('\n');
 
-        const { text, provider, model } = await this.llm.completeChat({
-            systemPrompt: SYSTEM_PROMPT,
-            history: [],
-            userBlock,
-            maxTokens: 1200,
-            temperature: 0.7,
-            maxChars: 4000,
-        });
+        let lastErr;
+        for (let attempt = 0; attempt < 2; attempt++) {
+            try {
+                const { text, provider, model } = await this.llm.completeChat({
+                    systemPrompt: SYSTEM_PROMPT,
+                    history: [],
+                    userBlock:
+                        attempt === 0
+                            ? userBlock
+                            : `${userBlock}\nPrevious output was invalid JSON. Reply with valid JSON only.`,
+                    maxTokens: 1200,
+                    temperature: attempt === 0 ? 0.7 : 0.3,
+                    maxChars: 4000,
+                });
 
-        const normalized = normalizeQuestion(extractJsonObject(text));
-        // Force requested category family when model drifts
-        if (!normalized.type) normalized.type = type;
-        logger.info(`Interview Q generated via ${provider}/${model}: ${normalized.type} · ${normalized.topic}`);
-        return normalized;
+                const normalized = normalizeQuestion(extractJsonObject(text));
+                if (!normalized.type) normalized.type = type;
+                logger.info(
+                    `Interview Q generated via ${provider}/${model}: ${normalized.type} · ${normalized.topic}`
+                );
+                return normalized;
+            } catch (err) {
+                lastErr = err;
+                logger.warn(`Interview Q generate attempt ${attempt + 1} failed: ${err.message}`);
+            }
+        }
+        throw lastErr || new Error('Failed to generate interview question');
     }
 
     /**
@@ -321,7 +444,12 @@ class InterviewQuestionService {
 
         try {
             const q = this.docToQuestion(doc);
-            await sock.sendMessage(doc.jid, { text: formatAnswerMessage(q) });
+            const quoted = buildPollQuote(doc, q);
+            await sock.sendMessage(
+                doc.jid,
+                { text: formatAnswerMessage(q) },
+                quoted ? { quoted } : undefined
+            );
             await this.store.markAnswerPosted(doc._id);
             logger.info(`Interview Q answer posted for ${doc.jid} (${docId})`);
             return { ok: true };
