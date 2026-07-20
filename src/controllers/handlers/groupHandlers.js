@@ -544,13 +544,14 @@ export async function handleGroups(sock, chatId, senderJid, { groupManager }) {
     try {
         const senderPhone = extractPhoneNumber(senderJid);
 
-        const [activeGroups, courseGroups, newsGroups, githubGroups, awesomeGroups, instaAutoGroups, stickerAutoGroups, welcomeGroups, movieGroups, trendingGroups, groupCount, memberCounts] =
+        const [activeGroups, courseGroups, newsGroups, githubGroups, awesomeGroups, interviewQGroups, instaAutoGroups, stickerAutoGroups, welcomeGroups, movieGroups, trendingGroups, groupCount, memberCounts] =
             await Promise.all([
                 groupManager.getActiveGroups(),
                 groupManager.getCourseEnabledGroups(),
                 groupManager.getNewsEnabledGroups(),
                 groupManager.getGithubTrendingGroups(),
                 groupManager.getAwesomeListsGroups(),
+                groupManager.getInterviewQGroups(),
                 groupManager.getInstaAutoGroups(),
                 groupManager.getStickerAutoGroups(),
                 groupManager.getWelcomeEnabledGroups(),
@@ -568,6 +569,7 @@ export async function handleGroups(sock, chatId, senderJid, { groupManager }) {
         r += `📰 *Tech news:* ${newsGroups.length} ON\n`;
         r += `🐙 *GitHub trending:* ${githubGroups.length} ON\n`;
         r += `⭐ *Awesome lists:* ${awesomeGroups.length} ON\n`;
+        r += `🧠 *Interview Q:* ${interviewQGroups.length} ON\n`;
         r += `📸 *Insta auto:* ${instaAutoGroups.length} group(s)\n`;
         r += `🎨 *Sticker auto:* ${stickerAutoGroups.length} group(s)\n`;
         r += `🎬 *Movie:* ${movieGroups.length} ON\n`;
@@ -714,9 +716,21 @@ export async function handleGroups(sock, chatId, senderJid, { groupManager }) {
             });
         }
 
+        r += '🧠 *Interview Q ON — groups*\n';
+        r += '_(MCQ polls via `/interviewqon` · `/interviewqoff`)_\n\n';
+        if (!interviewQGroups.length) {
+            r += '📭 None yet. Use `/activate` then `/interviewqon`.\n\n';
+        } else {
+            interviewQGroups.forEach((group, index) => {
+                const members = groupManager.formatMemberCount(memberCounts, group.group_id);
+                r += `${index + 1}. *${group.group_name}*\n`;
+                r += `   👥 Members: ${members}\n\n`;
+            });
+        }
+
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
         r += '💡 `/activate` `/deactivate` · `/newson` `/newsoff`\n';
-        r += '💡 `/githubon` `/githuboff` · `/awesomeon` `/awesomeoff` · `/instaon` `/instaoff` · `/stickeron` `/stickeroff` · `/movieon` `/movieoff` · `/trending on/off` · `/setwc`';
+        r += '💡 `/githubon` `/githuboff` · `/awesomeon` `/awesomeoff` · `/interviewqon` `/interviewqoff` · `/instaon` `/instaoff` · `/stickeron` `/stickeroff` · `/movieon` `/movieoff` · `/trending on/off` · `/setwc`';
 
         await sock.sendMessage(chatId, { text: r });
         logger.info(`📋 Group list sent to ${senderPhone}`);

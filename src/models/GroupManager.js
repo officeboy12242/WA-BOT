@@ -975,6 +975,45 @@ class GroupManager {
             .toArray();
     }
 
+    /** Interview Q of the Day — opt-in via /interviewqon */
+    async setInterviewQEnabled(groupId, groupName, enabled, setBy) {
+        await this.groups.updateOne(
+            { group_id: groupId },
+            {
+                $set: {
+                    group_name: groupName,
+                    interview_q: enabled,
+                    interview_q_by: setBy,
+                    interview_q_at: new Date(),
+                },
+                $setOnInsert: { group_id: groupId, is_active: false },
+            },
+            { upsert: true }
+        );
+        logger.info(
+            `🧠 Interview Q ${enabled ? 'enabled' : 'disabled'} for ${groupName || groupId} by ${setBy}`
+        );
+    }
+
+    async isInterviewQEnabled(groupId) {
+        const row = await this.groups.findOne(
+            { group_id: groupId },
+            { projection: { interview_q: 1, is_active: 1 } }
+        );
+        if (!row?.is_active) return false;
+        return row.interview_q === true;
+    }
+
+    async getInterviewQGroups() {
+        return this.groups
+            .find(
+                { is_active: true, interview_q: true },
+                { projection: { _id: 0 } }
+            )
+            .sort({ activated_at: -1 })
+            .toArray();
+    }
+
     async getAllGroups() {
         return this.groups
             .find({}, { projection: { _id: 0 } })
