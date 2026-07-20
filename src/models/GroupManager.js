@@ -694,6 +694,7 @@ class GroupManager {
                     courses_enabled: true,
                     news_enabled: true,
                     github_trending: true,
+                    awesome_lists: true,
                 },
                 $setOnInsert: {
                     group_id: groupId,
@@ -930,6 +931,44 @@ class GroupManager {
         return this.groups
             .find(
                 { is_active: true, github_trending: { $ne: false } },
+                { projection: { _id: 0 } }
+            )
+            .sort({ activated_at: -1 })
+            .toArray();
+    }
+
+    async setAwesomeListsEnabled(groupId, groupName, enabled, setBy) {
+        await this.groups.updateOne(
+            { group_id: groupId },
+            {
+                $set: {
+                    group_name: groupName,
+                    awesome_lists: enabled,
+                    awesome_lists_by: setBy,
+                    awesome_lists_at: new Date(),
+                },
+                $setOnInsert: { group_id: groupId, is_active: false },
+            },
+            { upsert: true }
+        );
+        logger.info(
+            `⭐ Awesome lists ${enabled ? 'enabled' : 'disabled'} for ${groupName || groupId} by ${setBy}`
+        );
+    }
+
+    async isAwesomeListsEnabled(groupId) {
+        const row = await this.groups.findOne(
+            { group_id: groupId },
+            { projection: { awesome_lists: 1, is_active: 1 } }
+        );
+        if (!row?.is_active) return false;
+        return row.awesome_lists !== false;
+    }
+
+    async getAwesomeListsGroups() {
+        return this.groups
+            .find(
+                { is_active: true, awesome_lists: { $ne: false } },
                 { projection: { _id: 0 } }
             )
             .sort({ activated_at: -1 })

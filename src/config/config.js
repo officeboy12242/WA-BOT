@@ -229,6 +229,14 @@ export const config = {
         .filter(Boolean),
     GITHUB_TRENDING_TIMEZONE: process.env.GITHUB_TRENDING_TIMEZONE || 'Asia/Kolkata',
     GITHUB_TRENDING_COUNT: parseInt(process.env.GITHUB_TRENDING_COUNT, 10) || 5,
+    /** Awesome lists — offset from GitHub times so posts don't collide */
+    AWESOME_LISTS_ENABLED: process.env.AWESOME_LISTS_ENABLED !== 'false',
+    AWESOME_LISTS_TIMES: (process.env.AWESOME_LISTS_TIMES || '10:15,12:45,15:15,17:45,20:30')
+        .split(',')
+        .map((t) => t.trim())
+        .filter(Boolean),
+    AWESOME_LISTS_TIMEZONE: process.env.AWESOME_LISTS_TIMEZONE || 'Asia/Kolkata',
+    AWESOME_LISTS_COUNT: parseInt(process.env.AWESOME_LISTS_COUNT, 10) || 5,
     /** Public URL for short links (Render sets RENDER_EXTERNAL_URL automatically). */
     PUBLIC_URL: (process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || '').replace(/\/$/, ''),
     RENDER_API_KEY: process.env.RENDER_API_KEY?.trim() || '',

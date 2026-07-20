@@ -544,12 +544,13 @@ export async function handleGroups(sock, chatId, senderJid, { groupManager }) {
     try {
         const senderPhone = extractPhoneNumber(senderJid);
 
-        const [activeGroups, courseGroups, newsGroups, githubGroups, instaAutoGroups, stickerAutoGroups, welcomeGroups, movieGroups, trendingGroups, groupCount, memberCounts] =
+        const [activeGroups, courseGroups, newsGroups, githubGroups, awesomeGroups, instaAutoGroups, stickerAutoGroups, welcomeGroups, movieGroups, trendingGroups, groupCount, memberCounts] =
             await Promise.all([
                 groupManager.getActiveGroups(),
                 groupManager.getCourseEnabledGroups(),
                 groupManager.getNewsEnabledGroups(),
                 groupManager.getGithubTrendingGroups(),
+                groupManager.getAwesomeListsGroups(),
                 groupManager.getInstaAutoGroups(),
                 groupManager.getStickerAutoGroups(),
                 groupManager.getWelcomeEnabledGroups(),
@@ -566,6 +567,7 @@ export async function handleGroups(sock, chatId, senderJid, { groupManager }) {
         r += `🎓 *Courses:* ${courseGroups.length} ON\n`;
         r += `📰 *Tech news:* ${newsGroups.length} ON\n`;
         r += `🐙 *GitHub trending:* ${githubGroups.length} ON\n`;
+        r += `⭐ *Awesome lists:* ${awesomeGroups.length} ON\n`;
         r += `📸 *Insta auto:* ${instaAutoGroups.length} group(s)\n`;
         r += `🎨 *Sticker auto:* ${stickerAutoGroups.length} group(s)\n`;
         r += `🎬 *Movie:* ${movieGroups.length} ON\n`;
@@ -620,6 +622,23 @@ export async function handleGroups(sock, chatId, senderJid, { groupManager }) {
                 r += `   👥 Members: ${members}\n`;
                 if (group.github_trending_at) {
                     r += `   📅 Since: ${new Date(group.github_trending_at).toLocaleDateString()}\n`;
+                }
+                r += '\n';
+            });
+        }
+
+        r += '⭐ *Awesome lists ON — groups*\n';
+        r += '_(1 random awesome-* list per slot via `/awesomeon` · off with `/awesomeoff`)_\n\n';
+
+        if (!awesomeGroups.length) {
+            r += '📭 None yet. Use `/activate` then `/awesomeon` in a group.\n\n';
+        } else {
+            awesomeGroups.forEach((group, index) => {
+                const members = groupManager.formatMemberCount(memberCounts, group.group_id);
+                r += `${index + 1}. *${group.group_name}*\n`;
+                r += `   👥 Members: ${members}\n`;
+                if (group.awesome_lists_at) {
+                    r += `   📅 Since: ${new Date(group.awesome_lists_at).toLocaleDateString()}\n`;
                 }
                 r += '\n';
             });
@@ -697,7 +716,7 @@ export async function handleGroups(sock, chatId, senderJid, { groupManager }) {
 
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
         r += '💡 `/activate` `/deactivate` · `/newson` `/newsoff`\n';
-        r += '💡 `/githubon` `/githuboff` · `/instaon` `/instaoff` · `/stickeron` `/stickeroff` · `/movieon` `/movieoff` · `/trending on/off` · `/setwc`';
+        r += '💡 `/githubon` `/githuboff` · `/awesomeon` `/awesomeoff` · `/instaon` `/instaoff` · `/stickeron` `/stickeroff` · `/movieon` `/movieoff` · `/trending on/off` · `/setwc`';
 
         await sock.sendMessage(chatId, { text: r });
         logger.info(`📋 Group list sent to ${senderPhone}`);
@@ -1143,6 +1162,94 @@ export async function handleGithubOff(sock, chatId, senderJid, { groupManager, o
         logger.info(`🐙 GitHub trending disabled: ${chatId} by ${senderPhone}`);
     } catch (error) {
         logger.error(`Error disabling GitHub trending: ${error.message}`);
+    }
+}
+
+export async function handleAwesomeOn(sock, chatId, senderJid, { groupManager, originalMsg }) {
+    try {
+        const senderPhone = extractPhoneNumber(senderJid);
+        const isActive = await groupManager.isGroupActive(chatId);
+        if (!isActive) {
+            await sock.sendMessage(chatId, {
+                text:
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\nℹ️ *GROUP NOT ACTIVATED* ℹ️\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                    'Awesome lists require an activated group.\n\nUse `/activate` first, then `/awesomeon`.',
+            }, { quoted: originalMsg });
+            return;
+        }
+
+        let groupName = 'Unknown Group';
+        try {
+            const meta = await sock.groupMetadata(chatId);
+            groupName = meta.subject;
+        } catch (err) {
+            logger.error(`Error fetching group metadata: ${err.message}`);
+        }
+
+        await groupManager.setAwesomeListsEnabled(chatId, groupName, true, senderPhone);
+
+        let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        r += '✅ *AWESOME LISTS ON* ✅\n';
+        r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+        r += `📢 *Group:* ${groupName}\n\n`;
+        r += '⭐ Daily *awesome-* list picks — one random list per slot (times offset from GitHub).\n';
+        r += '🐙 GitHub trending continues on its own schedule.\n\n';
+        r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        r += '💡 Use `/awesomeoff` to stop awesome lists only';
+
+        await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
+        logger.info(`⭐ Awesome lists enabled: ${groupName} (${chatId}) by ${senderPhone}`);
+    } catch (error) {
+        logger.error(`Error enabling awesome lists: ${error.message}`);
+    }
+}
+
+export async function handleAwesomeOff(sock, chatId, senderJid, { groupManager, originalMsg }) {
+    try {
+        const senderPhone = extractPhoneNumber(senderJid);
+        const isActive = await groupManager.isGroupActive(chatId);
+        if (!isActive) {
+            await sock.sendMessage(chatId, {
+                text:
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\nℹ️ *GROUP NOT ACTIVATED* ℹ️\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                    'This group is not activated.\n\nUse `/activate` to enable updates.',
+            }, { quoted: originalMsg });
+            return;
+        }
+
+        const enabled = await groupManager.isAwesomeListsEnabled(chatId);
+        if (!enabled) {
+            await sock.sendMessage(chatId, {
+                text:
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\nℹ️ *AWESOME LISTS ALREADY OFF* ℹ️\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                    'Awesome lists are not enabled in this group.\n\nUse `/awesomeon` to enable it.',
+            }, { quoted: originalMsg });
+            return;
+        }
+
+        let groupName = 'Unknown Group';
+        try {
+            const meta = await sock.groupMetadata(chatId);
+            groupName = meta.subject;
+        } catch (err) {
+            logger.error(`Error fetching group metadata: ${err.message}`);
+        }
+
+        await groupManager.setAwesomeListsEnabled(chatId, groupName, false, senderPhone);
+
+        let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        r += '🛑 *AWESOME LISTS OFF* 🛑\n';
+        r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+        r += `📢 *Group:* ${groupName}\n\n`;
+        r += '⭐ Daily awesome-list posts are disabled here.\n';
+        r += '🐙 GitHub trending will continue if enabled.\n\n';
+        r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        r += '💡 Use `/awesomeon` to enable again';
+
+        await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
+        logger.info(`⭐ Awesome lists disabled: ${chatId} by ${senderPhone}`);
+    } catch (error) {
+        logger.error(`Error disabling awesome lists: ${error.message}`);
     }
 }
 
