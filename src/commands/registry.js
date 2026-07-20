@@ -228,6 +228,27 @@ export const COMMAND_REGISTRY = [
         help: 'Disable awesome lists only — GitHub continues',
     },
     {
+        names: ['/interviewqon'],
+        key: 'interviewqon',
+        scope: 'group_only',
+        role: 'staff',
+        help: 'Enable daily Interview Q polls (1pm & 6pm) in this group',
+    },
+    {
+        names: ['/interviewqoff'],
+        key: 'interviewqoff',
+        scope: 'group_only',
+        role: 'staff',
+        help: 'Disable Interview Q polls in this group',
+    },
+    {
+        names: ['/interviewq'],
+        key: 'interviewq',
+        scope: 'any',
+        role: 'admins',
+        help: 'Interview Q: `/interviewq test|post|answer`',
+    },
+    {
         names: ['/instaon'],
         key: 'instaon',
         scope: 'group_only',

@@ -113,6 +113,11 @@ import {
     handlePendingResumeInput,
     createResumeSessionStore,
 } from './handlers/resumeHandlers.js';
+import {
+    handleInterviewQ,
+    handleInterviewQOn,
+    handleInterviewQOff,
+} from '../interviewQuestion/interviewQuestion.commands.js';
 
 class CommandController {
     constructor(database, botState, groupManager, newsController = null, movieController = null, userManager = null, stickerController = null, botSettings = null, githubTrendingController = null, memberScrapeController = null, warnDatabase = null, authDatabase = null, courseAPI = null, awesomeListsController = null) {
@@ -133,6 +138,7 @@ class CommandController {
         this.assistService = null;
         this.resumeStore = null;
         this.resumeTailorService = null;
+        this.interviewQuestionService = null;
         this.pendingClearConfirmations = new Map();
         this.pendingScrapSessions = createScrapSessionStore();
         this.pendingGithubPosts = createGithubPostSessionStore();
@@ -172,6 +178,10 @@ class CommandController {
 
     setAssistService(assistService) {
         this.assistService = assistService;
+    }
+
+    setInterviewQuestionService(interviewQuestionService) {
+        this.interviewQuestionService = interviewQuestionService;
     }
 
     setTradeAlertController(tradeAlertController) {
@@ -234,6 +244,7 @@ class CommandController {
             groupSummaryController: this.groupSummaryController,
             tradeAlertController: this.tradeAlertController,
             assistService: this.assistService,
+            interviewQuestionService: this.interviewQuestionService,
             botStartTime: this.botStartTime,
             courseAPI: this.courseAPI,
             isOwnerFromJid: this._isOwnerFromJid,
@@ -346,6 +357,9 @@ class CommandController {
             case 'githuboff':  await handleGithubOff(sock, chatId, senderJid, ctx); break;
             case 'awesomeon':  await handleAwesomeOn(sock, chatId, senderJid, ctx); break;
             case 'awesomeoff': await handleAwesomeOff(sock, chatId, senderJid, ctx); break;
+            case 'interviewqon':  await handleInterviewQOn(sock, chatId, senderJid, ctx); break;
+            case 'interviewqoff': await handleInterviewQOff(sock, chatId, senderJid, ctx); break;
+            case 'interviewq': await handleInterviewQ(sock, chatId, senderJid, args, ctx); break;
             case 'groups':     await handleGroups(sock, chatId, senderJid, ctx); break;
             case 'setwc':      await handleSetWelcome(sock, chatId, senderJid, command.trim(), ctx); break;
             case 'warn':       await handleWarn(sock, chatId, senderJid, args, originalMsg, ctx); break;

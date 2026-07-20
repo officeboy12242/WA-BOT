@@ -237,6 +237,18 @@ export const config = {
         .filter(Boolean),
     AWESOME_LISTS_TIMEZONE: process.env.AWESOME_LISTS_TIMEZONE || 'Asia/Kolkata',
     AWESOME_LISTS_COUNT: parseInt(process.env.AWESOME_LISTS_COUNT, 10) || 5,
+    /** Interview Q of the Day — MCQ polls at 1pm & 6pm IST; answer after 30m */
+    INTERVIEW_Q_ENABLED: process.env.INTERVIEW_Q_ENABLED !== 'false',
+    INTERVIEW_Q_TIMES: (process.env.INTERVIEW_Q_TIMES || '13:00,18:00')
+        .split(',')
+        .map((t) => t.trim())
+        .filter(Boolean),
+    INTERVIEW_Q_TIMEZONE: process.env.INTERVIEW_Q_TIMEZONE || 'Asia/Kolkata',
+    INTERVIEW_Q_ANSWER_DELAY_MS: (() => {
+        const n = parseInt(process.env.INTERVIEW_Q_ANSWER_DELAY_MS, 10);
+        if (Number.isFinite(n) && n >= 60_000) return n;
+        return 30 * 60 * 1000;
+    })(),
     /** Public URL for short links (Render sets RENDER_EXTERNAL_URL automatically). */
     PUBLIC_URL: (process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || '').replace(/\/$/, ''),
     RENDER_API_KEY: process.env.RENDER_API_KEY?.trim() || '',
