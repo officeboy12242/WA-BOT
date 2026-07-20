@@ -26,12 +26,35 @@ function isZipOrPackLink(link) {
     return /\bzip\b/i.test(blob) || /\bpack\b/i.test(blob) || /\bfull\s*season\b/i.test(blob);
 }
 
+function isNullDropLink(link) {
+    return /null-drop\.onrender\.com/i.test(String(link?.url || ''));
+}
+
+function isTelegramLink(link) {
+    return /(?:^|\.)t\.me\//i.test(String(link?.url || '')) || /telegram/i.test(String(link?.label || ''));
+}
+
 /**
  * Prefer season Zip/pack links (often listed after episode links in API).
- * Episode links fill remaining slots so WhatsApp stays under length limits.
+ * For AtoZ: always keep every NullDrop mirror; drop Telegram when NullDrop exists.
  */
-function prioritizeLinks(links, maxLinks) {
-    if (!links.length || links.length <= maxLinks) return links;
+function prioritizeLinks(links, maxLinks, { preferNullDrop = false } = {}) {
+    if (!links.length) return links;
+
+    if (preferNullDrop) {
+        const nullDrop = links.filter(isNullDropLink);
+        let rest = links.filter((l) => !isNullDropLink(l));
+        if (nullDrop.length) {
+            // Telegram is redundant when NullDrop is present (and eats WhatsApp length)
+            rest = rest.filter((l) => !isTelegramLink(l));
+        }
+        // Never drop NullDrop — raise the cap if needed
+        const cap = Math.max(maxLinks, nullDrop.length);
+        const room = Math.max(0, cap - nullDrop.length);
+        return [...nullDrop, ...rest.slice(0, room)];
+    }
+
+    if (links.length <= maxLinks) return links;
 
     const zips = [];
     const rest = [];
@@ -150,7 +173,8 @@ class HdHubMoviesService {
 
             if (!title || !links.length) continue;
 
-            links = prioritizeLinks(links, maxLinksPerResult);
+            const isAtoz = /^atoz$/i.test(String(row?.source || '').trim());
+            links = prioritizeLinks(links, maxLinksPerResult, { preferNullDrop: isAtoz });
 
             results.push({
                 title,
