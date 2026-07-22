@@ -7,8 +7,7 @@
   "scripts": {
     "start": "node --max-old-space-size=450 bot-new.js",
     "dev": "node --watch bot-new.js",
-    "clear-auth": "node scripts/clear-auth.js",
-    "ensure-omniroute": "node scripts/ensure-omniroute.js"
+    "clear-auth": "node scripts/clear-auth.js"
   },
   "engines": {
     "node": ">=22.19.0",

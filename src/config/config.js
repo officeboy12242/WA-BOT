@@ -95,7 +95,7 @@ export const config = {
     GROQ_API_KEY: process.env.GROQ_API_KEY?.trim() || '',
     GROQ_TRADE_MODEL: process.env.GROQ_TRADE_MODEL?.trim() || 'llama-3.3-70b-versatile',
     GROQ_TRADE_MODELS: process.env.GROQ_TRADE_MODELS?.trim() || 'llama-3.3-70b-versatile,llama-3.1-8b-instant',
-    /** Provider order: gemini,groq,nvidia,openrouter,omniroute — omniroute prepended when configured */
+    /** Provider order: gemini,groq,nvidia,openrouter */
     TRADE_LLM_PROVIDERS: (process.env.TRADE_LLM_PROVIDERS || 'gemini,groq,nvidia').trim(),
     /** @deprecated Trade alerts use Gemini; kept for group summaries only */
     NVIDIA_TRADE_MODEL: process.env.NVIDIA_TRADE_MODEL?.trim() || 'z-ai/glm-5.2',
@@ -201,34 +201,6 @@ export const config = {
         const n = parseInt(process.env.OPENROUTER_TIMEOUT_MS, 10);
         if (!Number.isFinite(n) || n <= 0) return 90_000;
         return Math.min(120_000, Math.max(30_000, n));
-    })(),
-    /**
-     * OmniRoute AI gateway (OpenAI-compatible /v1).
-     * Same Render service: OMNIROUTE_EMBED=true + omniroute on PATH → proxy at PUBLIC_URL/v1
-     * Separate host: set OMNIROUTE_BASE_URL to that host's /v1
-     */
-    OMNIROUTE_EMBED: process.env.OMNIROUTE_EMBED === 'true',
-    OMNIROUTE_INTERNAL_PORT: (() => {
-        const n = parseInt(process.env.OMNIROUTE_INTERNAL_PORT, 10);
-        return Number.isFinite(n) && n > 0 ? n : 20128;
-    })(),
-    OMNIROUTE_BIN: process.env.OMNIROUTE_BIN?.trim() || 'omniroute',
-    OMNIROUTE_BASE_URL: (() => {
-        const explicit = process.env.OMNIROUTE_BASE_URL?.trim();
-        if (explicit) return explicit;
-        if (process.env.OMNIROUTE_EMBED === 'true') {
-            const port = parseInt(process.env.OMNIROUTE_INTERNAL_PORT, 10);
-            const p = Number.isFinite(port) && port > 0 ? port : 20128;
-            return `http://127.0.0.1:${p}/v1`;
-        }
-        return 'http://localhost:20128/v1';
-    })(),
-    OMNIROUTE_API_KEY: process.env.OMNIROUTE_API_KEY?.trim() || '',
-    OMNIROUTE_MODEL: process.env.OMNIROUTE_MODEL?.trim() || 'auto',
-    OMNIROUTE_TIMEOUT_MS: (() => {
-        const n = parseInt(process.env.OMNIROUTE_TIMEOUT_MS, 10);
-        if (!Number.isFinite(n) || n <= 0) return 60_000;
-        return Math.min(120_000, Math.max(15_000, n));
     })(),
     /** Multi-target trade plan on CE/PE sections (1 lot, ₹ P&L) */
     TRADE_PLAN_ENABLED: process.env.TRADE_PLAN_ENABLED !== 'false',

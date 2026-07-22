@@ -8,65 +8,6 @@ import os from 'os';
 import { URL } from 'url';
 import { logger } from './logger.js';
 
-function shouldProxyOmniRoute(pathname) {
-    return (
-        pathname === '/v1' ||
-        pathname.startsWith('/v1/') ||
-        pathname === '/dashboard' ||
-        pathname.startsWith('/dashboard/') ||
-        pathname === '/login' ||
-        pathname.startsWith('/login/') ||
-        pathname.startsWith('/_next/') ||
-        pathname.startsWith('/api/mcp') ||
-        pathname.startsWith('/.well-known/')
-    );
-}
-
-/**
- * Reverse-proxy OmniRoute (same public host, internal port).
- */
-function proxyToOmniRoute(req, res, targetPort, pathname, search) {
-    const headers = { ...req.headers };
-    delete headers['content-length'];
-    // Preserve public host so OmniRoute redirects/cookies work behind Render
-    headers['x-forwarded-host'] = req.headers.host || '';
-    headers['x-forwarded-proto'] = req.headers['x-forwarded-proto'] || 'https';
-    headers['x-real-ip'] = req.socket?.remoteAddress || '';
-    headers.host = `127.0.0.1:${targetPort}`;
-
-    const proxyReq = http.request(
-        {
-            hostname: '127.0.0.1',
-            port: targetPort,
-            path: `${pathname}${search || ''}`,
-            method: req.method,
-            headers,
-            timeout: 120_000,
-        },
-        (proxyRes) => {
-            res.writeHead(proxyRes.statusCode || 502, proxyRes.headers);
-            proxyRes.pipe(res);
-        }
-    );
-
-    proxyReq.on('error', (err) => {
-        logger.warn(`OmniRoute proxy error: ${err.message}`);
-        if (!res.headersSent) {
-            res.writeHead(502, { 'Content-Type': 'application/json' });
-            res.end(
-                JSON.stringify({
-                    error: 'OmniRoute unavailable',
-                    hint: 'Still starting, or install failed — check logs for Embedded OmniRoute ready',
-                })
-            );
-        } else {
-            res.end();
-        }
-    });
-
-    req.pipe(proxyReq);
-}
-
 /**
  * Get comprehensive system metrics
  */
@@ -174,18 +115,6 @@ class AdminPanel {
         this.shortLinkService = null;
         this.adminToken = process.env.ADMIN_TOKEN || 'sassy123';
         this.lastActivity = new Date();
-        /** @type {number|null} internal OmniRoute port for same-host proxy */
-        this.omniRoutePort = null;
-        /** True when OMNIROUTE_EMBED is on — show starting status before proxy is ready */
-        this.omniRouteExpected = false;
-    }
-
-    setOmniRouteExpected(expected) {
-        this.omniRouteExpected = Boolean(expected);
-    }
-
-    setOmniRoutePort(port) {
-        this.omniRoutePort = port || null;
     }
 
     setAuthDatabase(authDB) {
@@ -507,27 +436,6 @@ class AdminPanel {
         this.server = http.createServer(async (req, res) => {
             const url = new URL(req.url, `http://localhost:${this.port}`);
             const pathname = url.pathname;
-
-            // Same-host OmniRoute (must not steal /health or bot /api/* routes)
-            if (shouldProxyOmniRoute(pathname)) {
-                if (this.omniRoutePort) {
-                    proxyToOmniRoute(req, res, this.omniRoutePort, pathname, url.search);
-                    return;
-                }
-                if (this.omniRouteExpected) {
-                    res.writeHead(503, { 'Content-Type': 'application/json' });
-                    res.end(
-                        JSON.stringify({
-                            status: 'starting',
-                            service: 'OmniRoute',
-                            message:
-                                'OmniRoute is still installing/starting. Wait for Render log: Embedded OmniRoute ready — then reload.',
-                            try_again_in_seconds: 60,
-                        })
-                    );
-                    return;
-                }
-            }
 
             // Health check (no auth required) - detailed system metrics for Koyeb/Render
             if (pathname === '/health' || pathname === '/') {

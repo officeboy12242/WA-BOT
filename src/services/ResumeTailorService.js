@@ -46,7 +46,7 @@ export default class ResumeTailorService {
      */
     async tailor({ baseResume, jobDescription, mode = 'related' }) {
         if (!this.isConfigured()) {
-            throw new Error('No LLM configured (set OMNIROUTE / GEMINI / GROQ / NVIDIA / OPENROUTER key)');
+            throw new Error('No LLM configured (set GEMINI / GROQ / NVIDIA / OPENROUTER key)');
         }
         if (!String(baseResume || '').trim()) {
             throw new Error('No base resume saved');
@@ -75,7 +75,7 @@ export default class ResumeTailorService {
 
     async coverLetter({ baseResume, jobDescription }) {
         if (!this.isConfigured()) {
-            throw new Error('No LLM configured (set OMNIROUTE / GEMINI / GROQ / NVIDIA / OPENROUTER key)');
+            throw new Error('No LLM configured (set GEMINI / GROQ / NVIDIA / OPENROUTER key)');
         }
         const { text, provider, model } = await this.llm.completeChat({
             systemPrompt: buildCoverLetterSystemPrompt(),
