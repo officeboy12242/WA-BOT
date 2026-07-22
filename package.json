@@ -11,8 +11,8 @@
     "ensure-omniroute": "node scripts/ensure-omniroute.js"
   },
   "engines": {
-    "node": ">=20.0.0",
-    "npm": ">=9.0.0"
+    "node": ">=22.19.0",
+    "npm": ">=10.0.0"
   },
   "keywords": [
     "whatsapp",
