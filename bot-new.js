@@ -503,6 +503,7 @@ async function boot() {
 
     // Install + spawn OmniRoute in background — must stay async (no spawnSync)
     if (config.OMNIROUTE_EMBED) {
+        bot.adminPanel.setOmniRouteExpected(true);
         void (async () => {
             bot.omniRouteEmbed = new OmniRouteEmbed(config);
             try {
@@ -511,7 +512,7 @@ async function boot() {
                 if (result.started) {
                     bot.adminPanel.setOmniRoutePort(result.port || config.OMNIROUTE_INTERNAL_PORT);
                     logger.info(
-                        `🌐 OmniRoute same-host: internal ${bot.omniRouteEmbed.internalBaseUrl()} · public ${(config.PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '')}/v1`
+                        `🌐 OmniRoute same-host: internal ${bot.omniRouteEmbed.internalBaseUrl()} · public ${(config.PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '')}/dashboard`
                     );
                 }
             } catch (err) {
