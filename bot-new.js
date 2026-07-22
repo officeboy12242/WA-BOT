@@ -493,22 +493,7 @@ const PORT = process.env.PORT || 3000;
 bot.adminPanel = new AdminPanel(PORT);
 
 async function boot() {
-    // Same-host OmniRoute: spawn on internal port, proxy /v1 + /dashboard on PUBLIC_URL
-    if (config.OMNIROUTE_EMBED) {
-        bot.omniRouteEmbed = new OmniRouteEmbed(config);
-        try {
-            const result = await bot.omniRouteEmbed.start();
-            if (result.started) {
-                bot.adminPanel.setOmniRoutePort(result.port || config.OMNIROUTE_INTERNAL_PORT);
-                logger.info(
-                    `🌐 OmniRoute same-host: internal ${bot.omniRouteEmbed.internalBaseUrl()} · public ${(config.PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '')}/v1`
-                );
-            }
-        } catch (err) {
-            logger.error(`OmniRoute embed failed (bot continues without it): ${err.message}`);
-        }
-    }
-
+    // Bind Render PORT immediately — OmniRoute install is slow and must not block health checks
     bot.adminPanel.start();
 
     process.on('SIGINT', () => {
@@ -517,6 +502,25 @@ async function boot() {
     process.on('SIGTERM', () => {
         void bot.shutdown('SIGTERM');
     });
+
+    // Install + spawn OmniRoute in the background after PORT is open
+    if (config.OMNIROUTE_EMBED) {
+        void (async () => {
+            bot.omniRouteEmbed = new OmniRouteEmbed(config);
+            try {
+                logger.info('🌐 OmniRoute install/start in background (PORT already bound)...');
+                const result = await bot.omniRouteEmbed.start();
+                if (result.started) {
+                    bot.adminPanel.setOmniRoutePort(result.port || config.OMNIROUTE_INTERNAL_PORT);
+                    logger.info(
+                        `🌐 OmniRoute same-host: internal ${bot.omniRouteEmbed.internalBaseUrl()} · public ${(config.PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '')}/v1`
+                    );
+                }
+            } catch (err) {
+                logger.error(`OmniRoute embed failed (bot continues without it): ${err.message}`);
+            }
+        })();
+    }
 
     await bot.start();
 }
