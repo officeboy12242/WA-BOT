@@ -218,6 +218,56 @@ class NseMarketDataService {
         }
         return lines.join('\n');
     }
+
+    /**
+     * NIFTY 50 top gainers/losers — same feed as
+     * https://www.nseindia.com/market-data/top-gainers-losers (Select Index: NIFTY 50).
+     * NSE uses the typo path `loosers` for losers.
+     */
+    async fetchNiftyTopGainersLosers({ each = 5 } = {}) {
+        const n = Math.max(1, Math.min(10, Number(each) || 5));
+        const [gRaw, lRaw] = await Promise.all([
+            nseGetSafe('live-analysis-variations?index=gainers'),
+            nseGetSafe('live-analysis-variations?index=loosers'),
+        ]);
+
+        const mapRow = (row) => {
+            const symbol = String(row?.symbol || '').trim().toUpperCase();
+            if (!symbol) return null;
+            return {
+                symbol,
+                changePct: safeNum(row?.perChange ?? row?.pChange ?? row?.percentChange),
+                last: safeNum(row?.ltp ?? row?.lastPrice),
+                volume: safeNum(row?.trade_quantity ?? row?.totalTradedVolume),
+                turnover: safeNum(row?.turnover),
+            };
+        };
+
+        const gainers = (gRaw?.NIFTY?.data || []).map(mapRow).filter(Boolean).slice(0, n);
+        const losers = (lRaw?.NIFTY?.data || []).map(mapRow).filter(Boolean).slice(0, n);
+        const timestamp = gRaw?.NIFTY?.timestamp || lRaw?.NIFTY?.timestamp || null;
+
+        if (!gainers.length && !losers.length) {
+            logger.warn('NSE NIFTY top gainers/losers empty');
+        } else {
+            logger.info(
+                `NSE NIFTY G/L: ${gainers.map((x) => x.symbol).join(',')} | ${losers.map((x) => x.symbol).join(',')}`
+            );
+        }
+
+        return { index: 'NIFTY 50', each: n, gainers, losers, timestamp };
+    }
+
+    formatNiftyGlBlock(gl) {
+        if (!gl) return '';
+        const fmt = (row) =>
+            `${row.symbol}${row.changePct != null ? ` ${row.changePct >= 0 ? '+' : ''}${row.changePct}%` : ''}`;
+        const lines = ['=== NSE NIFTY 50 TOP GAINERS / LOSERS ==='];
+        if (gl.timestamp) lines.push(`As of: ${gl.timestamp}`);
+        if (gl.gainers?.length) lines.push(`Gainers: ${gl.gainers.map(fmt).join(', ')}`);
+        if (gl.losers?.length) lines.push(`Losers: ${gl.losers.map(fmt).join(', ')}`);
+        return lines.join('\n');
+    }
 }
 
 export const nseMarketDataService = new NseMarketDataService();

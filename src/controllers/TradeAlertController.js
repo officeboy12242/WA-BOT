@@ -42,6 +42,11 @@ function parseAlertTime(timeStr) {
     return { hour: Number(h), minute: Number(m) };
 }
 
+function normalizeDiscoverySource(v) {
+    const s = String(v || '').trim().toLowerCase();
+    return s === 'nse' || s === 'nse_gl' || s === 'gl' || s === 'gainers' ? 'nse' : 'legacy';
+}
+
 class TradeAlertController {
     constructor(groupManager, config = {}, mongoDb = null) {
         this.groupManager = groupManager;
@@ -57,6 +62,8 @@ class TradeAlertController {
         this.alertMinute = minute;
         this.defaultSymbols = config.TRADE_ALERT_STOCKS || [];
         this.defaultMode = config.TRADE_ALERT_MODE || 'auto';
+        this.defaultDiscoverySource = normalizeDiscoverySource(config.TRADE_ALERT_DISCOVERY_SOURCE);
+        this.nseGlEach = config.TRADE_ALERT_NSE_GL_EACH || 5;
         this.onlyBuySignals = config.TRADE_ALERT_ONLY_BUY_SIGNALS !== false;
         this.maxSendsPerGroup = config.TRADE_ALERT_MAX_SENDS || 5;
         this.discoveryCount = config.TRADE_ALERT_DISCOVERY_COUNT || 8;
@@ -67,6 +74,7 @@ class TradeAlertController {
         this._discoveryCollection = null;
         this._discoveryCache = {
             date: null,
+            source: null,
             symbols: [],
             hiddenGem: null,
             hiddenGemReason: null,
@@ -289,28 +297,42 @@ class TradeAlertController {
         return /timeout|ETIMEDOUT|ECONNABORTED/i.test(String(err?.message || err));
     }
 
-    async discoverSymbolsForToday({ forceRefresh = false } = {}) {
-        const result = await this.runDiscovery({ forceRefresh, persist: !forceRefresh });
+    async discoverSymbolsForToday({ forceRefresh = false, source = null } = {}) {
+        const result = await this.runDiscovery({ forceRefresh, persist: !forceRefresh, source });
         return result.symbols;
     }
 
+    async resolveDiscoverySourceForGroup(groupId) {
+        const fromGroup = await this.groupManager.getTradeAlertDiscoverySource?.(groupId);
+        return normalizeDiscoverySource(fromGroup || this.defaultDiscoverySource);
+    }
+
     /**
-     * @param {{ forceRefresh?: boolean, persist?: boolean }} opts
+     * @param {{ forceRefresh?: boolean, persist?: boolean, source?: string }} opts
      * persist=false for manual /tradelert scan so it does not lock in stale all-day cache
      */
-    async runDiscovery({ forceRefresh = false, persist = true } = {}) {
+    async runDiscovery({ forceRefresh = false, persist = true, source = null } = {}) {
         const dateStr = getTodayDateStrIST();
+        const discoverySource = normalizeDiscoverySource(source || this.defaultDiscoverySource);
 
         if (!forceRefresh) {
-            if (this._discoveryCache.date === dateStr && this._discoveryCache.symbols.length) {
+            if (
+                this._discoveryCache.date === dateStr &&
+                this._discoveryCache.source === discoverySource &&
+                this._discoveryCache.symbols.length
+            ) {
                 return this._discoveryResultFromCache();
             }
 
             if (this._discoveryCollection) {
-                const row = await this._discoveryCollection.findOne({ alert_date: dateStr });
+                const row = await this._discoveryCollection.findOne({
+                    alert_date: dateStr,
+                    discovery_source: discoverySource,
+                });
                 if (row?.symbols?.length) {
                     this._discoveryCache = {
                         date: dateStr,
+                        source: discoverySource,
                         symbols: row.symbols,
                         hiddenGem: row.hidden_gem || null,
                         hiddenGemReason: row.hidden_gem_reason || null,
@@ -319,6 +341,8 @@ class TradeAlertController {
                         marketNews: row.market_news || '',
                         scannedAt: row.created_at || null,
                         intelligence: row.intelligence || null,
+                        niftyGl: row.intelligence?.niftyGl || null,
+                        discoverySource,
                     };
                     return this._discoveryResultFromCache();
                 }
@@ -331,40 +355,45 @@ class TradeAlertController {
 
         logger.info(
             forceRefresh
-                ? '📡 Fresh enhanced trade scan (sectors + macro + smart money)…'
-                : '🤖 Enhanced trade discovery…'
+                ? `📡 Fresh trade scan (${discoverySource})…`
+                : `🤖 Trade discovery (${discoverySource})…`
         );
 
-        const intel = await this.discoveryEngine.run({ forceRefresh });
+        const intel = await this.discoveryEngine.run({ forceRefresh, source: discoverySource });
 
-        let discovery = { symbols: [], hiddenGem: null, hiddenGemReason: null };
-        if (this.tradeLlm.isConfigured()) {
-            const userPrompt = buildDiscoveryUserPrompt(intel.context, this.discoveryCount);
-            try {
-                const raw = await this.tradeLlm.completeTrade(STOCK_DISCOVERY_SYSTEM_PROMPT, userPrompt, {
-                    maxTokens: 900,
-                    timeoutMs: 90_000,
-                });
-                discovery = parseDiscoveryResult(raw);
-            } catch (err) {
-                logger.warn(`AI discovery overlay skipped: ${err.message}`);
+        let symbols = [...(intel.symbols || [])];
+        let gemPick = { hiddenGem: null, hiddenGemReason: null };
+
+        // NSE G/L list is authoritative — skip AI overlay / hidden-gem rewrite.
+        if (discoverySource !== 'nse') {
+            let discovery = { symbols: [], hiddenGem: null, hiddenGemReason: null };
+            if (this.tradeLlm.isConfigured()) {
+                const userPrompt = buildDiscoveryUserPrompt(intel.context, this.discoveryCount);
+                try {
+                    const raw = await this.tradeLlm.completeTrade(STOCK_DISCOVERY_SYSTEM_PROMPT, userPrompt, {
+                        maxTokens: 900,
+                        timeoutMs: 90_000,
+                    });
+                    discovery = parseDiscoveryResult(raw);
+                } catch (err) {
+                    logger.warn(`AI discovery overlay skipped: ${err.message}`);
+                }
             }
-        }
 
-        const baseRows = intel.universeRows || [];
-        const gemPick = marketScanService.pickHiddenGem(
-            baseRows,
-            intel.movers,
-            intel.marketNews,
-            discovery.hiddenGem,
-            discovery.hiddenGemReason
-        );
+            const baseRows = intel.universeRows || [];
+            gemPick = marketScanService.pickHiddenGem(
+                baseRows,
+                intel.movers,
+                intel.marketNews,
+                discovery.hiddenGem,
+                discovery.hiddenGemReason
+            );
 
-        let symbols = [...intel.symbols];
-        if (gemPick.hiddenGem && !symbols.includes(gemPick.hiddenGem)) {
-            symbols = [gemPick.hiddenGem, ...symbols].slice(0, this.discoveryCount);
+            if (gemPick.hiddenGem && !symbols.includes(gemPick.hiddenGem)) {
+                symbols = [gemPick.hiddenGem, ...symbols].slice(0, this.discoveryCount);
+            }
+            symbols = marketScanService.finalizeWatchlist(symbols, baseRows, this.discoveryCount);
         }
-        symbols = marketScanService.finalizeWatchlist(symbols, baseRows, this.discoveryCount);
 
         const scannedAt = intel.scannedAt || new Date();
         const result = {
@@ -387,17 +416,20 @@ class TradeAlertController {
             marketModeLabel: intel.marketModeLabel,
             freshness: intel.freshness,
             gates: intel.gates,
+            niftyGl: intel.niftyGl || null,
+            discoverySource,
             intelligence: intel,
         };
 
-        this._discoveryCache = { date: dateStr, ...result };
+        this._discoveryCache = { date: dateStr, source: discoverySource, ...result };
 
         if (persist && this._discoveryCollection) {
             await this._discoveryCollection.updateOne(
-                { alert_date: dateStr },
+                { alert_date: dateStr, discovery_source: discoverySource },
                 {
                     $set: {
                         symbols,
+                        discovery_source: discoverySource,
                         hidden_gem: gemPick.hiddenGem,
                         hidden_gem_reason: gemPick.hiddenGemReason,
                         movers: intel.movers,
@@ -412,6 +444,7 @@ class TradeAlertController {
                             delta: intel.delta,
                             gates: intel.gates,
                             marketMode: intel.marketMode,
+                            niftyGl: intel.niftyGl || null,
                         },
                         created_at: scannedAt,
                     },
@@ -421,7 +454,9 @@ class TradeAlertController {
         }
 
         const gemNote = gemPick.hiddenGem ? ` · 💎 ${gemPick.hiddenGem}` : '';
-        logger.info(`🤖 Enhanced watchlist (${symbols.length}): ${symbols.join(', ')}${gemNote}`);
+        logger.info(
+            `🤖 Watchlist [${discoverySource}] (${symbols.length}): ${symbols.join(', ')}${gemNote}`
+        );
         return result;
     }
 
@@ -446,6 +481,8 @@ class TradeAlertController {
             marketModeLabel: this._discoveryCache.marketModeLabel,
             freshness: this._discoveryCache.freshness,
             gates: this._discoveryCache.intelligence?.gates || this._discoveryCache.gates,
+            niftyGl: this._discoveryCache.niftyGl || this._discoveryCache.intelligence?.niftyGl || null,
+            discoverySource: this._discoveryCache.discoverySource || this._discoveryCache.source || this.defaultDiscoverySource,
         };
     }
 
@@ -528,32 +565,40 @@ class TradeAlertController {
         const dateLabel = formatNowLabelIST();
         logger.info(`📈 Daily trade alerts for ${groups.length} group(s) — ${dateLabel}`);
 
-        let autoDiscovery = null;
+        /** @type {Map<string, object>} */
+        const discoveriesBySource = new Map();
 
         for (const group of groups) {
             const mode = await this.resolveModeForGroup(group);
             let symbols;
+            let autoDiscovery = null;
             if (mode === 'manual') {
                 const groupSymbols = await this.groupManager.getTradeAlertSymbols(group.group_id);
                 symbols = groupSymbols.length ? groupSymbols : this.defaultSymbols;
             } else {
-                if (!autoDiscovery) {
+                const source = await this.resolveDiscoverySourceForGroup(group.group_id);
+                if (!discoveriesBySource.has(source)) {
                     try {
-                        autoDiscovery = await this.runDiscovery({ forceRefresh: true, persist: true });
+                        discoveriesBySource.set(
+                            source,
+                            await this.runDiscovery({ forceRefresh: true, persist: true, source })
+                        );
                     } catch (err) {
-                        logger.error(`Daily discovery failed, using fallback watchlist: ${err.message}`);
-                        autoDiscovery = {
+                        logger.error(`Daily discovery (${source}) failed, using fallback: ${err.message}`);
+                        discoveriesBySource.set(source, {
                             symbols: this.defaultSymbols.slice(0, this.discoveryCount),
                             hiddenGem: null,
                             hiddenGemReason: null,
                             moversBrief: 'Discovery unavailable — using default watchlist',
                             marketNews: '',
                             scannedAt: new Date(),
-                        };
+                            discoverySource: source,
+                        });
                     }
                 }
+                autoDiscovery = discoveriesBySource.get(source);
                 symbols = autoDiscovery.symbols;
-                if (autoDiscovery.movers) {
+                if (autoDiscovery.movers && source !== 'nse') {
                     symbols = marketScanService.orderSymbolsByMovers(symbols, autoDiscovery.movers);
                 }
             }
@@ -795,9 +840,9 @@ class TradeAlertController {
     }
 
     /** Manual preview — always fresh live scan (does not reuse all-day cache). */
-    async previewDiscovery() {
-        const result = await this.runDiscovery({ forceRefresh: true, persist: false });
-        return result;
+    async previewDiscovery(source = null) {
+        const discoverySource = normalizeDiscoverySource(source || this.defaultDiscoverySource);
+        return this.runDiscovery({ forceRefresh: true, persist: false, source: discoverySource });
     }
 }
 

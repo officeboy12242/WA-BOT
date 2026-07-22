@@ -171,6 +171,18 @@ export const config = {
     TRADE_ALERT_MAX_SENDS: Math.max(1, parseInt(process.env.TRADE_ALERT_MAX_SENDS, 10) || 5),
     /** How many symbols AI discovery picks to scan */
     TRADE_ALERT_DISCOVERY_COUNT: Math.max(8, Math.min(15, parseInt(process.env.TRADE_ALERT_DISCOVERY_COUNT, 10) || 10)),
+    /**
+     * Discovery source for auto mode:
+     * - legacy = sectors/movers/smart-money merge (default)
+     * - nse = NIFTY 50 top gainers + losers from NSE page
+     * Overridable per group via `/tradelert source nse|legacy`
+     */
+    TRADE_ALERT_DISCOVERY_SOURCE: (() => {
+        const s = (process.env.TRADE_ALERT_DISCOVERY_SOURCE || 'legacy').trim().toLowerCase();
+        return s === 'nse' || s === 'nse_gl' || s === 'gl' || s === 'gainers' ? 'nse' : 'legacy';
+    })(),
+    /** Top N gainers + top N losers when discovery source is nse (default 5+5). */
+    TRADE_ALERT_NSE_GL_EACH: Math.max(1, Math.min(10, parseInt(process.env.TRADE_ALERT_NSE_GL_EACH, 10) || 5)),
     /** Strict confluence floor (0–100) for high-quality daily posts */
     TRADE_ALERT_MIN_CONFLUENCE: Math.max(25, Math.min(80, parseInt(process.env.TRADE_ALERT_MIN_CONFLUENCE, 10) || 40)),
     /** If no strict posts, still send daily AI≥70% picks with softer confluence */

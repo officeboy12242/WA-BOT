@@ -39,12 +39,30 @@ export function formatTradeScanPreview(discovery) {
         : formatNowLabelIST();
     lines.push(`🕐 *Scanned:* ${scanned} IST`);
     lines.push(`📍 *Mode:* ${d.marketModeLabel || d.marketMode || 'MARKET'}`);
+    if (d.discoverySource === 'nse') {
+        lines.push('📡 *Discovery:* NSE NIFTY50 top gainers + losers');
+    }
     if (d.freshness?.ok === false) {
         lines.push(`⚠️ *Freshness:* ${d.freshness.message || 'stale data — watch only'}`);
     } else {
         lines.push('🟢 *Data:* fresh');
     }
     lines.push('');
+
+    // NSE G/L (when discovery source = nse)
+    const gl = d.niftyGl;
+    if (gl && (gl.gainers?.length || gl.losers?.length)) {
+        lines.push('┌─ *NSE NIFTY 50 GAINERS / LOSERS* ─');
+        if (gl.timestamp) lines.push(`│ As of: ${gl.timestamp}`);
+        for (const g of gl.gainers || []) {
+            lines.push(`│ ▲ *${g.symbol}* ${fmtPct(g.changePct)}${g.last != null ? ` · ₹${g.last}` : ''}`);
+        }
+        for (const l of gl.losers || []) {
+            lines.push(`│ ▼ *${l.symbol}* ${fmtPct(l.changePct)}${l.last != null ? ` · ₹${l.last}` : ''}`);
+        }
+        lines.push('└────────────────────────────');
+        lines.push('');
+    }
 
     // Macro block
     lines.push('┌─ *MACRO PULSE* ─────────────');

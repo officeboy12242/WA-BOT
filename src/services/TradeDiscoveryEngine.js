@@ -131,15 +131,165 @@ function mergeWatchlist({
     };
 }
 
+function normalizeDiscoverySource(v) {
+    const s = String(v || '').trim().toLowerCase();
+    return s === 'nse' || s === 'nse_gl' || s === 'gl' || s === 'gainers' ? 'nse' : 'legacy';
+}
+
 class TradeDiscoveryEngine {
     constructor(config = {}, mongoDb = null) {
         this.config = config;
         this.delta = createMarketDeltaService(mongoDb);
         this.outcomes = createTradeOutcomeService(mongoDb, config);
         this.discoveryCount = config.TRADE_ALERT_DISCOVERY_COUNT || 10;
+        this.nseGlEach = config.TRADE_ALERT_NSE_GL_EACH || 5;
     }
 
-    async run({ forceRefresh = false } = {}) {
+    async run({ forceRefresh = false, source = null } = {}) {
+        const discoverySource = normalizeDiscoverySource(
+            source ?? this.config.TRADE_ALERT_DISCOVERY_SOURCE
+        );
+        if (discoverySource === 'nse') {
+            return this.runNseGainersLosers();
+        }
+        return this.runLegacy({ forceRefresh });
+    }
+
+    /** NIFTY 50 top N gainers + top N losers → analyze those only. */
+    async runNseGainersLosers() {
+        const marketMode = getIndiaMarketMode();
+        const scannedAt = new Date();
+        const each = this.nseGlEach;
+
+        const [niftyGl, macro, marketNewsPack, calibration] = await Promise.all([
+            nseMarketDataService.fetchNiftyTopGainersLosers({ each }),
+            nseMarketDataService.fetchMacroSnapshot(),
+            stockNewsService.fetchMarketHeadlines(),
+            this.outcomes.getCalibration(),
+        ]);
+
+        const headlines = String(marketNewsPack?.context || '')
+            .split('\n')
+            .filter(Boolean);
+
+        const seen = new Set();
+        const symbols = [];
+        const symbolMeta = [];
+        const universeRows = [];
+
+        const pushSide = (rows, side) => {
+            for (const row of rows || []) {
+                const sym = row.symbol;
+                if (!sym || seen.has(sym)) continue;
+                seen.add(sym);
+                symbols.push(sym);
+                symbolMeta.push({ symbol: sym, sources: [`nse ${side}`] });
+                universeRows.push({
+                    symbol: sym,
+                    changePct: row.changePct,
+                    price: row.last,
+                    volume: row.volume,
+                });
+            }
+        };
+        pushSide(niftyGl.gainers, 'gainer');
+        pushSide(niftyGl.losers, 'loser');
+
+        const movers = {
+            gainers: (niftyGl.gainers || []).map((r) => ({
+                symbol: r.symbol,
+                changePct: r.changePct,
+                price: r.last,
+            })),
+            losers: (niftyGl.losers || []).map((r) => ({
+                symbol: r.symbol,
+                changePct: r.changePct,
+                price: r.last,
+            })),
+        };
+
+        const catalystItems = catalystRadarService.scanHeadlines(headlines, new Set(symbols));
+        const catalystHighlights = catalystRadarService.formatHighlights(catalystItems);
+
+        const enrichedMeta = symbols.map((sym) => {
+            const base = symbolMeta.find((m) => m.symbol === sym) || { symbol: sym, sources: ['nse'] };
+            const row = universeRows.find((r) => r.symbol === sym);
+            const conf = scoreConfluence({
+                symbol: sym,
+                quote: row,
+                movers,
+                macro,
+                catalystItems,
+                smartMoneyDeals: [],
+                sectorTag: null,
+            });
+            return {
+                ...base,
+                confluence: conf.score,
+                confluencePass: conf.passes,
+                blocked: conf.blocked,
+            };
+        });
+
+        const moversBrief = [
+            movers.gainers.length
+                ? `G: ${movers.gainers.map((x) => `${x.symbol}${x.changePct != null ? ` +${x.changePct}%` : ''}`).join(', ')}`
+                : '',
+            movers.losers.length
+                ? `L: ${movers.losers.map((x) => `${x.symbol}${x.changePct != null ? ` ${x.changePct}%` : ''}`).join(', ')}`
+                : '',
+        ]
+            .filter(Boolean)
+            .join(' · ');
+
+        const freshness = checkQuoteFreshness(scannedAt);
+        const minConfluence = calibration.minConfluence || getMinConfluenceScore(this.config);
+        const minConfidence = calibration.minConfidence || adjustConfidenceFloor(macro, 70);
+
+        const context = [
+            nseMarketDataService.formatMacroBlock(macro),
+            nseMarketDataService.formatNiftyGlBlock(niftyGl),
+        ]
+            .filter(Boolean)
+            .join('\n\n');
+
+        logger.info(
+            `📡 NSE G/L discovery: ${symbols.length} symbols (${each}G+${each}L) · bias ${macro?.bias?.label}`
+        );
+
+        return {
+            symbols,
+            symbolMeta: enrichedMeta,
+            context,
+            universeRows,
+            movers,
+            moversBrief,
+            marketNews: headlines.slice(0, 6).join('\n'),
+            macro,
+            hotSectors: { hot: [], cold: [] },
+            phase4Picks: [],
+            momentumAlerts: [],
+            smartMoney: { deals: [] },
+            catalystItems,
+            catalystHighlights,
+            niftyGl,
+            delta: null,
+            marketMode: marketMode.mode,
+            marketModeLabel: marketMode.label,
+            freshness,
+            gates: {
+                minConfluence,
+                minConfidence,
+                watchOnly: marketMode.watchOnly,
+                allowsLiveEntry: marketMode.allowsLiveEntry,
+            },
+            scannedAt,
+            calibration,
+            discoverySource: 'nse',
+        };
+    }
+
+    async runLegacy({ forceRefresh = false } = {}) {
         const marketMode = getIndiaMarketMode();
         const scannedAt = new Date();
 
@@ -249,6 +399,7 @@ class TradeDiscoveryEngine {
             smartMoney,
             catalystItems,
             catalystHighlights,
+            niftyGl: null,
             delta,
             marketMode: marketMode.mode,
             marketModeLabel: marketMode.label,
@@ -261,6 +412,7 @@ class TradeDiscoveryEngine {
             },
             scannedAt,
             calibration,
+            discoverySource: 'legacy',
         };
     }
 }
