@@ -2,16 +2,19 @@
  * Optional same-host OmniRoute: spawn gateway on an internal port.
  * Public traffic reaches it via AdminPanel reverse-proxy (/v1, /dashboard).
  *
- * Requires `omniroute` on PATH (npm i -g omniroute) or OMNIROUTE_BIN override.
- * Do not add the full omniroute package to this repo — it is huge.
+ * Install: scripts/ensure-omniroute.js (postinstall + prestart when OMNIROUTE_EMBED=true).
  */
 
-import { spawn } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import http from 'http';
 import { logger } from '../utils/logger.js';
 import { config } from '../config/config.js';
+import {
+    isOmniRoutePackageInstalled,
+    resolveOmniRouteLaunch,
+} from '../../scripts/ensure-omniroute.js';
 
-function waitForHttpOk(url, { timeoutMs = 90_000, intervalMs = 1_500 } = {}) {
+function waitForHttpOk(url, { timeoutMs = 120_000, intervalMs = 1_500 } = {}) {
     const started = Date.now();
     return new Promise((resolve, reject) => {
         const tryOnce = () => {
@@ -40,6 +43,17 @@ function waitForHttpOk(url, { timeoutMs = 90_000, intervalMs = 1_500 } = {}) {
     });
 }
 
+function ensureInstalled() {
+    if (isOmniRoutePackageInstalled()) return true;
+    logger.info('🌐 OmniRoute missing — installing into node_modules...');
+    const result = spawnSync(
+        'npm',
+        ['install', 'omniroute', '--no-save', '--no-audit', '--no-fund'],
+        { stdio: 'inherit', shell: true, env: process.env }
+    );
+    return result.status === 0 && isOmniRoutePackageInstalled();
+}
+
 class OmniRouteEmbed {
     constructor(cfg = config) {
         this.cfg = cfg;
@@ -64,16 +78,19 @@ class OmniRouteEmbed {
             return { started: true, reason: 'already' };
         }
 
-        const bin = (this.cfg.OMNIROUTE_BIN || 'omniroute').trim() || 'omniroute';
-        const args = ['--port', String(this.port), '--no-open'];
-        logger.info(`🌐 Starting embedded OmniRoute: ${bin} ${args.join(' ')}`);
+        if (!ensureInstalled()) {
+            throw new Error('omniroute package not installed (auto-install failed)');
+        }
 
-        this.child = spawn(bin, args, {
+        const launch = resolveOmniRouteLaunch();
+        const args = [...launch.argsPrefix, '--port', String(this.port), '--no-open'];
+        logger.info(`🌐 Starting embedded OmniRoute: ${launch.command} ${args.join(' ')}`);
+
+        this.child = spawn(launch.command, args, {
             stdio: ['ignore', 'pipe', 'pipe'],
             env: {
                 ...process.env,
                 PORT: String(this.port),
-                // Keep OmniRoute off the public Render PORT
             },
             windowsHide: true,
         });

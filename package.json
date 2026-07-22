@@ -5,6 +5,8 @@
   "main": "bot.js",
   "type": "module",
   "scripts": {
+    "postinstall": "node scripts/ensure-omniroute.js",
+    "prestart": "node scripts/ensure-omniroute.js",
     "start": "node --max-old-space-size=450 bot-new.js",
     "dev": "node --watch bot-new.js",
     "clear-auth": "node scripts/clear-auth.js"
