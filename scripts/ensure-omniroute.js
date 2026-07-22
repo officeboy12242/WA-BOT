@@ -1,6 +1,7 @@
 /**
  * Install OmniRoute into node_modules when OMNIROUTE_EMBED=true.
- * Runs on Render via npm postinstall + prestart — no Build Command UI needed.
+ * Runs on `npm start` via prestart (after Docker COPY) — not postinstall,
+ * because Docker runs npm ci before the app source is copied.
  *
  * Usage: node scripts/ensure-omniroute.js
  */
