@@ -122,8 +122,17 @@ class OmniRouteEmbed {
         const args = [...launch.argsPrefix, '--port', String(this.port), '--no-open'];
         logger.info(`🌐 Starting embedded OmniRoute: ${launch.command} ${args.join(' ')}`);
 
-        // Do not pass through Render's public PORT — OmniRoute must stay on internal port only
-        const childEnv = { ...process.env, PORT: String(this.port) };
+        // Public URL for dashboard links behind Render reverse-proxy
+        const publicUrl = (this.cfg.PUBLIC_URL || '').replace(/\/$/, '');
+        const childEnv = {
+            ...process.env,
+            PORT: String(this.port),
+            OMNIROUTE_TRUST_PROXY: 'true',
+        };
+        if (publicUrl) {
+            childEnv.NEXT_PUBLIC_BASE_URL = publicUrl;
+            childEnv.BASE_URL = `http://127.0.0.1:${this.port}`;
+        }
 
         this.child = spawn(launch.command, args, {
             stdio: ['ignore', 'pipe', 'pipe'],
