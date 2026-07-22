@@ -5,10 +5,10 @@
   "main": "bot.js",
   "type": "module",
   "scripts": {
-    "prestart": "node scripts/ensure-omniroute.js",
     "start": "node --max-old-space-size=450 bot-new.js",
     "dev": "node --watch bot-new.js",
-    "clear-auth": "node scripts/clear-auth.js"
+    "clear-auth": "node scripts/clear-auth.js",
+    "ensure-omniroute": "node scripts/ensure-omniroute.js"
   },
   "engines": {
     "node": ">=20.0.0",
