@@ -2,10 +2,11 @@
  * Optional same-host OmniRoute: spawn gateway on an internal port.
  * Public traffic reaches it via AdminPanel reverse-proxy (/v1, /dashboard).
  *
- * Install: scripts/ensure-omniroute.js (postinstall + prestart when OMNIROUTE_EMBED=true).
+ * IMPORTANT: never use spawnSync for npm install — it blocks the event loop
+ * and Render's port health check fails even though listen() already ran.
  */
 
-import { spawn, spawnSync } from 'child_process';
+import { spawn } from 'child_process';
 import http from 'http';
 import { logger } from '../utils/logger.js';
 import { config } from '../config/config.js';
@@ -14,7 +15,7 @@ import {
     resolveOmniRouteLaunch,
 } from '../../scripts/ensure-omniroute.js';
 
-function waitForHttpOk(url, { timeoutMs = 120_000, intervalMs = 1_500 } = {}) {
+function waitForHttpOk(url, { timeoutMs = 180_000, intervalMs = 2_000 } = {}) {
     const started = Date.now();
     return new Promise((resolve, reject) => {
         const tryOnce = () => {
@@ -43,15 +44,49 @@ function waitForHttpOk(url, { timeoutMs = 120_000, intervalMs = 1_500 } = {}) {
     });
 }
 
-function ensureInstalled() {
-    if (isOmniRoutePackageInstalled()) return true;
-    logger.info('🌐 OmniRoute missing — installing into node_modules...');
-    const result = spawnSync(
-        'npm',
-        ['install', 'omniroute', '--no-save', '--no-audit', '--no-fund'],
-        { stdio: 'inherit', shell: true, env: process.env }
-    );
-    return result.status === 0 && isOmniRoutePackageInstalled();
+/** Non-blocking npm install so HTTP health checks keep working. */
+function ensureInstalledAsync() {
+    if (isOmniRoutePackageInstalled()) {
+        return Promise.resolve(true);
+    }
+
+    logger.info('🌐 OmniRoute missing — installing into node_modules (async, PORT stays healthy)...');
+
+    return new Promise((resolve) => {
+        const child = spawn(
+            'npm',
+            ['install', 'omniroute', '--no-save', '--no-audit', '--no-fund', '--prefer-offline'],
+            {
+                stdio: ['ignore', 'pipe', 'pipe'],
+                shell: true,
+                env: process.env,
+            }
+        );
+
+        child.stdout?.on('data', (buf) => {
+            const line = String(buf).trim();
+            if (line) logger.info(`[npm omniroute] ${line.slice(0, 240)}`);
+        });
+        child.stderr?.on('data', (buf) => {
+            const line = String(buf).trim();
+            if (line) logger.warn(`[npm omniroute] ${line.slice(0, 240)}`);
+        });
+
+        child.on('error', (err) => {
+            logger.error(`OmniRoute npm install error: ${err.message}`);
+            resolve(false);
+        });
+
+        child.on('exit', (code) => {
+            const ok = code === 0 && isOmniRoutePackageInstalled();
+            if (!ok) {
+                logger.error(`OmniRoute npm install exited ${code}`);
+            } else {
+                logger.info('🌐 OmniRoute package installed');
+            }
+            resolve(ok);
+        });
+    });
 }
 
 class OmniRouteEmbed {
@@ -78,7 +113,8 @@ class OmniRouteEmbed {
             return { started: true, reason: 'already' };
         }
 
-        if (!ensureInstalled()) {
+        const installed = await ensureInstalledAsync();
+        if (!installed) {
             throw new Error('omniroute package not installed (auto-install failed)');
         }
 
@@ -86,12 +122,12 @@ class OmniRouteEmbed {
         const args = [...launch.argsPrefix, '--port', String(this.port), '--no-open'];
         logger.info(`🌐 Starting embedded OmniRoute: ${launch.command} ${args.join(' ')}`);
 
+        // Do not pass through Render's public PORT — OmniRoute must stay on internal port only
+        const childEnv = { ...process.env, PORT: String(this.port) };
+
         this.child = spawn(launch.command, args, {
             stdio: ['ignore', 'pipe', 'pipe'],
-            env: {
-                ...process.env,
-                PORT: String(this.port),
-            },
+            env: childEnv,
             windowsHide: true,
         });
 
