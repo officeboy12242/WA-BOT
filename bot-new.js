@@ -488,14 +488,12 @@ class WhatsAppCourseBot {
 // ─── Start Bot ────────────────────────────────────────────────────────────────
 const bot = new WhatsAppCourseBot();
 
-// Start admin panel server (includes health check for Render)
+// Bind Render PORT on 0.0.0.0 immediately (before any OmniRoute install work)
 const PORT = process.env.PORT || 3000;
 bot.adminPanel = new AdminPanel(PORT);
+bot.adminPanel.start();
 
 async function boot() {
-    // Bind Render PORT immediately — OmniRoute install is slow and must not block health checks
-    bot.adminPanel.start();
-
     process.on('SIGINT', () => {
         void bot.shutdown('SIGINT');
     });
@@ -503,7 +501,7 @@ async function boot() {
         void bot.shutdown('SIGTERM');
     });
 
-    // Install + spawn OmniRoute in the background after PORT is open
+    // Install + spawn OmniRoute in background — must stay async (no spawnSync)
     if (config.OMNIROUTE_EMBED) {
         void (async () => {
             bot.omniRouteEmbed = new OmniRouteEmbed(config);

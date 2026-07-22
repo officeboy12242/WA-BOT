@@ -695,8 +695,8 @@ class AdminPanel {
             }
         });
 
-        this.server.listen(this.port, () => {
-            logger.info(`🏥 Admin panel running on port ${this.port}`);
+        this.server.listen(this.port, '0.0.0.0', () => {
+            logger.info(`🏥 Admin panel listening on 0.0.0.0:${this.port}`);
             logger.info(`🔗 Admin URL: http://localhost:${this.port}/admin?token=${this.adminToken}`);
         });
 
