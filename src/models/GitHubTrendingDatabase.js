@@ -1,5 +1,6 @@
 /**
- * Tracks GitHub trending repos posted per chat/group to avoid repeats.
+ * Tracks GitHub trending repos posted per chat/group to avoid repeats,
+ * plus durable per-day slot success so missed/failed posts can catch up.
  */
 
 import crypto from 'crypto';
@@ -13,16 +14,20 @@ class GitHubTrendingDatabase {
     constructor(mongoDb) {
         this.mongoDb = mongoDb;
         this.posted = null;
+        this.slots = null;
     }
 
     async init() {
         this.posted = this.mongoDb.collection('posted_github_repos');
+        this.slots = this.mongoDb.collection('github_post_slots');
         await Promise.all([
             this.posted.createIndex(
                 { hash: 1, group_id: 1 },
                 { unique: true, name: 'posted_github_repo_per_group' }
             ),
             this.posted.createIndex({ posted_at: 1 }, { name: 'posted_github_repo_posted_at' }),
+            this.slots.createIndex({ slot_key: 1 }, { unique: true, name: 'github_slot_key' }),
+            this.slots.createIndex({ posted_at: 1 }, { name: 'github_slot_posted_at' }),
         ]);
         logger.info('Mongo GitHub trending store ready');
     }
@@ -66,21 +71,24 @@ class GitHubTrendingDatabase {
         return unposted;
     }
 
-    /** Repos not yet posted to any of the given groups (fresh for everyone). */
+    /**
+     * Repos that still need posting to at least one target group.
+     * (Partial fan-out can finish later instead of being treated as "done everywhere".)
+     */
     async filterFreshForGroups(repos, groupIds) {
         if (!repos?.length || !groupIds?.length) {
             return repos || [];
         }
         const fresh = [];
         for (const repo of repos) {
-            let postedAnywhere = false;
+            let missingSomewhere = false;
             for (const groupId of groupIds) {
-                if (await this.isRepoPosted(repo.fullName, groupId)) {
-                    postedAnywhere = true;
+                if (!(await this.isRepoPosted(repo.fullName, groupId))) {
+                    missingSomewhere = true;
                     break;
                 }
             }
-            if (!postedAnywhere) {
+            if (missingSomewhere) {
                 fresh.push(repo);
             }
         }
@@ -92,15 +100,47 @@ class GitHubTrendingDatabase {
         return fresh[0] || null;
     }
 
+    async isSlotDone(slotKey) {
+        if (!slotKey || !this.slots) return false;
+        const row = await this.slots.findOne(
+            { slot_key: slotKey },
+            { projection: { _id: 1 } }
+        );
+        return Boolean(row);
+    }
+
+    async markSlotDone(slotKey, meta = {}) {
+        if (!slotKey || !this.slots) return;
+        await this.slots.updateOne(
+            { slot_key: slotKey },
+            {
+                $set: {
+                    slot_key: slotKey,
+                    posted: Number(meta.posted) || 0,
+                    reason: String(meta.reason || '').slice(0, 80),
+                    repo: String(meta.repo || '').slice(0, 200),
+                    posted_at: new Date(),
+                },
+            },
+            { upsert: true }
+        );
+    }
+
     async cleanupOldPosted(days = 7) {
         const cutoff = new Date();
         cutoff.setDate(cutoff.getDate() - days);
-        const result = await this.posted.deleteMany({ posted_at: { $lt: cutoff } });
-        return result.deletedCount || 0;
+        const [repos, slots] = await Promise.all([
+            this.posted.deleteMany({ posted_at: { $lt: cutoff } }),
+            this.slots
+                ? this.slots.deleteMany({ posted_at: { $lt: cutoff } })
+                : Promise.resolve({ deletedCount: 0 }),
+        ]);
+        return (repos.deletedCount || 0) + (slots.deletedCount || 0);
     }
 
     close() {
         this.posted = null;
+        this.slots = null;
     }
 }
 

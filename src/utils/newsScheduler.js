@@ -77,6 +77,18 @@ export function getCurrentDueSlot(postTimes, timezone, now = new Date()) {
 }
 
 /**
+ * Slots whose wall-clock time has already passed today (inclusive of current minute).
+ * @returns {{ hour: number, minute: number, index: number }[]}
+ */
+export function getPastDueSlotsToday(postTimes, timezone, now = new Date()) {
+    const p = zonedParts(now, timezone);
+    const nowMinutes = p.hour * 60 + p.minute;
+    return parsePostTimes(postTimes)
+        .map((slot, index) => ({ ...slot, index }))
+        .filter((slot) => slot.hour * 60 + slot.minute <= nowMinutes);
+}
+
+/**
  * @param {object} options
  * @param {() => import('baileys').WASocket | null} options.getSock
  * @param {object} options.botState

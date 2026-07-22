@@ -286,7 +286,8 @@ export async function handleGithub(sock, chatId, senderJid, { githubTrendingCont
         if (pendingGithubPosts) {
             const key = githubSessionKey(chatId, senderJid);
             pendingGithubPosts.set(key, {
-                repos,
+                // Store the confirmed fresh set — not the full fetch (preview must not poison this)
+                repos: freshRepos,
                 expiresAt: Date.now() + GITHUB_POST_CONFIRM_MS,
             });
         }
