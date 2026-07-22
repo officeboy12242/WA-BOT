@@ -411,11 +411,14 @@ class PronoobDriveService {
             const relUrl = match[3];
             const rawFilename = decodeHtmlEntities(match[4]);
             const { title: cardTitle, audio: cardAudio } = parseCardLabel(cardLabel);
-            const title = filenameToDisplayTitle(rawFilename) || cardTitle;
+            // Caption (p-2) is the human movie name; filename is the release name
+            const description = cardTitle || '';
+            const title = description || filenameToDisplayTitle(rawFilename) || rawFilename;
             const parsedAudio = audioFromFilename(rawFilename);
             files.push({
                 rawFilename,
                 title,
+                description,
                 quality: qualityFromFilename(rawFilename),
                 size,
                 audio: mergeAudioLabels(cardAudio, parsedAudio),
@@ -424,6 +427,30 @@ class PronoobDriveService {
             if (files.length >= MAX_PARSED_CARDS) break;
         }
         return files;
+    }
+
+    /**
+     * Keep files that match the query in filename OR card description.
+     * Falls back to all files if nothing matches (API may still be right).
+     */
+    _filterByQuery(files, query) {
+        const words = String(query || '')
+            .toLowerCase()
+            .split(/\s+/)
+            .map((w) => w.replace(/[^a-z0-9]/g, ''))
+            .filter((w) => w.length > 2);
+        if (!words.length || !files?.length) return files || [];
+
+        const scored = files
+            .map((f) => {
+                const hay = `${f.rawFilename || ''} ${f.description || ''} ${f.title || ''}`.toLowerCase();
+                const hits = words.filter((w) => hay.includes(w)).length;
+                return { f, hits };
+            })
+            .filter((row) => row.hits > 0)
+            .sort((a, b) => b.hits - a.hits);
+
+        return scored.length ? scored.map((row) => row.f) : files;
     }
 
     async _searchSingleBase(baseUrl, query, maxResults, sourceLabel) {
@@ -440,14 +467,18 @@ class PronoobDriveService {
             throw new Error(`HTTP ${status}`);
         }
 
-        const files = this._parseHtml(data, baseUrl);
+        const files = this._filterByQuery(this._parseHtml(data, baseUrl), query);
         if (!files.length) return [];
 
         const groups = new Map();
         for (const file of files) {
-            const key = file.title.toLowerCase();
+            const key = (file.description || file.title).toLowerCase();
             if (!groups.has(key)) {
-                groups.set(key, { title: file.title, links: [] });
+                groups.set(key, {
+                    title: file.title,
+                    description: file.description || '',
+                    links: [],
+                });
             }
             const label = file.quality ? `${file.quality} • ${file.size}` : file.size;
             groups.get(key).links.push({
@@ -461,7 +492,12 @@ class PronoobDriveService {
 
         const results = [];
         for (const [, group] of groups) {
-            results.push({ title: group.title, source: sourceLabel, links: group.links });
+            results.push({
+                title: group.title,
+                description: group.description,
+                source: sourceLabel,
+                links: group.links,
+            });
             if (results.length >= maxResults) break;
         }
 

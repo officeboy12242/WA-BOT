@@ -487,7 +487,7 @@ function cleanTitle(raw) {
     return raw.replace(/^\*+|\*+$/g, '').trim();
 }
 
-/** Prefer titles that match more query words (e.g. "dragon tattoo" over "girl next door"). */
+/** Prefer results that match more query words in title or description. */
 function rankMovieResults(results, query) {
     const words = String(query || '')
         .toLowerCase()
@@ -499,8 +499,8 @@ function rankMovieResults(results, query) {
         return results;
     }
 
-    const score = (title) => {
-        const t = String(title || '').toLowerCase();
+    const score = (item) => {
+        const t = `${item?.title || ''} ${item?.description || ''}`.toLowerCase();
         let hits = 0;
         for (const w of words) {
             if (t.includes(w)) {
@@ -510,7 +510,7 @@ function rankMovieResults(results, query) {
         return hits / words.length;
     };
 
-    return [...results].sort((a, b) => score(b.title) - score(a.title));
+    return [...results].sort((a, b) => score(b) - score(a));
 }
 
 function movieQuickSend(sock, chatId, content, originalMsg = null) {
