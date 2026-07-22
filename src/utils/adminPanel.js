@@ -8,6 +8,55 @@ import os from 'os';
 import { URL } from 'url';
 import { logger } from './logger.js';
 
+function shouldProxyOmniRoute(pathname) {
+    return (
+        pathname === '/v1' ||
+        pathname.startsWith('/v1/') ||
+        pathname === '/dashboard' ||
+        pathname.startsWith('/dashboard/')
+    );
+}
+
+/**
+ * Reverse-proxy OmniRoute (same public host, internal port).
+ */
+function proxyToOmniRoute(req, res, targetPort, pathname, search) {
+    const headers = { ...req.headers, host: `127.0.0.1:${targetPort}` };
+    delete headers['content-length'];
+
+    const proxyReq = http.request(
+        {
+            hostname: '127.0.0.1',
+            port: targetPort,
+            path: `${pathname}${search || ''}`,
+            method: req.method,
+            headers,
+            timeout: 120_000,
+        },
+        (proxyRes) => {
+            res.writeHead(proxyRes.statusCode || 502, proxyRes.headers);
+            proxyRes.pipe(res);
+        }
+    );
+
+    proxyReq.on('error', (err) => {
+        logger.warn(`OmniRoute proxy error: ${err.message}`);
+        if (!res.headersSent) {
+            res.writeHead(502, { 'Content-Type': 'application/json' });
+            res.end(
+                JSON.stringify({
+                    error: 'OmniRoute unavailable',
+                    hint: 'Set OMNIROUTE_EMBED=true and install omniroute on the host',
+                })
+            );
+        } else {
+            res.end();
+        }
+    });
+
+    req.pipe(proxyReq);
+}
+
 /**
  * Get comprehensive system metrics
  */
@@ -115,6 +164,12 @@ class AdminPanel {
         this.shortLinkService = null;
         this.adminToken = process.env.ADMIN_TOKEN || 'sassy123';
         this.lastActivity = new Date();
+        /** @type {number|null} internal OmniRoute port for same-host proxy */
+        this.omniRoutePort = null;
+    }
+
+    setOmniRoutePort(port) {
+        this.omniRoutePort = port || null;
     }
 
     setAuthDatabase(authDB) {
@@ -436,6 +491,12 @@ class AdminPanel {
         this.server = http.createServer(async (req, res) => {
             const url = new URL(req.url, `http://localhost:${this.port}`);
             const pathname = url.pathname;
+
+            // Same-host OmniRoute (must not steal /health or /api/* bot routes)
+            if (this.omniRoutePort && shouldProxyOmniRoute(pathname)) {
+                proxyToOmniRoute(req, res, this.omniRoutePort, pathname, url.search);
+                return;
+            }
 
             // Health check (no auth required) - detailed system metrics for Koyeb/Render
             if (pathname === '/health' || pathname === '/') {

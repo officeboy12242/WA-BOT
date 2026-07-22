@@ -54,6 +54,7 @@ import { startGroupSummaryScheduler } from './src/utils/groupSummaryScheduler.js
 import TradeAlertController from './src/controllers/TradeAlertController.js';
 import { startTradeAlertScheduler } from './src/utils/tradeAlertScheduler.js';
 import { deployNotificationService } from './src/services/DeployNotificationService.js';
+import OmniRouteEmbed from './src/services/OmniRouteEmbed.js';
 
 // Bot state
 const botState = {
@@ -106,6 +107,7 @@ class WhatsAppCourseBot {
         this.instanceLock = null;
         this.botSettings = null;
         this.assistService = null;
+        this.omniRouteEmbed = null;
         this._isShuttingDown = false;
     }
 
@@ -439,6 +441,9 @@ class WhatsAppCourseBot {
         if (this.interviewQScheduler) {
             this.interviewQScheduler.stop();
         }
+        if (this.omniRouteEmbed) {
+            this.omniRouteEmbed.stop();
+        }
         if (this.morningScheduler) {
             this.morningScheduler.stop();
         }
@@ -486,18 +491,37 @@ const bot = new WhatsAppCourseBot();
 // Start admin panel server (includes health check for Render)
 const PORT = process.env.PORT || 3000;
 bot.adminPanel = new AdminPanel(PORT);
-bot.adminPanel.start();
 
-// Handle graceful shutdown (Render sends SIGTERM on deploy)
-process.on('SIGINT', () => {
-    void bot.shutdown('SIGINT');
-});
-process.on('SIGTERM', () => {
-    void bot.shutdown('SIGTERM');
-});
+async function boot() {
+    // Same-host OmniRoute: spawn on internal port, proxy /v1 + /dashboard on PUBLIC_URL
+    if (config.OMNIROUTE_EMBED) {
+        bot.omniRouteEmbed = new OmniRouteEmbed(config);
+        try {
+            const result = await bot.omniRouteEmbed.start();
+            if (result.started) {
+                bot.adminPanel.setOmniRoutePort(result.port || config.OMNIROUTE_INTERNAL_PORT);
+                logger.info(
+                    `🌐 OmniRoute same-host: internal ${bot.omniRouteEmbed.internalBaseUrl()} · public ${(config.PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '')}/v1`
+                );
+            }
+        } catch (err) {
+            logger.error(`OmniRoute embed failed (bot continues without it): ${err.message}`);
+        }
+    }
 
-// Start the bot
-bot.start().catch(err => {
+    bot.adminPanel.start();
+
+    process.on('SIGINT', () => {
+        void bot.shutdown('SIGINT');
+    });
+    process.on('SIGTERM', () => {
+        void bot.shutdown('SIGTERM');
+    });
+
+    await bot.start();
+}
+
+boot().catch((err) => {
     logger.error('Fatal error:', err);
     process.exit(1);
 });

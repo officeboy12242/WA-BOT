@@ -32,7 +32,7 @@ export async function handleAssist(sock, chatId, senderJid, args, { groupManager
                 '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
                 `👤 *Persona:* ${ownerName}\n` +
                 `🔘 *Status:* ${on ? '✅ ON' : '❌ OFF'}\n` +
-                `🧠 *AI chain:* ${llmOk ? llmChain : '❌ set GEMINI / GROQ / NVIDIA key on Render'}\n\n` +
+                `🧠 *AI chain:* ${llmOk ? llmChain : '❌ set OMNIROUTE / GEMINI / GROQ / NVIDIA key'}\n\n` +
                 'When ON, personal DMs get smart replies *as you* (same language as them).\n' +
                 '*Groups are never affected.*\n\n' +
                 '*Commands:*\n' +

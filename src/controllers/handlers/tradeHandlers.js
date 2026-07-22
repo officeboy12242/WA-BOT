@@ -63,7 +63,7 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
             r += `📊 *Symbols:* ${symbolLine}\n`;
             r += `🔔 *Posts:* CE/PE when AI ≥70% · confluence ≥40 (soft ≥25 if quiet day)\n`;
             r += `🌐 *Data:* NSE macro + hot sectors + Yahoo + news\n`;
-            r += `🤖 *AI:* ${llmOk ? llmChain : 'Set GEMINI / GROQ / NVIDIA API key'}\n\n`;
+            r += `🤖 *AI:* ${llmOk ? llmChain : 'Set OMNIROUTE / GEMINI / GROQ / NVIDIA API key'}\n\n`;
             r += '*Commands:*\n';
             r += '• `/tradelert on` — enable daily AI scan\n';
             r += '• `/tradelert off` — disable\n';

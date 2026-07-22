@@ -283,7 +283,7 @@ class InterviewQuestionService {
 
     async generateQuestion({ category, slotIndex = 0 } = {}) {
         if (!this.isConfigured()) {
-            throw new Error('No LLM configured (set GEMINI / GROQ / NVIDIA / OPENROUTER key)');
+            throw new Error('No LLM configured (set OMNIROUTE / GEMINI / GROQ / NVIDIA / OPENROUTER key)');
         }
 
         const type = category || pickCategory(slotIndex);
