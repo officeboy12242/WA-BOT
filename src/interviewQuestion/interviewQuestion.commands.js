@@ -25,7 +25,7 @@ export async function handleInterviewQ(sock, chatId, senderJid, args, ctx) {
     if (!interviewQuestionService.isConfigured()) {
         await sock.sendMessage(
             chatId,
-            { text: '⚠️ AI not configured. Set OMNIROUTE / GEMINI / GROQ / NVIDIA / OPENROUTER API key.' },
+            { text: '⚠️ AI not configured. Set GEMINI / GROQ / NVIDIA / OPENROUTER API key.' },
             { quoted: originalMsg }
         );
         return;

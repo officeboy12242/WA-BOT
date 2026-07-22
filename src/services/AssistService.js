@@ -96,7 +96,7 @@ class AssistService {
             return false;
         }
         if (!this.isConfigured()) {
-            logger.warn('Assist mode on but no LLM API key (OMNIROUTE / GEMINI / GROQ / NVIDIA / OPENROUTER)');
+            logger.warn('Assist mode on but no LLM API key (GEMINI / GROQ / NVIDIA)');
             return false;
         }
 

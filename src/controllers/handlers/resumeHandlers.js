@@ -257,7 +257,7 @@ export async function handleCv(sock, chatId, senderJid, args, ctx) {
         await safeSendMessage(
             sock,
             chatId,
-            { text: '⚠️ AI not configured. Set OMNIROUTE / GEMINI / GROQ / NVIDIA / OPENROUTER API key.' },
+            { text: '⚠️ AI not configured. Set GEMINI / GROQ / NVIDIA / OPENROUTER API key.' },
             originalMsg
         );
         return;
