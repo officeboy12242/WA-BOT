@@ -33,8 +33,22 @@ class GitHubTrendingController {
         return this.githubDatabase.filterUnpostedRepos(repos, chatId);
     }
 
-    async sendRepoMessage(sock, chatId, repo, index, total) {
-        if (this.githubDatabase && (await this.githubDatabase.isRepoPosted(repo.fullName, chatId))) {
+    async isSlotDone(slotKey) {
+        if (!this.githubDatabase) return false;
+        return this.githubDatabase.isSlotDone(slotKey);
+    }
+
+    async markSlotDone(slotKey, meta = {}) {
+        if (!this.githubDatabase) return;
+        await this.githubDatabase.markSlotDone(slotKey, meta);
+    }
+
+    /**
+     * @param {object} [opts]
+     * @param {boolean} [opts.markPosted=true] — false for /github preview so confirm can still fan out
+     */
+    async sendRepoMessage(sock, chatId, repo, index, total, { markPosted = true } = {}) {
+        if (markPosted && this.githubDatabase && (await this.githubDatabase.isRepoPosted(repo.fullName, chatId))) {
             logger.info(`Skipping duplicate GitHub repo ${repo.fullName} for ${chatId}`);
             return false;
         }
@@ -42,7 +56,7 @@ class GitHubTrendingController {
         const text = formatGitHubRepoMessage(repo, index, total);
         await sendTextWithLinkPreview(sock, chatId, text, repo.url);
 
-        if (this.githubDatabase) {
+        if (markPosted && this.githubDatabase) {
             await this.githubDatabase.markRepoPosted(repo.fullName, chatId);
         }
         return true;
@@ -134,22 +148,31 @@ class GitHubTrendingController {
         return candidates[0];
     }
 
-    /** Post one fresh repo at a scheduled slot (0-based index). */
+    /**
+     * Post one fresh repo at a scheduled slot (0-based index).
+     * @returns {{ posted: number, groups: number, ok: boolean, reason: string, repo?: string }}
+     */
     async checkAndPostRepo(sock, botState, slotIndex) {
         if (!this.config.GITHUB_TRENDING_ENABLED) {
-            return;
+            return { posted: 0, groups: 0, ok: false, reason: 'disabled' };
         }
 
         if (!sock) {
             logger.info('Waiting for WhatsApp connection (GitHub trending)...');
-            return;
+            return { posted: 0, groups: 0, ok: false, reason: 'no_sock' };
         }
 
         try {
+            const targetGroups = await this.groupManager.getGithubTrendingGroups();
+            if (!targetGroups.length) {
+                logger.warn('No groups with GitHub trending enabled. Use /activate and /githubon.');
+                return { posted: 0, groups: 0, ok: false, reason: 'no_groups' };
+            }
+
             const repo = await this.resolveFreshRepoForSlot(slotIndex);
             if (!repo) {
                 logger.info(`No fresh GitHub repo for slot ${slotIndex + 1}`);
-                return;
+                return { posted: 0, groups: targetGroups.length, ok: false, reason: 'no_repo' };
             }
 
             const total = this.config.GITHUB_TRENDING_COUNT;
@@ -159,16 +182,27 @@ class GitHubTrendingController {
             const { posted, groups } = await this.postSingleRepoToGroups(sock, repo, slotIndex + 1, total);
             if (posted > 0) {
                 logger.info(`🐙 GitHub #${slotIndex + 1} posted to ${posted}/${groups} group(s)`);
+            } else {
+                logger.warn(`🐙 GitHub #${slotIndex + 1} sent to 0/${groups} group(s)`);
             }
 
             if (slotIndex === 0 && this.githubDatabase) {
                 const removed = await this.githubDatabase.cleanupOldPosted(14);
                 if (removed > 0) {
-                    logger.info(`Cleaned ${removed} old posted_github_repos record(s)`);
+                    logger.info(`Cleaned ${removed} old GitHub posted/slot record(s)`);
                 }
             }
+
+            return {
+                posted,
+                groups,
+                ok: posted > 0,
+                reason: posted > 0 ? 'posted' : 'send_failed',
+                repo: repo.fullName,
+            };
         } catch (err) {
             logger.error(`GitHub trending slot ${slotIndex + 1} failed: ${err.message}`);
+            return { posted: 0, groups: 0, ok: false, reason: 'error' };
         }
     }
 
@@ -195,7 +229,10 @@ class GitHubTrendingController {
         let skipped = 0;
 
         for (let i = 0; i < repos.length; i++) {
-            const ok = await this.sendRepoMessage(sock, chatId, repos[i], i + 1, total);
+            // Preview must NOT mark posted — otherwise confirm finds nothing fresh for groups.
+            const ok = await this.sendRepoMessage(sock, chatId, repos[i], i + 1, total, {
+                markPosted: false,
+            });
             if (ok) {
                 sent++;
             } else {
