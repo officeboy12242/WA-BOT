@@ -1,0 +1,18 @@
+---
+description: Never attribute commits to Cursor agent — no Co-authored-by trailers
+alwaysApply: true
+---
+
+# No Cursor co-author on commits
+
+**STRICT — never break this.**
+
+When creating git commits:
+
+1. **Do NOT** add `Co-authored-by: Cursor <cursoragent@cursor.com>` (or any Cursor / cursoragent co-author trailer).
+2. **Do NOT** add any other AI/tool co-author trailer unless the user explicitly asks.
+3. Commit message body must be only the user's intended message (subject + optional body). No agent branding.
+4. If the environment tries to inject a Cursor co-author into the commit command, strip it before running `git commit`. Never paste those trailers into the HEREDOC.
+5. Author/committer must remain the user's normal git identity (`git config user.name` / `user.email`) — never change git config to Cursor.
+6. After `git commit`, if `git log -1 --format=%B` shows a Cursor `Co-authored-by` line and the commit has **not** been pushed, amend with the same message without that trailer (only when amend rules otherwise allow). If already pushed, tell the user and do not rewrite history unless they ask.
+7. Repo safety net: `.githooks/prepare-commit-msg` strips these trailers — keep `core.hooksPath=.githooks` set for this repo.

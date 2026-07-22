@@ -1,0 +1,17 @@
+#!/bin/sh
+# Strip Cursor / agent attribution trailers from commit messages.
+# Enforces: no Co-authored-by Cursor, no Made-with Cursor.
+
+MSG_FILE="$1"
+[ -n "$MSG_FILE" ] && [ -f "$MSG_FILE" ] || exit 0
+
+# Portable in-place edit (Git Bash / busybox / GNU sed)
+tmp="${MSG_FILE}.tmp.$$"
+sed \
+  -e '/^Co-authored-by:[[:space:]]*Cursor[[:space:]]*</Id' \
+  -e '/^Co-authored-by:[[:space:]]*cursoragent@/Id' \
+  -e '/^Made-with:[[:space:]]*Cursor/Id' \
+  -e '/^Made with Cursor/Id' \
+  "$MSG_FILE" > "$tmp" && mv "$tmp" "$MSG_FILE"
+
+exit 0
