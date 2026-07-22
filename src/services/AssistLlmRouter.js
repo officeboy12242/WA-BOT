@@ -1,5 +1,5 @@
 /**
- * Assist DM chat router: Gemini → Groq → NVIDIA → OpenRouter.
+ * Assist DM chat router: OmniRoute → Gemini → Groq → NVIDIA → OpenRouter.
  */
 
 import axios from 'axios';
@@ -9,6 +9,10 @@ import { isGeminiRateLimitError } from './GeminiTradeService.js';
 import { isGroqRateLimitError } from './GroqTradeService.js';
 import NvidiaDeepSeekService from './NvidiaDeepSeekService.js';
 import OpenRouterLlmService, { isOpenRouterRateLimitError } from './OpenRouterLlmService.js';
+import OmniRouteLlmService, {
+    isOmniRouteFallbackError,
+    withOmniRouteFirst,
+} from './OmniRouteLlmService.js';
 
 const GEMINI_ROOT = 'https://generativelanguage.googleapis.com/v1beta/models';
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
@@ -33,9 +37,18 @@ function sleep(ms) {
 export function isAssistLlmFallbackError(err) {
     const msg = String(err?.message || err);
     const status = err?.response?.status;
-    if (isGeminiRateLimitError(err) || isGroqRateLimitError(err) || isOpenRouterRateLimitError(err)) return true;
+    if (
+        isGeminiRateLimitError(err) ||
+        isGroqRateLimitError(err) ||
+        isOpenRouterRateLimitError(err) ||
+        isOmniRouteFallbackError(err)
+    ) {
+        return true;
+    }
     if (status === 429 || status === 503 || status === 502 || status === 504) return true;
-    return /rate limit|quota|timeout|ETIMEDOUT|ECONNABORTED|empty response|overloaded|unavailable/i.test(msg);
+    return /rate limit|quota|timeout|ETIMEDOUT|ECONNABORTED|ECONNREFUSED|empty response|overloaded|unavailable/i.test(
+        msg
+    );
 }
 
 function toOpenAiMessages(systemPrompt, history, userBlock) {
@@ -50,7 +63,6 @@ function toOpenAiMessages(systemPrompt, history, userBlock) {
     return messages;
 }
 
-
 export default class AssistLlmRouter {
     constructor(cfg = config) {
         this.cfg = cfg;
@@ -64,17 +76,30 @@ export default class AssistLlmRouter {
             ['deepseek-ai/deepseek-v4-flash']
         );
         this.openrouter = new OpenRouterLlmService(cfg);
-        this.providerOrder = parseList(cfg.ASSIST_LLM_PROVIDERS || cfg.TRADE_LLM_PROVIDERS, DEFAULT_PROVIDERS);
+        this.omniroute = new OmniRouteLlmService(cfg);
+        this.providerOrder = withOmniRouteFirst(
+            parseList(cfg.ASSIST_LLM_PROVIDERS || cfg.TRADE_LLM_PROVIDERS, DEFAULT_PROVIDERS),
+            this.omniroute.isConfigured()
+        );
         this.timeoutMs = Math.min(60_000, Math.max(15_000, Number(cfg.ASSIST_TIMEOUT_MS) || 45_000));
         this.nvidia = new NvidiaDeepSeekService(cfg);
     }
 
     isConfigured() {
-        return Boolean(this.geminiKey || this.groqKey || this.nvidiaKey || this.openrouter.isConfigured());
+        return Boolean(
+            this.omniroute.isConfigured() ||
+                this.geminiKey ||
+                this.groqKey ||
+                this.nvidiaKey ||
+                this.openrouter.isConfigured()
+        );
     }
 
     getProviderChain() {
         const out = [];
+        if (this.omniroute.isConfigured() && this.providerOrder.includes('omniroute')) {
+            out.push(`OmniRoute ${this.omniroute.model}`);
+        }
         if (this.geminiKey && this.providerOrder.includes('gemini')) {
             out.push(`Gemini ${this.geminiModels[0]}`);
         }
@@ -93,6 +118,7 @@ export default class AssistLlmRouter {
     async completeChat({ systemPrompt, history, userBlock, maxTokens = 512, temperature = 0.75, maxChars = 2000 }) {
         const outLimit = Math.min(50_000, Math.max(200, Number(maxChars) || 2000));
         const providers = this.providerOrder.filter((p) => {
+            if (p === 'omniroute') return this.omniroute.isConfigured();
             if (p === 'gemini') return Boolean(this.geminiKey);
             if (p === 'groq') return Boolean(this.groqKey);
             if (p === 'nvidia') return Boolean(this.nvidiaKey);
@@ -101,27 +127,40 @@ export default class AssistLlmRouter {
         });
 
         if (!providers.length) {
-            throw new Error('No assist LLM configured (GEMINI, GROQ, NVIDIA, or OPENROUTER API key)');
+            throw new Error(
+                'No assist LLM configured (OMNIROUTE, GEMINI, GROQ, NVIDIA, or OPENROUTER API key)'
+            );
         }
 
         let lastErr;
         for (let pi = 0; pi < providers.length; pi++) {
             const provider = providers[pi];
             const models =
-                provider === 'gemini'
-                    ? this.geminiModels
-                    : provider === 'groq'
-                      ? this.groqModels
-                      : provider === 'openrouter'
-                        ? ['openrouter']
-                        : this.nvidiaModels;
+                provider === 'omniroute'
+                    ? ['omniroute']
+                    : provider === 'gemini'
+                      ? this.geminiModels
+                      : provider === 'groq'
+                        ? this.groqModels
+                        : provider === 'openrouter'
+                          ? ['openrouter']
+                          : this.nvidiaModels;
 
             for (const model of models) {
                 for (let rateTry = 0; rateTry < 2; rateTry++) {
                     try {
                         let text;
                         let usedModel = model;
-                        if (provider === 'gemini') {
+                        if (provider === 'omniroute') {
+                            const res = await this.omniroute.chat({
+                                messages: toOpenAiMessages(systemPrompt, history, userBlock),
+                                temperature,
+                                maxTokens,
+                                timeoutMs: this.timeoutMs,
+                            });
+                            text = res.text;
+                            usedModel = res.model;
+                        } else if (provider === 'gemini') {
                             text = await this._callGemini(model, systemPrompt, history, userBlock, {
                                 maxTokens,
                                 temperature,
