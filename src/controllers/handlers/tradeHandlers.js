@@ -24,6 +24,19 @@ function modeLabel(mode) {
     return mode === 'manual' ? '📋 Manual watchlist' : '🤖 AI auto (live news + movers)';
 }
 
+function sourceLabel(source) {
+    return source === 'nse'
+        ? 'NSE NIFTY50 top 5G+5L'
+        : 'Legacy (sectors · movers · smart money)';
+}
+
+function normalizeSourceArg(raw) {
+    const s = String(raw || '').trim().toLowerCase();
+    if (s === 'nse' || s === 'nse_gl' || s === 'gl' || s === 'gainers') return 'nse';
+    if (s === 'legacy' || s === 'old' || s === 'enhanced') return 'legacy';
+    return null;
+}
+
 
 async function getGroupName(sock, chatId, groupManager) {
     try {
@@ -43,15 +56,22 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
         const groupName = await getGroupName(sock, chatId, groupManager);
         const currentlyOn = await groupManager.isTradeAlertEnabled(chatId);
         const mode = (await groupManager.getTradeAlertMode(chatId)) || config.TRADE_ALERT_MODE || 'auto';
+        const discoverySource =
+            (await groupManager.getTradeAlertDiscoverySource(chatId)) ||
+            config.TRADE_ALERT_DISCOVERY_SOURCE ||
+            'legacy';
         const symbols = await groupManager.getTradeAlertSymbols(chatId);
         const defaultSymbols = config.TRADE_ALERT_STOCKS || [];
+        const nseEach = config.TRADE_ALERT_NSE_GL_EACH || 5;
 
         if (!action || action === 'status') {
             const llmOk = tradeAlertController?.isReady?.() ?? false;
             const llmChain = tradeAlertController?.tradeLlm?.getModelChain?.()?.join(' → ') || 'none';
             let symbolLine = mode === 'manual'
                 ? (symbols.length ? symbols.join(', ') : (defaultSymbols.join(', ') || '_env default_'))
-                : '_AI picks daily from live news & top movers_';
+                : discoverySource === 'nse'
+                  ? `_NSE NIFTY50 top ${nseEach}G + ${nseEach}L_`
+                  : '_AI picks daily from live news & top movers_';
 
             let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
             r += '📈 *TRADE ALERTS* 📈\n';
@@ -59,17 +79,20 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
             r += `📢 *Group:* ${groupName}\n`;
             r += `🔘 *Status:* ${currentlyOn ? '✅ ON' : '❌ OFF'}\n`;
             r += `🧠 *Mode:* ${modeLabel(mode)}\n`;
+            r += `📡 *Discovery:* ${sourceLabel(discoverySource)}\n`;
             r += `🕐 *Daily time:* ${formatAlertTime()} IST (trading days only)\n`;
             r += `📊 *Symbols:* ${symbolLine}\n`;
             r += `🔔 *Posts:* CE/PE when AI ≥70% · confluence ≥40 (soft ≥25 if quiet day)\n`;
-            r += `🌐 *Data:* NSE macro + hot sectors + Yahoo + news\n`;
+            r += `🌐 *Data:* ${discoverySource === 'nse' ? 'NSE top gainers/losers + option chain' : 'NSE macro + hot sectors + Yahoo + news'}\n`;
             r += `🤖 *AI:* ${llmOk ? llmChain : 'Set GEMINI / GROQ / NVIDIA API key'}\n\n`;
             r += '*Commands:*\n';
             r += '• `/tradelert on` — enable daily AI scan\n';
             r += '• `/tradelert off` — disable\n';
             r += '• `/tradelert auto` — AI picks stocks (default)\n';
             r += '• `/tradelert manual` + `/tradelert stocks A,B` — fixed list\n';
-            r += '• `/tradelert scan` — preview today\'s AI watchlist\n';
+            r += '• `/tradelert source nse` — NIFTY50 top 5G+5L\n';
+            r += '• `/tradelert source legacy` — old multi-signal scan\n';
+            r += '• `/tradelert scan` — preview today\'s watchlist\n';
             r += '• `/tradenow RELIANCE` — full analysis (incl. NO TRADE)\n\n';
             r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━';
             await sock.sendMessage(chatId, { text: r });
@@ -152,10 +175,13 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
 
         if (action === 'scan') {
             const loading = await sock.sendMessage(chatId, {
-                text: '📡 _Running enhanced market scan (sectors · macro · smart money)… (~60–120s)_',
+                text:
+                    discoverySource === 'nse'
+                        ? `📡 _Fetching NSE NIFTY50 top ${nseEach}G+${nseEach}L…_`
+                        : '📡 _Running enhanced market scan (sectors · macro · smart money)… (~60–120s)_',
             });
             try {
-                const preview = await tradeAlertController.previewDiscovery();
+                const preview = await tradeAlertController.previewDiscovery(discoverySource);
                 const r = formatTradeScanPreview({
                     ...preview,
                     hiddenGem: preview.hiddenGem,
@@ -165,6 +191,35 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
             } catch (err) {
                 await editMessageText(sock, chatId, loading?.key, `❌ Scan failed: ${err.message}`);
             }
+            return;
+        }
+
+        if (action === 'source') {
+            const next = normalizeSourceArg(args[1]);
+            if (!next) {
+                await sock.sendMessage(chatId, {
+                    text:
+                        '❌ Usage:\n' +
+                        '`/tradelert source nse` — NIFTY50 top 5 gainers + 5 losers\n' +
+                        '`/tradelert source legacy` — sectors / movers / smart money\n\n' +
+                        `Current: *${sourceLabel(discoverySource)}*`,
+                });
+                return;
+            }
+            const saved = await groupManager.setTradeAlertDiscoverySource(
+                chatId,
+                groupName,
+                next,
+                senderPhone
+            );
+            await sock.sendMessage(chatId, {
+                text:
+                    `✅ *Discovery source:* ${sourceLabel(saved)}\n\n` +
+                    (saved === 'nse'
+                        ? `Daily auto scan uses NSE NIFTY50 top *${nseEach} gainers + ${nseEach} losers*, then CE/PE trades.\n`
+                        : 'Daily auto scan uses the legacy multi-signal watchlist.\n') +
+                    '_Preview with `/tradelert scan`._',
+            });
             return;
         }
 
@@ -194,6 +249,7 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
                 '❌ Usage:\n' +
                 '`/tradelert on` · `/tradelert off`\n' +
                 '`/tradelert auto` · `/tradelert manual`\n' +
+                '`/tradelert source nse` · `/tradelert source legacy`\n' +
                 '`/tradelert stocks SYMBOL1,SYMBOL2`\n' +
                 '`/tradelert scan`',
         });

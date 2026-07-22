@@ -1195,6 +1195,38 @@ class GroupManager {
         return m === 'manual' ? 'manual' : m === 'auto' ? 'auto' : null;
     }
 
+    async setTradeAlertDiscoverySource(groupId, groupName, source, setBy) {
+        const normalizedId = jidNormalizedUser(String(groupId).replace(/:\d+(?=@)/, '')) || groupId;
+        const s = String(source || '').trim().toLowerCase();
+        const normalized =
+            s === 'nse' || s === 'nse_gl' || s === 'gl' || s === 'gainers' ? 'nse' : 'legacy';
+        await this.groups.updateOne(
+            { group_id: normalizedId },
+            {
+                $set: {
+                    group_name: groupName,
+                    trade_alert_discovery_source: normalized,
+                    trade_alert_discovery_source_by: setBy,
+                    trade_alert_discovery_source_at: new Date(),
+                },
+                $setOnInsert: { group_id: normalizedId, is_active: false },
+            },
+            { upsert: true }
+        );
+        logger.info(`📈 Trade discovery source ${normalized}: ${groupName} (${normalizedId})`);
+        return normalized;
+    }
+
+    async getTradeAlertDiscoverySource(groupId) {
+        const row = await this.groups.findOne(
+            { group_id: groupId },
+            { projection: { trade_alert_discovery_source: 1 } }
+        );
+        const s = row?.trade_alert_discovery_source;
+        if (s === 'nse' || s === 'legacy') return s;
+        return null;
+    }
+
     async setWeeklyTrendingEnabled(groupId, groupName, enabled, setBy) {
         await this.groups.updateOne(
             { group_id: groupId },
