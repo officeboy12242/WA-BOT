@@ -1,9 +1,11 @@
 /**
  * Expiring movie links: self-hosted /d/:code (7h TTL) → TinyURL for display.
+ * Memory cache must die before /d/ codes — otherwise vault hits reuse dead TinyURLs.
  */
 
 import https from 'https';
 import { logger } from './logger.js';
+import { LINK_TTL_MS } from '../services/ShortLinkService.js';
 
 const TINYURL_API = 'https://tinyurl.com/api-create.php?url=';
 const TINYURL_TIMEOUT_MS = 3500;
@@ -11,6 +13,8 @@ const PER_LINK_SHORTEN_MS = 5000;
 const MAX_CACHE_SIZE = 500;
 const SHORTEN_CONCURRENCY = 6;
 const BATCH_PAUSE_MS = 100;
+/** Keep display cache under short-link TTL (buffer so TinyURL never outlives /d/). */
+const MEMORY_CACHE_TTL_MS = Math.max(60 * 60 * 1000, LINK_TTL_MS - 60 * 60 * 1000);
 
 function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -79,15 +83,23 @@ class UrlShortener {
         if (!this.needsShortening(url)) return url;
 
         const cached = this._cache.get(url);
-        if (cached) {
+        if (cached && cached.expiresAt > Date.now() && cached.finalUrl) {
             return cached.finalUrl;
         }
+        if (cached) this._cache.delete(url);
 
+        let shortMeta = null;
         const work = (async () => {
             let expiringLink = url;
             if (this._service) {
                 try {
-                    expiringLink = await this._service.shorten(url);
+                    const minted = await this._service.shorten(url);
+                    if (typeof minted === 'string') {
+                        expiringLink = minted;
+                    } else if (minted?.url) {
+                        expiringLink = minted.url;
+                        shortMeta = minted;
+                    }
                 } catch (err) {
                     logger.warn(`Expiring link failed: ${err.message}`);
                 }
@@ -114,10 +126,24 @@ class UrlShortener {
             finalUrl = url;
         }
 
-        if (this._cache.size >= MAX_CACHE_SIZE) {
-            this._cache.delete(this._cache.keys().next().value);
+        // Only cache when we actually minted an expiring short link.
+        const canCache =
+            finalUrl !== url &&
+            (finalUrl.includes('tinyurl.com/') || finalUrl.includes('/d/'));
+        if (canCache) {
+            const expiresAt = Math.min(
+                shortMeta?.expiresAt || Date.now() + MEMORY_CACHE_TTL_MS,
+                Date.now() + MEMORY_CACHE_TTL_MS,
+            );
+            if (this._cache.size >= MAX_CACHE_SIZE) {
+                this._cache.delete(this._cache.keys().next().value);
+            }
+            this._cache.set(url, {
+                finalUrl,
+                code: shortMeta?.code || null,
+                expiresAt,
+            });
         }
-        this._cache.set(url, { expiringLink: finalUrl, finalUrl });
 
         return finalUrl;
     }

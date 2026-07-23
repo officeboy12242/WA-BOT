@@ -26,6 +26,27 @@ function linkKey(link) {
     return String(link?.url || '').trim().toLowerCase();
 }
 
+/** TinyURL /d/ codes expire — never persist them in the vault. */
+export function isEphemeralDisplayUrl(url) {
+    const u = String(url || '');
+    if (/tinyurl\.com\//i.test(u)) return true;
+    if (/\/d\/[A-Za-z0-9_-]+/i.test(u)) return true;
+    return false;
+}
+
+/** Drop expired-prone display shorts; keep host originals only. */
+export function sanitizeMovieResults(results) {
+    return (results || [])
+        .map((item) => {
+            if (!item?.title) return null;
+            const links = (item.links || []).filter(
+                (l) => l?.url && !isEphemeralDisplayUrl(l.url)
+            );
+            return { ...item, links };
+        })
+        .filter((item) => item && item.links.length > 0);
+}
+
 function resultKey(item) {
     const title = String(item?.title || '').trim().toLowerCase();
     const source = String(item?.source || '').trim().toLowerCase();
@@ -34,13 +55,13 @@ function resultKey(item) {
 
 /** Deep clone so URL shortening never mutates cached originals. */
 export function cloneMovieResults(results) {
-    return JSON.parse(JSON.stringify(results || []));
+    return sanitizeMovieResults(JSON.parse(JSON.stringify(results || [])));
 }
 
 export function mergeMovieResults(existing = [], incoming = []) {
     const byKey = new Map();
 
-    for (const item of [...existing, ...incoming]) {
+    for (const item of sanitizeMovieResults([...(existing || []), ...(incoming || [])])) {
         if (!item?.title) continue;
         const key = resultKey(item);
         const prev = byKey.get(key);
@@ -56,7 +77,7 @@ export function mergeMovieResults(existing = [], incoming = []) {
         const seen = new Set((prev.links || []).map(linkKey));
         for (const link of item.links || []) {
             const k = linkKey(link);
-            if (!k || seen.has(k)) continue;
+            if (!k || seen.has(k) || isEphemeralDisplayUrl(link.url)) continue;
             seen.add(k);
             prev.links.push(link);
         }
