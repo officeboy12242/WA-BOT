@@ -1198,8 +1198,9 @@ class GroupManager {
     async setTradeAlertDiscoverySource(groupId, groupName, source, setBy) {
         const normalizedId = jidNormalizedUser(String(groupId).replace(/:\d+(?=@)/, '')) || groupId;
         const s = String(source || '').trim().toLowerCase();
-        const normalized =
-            s === 'nse' || s === 'nse_gl' || s === 'gl' || s === 'gainers' ? 'nse' : 'legacy';
+        let normalized = 'legacy';
+        if (s === 'heatmap' || s === 'breakout' || s === 'ema' || s === 'or') normalized = 'heatmap';
+        else if (s === 'nse' || s === 'nse_gl' || s === 'gl' || s === 'gainers') normalized = 'nse';
         await this.groups.updateOne(
             { group_id: normalizedId },
             {
@@ -1223,7 +1224,7 @@ class GroupManager {
             { projection: { trade_alert_discovery_source: 1 } }
         );
         const s = row?.trade_alert_discovery_source;
-        if (s === 'nse' || s === 'legacy') return s;
+        if (s === 'heatmap' || s === 'nse' || s === 'legacy') return s;
         return null;
     }
 

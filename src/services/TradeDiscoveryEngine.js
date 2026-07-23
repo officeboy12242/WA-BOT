@@ -12,6 +12,7 @@ import { scoreConfluence, getMinConfluenceScore, adjustConfidenceFloor } from '.
 import { getIndiaMarketMode, checkQuoteFreshness } from '../utils/indianMarketCalendar.js';
 import { createMarketDeltaService } from './MarketDeltaService.js';
 import { createTradeOutcomeService } from './TradeOutcomeService.js';
+import { heatmapBreakoutScanService } from './HeatmapBreakoutScanService.js';
 
 const MOMENTUM_RS_MIN = 1.5;
 const MOMENTUM_TURNOVER_MIN_CR = 500;
@@ -133,7 +134,9 @@ function mergeWatchlist({
 
 function normalizeDiscoverySource(v) {
     const s = String(v || '').trim().toLowerCase();
-    return s === 'nse' || s === 'nse_gl' || s === 'gl' || s === 'gainers' ? 'nse' : 'legacy';
+    if (s === 'heatmap' || s === 'breakout' || s === 'ema' || s === 'or') return 'heatmap';
+    if (s === 'nse' || s === 'nse_gl' || s === 'gl' || s === 'gainers') return 'nse';
+    return 'legacy';
 }
 
 class TradeDiscoveryEngine {
@@ -143,16 +146,147 @@ class TradeDiscoveryEngine {
         this.outcomes = createTradeOutcomeService(mongoDb, config);
         this.discoveryCount = config.TRADE_ALERT_DISCOVERY_COUNT || 10;
         this.nseGlEach = config.TRADE_ALERT_NSE_GL_EACH || 5;
+        this.heatmapMax = config.TRADE_ALERT_HEATMAP_MAX || 8;
+        this.heatmapMinMove = config.TRADE_ALERT_HEATMAP_MIN_MOVE_PCT || 2;
     }
 
     async run({ forceRefresh = false, source = null } = {}) {
         const discoverySource = normalizeDiscoverySource(
             source ?? this.config.TRADE_ALERT_DISCOVERY_SOURCE
         );
+        if (discoverySource === 'heatmap') {
+            return this.runHeatmapBreakout();
+        }
         if (discoverySource === 'nse') {
             return this.runNseGainersLosers();
         }
         return this.runLegacy({ forceRefresh });
+    }
+
+    /**
+     * NSE Heatmap sector momentum (±2%) + 15m opening-range breakout + 8 EMA.
+     * Replaces blind top-gainer/loser lists with setup-qualified names.
+     */
+    async runHeatmapBreakout() {
+        const marketMode = getIndiaMarketMode();
+        const scannedAt = new Date();
+
+        const [scan, marketNewsPack, calibration] = await Promise.all([
+            heatmapBreakoutScanService.scan({
+                minMovePct: this.heatmapMinMove,
+                maxSymbols: this.heatmapMax,
+                topSectors: 3,
+                maxCandidates: 14,
+            }),
+            stockNewsService.fetchMarketHeadlines(),
+            this.outcomes.getCalibration(),
+        ]);
+
+        const macro = scan.macro;
+        const headlines = String(marketNewsPack?.context || '')
+            .split('\n')
+            .filter(Boolean);
+
+        const symbols = [...(scan.symbols || [])];
+        const universeRows = (scan.picks || []).map((p) => ({
+            symbol: p.symbol,
+            changePct: p.changePct,
+            price: p.last ?? p.setup?.breakoutClose ?? p.setup?.lastClose,
+            volume: null,
+        }));
+
+        const movers = {
+            gainers: (scan.picks || [])
+                .filter((p) => (p.changePct || 0) > 0)
+                .map((p) => ({ symbol: p.symbol, changePct: p.changePct, price: p.last })),
+            losers: (scan.picks || [])
+                .filter((p) => (p.changePct || 0) < 0)
+                .map((p) => ({ symbol: p.symbol, changePct: p.changePct, price: p.last })),
+        };
+
+        const catalystItems = catalystRadarService.scanHeadlines(headlines, new Set(symbols));
+        const catalystHighlights = catalystRadarService.formatHighlights(catalystItems);
+
+        const symbolMeta = (scan.picks || []).map((p) => {
+            const row = universeRows.find((r) => r.symbol === p.symbol);
+            const conf = scoreConfluence({
+                symbol: p.symbol,
+                quote: row,
+                movers,
+                macro,
+                catalystItems,
+                smartMoneyDeals: [],
+                sectorTag: p.sector,
+            });
+            const st = p.setup?.status || 'watch';
+            return {
+                symbol: p.symbol,
+                sources: [`heatmap ${st}`, p.side || p.setup?.direction || ''].filter(Boolean),
+                confluence: conf.score,
+                confluencePass: conf.passes,
+                blocked: conf.blocked,
+                setup: p.setup,
+                sector: p.sector,
+                changePct: p.changePct,
+            };
+        });
+
+        const moversBrief = (scan.picks || [])
+            .map((p) => {
+                const st = p.setup?.status || 'watch';
+                const chg = p.changePct != null ? `${p.changePct >= 0 ? '+' : ''}${p.changePct}%` : '';
+                return `${p.symbol}${chg ? ` ${chg}` : ''} (${st})`;
+            })
+            .join(', ');
+
+        const freshness = checkQuoteFreshness(scannedAt);
+        const minConfluence = calibration.minConfluence || getMinConfluenceScore(this.config);
+        const minConfidence = calibration.minConfidence || adjustConfidenceFloor(macro, 70);
+
+        const context = [
+            nseMarketDataService.formatMacroBlock(macro),
+            heatmapBreakoutScanService.formatBlock(scan),
+            'Strategy rules: trade WITH heatmap bias only. Longs need OR high break + solid green close above 8 EMA; shorts need OR low break + solid red close below 8 EMA. Prefer volume spike + follow-through. SL beyond breakout candle / 8 EMA; target ≥1:1.5 R:R.',
+        ]
+            .filter(Boolean)
+            .join('\n\n');
+
+        logger.info(
+            `📡 Heatmap OR/EMA discovery: ${symbols.length} symbols · ${scan.sentiment?.label} · ` +
+                `${(scan.setups || []).length} active setups`
+        );
+
+        return {
+            symbols,
+            symbolMeta,
+            context,
+            universeRows,
+            movers,
+            moversBrief,
+            marketNews: headlines.slice(0, 6).join('\n'),
+            macro,
+            hotSectors: scan.hotSectors,
+            phase4Picks: [],
+            momentumAlerts: [],
+            smartMoney: { deals: [] },
+            catalystItems,
+            catalystHighlights,
+            niftyGl: null,
+            heatmap: scan,
+            delta: null,
+            marketMode: marketMode.mode,
+            marketModeLabel: marketMode.label,
+            freshness,
+            gates: {
+                minConfluence,
+                minConfidence,
+                watchOnly: marketMode.watchOnly,
+                allowsLiveEntry: marketMode.allowsLiveEntry,
+            },
+            scannedAt,
+            calibration,
+            discoverySource: 'heatmap',
+        };
     }
 
     /** NIFTY 50 top N gainers + top N losers → analyze those only. */

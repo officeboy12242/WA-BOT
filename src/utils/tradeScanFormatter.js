@@ -39,7 +39,9 @@ export function formatTradeScanPreview(discovery) {
         : formatNowLabelIST();
     lines.push(`🕐 *Scanned:* ${scanned} IST`);
     lines.push(`📍 *Mode:* ${d.marketModeLabel || d.marketMode || 'MARKET'}`);
-    if (d.discoverySource === 'nse') {
+    if (d.discoverySource === 'heatmap') {
+        lines.push('📡 *Discovery:* NSE Heatmap + 15m OR / 8 EMA');
+    } else if (d.discoverySource === 'nse') {
         lines.push('📡 *Discovery:* NSE NIFTY50 top gainers + losers');
     }
     if (d.freshness?.ok === false) {
@@ -48,6 +50,24 @@ export function formatTradeScanPreview(discovery) {
         lines.push('🟢 *Data:* fresh');
     }
     lines.push('');
+
+    // Heatmap OR/EMA setups
+    const hm = d.heatmap;
+    if (hm?.picks?.length) {
+        lines.push('┌─ *HEATMAP + 15m OR / 8 EMA* ─');
+        lines.push(`│ Bias: ${hm.sentiment?.label || 'n/a'} (G${hm.sentiment?.green ?? '?'} / R${hm.sentiment?.red ?? '?'})`);
+        for (const p of hm.picks) {
+            const s = p.setup || {};
+            const chg = p.changePct != null ? fmtPct(p.changePct) : '';
+            const st = s.status || 'watch';
+            const dir = (s.direction || p.side || '').toUpperCase();
+            let row = `│ • *${p.symbol}* ${chg} · ${dir} · ${st} (${s.score ?? 0})`;
+            if (s.entry != null) row += ` · E ${s.entry} SL ${s.stop}`;
+            lines.push(row);
+        }
+        lines.push('└────────────────────────────');
+        lines.push('');
+    }
 
     // NSE G/L (when discovery source = nse)
     const gl = d.niftyGl;
