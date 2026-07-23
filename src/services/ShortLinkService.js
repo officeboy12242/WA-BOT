@@ -6,7 +6,10 @@ import crypto from 'crypto';
 import { config } from '../config/config.js';
 import { logger } from '../utils/logger.js';
 
-const LINK_TTL_MS = 7 * 60 * 60 * 1000; // 7 hours
+/** Public so UrlShortener can align its memory cache under this TTL. */
+export const LINK_TTL_MS = 7 * 60 * 60 * 1000; // 7 hours
+/** Reuse an existing /d/ code only if it still has at least this long left. */
+const MIN_REUSE_REMAINING_MS = 60 * 60 * 1000; // 1 hour
 
 class ShortLinkService {
     constructor() {
@@ -34,14 +37,22 @@ class ShortLinkService {
         throw new Error('Failed to generate unique short code');
     }
 
+    /**
+     * @returns {{ url: string, code: string, expiresAt: number }}
+     */
     async shorten(longUrl) {
         const now = new Date();
+        const reuseAfter = new Date(now.getTime() + MIN_REUSE_REMAINING_MS);
         const existing = await this.collection.findOne({
             long_url: longUrl,
-            expires_at: { $gt: now },
+            expires_at: { $gt: reuseAfter },
         });
         if (existing) {
-            return `${this.getPublicBaseUrl()}/d/${existing.code}`;
+            return {
+                url: `${this.getPublicBaseUrl()}/d/${existing.code}`,
+                code: existing.code,
+                expiresAt: new Date(existing.expires_at).getTime(),
+            };
         }
 
         const code = await this._generateCode();
@@ -53,7 +64,11 @@ class ShortLinkService {
             created_at: now,
         });
 
-        return `${this.getPublicBaseUrl()}/d/${code}`;
+        return {
+            url: `${this.getPublicBaseUrl()}/d/${code}`,
+            code,
+            expiresAt: expiresAt.getTime(),
+        };
     }
 
     async resolve(code) {
