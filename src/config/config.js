@@ -173,16 +173,26 @@ export const config = {
     TRADE_ALERT_DISCOVERY_COUNT: Math.max(8, Math.min(15, parseInt(process.env.TRADE_ALERT_DISCOVERY_COUNT, 10) || 10)),
     /**
      * Discovery source for auto mode:
-     * - legacy = sectors/movers/smart-money merge (default)
-     * - nse = NIFTY 50 top gainers + losers from NSE page
-     * Overridable per group via `/tradelert source nse|legacy`
+     * - heatmap = NSE heatmap ±2% + 15m OR breakout + 8 EMA (recommended)
+     * - nse = NIFTY 50 top gainers + losers
+     * - legacy = sectors/movers/smart-money merge
+     * Overridable per group via `/tradelert source heatmap|nse|legacy`
      */
     TRADE_ALERT_DISCOVERY_SOURCE: (() => {
-        const s = (process.env.TRADE_ALERT_DISCOVERY_SOURCE || 'legacy').trim().toLowerCase();
-        return s === 'nse' || s === 'nse_gl' || s === 'gl' || s === 'gainers' ? 'nse' : 'legacy';
+        const s = (process.env.TRADE_ALERT_DISCOVERY_SOURCE || 'heatmap').trim().toLowerCase();
+        if (s === 'heatmap' || s === 'breakout' || s === 'ema' || s === 'or') return 'heatmap';
+        if (s === 'nse' || s === 'nse_gl' || s === 'gl' || s === 'gainers') return 'nse';
+        return 'legacy';
     })(),
     /** Top N gainers + top N losers when discovery source is nse (default 5+5). */
     TRADE_ALERT_NSE_GL_EACH: Math.max(1, Math.min(10, parseInt(process.env.TRADE_ALERT_NSE_GL_EACH, 10) || 5)),
+    /** Heatmap path: max symbols to analyze after OR/EMA scan. */
+    TRADE_ALERT_HEATMAP_MAX: Math.max(4, Math.min(12, parseInt(process.env.TRADE_ALERT_HEATMAP_MAX, 10) || 8)),
+    /** Heatmap path: minimum |% change| by scan time (PDF: ±2%). */
+    TRADE_ALERT_HEATMAP_MIN_MOVE_PCT: Math.max(
+        1,
+        Math.min(5, parseFloat(process.env.TRADE_ALERT_HEATMAP_MIN_MOVE_PCT) || 2)
+    ),
     /** Strict confluence floor (0–100) for high-quality daily posts */
     TRADE_ALERT_MIN_CONFLUENCE: Math.max(25, Math.min(80, parseInt(process.env.TRADE_ALERT_MIN_CONFLUENCE, 10) || 40)),
     /** If no strict posts, still send daily AI≥70% picks with softer confluence */

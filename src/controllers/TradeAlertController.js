@@ -44,7 +44,9 @@ function parseAlertTime(timeStr) {
 
 function normalizeDiscoverySource(v) {
     const s = String(v || '').trim().toLowerCase();
-    return s === 'nse' || s === 'nse_gl' || s === 'gl' || s === 'gainers' ? 'nse' : 'legacy';
+    if (s === 'heatmap' || s === 'breakout' || s === 'ema' || s === 'or') return 'heatmap';
+    if (s === 'nse' || s === 'nse_gl' || s === 'gl' || s === 'gainers') return 'nse';
+    return 'legacy';
 }
 
 class TradeAlertController {
@@ -364,8 +366,8 @@ class TradeAlertController {
         let symbols = [...(intel.symbols || [])];
         let gemPick = { hiddenGem: null, hiddenGemReason: null };
 
-        // NSE G/L list is authoritative — skip AI overlay / hidden-gem rewrite.
-        if (discoverySource !== 'nse') {
+        // Heatmap / NSE lists are authoritative — skip AI overlay / hidden-gem rewrite.
+        if (discoverySource !== 'nse' && discoverySource !== 'heatmap') {
             let discovery = { symbols: [], hiddenGem: null, hiddenGemReason: null };
             if (this.tradeLlm.isConfigured()) {
                 const userPrompt = buildDiscoveryUserPrompt(intel.context, this.discoveryCount);
@@ -417,6 +419,7 @@ class TradeAlertController {
             freshness: intel.freshness,
             gates: intel.gates,
             niftyGl: intel.niftyGl || null,
+            heatmap: intel.heatmap || null,
             discoverySource,
             intelligence: intel,
         };
@@ -445,6 +448,18 @@ class TradeAlertController {
                             gates: intel.gates,
                             marketMode: intel.marketMode,
                             niftyGl: intel.niftyGl || null,
+                            heatmap: intel.heatmap
+                                ? {
+                                      sentiment: intel.heatmap.sentiment,
+                                      picks: (intel.heatmap.picks || []).map((p) => ({
+                                          symbol: p.symbol,
+                                          sector: p.sector,
+                                          changePct: p.changePct,
+                                          side: p.side,
+                                          setup: p.setup,
+                                      })),
+                                  }
+                                : null,
                         },
                         created_at: scannedAt,
                     },
@@ -482,6 +497,7 @@ class TradeAlertController {
             freshness: this._discoveryCache.freshness,
             gates: this._discoveryCache.intelligence?.gates || this._discoveryCache.gates,
             niftyGl: this._discoveryCache.niftyGl || this._discoveryCache.intelligence?.niftyGl || null,
+            heatmap: this._discoveryCache.heatmap || this._discoveryCache.intelligence?.heatmap || null,
             discoverySource: this._discoveryCache.discoverySource || this._discoveryCache.source || this.defaultDiscoverySource,
         };
     }
@@ -598,7 +614,7 @@ class TradeAlertController {
                 }
                 autoDiscovery = discoveriesBySource.get(source);
                 symbols = autoDiscovery.symbols;
-                if (autoDiscovery.movers && source !== 'nse') {
+                if (autoDiscovery.movers && source !== 'nse' && source !== 'heatmap') {
                     symbols = marketScanService.orderSymbolsByMovers(symbols, autoDiscovery.movers);
                 }
             }

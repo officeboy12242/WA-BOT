@@ -65,7 +65,7 @@ function moversFromSectorStocks(sectorKey, stockMap, stocksPerSector) {
 
     return {
         gainers: movers.filter((m) => m.changePct > 0).slice(0, stocksPerSector),
-        losers: [...movers].sort((a, b) => a.changePct - b.changePct).slice(0, 2),
+        losers: [...movers].sort((a, b) => a.changePct - b.changePct).slice(0, stocksPerSector),
     };
 }
 
@@ -149,7 +149,7 @@ class NseMarketDataService {
                 const parsed = parseEquityStockRows(data?.data || []);
                 if (parsed.indexPct != null) indexPct = parsed.indexPct;
                 gainers = parsed.gainers.slice(0, stocksPerSector);
-                losers = parsed.losers.slice(0, 2);
+                losers = parsed.losers.slice(0, stocksPerSector);
                 source = 'equity-stockIndices';
             } else if (stockMap.size > 0) {
                 const parsed = moversFromSectorStocks(sector.key, stockMap, stocksPerSector);

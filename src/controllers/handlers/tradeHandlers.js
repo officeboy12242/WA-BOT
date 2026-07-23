@@ -25,13 +25,14 @@ function modeLabel(mode) {
 }
 
 function sourceLabel(source) {
-    return source === 'nse'
-        ? 'NSE NIFTY50 top 5G+5L'
-        : 'Legacy (sectors · movers · smart money)';
+    if (source === 'heatmap') return 'NSE Heatmap + 15m OR / 8 EMA';
+    if (source === 'nse') return 'NSE NIFTY50 top 5G+5L';
+    return 'Legacy (sectors · movers · smart money)';
 }
 
 function normalizeSourceArg(raw) {
     const s = String(raw || '').trim().toLowerCase();
+    if (s === 'heatmap' || s === 'breakout' || s === 'ema' || s === 'or') return 'heatmap';
     if (s === 'nse' || s === 'nse_gl' || s === 'gl' || s === 'gainers') return 'nse';
     if (s === 'legacy' || s === 'old' || s === 'enhanced') return 'legacy';
     return null;
@@ -59,19 +60,22 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
         const discoverySource =
             (await groupManager.getTradeAlertDiscoverySource(chatId)) ||
             config.TRADE_ALERT_DISCOVERY_SOURCE ||
-            'legacy';
+            'heatmap';
         const symbols = await groupManager.getTradeAlertSymbols(chatId);
         const defaultSymbols = config.TRADE_ALERT_STOCKS || [];
         const nseEach = config.TRADE_ALERT_NSE_GL_EACH || 5;
+        const heatmapMax = config.TRADE_ALERT_HEATMAP_MAX || 8;
 
         if (!action || action === 'status') {
             const llmOk = tradeAlertController?.isReady?.() ?? false;
             const llmChain = tradeAlertController?.tradeLlm?.getModelChain?.()?.join(' → ') || 'none';
             let symbolLine = mode === 'manual'
                 ? (symbols.length ? symbols.join(', ') : (defaultSymbols.join(', ') || '_env default_'))
-                : discoverySource === 'nse'
-                  ? `_NSE NIFTY50 top ${nseEach}G + ${nseEach}L_`
-                  : '_AI picks daily from live news & top movers_';
+                : discoverySource === 'heatmap'
+                  ? `_Heatmap ±2% sectors → top ${heatmapMax} OR/EMA setups_`
+                  : discoverySource === 'nse'
+                    ? `_NSE NIFTY50 top ${nseEach}G + ${nseEach}L_`
+                    : '_AI picks daily from live news & top movers_';
 
             let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
             r += '📈 *TRADE ALERTS* 📈\n';
@@ -83,13 +87,20 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
             r += `🕐 *Daily time:* ${formatAlertTime()} IST (trading days only)\n`;
             r += `📊 *Symbols:* ${symbolLine}\n`;
             r += `🔔 *Posts:* CE/PE when AI ≥70% · confluence ≥40 (soft ≥25 if quiet day)\n`;
-            r += `🌐 *Data:* ${discoverySource === 'nse' ? 'NSE top gainers/losers + option chain' : 'NSE macro + hot sectors + Yahoo + news'}\n`;
+            r += `🌐 *Data:* ${
+                discoverySource === 'heatmap'
+                    ? 'NSE heatmap sectors + Yahoo 15m OR/8EMA + option chain'
+                    : discoverySource === 'nse'
+                      ? 'NSE top gainers/losers + option chain'
+                      : 'NSE macro + hot sectors + Yahoo + news'
+            }\n`;
             r += `🤖 *AI:* ${llmOk ? llmChain : 'Set GEMINI / GROQ / NVIDIA API key'}\n\n`;
             r += '*Commands:*\n';
             r += '• `/tradelert on` — enable daily AI scan\n';
             r += '• `/tradelert off` — disable\n';
             r += '• `/tradelert auto` — AI picks stocks (default)\n';
             r += '• `/tradelert manual` + `/tradelert stocks A,B` — fixed list\n';
+            r += '• `/tradelert source heatmap` — heatmap + 15m OR / 8 EMA\n';
             r += '• `/tradelert source nse` — NIFTY50 top 5G+5L\n';
             r += '• `/tradelert source legacy` — old multi-signal scan\n';
             r += '• `/tradelert scan` — preview today\'s watchlist\n';
@@ -176,9 +187,11 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
         if (action === 'scan') {
             const loading = await sock.sendMessage(chatId, {
                 text:
-                    discoverySource === 'nse'
-                        ? `📡 _Fetching NSE NIFTY50 top ${nseEach}G+${nseEach}L…_`
-                        : '📡 _Running enhanced market scan (sectors · macro · smart money)… (~60–120s)_',
+                    discoverySource === 'heatmap'
+                        ? '📡 _Heatmap scan: sectors ±2% → 15m OR + 8 EMA… (~30–90s)_'
+                        : discoverySource === 'nse'
+                          ? `📡 _Fetching NSE NIFTY50 top ${nseEach}G+${nseEach}L…_`
+                          : '📡 _Running enhanced market scan (sectors · macro · smart money)… (~60–120s)_',
             });
             try {
                 const preview = await tradeAlertController.previewDiscovery(discoverySource);
@@ -200,6 +213,7 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
                 await sock.sendMessage(chatId, {
                     text:
                         '❌ Usage:\n' +
+                        '`/tradelert source heatmap` — NSE heatmap ±2% + 15m OR / 8 EMA\n' +
                         '`/tradelert source nse` — NIFTY50 top 5 gainers + 5 losers\n' +
                         '`/tradelert source legacy` — sectors / movers / smart money\n\n' +
                         `Current: *${sourceLabel(discoverySource)}*`,
@@ -215,9 +229,11 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
             await sock.sendMessage(chatId, {
                 text:
                     `✅ *Discovery source:* ${sourceLabel(saved)}\n\n` +
-                    (saved === 'nse'
-                        ? `Daily auto scan uses NSE NIFTY50 top *${nseEach} gainers + ${nseEach} losers*, then CE/PE trades.\n`
-                        : 'Daily auto scan uses the legacy multi-signal watchlist.\n') +
+                    (saved === 'heatmap'
+                        ? 'Daily auto scan uses *heatmap bias* → stocks ±2% in hot sectors → ranks *15m opening-range breakouts* with *8 EMA* filters, then CE/PE trades.\n'
+                        : saved === 'nse'
+                          ? `Daily auto scan uses NSE NIFTY50 top *${nseEach} gainers + ${nseEach} losers*, then CE/PE trades.\n`
+                          : 'Daily auto scan uses the legacy multi-signal watchlist.\n') +
                     '_Preview with `/tradelert scan`._',
             });
             return;
@@ -249,7 +265,7 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
                 '❌ Usage:\n' +
                 '`/tradelert on` · `/tradelert off`\n' +
                 '`/tradelert auto` · `/tradelert manual`\n' +
-                '`/tradelert source nse` · `/tradelert source legacy`\n' +
+                '`/tradelert source heatmap` · `/tradelert source nse` · `/tradelert source legacy`\n' +
                 '`/tradelert stocks SYMBOL1,SYMBOL2`\n' +
                 '`/tradelert scan`',
         });
