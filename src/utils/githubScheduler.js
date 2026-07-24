@@ -19,6 +19,7 @@ export { parsePostTimesFromConfig };
 const RETRY_MS = 45_000;
 const MAX_RETRIES = 3;
 const CATCHUP_GAP_MS = 2_500;
+const CATCHUP_RETRY_DELAY_MS = 60_000;
 
 /**
  * @param {object} options
@@ -209,6 +210,12 @@ export function startGithubScheduler({ getSock, botState, githubController, conf
     void catchUpMissedSlots().catch((err) => {
         logger.warn(`GitHub catch-up failed: ${err.message}`);
     });
+    // Second pass — WA session sometimes not ready on the first tick
+    setTimeout(() => {
+        void catchUpMissedSlots().catch((err) => {
+            logger.warn(`GitHub delayed catch-up failed: ${err.message}`);
+        });
+    }, CATCHUP_RETRY_DELAY_MS);
 
     scheduleNextPost();
 
