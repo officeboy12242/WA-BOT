@@ -5,8 +5,8 @@
 
 import { extractPhoneNumber, isGroupMessage, normalizePhoneNumber } from '../../utils/permissions.js';
 import { safeSendMessage } from '../../utils/waMessage.js';
-import { hasWaDocument, downloadWaDocument } from '../../utils/waDocument.js';
-import { extractResumeText } from '../../utils/resumeTextExtract.js';
+import { hasWaDocument, hasWaResumeMedia, downloadWaDocument, downloadWaResumeMedia } from '../../utils/waDocument.js';
+import { extractResumeText, unwrapResumeBuffer, sniffResumeKind } from '../../utils/resumeTextExtract.js';
 import { formatProgressLine } from '../../utils/progressBar.js';
 import { parseRewriteMode, parseExportFormat } from '../../prompts/resumeTailorPrompt.js';
 import { buildResumePdfBuffer } from '../../utils/resumePdfExport.js';
@@ -56,11 +56,38 @@ function getLiveSession(map, chatId, senderJid) {
     return session;
 }
 
-async function loadTextFromMsg(sock, originalMsg, pastedText) {
-    if (hasWaDocument(originalMsg)) {
-        const { buffer, fileName, mimetype } = await downloadWaDocument(sock, originalMsg);
-        const extracted = await extractResumeText(buffer, { fileName, mimetype });
-        return { ...extracted, fileName, fromFile: true };
+async function loadTextFromMsg(sock, originalMsg, pastedText, { ocrResume } = {}) {
+    const allowImages = typeof ocrResume === 'function';
+    const hasMedia = allowImages ? hasWaResumeMedia(originalMsg) : hasWaDocument(originalMsg);
+    if (hasMedia) {
+        const { buffer, fileName, mimetype } = allowImages
+            ? await downloadWaResumeMedia(sock, originalMsg)
+            : await downloadWaDocument(sock, originalMsg);
+        try {
+            const extracted = await extractResumeText(buffer, { fileName, mimetype });
+            return { ...extracted, fileName, fromFile: true };
+        } catch (err) {
+            const msg = String(err?.message || err);
+            const sniffed = sniffResumeKind(unwrapResumeBuffer(buffer));
+            const needsOcr =
+                allowImages &&
+                (/requires OCR|enough text|too short|Could not parse PDF|scanned|image/i.test(msg) ||
+                    sniffed === 'image' ||
+                    sniffed === 'pdf');
+            if (needsOcr) {
+                logger.warn(`Resume local extract failed (${msg}) — trying OCR`);
+                const ocr = await ocrResume({ buffer, fileName, mimetype });
+                return {
+                    text: ocr.text,
+                    kind: ocr.kind || 'ocr',
+                    fileName,
+                    fromFile: true,
+                    palette: null,
+                    typography: null,
+                };
+            }
+            throw err;
+        }
     }
     const text = String(pastedText || '').trim();
     if (text.length >= 40) {
@@ -849,18 +876,18 @@ export async function handleAts(sock, chatId, senderJid, args, ctx) {
         return;
     }
 
-    if (!hasWaDocument(originalMsg)) {
+    if (!hasWaResumeMedia(originalMsg)) {
         await safeSendMessage(
             sock,
             chatId,
             {
                 text:
                     '📋 *ATS scanner*\n\n' +
-                    '1. Upload a resume (PDF / DOCX / DOC / TXT)\n' +
+                    '1. Upload a resume (PDF / DOCX / DOC / TXT / photo)\n' +
                     '2. *Reply* to that file with `/ats`\n' +
                     '3. Optional: `/ats <paste job description>` for JD match scoring\n\n' +
                     '_Long JDs: reply `/ats` first for a general score, then use `/resume` to tailor._\n' +
-                    '_Scanned/image-only PDFs are not supported (no OCR)._',
+                    '_Scanned/image resumes use OCR when Gemini is configured._',
             },
             originalMsg
         );
@@ -911,23 +938,34 @@ export async function handleAts(sock, chatId, senderJid, args, ctx) {
 
         let loaded;
         try {
-            loaded = await loadTextFromMsg(sock, originalMsg, '');
+            loaded = await loadTextFromMsg(sock, originalMsg, '', {
+                ocrResume: (opts) => resumeAtsService.ocrResume(opts),
+            });
         } catch (err) {
             const msg = String(err?.message || err);
-            if (/enough text|too short|scanned|image PDFs|OCR/i.test(msg)) {
-                throw new Error(
-                    'Could not extract enough text — scanned/image PDFs are not supported (no OCR). Upload a text-based PDF/DOCX/TXT.'
-                );
-            }
             if (/Empty file|Empty document/i.test(msg)) {
                 throw new Error('Download failed (empty file). Re-send the resume and reply /ats again.');
+            }
+            if (/enough text|too short|OCR|parse PDF|Unsupported|requires OCR/i.test(msg)) {
+                throw new Error(
+                    `Could not extract resume text: ${msg}. Try a clearer PDF/DOCX, or a photo with readable text.`
+                );
             }
             throw err;
         }
         if (!loaded?.text || loaded.text.trim().length < 40) {
             throw new Error(
-                'Could not extract enough text — scanned/image PDFs are not supported (no OCR). Upload a text-based PDF/DOCX/TXT.'
+                'Could not extract enough text from that resume. Try PDF/DOCX or a clearer photo.'
             );
+        }
+
+        if (loaded.kind === 'ocr') {
+            await progress.flush({
+                percent: 28,
+                hasJd: hasJdArg,
+                stepExtract: '🔄',
+                detail: 'OCR text ready…',
+            });
         }
 
         await progress.flush({

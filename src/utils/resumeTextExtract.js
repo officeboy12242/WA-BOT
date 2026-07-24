@@ -19,12 +19,16 @@ const EXT_BY_MIME = {
     'application/msword': 'doc',
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
     'application/vnd.ms-word': 'doc',
+    'image/jpeg': 'image',
+    'image/jpg': 'image',
+    'image/png': 'image',
+    'image/webp': 'image',
 };
 
 /**
  * @param {string} [fileName]
  * @param {string} [mimetype]
- * @returns {'pdf'|'doc'|'docx'|'txt'|null}
+ * @returns {'pdf'|'doc'|'docx'|'txt'|'image'|null}
  */
 export function detectResumeKind(fileName = '', mimetype = '') {
     const mime = String(mimetype || '').toLowerCase().split(';')[0].trim();
@@ -36,7 +40,9 @@ export function detectResumeKind(fileName = '', mimetype = '') {
     if (ext === 'pdf' || ext === 'doc' || ext === 'docx' || ext === 'txt' || ext === 'text') {
         return ext === 'text' ? 'txt' : ext;
     }
+    if (ext === 'jpg' || ext === 'jpeg' || ext === 'png' || ext === 'webp') return 'image';
     if (mime.startsWith('text/')) return 'txt';
+    if (mime.startsWith('image/')) return 'image';
     return null;
 }
 
@@ -67,7 +73,7 @@ export function unwrapResumeBuffer(buffer) {
 /**
  * Kind from file magic (WhatsApp often sends application/octet-stream with no extension).
  * @param {Buffer} buffer
- * @returns {'pdf'|'doc'|'docx'|'txt'|null}
+ * @returns {'pdf'|'doc'|'docx'|'txt'|'image'|null}
  */
 export function sniffResumeKind(buffer) {
     if (!Buffer.isBuffer(buffer) || buffer.length < 5) return null;
@@ -81,6 +87,9 @@ export function sniffResumeKind(buffer) {
         return 'docx'; // ponytail: resume uploads as ZIP are almost always DOCX
     }
     if (b[0] === 0xd0 && b[1] === 0xcf && b[2] === 0x11 && b[3] === 0xe0) return 'doc';
+    if (b[0] === 0xff && b[1] === 0xd8) return 'image';
+    if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'image';
+    if (b.toString('ascii', 0, 4) === 'RIFF' && b.toString('ascii', 8, 12) === 'WEBP') return 'image';
 
     // Mostly printable → treat as TXT (skip obvious binary)
     const sample = b.subarray(0, Math.min(b.length, 2048));
@@ -115,26 +124,28 @@ function decodeAscii85(input) {
     const out = [];
     let i = 0;
     if (src.startsWith('<~')) i = 2;
-    const end = src.endsWith('~>') ? src.length - 2 : src.length;
+    const eod = src.indexOf('~>', i);
+    const end = eod >= 0 ? eod : src.length;
     while (i < end) {
         if (src[i] === 'z') {
             out.push(0, 0, 0, 0);
             i += 1;
             continue;
         }
-        const chunk = src.slice(i, i + 5);
-        if (chunk.length < 2) break;
+        const n = Math.min(5, end - i);
+        if (n < 2) break;
+        let chunk = src.slice(i, i + n);
+        if (n < 5) chunk += 'u'.repeat(5 - n);
         let value = 0;
-        const padded = (chunk + 'uuuuu').slice(0, 5);
         for (let j = 0; j < 5; j++) {
-            const c = padded.charCodeAt(j) - 33;
+            const c = chunk.charCodeAt(j) - 33;
             if (c < 0 || c > 84) return null;
             value = value * 85 + c;
         }
         const bytes = [(value >>> 24) & 255, (value >>> 16) & 255, (value >>> 8) & 255, value & 255];
-        const useful = chunk.length - 1;
-        for (let j = 0; j < useful && j < 4; j++) out.push(bytes[j]);
-        i += chunk.length;
+        const useful = n < 5 ? n - 1 : 4;
+        for (let j = 0; j < useful; j++) out.push(bytes[j]);
+        i += n;
     }
     return Buffer.from(out);
 }
@@ -146,6 +157,12 @@ function extractPdfTextFromStreams(buffer) {
 
     for (let i = 0; i < buffer.length - 6; i++) {
         if (buffer.toString('ascii', i, i + 6) !== 'stream') continue;
+        // Avoid matching the trailing "stream" inside "endstream"
+        if (i >= 3 && buffer.toString('ascii', i - 3, i) === 'end') continue;
+        const prev = i > 0 ? buffer[i - 1] : 0;
+        // Real stream keyword is preceded by whitespace / > / newline
+        if (prev && prev !== 0x0a && prev !== 0x0d && prev !== 0x20 && prev !== 0x3e) continue;
+
         let start = i + 6;
         if (buffer[start] === 0x0d) start += 1;
         if (buffer[start] === 0x0a) start += 1;
@@ -158,12 +175,12 @@ function extractPdfTextFromStreams(buffer) {
         }
         if (end < 0) continue;
 
-        const header = buffer.toString('latin1', Math.max(0, i - 200), i);
+        const header = buffer.toString('latin1', Math.max(0, i - 240), i);
         let payload = buffer.subarray(start, end);
         try {
             if (/ASCII85Decode/i.test(header)) {
                 const decoded = decodeAscii85(payload.toString('latin1'));
-                if (!decoded) continue;
+                if (!decoded?.length) continue;
                 payload = decoded;
             }
             if (/FlateDecode/i.test(header) || payload[0] === 0x78) {
@@ -184,7 +201,8 @@ function extractPdfTextFromStreams(buffer) {
         }
     }
 
-    return parts.join(' ').replace(/ {2,}/g, ' ').trim();
+    // Join with newlines so section headers stay readable after normalize
+    return parts.join('\n').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
 async function extractPdfText(buffer) {
@@ -236,7 +254,9 @@ export async function extractResumeText(buffer, meta = {}) {
     let text = '';
     let palette = null;
     let typography = null;
-    if (kind === 'pdf') {
+    if (kind === 'image') {
+        throw new Error('Image resume requires OCR');
+    } else if (kind === 'pdf') {
         text = await extractPdfText(raw);
         palette = extractPdfColorPalette(raw);
         typography = extractPdfTypography(raw);

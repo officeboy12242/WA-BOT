@@ -198,7 +198,7 @@ export default class ResumeAtsService {
         }
         const base = String(resumeText || '').trim();
         if (base.length < 40) {
-            throw new Error('Resume text too short — scanned/image PDFs are not supported (no OCR)');
+            throw new Error('Resume text too short for ATS scan');
         }
 
         const jd = String(jobDescription || '').trim();
@@ -220,5 +220,44 @@ export default class ResumeAtsService {
                 (hasJd ? ` · JD match ${analysis.jobMatch?.matchScore}` : '')
         );
         return { analysis, provider, model, hasJd };
+    }
+
+    /**
+     * OCR fallback for scanned PDFs / image resumes via Gemini.
+     * @param {{ buffer: Buffer, fileName?: string, mimetype?: string }} opts
+     */
+    async ocrResume({ buffer, fileName = '', mimetype = '' }) {
+        if (!this.llm.geminiKey) {
+            throw new Error(
+                'Could not extract text locally, and Gemini OCR is unavailable (set GEMINI_API_KEY).'
+            );
+        }
+        let mime = String(mimetype || '').split(';')[0].trim().toLowerCase();
+        if (!mime || mime === 'application/octet-stream') {
+            const name = String(fileName || '').toLowerCase();
+            if (name.endsWith('.png')) mime = 'image/png';
+            else if (name.endsWith('.jpg') || name.endsWith('.jpeg')) mime = 'image/jpeg';
+            else if (name.endsWith('.webp')) mime = 'image/webp';
+            else if (Buffer.isBuffer(buffer)) {
+                if (buffer.subarray(0, 5).toString('latin1') === '%PDF-') mime = 'application/pdf';
+                else if (buffer[0] === 0xff && buffer[1] === 0xd8) mime = 'image/jpeg';
+                else if (buffer[0] === 0x89 && buffer[1] === 0x50) mime = 'image/png';
+                else mime = 'application/pdf';
+            } else {
+                mime = 'application/pdf';
+            }
+        }
+
+        const { text, provider, model } = await this.llm.extractMediaText({
+            buffer,
+            mimeType: mime,
+            maxChars: 80_000,
+        });
+        const cleaned = String(text || '').trim();
+        if (cleaned.length < 40) {
+            throw new Error('OCR returned too little text from that resume');
+        }
+        logger.info(`Resume OCR via ${provider}/${model} · ${cleaned.length} chars`);
+        return { text: cleaned, kind: 'ocr', provider, model };
     }
 }
