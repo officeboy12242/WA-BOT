@@ -252,6 +252,82 @@ export default class AssistLlmRouter {
         const content = this.nvidia.extractMessageContent(data);
         return content || '';
     }
+
+    /**
+     * OCR / PDF text extraction via Gemini multimodal (PDF or image bytes).
+     * @param {{ buffer: Buffer, mimeType: string, prompt?: string, maxChars?: number }} opts
+     */
+    async extractMediaText({ buffer, mimeType, prompt, maxChars = 80_000 }) {
+        if (!this.geminiKey) {
+            throw new Error('Gemini API key required for OCR / scanned resume extraction');
+        }
+        if (!Buffer.isBuffer(buffer) || !buffer.length) {
+            throw new Error('Empty media for OCR');
+        }
+        // Gemini inline upload practical ceiling for this bot
+        if (buffer.length > 18 * 1024 * 1024) {
+            throw new Error('File too large for OCR (max ~18MB)');
+        }
+
+        const mime = String(mimeType || 'application/pdf').split(';')[0].trim().toLowerCase();
+        const userPrompt =
+            prompt ||
+            [
+                'Extract ALL readable text from this resume document/image.',
+                'Preserve reading order, section headings, bullets, dates, emails, and links.',
+                'Return plain text only — no markdown fences, no commentary.',
+            ].join(' ');
+
+        let lastErr;
+        for (const model of this.geminiModels) {
+            try {
+                const url = `${GEMINI_ROOT}/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(this.geminiKey)}`;
+                const { data } = await axios.post(
+                    url,
+                    {
+                        contents: [
+                            {
+                                role: 'user',
+                                parts: [
+                                    { text: userPrompt },
+                                    {
+                                        inlineData: {
+                                            mimeType: mime,
+                                            data: buffer.toString('base64'),
+                                        },
+                                    },
+                                ],
+                            },
+                        ],
+                        generationConfig: { temperature: 0.1, maxOutputTokens: 8192 },
+                    },
+                    {
+                        timeout: Math.max(this.timeoutMs, 90_000),
+                        headers: { 'Content-Type': 'application/json' },
+                        validateStatus: (s) => s >= 200 && s < 300,
+                    }
+                );
+                const parts = data?.candidates?.[0]?.content?.parts || [];
+                const text = parts
+                    .map((p) => p?.text || '')
+                    .join('')
+                    .trim();
+                if (!text) {
+                    throw new Error(`${model} empty OCR reply`);
+                }
+                return {
+                    text: text.slice(0, Math.min(100_000, Math.max(200, Number(maxChars) || 80_000))),
+                    provider: 'gemini',
+                    model,
+                };
+            } catch (err) {
+                lastErr = err;
+                logger.warn(`Assist OCR ${model} failed: ${err.message}`);
+                if (!isAssistLlmFallbackError(err)) break;
+            }
+        }
+        throw lastErr || new Error('Gemini OCR failed');
+    }
 }
 
 export const assistLlmRouter = new AssistLlmRouter();

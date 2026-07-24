@@ -67,17 +67,34 @@ if (fs.existsSync(atsPath)) {
     });
     assert.ok(fromWrapped.text.length >= 40, 'wrapped PDF should extract');
     assert.strictEqual(fromWrapped.kind, 'pdf');
+}
 
-    // ReportLab dual-filter PDF that pdf-parse sometimes rejects
-    const rlPath = 'c:/Users/jaikishanbagul/Downloads/Jaikishan_Resume_22-07.pdf';
-    if (fs.existsSync(rlPath)) {
-        const rl = await extractResumeText(fs.readFileSync(rlPath), {
-            fileName: 'resume.pdf',
-            mimetype: 'application/pdf',
-        });
-        assert.ok(rl.text.length >= 40, 'ReportLab PDF should salvage via streams');
-        assert.ok(/jaikishan|bagul|experience|skills/i.test(rl.text), 'salvaged text looks like a resume');
+// ReportLab dual-filter PDF that pdf-parse sometimes rejects — must salvage via streams
+const rlPath = 'c:/Users/jaikishanbagul/Downloads/Jaikishan_Resume_22-07.pdf';
+if (fs.existsSync(rlPath)) {
+    const rl = await extractResumeText(fs.readFileSync(rlPath), {
+        fileName: 'resume.pdf',
+        mimetype: 'application/pdf',
+    });
+    assert.ok(rl.text.length >= 40, 'ReportLab PDF should salvage via streams');
+    assert.ok(
+        /jaikishan|bagul|experience|skills|python|fastapi/i.test(rl.text),
+        'salvaged text looks like a resume'
+    );
+}
+
+// Image resumes are detected but need OCR (handled by ATS layer)
+const pngPath = 'c:/Users/jaikishanbagul/Downloads/Jaikishan_Resume_22-07_preview.png';
+if (fs.existsSync(pngPath)) {
+    const png = fs.readFileSync(pngPath);
+    assert.strictEqual(sniffResumeKind(png), 'image');
+    let imgRejected = false;
+    try {
+        await extractResumeText(png, { fileName: 'resume.png', mimetype: 'image/png' });
+    } catch (e) {
+        imgRejected = /OCR/i.test(e.message);
     }
+    assert.ok(imgRejected, 'image should require OCR');
 }
 
 console.log('resume extract self-check ok');
