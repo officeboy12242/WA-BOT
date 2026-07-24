@@ -85,6 +85,37 @@ class ResumeProfileStore {
             { upsert: true }
         );
     }
+
+    /**
+     * Persist latest ATS / recruiter scan (general and optional JD match).
+     * @param {string} phone
+     * @param {string} [chatId]
+     * @param {{ analysis: object, hasJd?: boolean, jdText?: string, fileName?: string }} patch
+     */
+    async saveAtsResult(phone, chatId, patch) {
+        const key = normalizePhoneNumber(phone) || String(phone || '').trim();
+        if (!key) throw new Error('Missing phone');
+        const analysis = patch?.analysis && typeof patch.analysis === 'object' ? patch.analysis : null;
+        if (!analysis) throw new Error('Missing ATS analysis');
+
+        await this.collection.updateOne(
+            { phone: key },
+            {
+                $set: {
+                    phone: key,
+                    ...(chatId ? { chat_id: chatId } : {}),
+                    last_ats: analysis,
+                    last_ats_has_jd: Boolean(patch.hasJd),
+                    last_ats_jd: String(patch.jdText || '').slice(0, 40_000),
+                    last_ats_file: String(patch.fileName || '').slice(0, 200),
+                    last_ats_at: new Date(),
+                    updated_at: new Date(),
+                },
+                $setOnInsert: { created_at: new Date(), text: '' },
+            },
+            { upsert: true }
+        );
+    }
 }
 
 export default ResumeProfileStore;

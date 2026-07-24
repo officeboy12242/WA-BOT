@@ -624,6 +624,14 @@ export const COMMAND_REGISTRY = [
         help: 'Cover letter from last tailored JD (or attach/paste JD)',
         category: 'resume',
     },
+    {
+        names: ['/ats', '/atsscan', '/resumescan'],
+        key: 'ats',
+        scope: 'any',
+        role: 'anyone',
+        help: 'Reply to an uploaded resume with `/ats` (optional JD text) for ATS/recruiter score',
+        category: 'resume',
+    },
 ];
 
 const nameIndex = new Map();

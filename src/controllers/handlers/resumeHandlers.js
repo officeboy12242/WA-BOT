@@ -10,6 +10,7 @@ import { extractResumeText } from '../../utils/resumeTextExtract.js';
 import { formatProgressLine } from '../../utils/progressBar.js';
 import { parseRewriteMode, parseExportFormat } from '../../prompts/resumeTailorPrompt.js';
 import { buildResumePdfBuffer } from '../../utils/resumePdfExport.js';
+import { formatAtsReport } from '../../services/ResumeAtsService.js';
 import { logger } from '../../utils/logger.js';
 
 const SESSION_TTL_MS = 15 * 60 * 1000;
@@ -756,3 +757,256 @@ export async function handlePendingResumeInput(sock, chatId, senderJid, messageT
 
     return false;
 }
+
+function formatAtsProgress(state) {
+    const percent = state.percent ?? 0;
+    let msg = '📋 *$ resume --ats*\n';
+    msg += `> ${state.hasJd ? 'General + JD match' : 'General ATS / recruiter scan'}\n`;
+    msg += `${formatProgressLine('SCAN', percent, { decimals: 0 })}\n\n`;
+    msg += `$ steps\n`;
+    msg += `> ${state.stepExtract || '⏳'} Extract document\n`;
+    msg += `> ${state.stepParse || '⏳'} Parse structure\n`;
+    msg += `> ${state.stepAudit || '⏳'} Recruiter audit\n`;
+    msg += `> ${state.stepScore || '⏳'} Score & report\n`;
+    if (state.detail) {
+        msg += `\n_${state.detail}_`;
+    }
+    return msg.trimEnd();
+}
+
+function makeAtsProgressEditor(sock, chatId, messageKey) {
+    let closed = false;
+    let editTail = Promise.resolve();
+    let lastText = '';
+    let currentState = {
+        percent: 5,
+        hasJd: false,
+        stepExtract: '🔄',
+        stepParse: '⏳',
+        stepAudit: '⏳',
+        stepScore: '⏳',
+        detail: '',
+    };
+
+    const queueEdit = () => {
+        if (closed || !messageKey?.id || !sock?.sendMessage) return editTail;
+        const text = formatAtsProgress(currentState);
+        if (text === lastText) return editTail;
+        lastText = text;
+        const key = {
+            remoteJid: chatId || messageKey.remoteJid,
+            id: messageKey.id,
+            fromMe: true,
+            ...(messageKey.participant ? { participant: messageKey.participant } : {}),
+        };
+        editTail = editTail
+            .then(async () => {
+                if (closed) return;
+                try {
+                    await sock.sendMessage(chatId, { text, edit: key, linkPreview: false });
+                } catch (err) {
+                    logger.warn(`ATS progress edit skipped: ${err?.message || err}`);
+                }
+            })
+            .catch(() => {});
+        return editTail;
+    };
+
+    return {
+        async flush(patch = {}) {
+            if (closed) return;
+            currentState = { ...currentState, ...patch };
+            await queueEdit();
+        },
+        async close() {
+            closed = true;
+            await editTail.catch(() => {});
+            await new Promise((r) => setTimeout(r, 500));
+        },
+    };
+}
+
+/** One ATS scan per user at a time. */
+const atsLocks = new Map();
+
+/**
+ * Reply `/ats` (optional JD text) to an uploaded resume document.
+ */
+export async function handleAts(sock, chatId, senderJid, args, ctx) {
+    const { originalMsg, fullCommand, resumeStore, resumeAtsService } = ctx;
+
+    if (!resumeStore || !resumeAtsService) {
+        await safeSendMessage(sock, chatId, { text: '⚠️ ATS scanner is not available.' }, originalMsg);
+        return;
+    }
+    if (!resumeAtsService.isConfigured()) {
+        await safeSendMessage(
+            sock,
+            chatId,
+            { text: '⚠️ AI not configured. Set GEMINI / GROQ / NVIDIA / OPENROUTER API key.' },
+            originalMsg
+        );
+        return;
+    }
+
+    if (!hasWaDocument(originalMsg)) {
+        await safeSendMessage(
+            sock,
+            chatId,
+            {
+                text:
+                    '📋 *ATS scanner*\n\n' +
+                    '1. Upload a resume (PDF / DOCX / DOC / TXT)\n' +
+                    '2. *Reply* to that file with `/ats`\n' +
+                    '3. Optional: `/ats <paste job description>` for JD match scoring\n\n' +
+                    '_Long JDs: reply `/ats` first for a general score, then use `/resume` to tailor._\n' +
+                    '_Scanned/image-only PDFs are not supported (no OCR)._',
+            },
+            originalMsg
+        );
+        return;
+    }
+
+    const phone = resolveUserPhone(chatId, senderJid);
+    if (!phone) {
+        await safeSendMessage(sock, chatId, { text: '⚠️ Could not identify your number.' }, originalMsg);
+        return;
+    }
+
+    const lockKey = `${chatId}|${phone}`;
+    if (atsLocks.get(lockKey)) {
+        await safeSendMessage(sock, chatId, { text: '⏳ ATS scan already running for you — wait for it to finish.' }, originalMsg);
+        return;
+    }
+    atsLocks.set(lockKey, true);
+
+    const jdFromArgs = stripCommandPrefix(fullCommand);
+    const hasJdArg = jdFromArgs.length >= 20;
+
+    const searchingMsg = await safeSendMessage(
+        sock,
+        chatId,
+        {
+            text: formatAtsProgress({
+                percent: 5,
+                hasJd: hasJdArg,
+                stepExtract: '🔄',
+                stepParse: '⏳',
+                stepAudit: '⏳',
+                stepScore: '⏳',
+                detail: 'Downloading resume…',
+            }),
+        },
+        originalMsg
+    );
+    const progress = makeAtsProgressEditor(sock, chatId, searchingMsg?.key);
+
+    try {
+        await progress.flush({
+            percent: 18,
+            hasJd: hasJdArg,
+            stepExtract: '🔄',
+            detail: 'Extracting text…',
+        });
+
+        let loaded;
+        try {
+            loaded = await loadTextFromMsg(sock, originalMsg, '');
+        } catch (err) {
+            const msg = String(err?.message || err);
+            if (/too short|scanned|empty|unsupported/i.test(msg)) {
+                throw new Error(
+                    'Could not extract text — scanned/image PDFs are not supported (no OCR). Upload a text-based PDF/DOCX.'
+                );
+            }
+            throw err;
+        }
+        if (!loaded?.text || loaded.text.trim().length < 40) {
+            throw new Error(
+                'Could not extract enough text — scanned/image PDFs are not supported (no OCR).'
+            );
+        }
+
+        await progress.flush({
+            percent: 35,
+            hasJd: hasJdArg,
+            stepExtract: '✅',
+            stepParse: '🔄',
+            detail: 'Parsing sections…',
+        });
+
+        await resumeStore.saveBase({
+            phone,
+            chatId,
+            text: loaded.text,
+            fileName: loaded.fileName || '',
+            kind: loaded.kind || '',
+            palette: loaded.palette || null,
+            typography: loaded.typography || null,
+        });
+
+        await progress.flush({
+            percent: 48,
+            hasJd: hasJdArg,
+            stepParse: '✅',
+            stepAudit: '🔄',
+            detail: hasJdArg ? 'Recruiter audit + JD match…' : 'Recruiter audit…',
+        });
+
+        const resultPromise = resumeAtsService.analyze({
+            resumeText: loaded.text,
+            jobDescription: hasJdArg ? jdFromArgs : '',
+        });
+
+        await progress.flush({
+            percent: 70,
+            hasJd: hasJdArg,
+            stepAudit: '🔄',
+            stepScore: '🔄',
+            detail: 'Scoring parseability, impact, keywords…',
+        });
+
+        const { analysis, hasJd } = await resultPromise;
+
+        await progress.flush({
+            percent: 92,
+            hasJd,
+            stepAudit: '✅',
+            stepScore: '🔄',
+            detail: 'Building report…',
+        });
+
+        await resumeStore.saveAtsResult(phone, chatId, {
+            analysis,
+            hasJd,
+            jdText: hasJdArg ? jdFromArgs : '',
+            fileName: loaded.fileName || '',
+        });
+
+        const report = formatAtsReport(analysis, {
+            fileName: loaded.fileName || '',
+            hasJd,
+        });
+
+        await progress.flush({ percent: 100, hasJd, stepScore: '✅', detail: 'Done' });
+        await progress.close();
+        await deleteProgressMessage(sock, chatId, searchingMsg?.key);
+
+        await safeSendMessage(sock, chatId, { text: report, linkPreview: false }, originalMsg);
+    } catch (err) {
+        logger.error(`ATS scan failed: ${err.message}`);
+        try {
+            await progress.close();
+        } catch {}
+        await deleteProgressMessage(sock, chatId, searchingMsg?.key);
+        await safeSendMessage(
+            sock,
+            chatId,
+            { text: `❌ ATS scan failed: ${err.message}` },
+            originalMsg
+        );
+    } finally {
+        atsLocks.delete(lockKey);
+    }
+}
+
