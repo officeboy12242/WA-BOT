@@ -476,23 +476,42 @@ class InterviewQuestionService {
         const groups = await this.groupManager.getInterviewQGroups();
         if (!groups.length) {
             logger.warn('Interview Q: no enabled groups — use /interviewqon');
-            return { posted: 0, groups: 0 };
+            return { posted: 0, groups: 0, skipped: 0 };
         }
 
         let posted = 0;
+        let skipped = 0;
         for (const group of groups) {
             try {
                 const result = await this.postQuestionToJid(sock, group.group_id, {
                     slotKey,
                     slotIndex,
                 });
-                if (!result.skipped) posted++;
+                if (result.skipped) skipped++;
+                else posted++;
                 await new Promise((r) => setTimeout(r, 800));
             } catch (err) {
                 logger.error(`Interview Q post failed for ${group.group_id}: ${err.message}`);
             }
         }
-        return { posted, groups: groups.length };
+        return { posted, groups: groups.length, skipped };
+    }
+
+    /**
+     * True when every currently enabled group already has this slot posted
+     * (or answered). Used so catch-up does not regenerate after a restart.
+     */
+    async isSlotFullyPosted(slotKey) {
+        if (!slotKey || !this.store) return false;
+        const groups = await this.groupManager.getInterviewQGroups();
+        if (!groups.length) return false;
+        for (const group of groups) {
+            const doc = await this.store.findBySlot(group.group_id, slotKey);
+            if (!doc || doc.status === 'failed' || doc.status === 'scheduled') {
+                return false;
+            }
+        }
+        return true;
     }
 }
 
