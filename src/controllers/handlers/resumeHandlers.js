@@ -914,16 +914,19 @@ export async function handleAts(sock, chatId, senderJid, args, ctx) {
             loaded = await loadTextFromMsg(sock, originalMsg, '');
         } catch (err) {
             const msg = String(err?.message || err);
-            if (/too short|scanned|empty|unsupported/i.test(msg)) {
+            if (/enough text|too short|scanned|image PDFs|OCR/i.test(msg)) {
                 throw new Error(
-                    'Could not extract text — scanned/image PDFs are not supported (no OCR). Upload a text-based PDF/DOCX.'
+                    'Could not extract enough text — scanned/image PDFs are not supported (no OCR). Upload a text-based PDF/DOCX/TXT.'
                 );
+            }
+            if (/Empty file|Empty document/i.test(msg)) {
+                throw new Error('Download failed (empty file). Re-send the resume and reply /ats again.');
             }
             throw err;
         }
         if (!loaded?.text || loaded.text.trim().length < 40) {
             throw new Error(
-                'Could not extract enough text — scanned/image PDFs are not supported (no OCR).'
+                'Could not extract enough text — scanned/image PDFs are not supported (no OCR). Upload a text-based PDF/DOCX/TXT.'
             );
         }
 
