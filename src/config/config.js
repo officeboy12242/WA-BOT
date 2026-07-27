@@ -271,6 +271,13 @@ export const config = {
         if (Number.isFinite(n) && n >= 60_000) return n;
         return 30 * 60 * 1000;
     })(),
+    /** Saturday weekly recap (default 22:00 IST). Set empty to disable. */
+    INTERVIEW_Q_SUMMARY_TIME: (process.env.INTERVIEW_Q_SUMMARY_TIME || '22:00').trim(),
+    /** How many past questions to keep out of the rotation (fingerprint window). */
+    INTERVIEW_Q_DEDUP_LOOKBACK: Math.max(
+        50,
+        parseInt(process.env.INTERVIEW_Q_DEDUP_LOOKBACK, 10) || 200
+    ),
     /** Public URL for short links (Render sets RENDER_EXTERNAL_URL automatically). */
     PUBLIC_URL: (process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || '').replace(/\/$/, ''),
     RENDER_API_KEY: process.env.RENDER_API_KEY?.trim() || '',

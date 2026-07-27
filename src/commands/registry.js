@@ -232,7 +232,7 @@ export const COMMAND_REGISTRY = [
         key: 'interviewqon',
         scope: 'group_only',
         role: 'staff',
-        help: 'Enable daily Interview Q polls (1pm & 6pm) in this group',
+        help: 'Enable Interview Q polls (1pm & 6pm Medium/Hard) + Sat 10pm weekly recap',
     },
     {
         names: ['/interviewqoff'],

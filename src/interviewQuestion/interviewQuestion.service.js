@@ -2,6 +2,7 @@
  * AI generation + WhatsApp poll/answer posting for Interview Q of the Day.
  */
 
+import crypto from 'crypto';
 import AssistLlmRouter from '../services/AssistLlmRouter.js';
 import { logger } from '../utils/logger.js';
 import { config } from '../config/config.js';
@@ -19,6 +20,8 @@ export const INTERVIEW_CATEGORIES = [
     'Aptitude',
 ];
 
+const ALLOWED_DIFFICULTIES = new Set(['medium', 'hard']);
+
 const SYSTEM_PROMPT = [
     'You generate one interview multiple-choice question for software engineers / students.',
     'Return JSON ONLY — no markdown fences, no prose outside JSON.',
@@ -27,6 +30,8 @@ const SYSTEM_PROMPT = [
     '- Exactly one correctOption in A|B|C|D.',
     '- Do not put the answer in the question text.',
     '- Keep question + each option short enough for a WhatsApp poll (options under ~90 chars).',
+    '- Difficulty MUST be Medium or Hard only (never Easy).',
+    '- Do NOT repeat or lightly rephrase any question listed in the avoid list.',
     '- Include explanation, approach, and complexity when relevant (DSA/algorithms).',
     '- For Behavioral/Aptitude, timeComplexity/spaceComplexity may be empty strings.',
     '- Valid strict JSON: double quotes only, escape any " inside strings as \\", no trailing commas, no raw newlines inside strings.',
@@ -36,6 +41,32 @@ function pickCategory(slotIndex = 0) {
     const day = Math.floor(Date.now() / 86_400_000);
     const idx = (day * 2 + Number(slotIndex || 0)) % INTERVIEW_CATEGORIES.length;
     return INTERVIEW_CATEGORIES[idx];
+}
+
+/** Prefer Hard slightly more often than Medium. */
+export function pickDifficulty(slotIndex = 0) {
+    const n = (Math.floor(Date.now() / 86_400_000) * 3 + Number(slotIndex || 0)) % 5;
+    return n < 3 ? 'Hard' : 'Medium';
+}
+
+/** Stable fingerprint so we never re-post the same (or near-identical) stem. */
+export function questionFingerprint(questionText) {
+    const norm = String(questionText || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    if (!norm) return '';
+    return crypto.createHash('sha256').update(norm).digest('hex').slice(0, 32);
+}
+
+export function normalizeDifficulty(raw) {
+    const d = String(raw || '')
+        .trim()
+        .toLowerCase();
+    if (d === 'hard' || d === 'difficult' || d === 'advanced') return 'Hard';
+    if (d === 'medium' || d === 'med' || d === 'intermediate') return 'Medium';
+    return '';
 }
 
 /** Strip fences / think tags and isolate the outermost `{...}`. */
@@ -56,7 +87,6 @@ function sliceJsonObject(raw) {
 /**
  * Repair common LLM JSON mistakes: smart quotes, trailing commas,
  * raw control chars in strings, and unescaped " inside string values.
- * Fixes errors like: expected " after property value in JSON at position N
  */
 export function repairLlmJson(jsonText) {
     let s = String(jsonText || '')
@@ -76,7 +106,6 @@ export function repairLlmJson(jsonText) {
             continue;
         }
 
-        // inside a JSON string
         if (c === '\\') {
             const next = s[i + 1];
             if (next !== undefined) {
@@ -89,7 +118,6 @@ export function repairLlmJson(jsonText) {
         }
 
         if (c === '"') {
-            // Real closer if next non-ws is structural; otherwise escape.
             let j = i + 1;
             while (j < s.length && /[ \t\r\n]/.test(s[j])) j++;
             const next = s[j];
@@ -114,7 +142,6 @@ export function repairLlmJson(jsonText) {
             out += '\\t';
             continue;
         }
-        // drop other control chars that break JSON.parse
         if (c.charCodeAt(0) < 0x20) {
             continue;
         }
@@ -169,11 +196,16 @@ export function normalizeQuestion(parsed) {
         throw new Error('Question too short');
     }
 
+    const difficulty = normalizeDifficulty(parsed.difficulty);
+    if (!difficulty || !ALLOWED_DIFFICULTIES.has(difficulty.toLowerCase())) {
+        throw new Error('Difficulty must be Medium or Hard');
+    }
+
     const clip = (s, n) => String(s || '').trim().slice(0, n);
 
     return {
         type: clip(parsed.type || 'DSA', 40),
-        difficulty: clip(parsed.difficulty || 'Medium', 16),
+        difficulty,
         topic: clip(parsed.topic || 'General', 60),
         question: clip(question, 400),
         options: {
@@ -190,6 +222,7 @@ export function normalizeQuestion(parsed) {
         timeComplexity: clip(parsed.timeComplexity || '', 40),
         spaceComplexity: clip(parsed.spaceComplexity || '', 40),
         commonMistake: clip(parsed.commonMistake || '', 400),
+        questionFp: questionFingerprint(question),
     };
 }
 
@@ -237,6 +270,44 @@ export function pollValues(q) {
     ].map((v) => v.slice(0, 100));
 }
 
+/** Weekend learning recap — short enough for WhatsApp, good for revision. */
+export function formatWeeklySummary(docs, { weekLabel = '' } = {}) {
+    const list = Array.isArray(docs) ? docs : [];
+    let text = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+    text += '📚 *WEEKEND INTERVIEW Q RECAP*\n';
+    text += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+    if (weekLabel) {
+        text += `_${weekLabel}_\n`;
+    }
+    text += '\nRevise these before Monday — question → answer → why.\n';
+
+    if (!list.length) {
+        text += '\n_No interview questions were posted this week._\n';
+        text += '\n🤖 _Sassy Bot_';
+        return text;
+    }
+
+    list.forEach((doc, i) => {
+        const n = i + 1;
+        const correct = String(doc.correct_option || '').toUpperCase();
+        const opt = doc.options?.[correct] || '';
+        text += `\n*${n}. ${doc.type || 'Q'} · ${doc.difficulty || ''} · ${doc.topic || ''}*\n`;
+        text += `${doc.question}\n`;
+        text += `✅ *${correct}${opt ? `. ${opt}` : ''}*\n`;
+        const takeaway = String(doc.explanation || doc.proper_answer || '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 180);
+        if (takeaway) {
+            text += `💡 ${takeaway}${takeaway.length >= 180 ? '…' : ''}\n`;
+        }
+    });
+
+    text += '\n🧠 Tip: cover the answers and re-solve each MCQ from memory.\n';
+    text += '\n🤖 _Sassy Bot_';
+    return text.slice(0, 4000);
+}
+
 /** Build a Baileys quoted stub so the answer replies to the poll. */
 export function buildPollQuote(doc, q) {
     const key = doc?.poll_message_key;
@@ -281,22 +352,33 @@ class InterviewQuestionService {
         return this.llm.isConfigured();
     }
 
-    async generateQuestion({ category, slotIndex = 0 } = {}) {
+    async generateQuestion({ category, slotIndex = 0, difficulty } = {}) {
         if (!this.isConfigured()) {
             throw new Error('No LLM configured (set GEMINI / GROQ / NVIDIA / OPENROUTER key)');
         }
 
         const type = category || pickCategory(slotIndex);
+        const wantDiff = normalizeDifficulty(difficulty) || pickDifficulty(slotIndex);
+        const lookback = this.cfg.INTERVIEW_Q_DEDUP_LOOKBACK || 200;
+        const recent = await this.store.findRecentQuestions(lookback);
+        const usedFps = new Set(recent.map((r) => r.question_fp).filter(Boolean));
+        const avoidLines = recent
+            .slice(0, 40)
+            .map((r, i) => `${i + 1}. [${r.type || '?'}] ${String(r.question || '').slice(0, 120)}`);
+
         const userBlock = [
             `Generate ONE interview MCQ.`,
             `Category/type must be: ${type}`,
-            `Vary difficulty across Easy/Medium/Hard.`,
+            `Difficulty MUST be exactly: ${wantDiff} (Medium or Hard only — never Easy).`,
             `Return JSON with keys: type, difficulty, topic, question, options{A,B,C,D}, correctOption, properAnswer, explanation, hint, approach, timeComplexity, spaceComplexity, commonMistake.`,
             `Strict JSON only — escape inner double-quotes; no trailing commas.`,
+            avoidLines.length
+                ? `AVOID repeating or rephrasing these already-used questions:\n${avoidLines.join('\n')}`
+                : 'Invent a fresh question not commonly reused in bank dumps.',
         ].join('\n');
 
         let lastErr;
-        for (let attempt = 0; attempt < 2; attempt++) {
+        for (let attempt = 0; attempt < 4; attempt++) {
             try {
                 const { text, provider, model } = await this.llm.completeChat({
                     systemPrompt: SYSTEM_PROMPT,
@@ -304,16 +386,31 @@ class InterviewQuestionService {
                     userBlock:
                         attempt === 0
                             ? userBlock
-                            : `${userBlock}\nPrevious output was invalid JSON. Reply with valid JSON only.`,
+                            : `${userBlock}\nPrevious output was rejected (${lastErr?.message || 'invalid'}). Reply with a NEW Medium/Hard question as valid JSON only.`,
                     maxTokens: 1200,
-                    temperature: attempt === 0 ? 0.7 : 0.3,
+                    temperature: attempt === 0 ? 0.75 : 0.45,
                     maxChars: 4000,
                 });
 
                 const normalized = normalizeQuestion(extractJsonObject(text));
                 if (!normalized.type) normalized.type = type;
+
+                if (normalized.difficulty !== wantDiff) {
+                    normalized.difficulty = wantDiff;
+                }
+
+                if (!normalized.questionFp) {
+                    throw new Error('Empty question fingerprint');
+                }
+                if (
+                    usedFps.has(normalized.questionFp) ||
+                    (await this.store.fingerprintExists(normalized.questionFp))
+                ) {
+                    throw new Error('Duplicate question fingerprint');
+                }
+
                 logger.info(
-                    `Interview Q generated via ${provider}/${model}: ${normalized.type} · ${normalized.topic}`
+                    `Interview Q generated via ${provider}/${model}: ${normalized.type} · ${normalized.difficulty} · ${normalized.topic}`
                 );
                 return normalized;
             } catch (err) {
@@ -326,8 +423,9 @@ class InterviewQuestionService {
 
     /**
      * Save + post poll for one jid. Skips if slot already used.
+     * @param {object} [opts.question] pre-generated question (shared across groups for one slot)
      */
-    async postQuestionToJid(sock, jid, { slotKey, slotIndex = 0, category } = {}) {
+    async postQuestionToJid(sock, jid, { slotKey, slotIndex = 0, category, question } = {}) {
         if (!sock || !jid) {
             throw new Error('Missing sock/jid');
         }
@@ -342,7 +440,7 @@ class InterviewQuestionService {
             await this.store.deleteById(existing._id);
         }
 
-        const q = await this.generateQuestion({ category, slotIndex });
+        const q = question || (await this.generateQuestion({ category, slotIndex }));
         const answerDelayMs = this.cfg.INTERVIEW_Q_ANSWER_DELAY_MS || 30 * 60 * 1000;
 
         const doc = await this.store.insertQuestion({
@@ -352,6 +450,7 @@ class InterviewQuestionService {
             difficulty: q.difficulty,
             topic: q.topic,
             question: q.question,
+            question_fp: q.questionFp || questionFingerprint(q.question),
             options: q.options,
             correct_option: q.correctOption,
             proper_answer: q.properAnswer,
@@ -410,6 +509,7 @@ class InterviewQuestionService {
             timeComplexity: doc.time_complexity,
             spaceComplexity: doc.space_complexity,
             commonMistake: doc.common_mistake,
+            questionFp: doc.question_fp || questionFingerprint(doc.question),
         };
     }
 
@@ -437,7 +537,6 @@ class InterviewQuestionService {
 
         const sock = this._getSock?.();
         if (!sock) {
-            // retry in 60s when sock not ready
             this.scheduleAnswer(docId, Date.now() + 60_000);
             return { ok: false, reason: 'no_sock' };
         }
@@ -479,6 +578,14 @@ class InterviewQuestionService {
             return { posted: 0, groups: 0, skipped: 0 };
         }
 
+        let sharedQuestion = null;
+        try {
+            sharedQuestion = await this.generateQuestion({ slotIndex });
+        } catch (err) {
+            logger.error(`Interview Q generate for slot ${slotKey} failed: ${err.message}`);
+            return { posted: 0, groups: groups.length, skipped: 0 };
+        }
+
         let posted = 0;
         let skipped = 0;
         for (const group of groups) {
@@ -486,6 +593,7 @@ class InterviewQuestionService {
                 const result = await this.postQuestionToJid(sock, group.group_id, {
                     slotKey,
                     slotIndex,
+                    question: sharedQuestion,
                 });
                 if (result.skipped) skipped++;
                 else posted++;
@@ -497,10 +605,6 @@ class InterviewQuestionService {
         return { posted, groups: groups.length, skipped };
     }
 
-    /**
-     * True when every currently enabled group already has this slot posted
-     * (or answered). Used so catch-up does not regenerate after a restart.
-     */
     async isSlotFullyPosted(slotKey) {
         if (!slotKey || !this.store) return false;
         const groups = await this.groupManager.getInterviewQGroups();
@@ -512,6 +616,83 @@ class InterviewQuestionService {
             }
         }
         return true;
+    }
+
+    /**
+     * Post Saturday-night learning recap of the past week to all enabled groups.
+     * @param {string} summaryKey e.g. summary-2026-07-26
+     */
+    async postWeeklySummaryToGroups(sock, { summaryKey, sinceMs } = {}) {
+        const groups = await this.groupManager.getInterviewQGroups();
+        if (!groups.length) {
+            return { posted: 0, groups: 0, skipped: 0 };
+        }
+
+        const since = new Date(sinceMs || Date.now() - 7 * 24 * 60 * 60 * 1000);
+        const weekLabel = `Week of ${since.toLocaleDateString('en-IN', {
+            timeZone: this.cfg.INTERVIEW_Q_TIMEZONE || 'Asia/Kolkata',
+            day: 'numeric',
+            month: 'short',
+        })}`;
+
+        let posted = 0;
+        let skipped = 0;
+        for (const group of groups) {
+            const slotKey = summaryKey || `summary-${Date.now()}`;
+            try {
+                const existing = await this.store.findBySlot(group.group_id, slotKey);
+                if (existing && existing.status !== 'failed') {
+                    skipped++;
+                    continue;
+                }
+                if (existing?.status === 'failed') {
+                    await this.store.deleteById(existing._id);
+                }
+
+                const docs = await this.store.findPostedSince(group.group_id, since);
+                const seen = new Set();
+                const unique = [];
+                for (const d of docs) {
+                    const fp = d.question_fp || questionFingerprint(d.question);
+                    if (fp && seen.has(fp)) continue;
+                    if (fp) seen.add(fp);
+                    unique.push(d);
+                }
+
+                const text = formatWeeklySummary(unique, { weekLabel });
+                await sock.sendMessage(group.group_id, { text, linkPreview: false });
+
+                await this.store.insertQuestion({
+                    jid: group.group_id,
+                    slot_key: slotKey,
+                    type: 'Weekly Summary',
+                    difficulty: 'Recap',
+                    topic: 'Weekend revision',
+                    question: `Weekly summary (${unique.length} Qs)`,
+                    question_fp: questionFingerprint(`summary:${slotKey}:${group.group_id}`),
+                    options: { A: '-', B: '-', C: '-', D: '-' },
+                    correct_option: 'A',
+                    proper_answer: '',
+                    explanation: '',
+                    hint: '',
+                    approach: '',
+                    time_complexity: '',
+                    space_complexity: '',
+                    common_mistake: '',
+                    status: 'answer_posted',
+                    poll_message_id: '',
+                    poll_message_key: null,
+                    question_posted_at: new Date(),
+                    answer_due_at: null,
+                    answer_posted_at: new Date(),
+                });
+                posted++;
+                await new Promise((r) => setTimeout(r, 800));
+            } catch (err) {
+                logger.error(`Interview Q weekly summary failed for ${group.group_id}: ${err.message}`);
+            }
+        }
+        return { posted, groups: groups.length, skipped };
     }
 }
 
