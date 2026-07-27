@@ -50,7 +50,6 @@ import GroupSummaryController from './src/controllers/GroupSummaryController.js'
 import AssistService from './src/services/AssistService.js';
 import ResumeProfileStore from './src/models/ResumeProfileStore.js';
 import ResumeTailorService from './src/services/ResumeTailorService.js';
-import ResumeAtsService from './src/services/ResumeAtsService.js';
 import { startGroupSummaryScheduler } from './src/utils/groupSummaryScheduler.js';
 import TradeAlertController from './src/controllers/TradeAlertController.js';
 import { startTradeAlertScheduler } from './src/utils/tradeAlertScheduler.js';
@@ -219,7 +218,6 @@ class WhatsAppCourseBot {
             this.resumeStore = new ResumeProfileStore(mongoDb);
             await this.resumeStore.init();
             this.resumeTailorService = new ResumeTailorService(config, this.resumeStore);
-            this.resumeAtsService = new ResumeAtsService(config, this.resumeStore);
 
             this.tradeAlertController = new TradeAlertController(
                 this.groupManager,
@@ -289,7 +287,7 @@ class WhatsAppCourseBot {
             this.commandController.setGroupSummaryController(this.groupSummaryController);
             this.commandController.setTradeAlertController(this.tradeAlertController);
             this.commandController.setAssistService(this.assistService);
-            this.commandController.setResumeTailor(this.resumeStore, this.resumeTailorService, this.resumeAtsService);
+            this.commandController.setResumeTailor(this.resumeStore, this.resumeTailorService);
             
             this.whatsappService = new WhatsAppService(
                 this.commandController,

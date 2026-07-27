@@ -83,18 +83,4 @@ if (fs.existsSync(rlPath)) {
     );
 }
 
-// Image resumes are detected but need OCR (handled by ATS layer)
-const pngPath = 'c:/Users/jaikishanbagul/Downloads/Jaikishan_Resume_22-07_preview.png';
-if (fs.existsSync(pngPath)) {
-    const png = fs.readFileSync(pngPath);
-    assert.strictEqual(sniffResumeKind(png), 'image');
-    let imgRejected = false;
-    try {
-        await extractResumeText(png, { fileName: 'resume.png', mimetype: 'image/png' });
-    } catch (e) {
-        imgRejected = /OCR/i.test(e.message);
-    }
-    assert.ok(imgRejected, 'image should require OCR');
-}
-
 console.log('resume extract self-check ok');

@@ -219,16 +219,6 @@ export const config = {
         .map((s) => s.trim())
         .filter(Boolean),
     OPENROUTER_MODELS: (process.env.OPENROUTER_MODELS || '').trim(),
-    /** Vision/OCR models for scanned resumes (images + PDFs via OpenRouter). */
-    OPENROUTER_VISION_MODELS: (process.env.OPENROUTER_VISION_MODELS || '')
-        .trim() ||
-        [
-            'google/gemini-2.5-flash',
-            'google/gemini-2.0-flash-001',
-            'qwen/qwen2.5-vl-72b-instruct',
-            'qwen/qwen-2.5-vl-7b-instruct:free',
-            'meta-llama/llama-3.2-11b-vision-instruct:free',
-        ].join(','),
     OPENROUTER_TIMEOUT_MS: (() => {
         const n = parseInt(process.env.OPENROUTER_TIMEOUT_MS, 10);
         if (!Number.isFinite(n) || n <= 0) return 90_000;

@@ -110,7 +110,6 @@ import {
     handleCv,
     handleTailor,
     handleCover,
-    handleAts,
     handlePendingResumeInput,
     createResumeSessionStore,
 } from './handlers/resumeHandlers.js';
@@ -139,7 +138,6 @@ class CommandController {
         this.assistService = null;
         this.resumeStore = null;
         this.resumeTailorService = null;
-        this.resumeAtsService = null;
         this.interviewQuestionService = null;
         this.pendingClearConfirmations = new Map();
         this.pendingScrapSessions = createScrapSessionStore();
@@ -157,10 +155,9 @@ class CommandController {
         this._isOwnerFromJid = this._isOwnerFromJid.bind(this);
     }
 
-    setResumeTailor(resumeStore, resumeTailorService, resumeAtsService = null) {
+    setResumeTailor(resumeStore, resumeTailorService) {
         this.resumeStore = resumeStore;
         this.resumeTailorService = resumeTailorService;
-        this.resumeAtsService = resumeAtsService;
     }
 
     setStickerForwarder(stickerForwarder) {
@@ -241,7 +238,6 @@ class CommandController {
             pendingResumeSessions: this.pendingResumeSessions,
             resumeStore: this.resumeStore,
             resumeTailorService: this.resumeTailorService,
-            resumeAtsService: this.resumeAtsService,
             getSock: this.getSock,
             whatsappService: this.whatsappService,
             groupChatLogService: this.groupChatLogService,
@@ -385,7 +381,6 @@ class CommandController {
             case 'resume':     await handleCv(sock, chatId, senderJid, args, ctx); break;
             case 'tailor':     await handleTailor(sock, chatId, senderJid, args, ctx); break;
             case 'cover':      await handleCover(sock, chatId, senderJid, args, ctx); break;
-            case 'ats':        await handleAts(sock, chatId, senderJid, args, ctx); break;
             case 'trending':   await handleTrending(sock, chatId, senderJid, args, ctx); break;
             case 'tradelert':  await handleTradelert(sock, chatId, senderJid, args, ctx); break;
             case 'tradenow':   await handleTradenow(sock, chatId, senderJid, args, ctx); break;
