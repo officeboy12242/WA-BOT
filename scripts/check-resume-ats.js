@@ -3,6 +3,7 @@
  * Run: node scripts/check-resume-ats.js
  */
 import assert from 'assert';
+import AssistLlmRouter from '../src/services/AssistLlmRouter.js';
 import { normalizeAtsResult, formatAtsReport } from '../src/services/ResumeAtsService.js';
 import { buildAtsUserBlock } from '../src/prompts/resumeAtsPrompt.js';
 
@@ -66,5 +67,21 @@ assert.match(block, /MODE: general ATS \+ JD match/);
 
 const blockNoJd = buildAtsUserBlock('A'.repeat(50) + '\nSKILLS\nNode');
 assert.match(blockNoJd, /jobMatch to null/);
+
+// OpenRouter always appended as last-resort when keyed, even if omitted from provider list
+const router = new AssistLlmRouter({
+    ASSIST_LLM_PROVIDERS: 'gemini,groq',
+    GEMINI_API_KEY: '',
+    GROQ_API_KEY: '',
+    NVIDIA_API_KEY: '',
+    OPENROUTER_API_KEY: 'test-or-key',
+    OPENROUTER_MODEL: 'meta-llama/llama-3.3-70b-instruct:free',
+});
+assert.ok(router.providerOrder.includes('openrouter'), 'openrouter should be last-resort');
+assert.deepEqual(
+    router.providerOrder.filter((p) => p === 'openrouter'),
+    ['openrouter'],
+    'openrouter should appear once'
+);
 
 console.log('OK resume ATS normalize + format');

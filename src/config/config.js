@@ -96,7 +96,7 @@ export const config = {
     GROQ_TRADE_MODEL: process.env.GROQ_TRADE_MODEL?.trim() || 'llama-3.3-70b-versatile',
     GROQ_TRADE_MODELS: process.env.GROQ_TRADE_MODELS?.trim() || 'llama-3.3-70b-versatile,llama-3.1-8b-instant',
     /** Provider order: gemini,groq,nvidia,openrouter */
-    TRADE_LLM_PROVIDERS: (process.env.TRADE_LLM_PROVIDERS || 'gemini,groq,nvidia').trim(),
+    TRADE_LLM_PROVIDERS: (process.env.TRADE_LLM_PROVIDERS || 'gemini,groq,nvidia,openrouter').trim(),
     /** @deprecated Trade alerts use Gemini; kept for group summaries only */
     NVIDIA_TRADE_MODEL: process.env.NVIDIA_TRADE_MODEL?.trim() || 'z-ai/glm-5.2',
     /** Summary self-heal model (code fix proposals) */
@@ -120,7 +120,7 @@ export const config = {
     ASSIST_NVIDIA_MODEL: process.env.ASSIST_NVIDIA_MODEL?.trim() || '',
     ASSIST_NVIDIA_MODELS: process.env.ASSIST_NVIDIA_MODELS?.trim() || '',
     /** Provider order for /assist DMs: gemini,groq,nvidia */
-    ASSIST_LLM_PROVIDERS: (process.env.ASSIST_LLM_PROVIDERS || process.env.TRADE_LLM_PROVIDERS || 'gemini,groq,nvidia').trim(),
+    ASSIST_LLM_PROVIDERS: (process.env.ASSIST_LLM_PROVIDERS || process.env.TRADE_LLM_PROVIDERS || 'gemini,groq,nvidia,openrouter').trim(),
     ASSIST_MAX_HISTORY: Math.max(4, parseInt(process.env.ASSIST_MAX_HISTORY, 10) || 12),
     ASSIST_REPLY_COOLDOWN_MS: Math.max(1500, parseInt(process.env.ASSIST_REPLY_COOLDOWN_MS, 10) || 3500),
     ASSIST_TIMEOUT_MS: Math.min(60_000, Math.max(15_000, parseInt(process.env.ASSIST_TIMEOUT_MS, 10) || 45_000)),
@@ -219,6 +219,16 @@ export const config = {
         .map((s) => s.trim())
         .filter(Boolean),
     OPENROUTER_MODELS: (process.env.OPENROUTER_MODELS || '').trim(),
+    /** Vision/OCR models for scanned resumes (images + PDFs via OpenRouter). */
+    OPENROUTER_VISION_MODELS: (process.env.OPENROUTER_VISION_MODELS || '')
+        .trim() ||
+        [
+            'google/gemini-2.5-flash',
+            'google/gemini-2.0-flash-001',
+            'qwen/qwen2.5-vl-72b-instruct',
+            'qwen/qwen-2.5-vl-7b-instruct:free',
+            'meta-llama/llama-3.2-11b-vision-instruct:free',
+        ].join(','),
     OPENROUTER_TIMEOUT_MS: (() => {
         const n = parseInt(process.env.OPENROUTER_TIMEOUT_MS, 10);
         if (!Number.isFinite(n) || n <= 0) return 90_000;

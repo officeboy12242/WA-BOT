@@ -2,7 +2,7 @@
  * ATS / recruiter resume analysis via AssistLlmRouter.
  */
 
-import AssistLlmRouter from './AssistLlmRouter.js';
+import AssistLlmRouter, { isAssistLlmFallbackError } from './AssistLlmRouter.js';
 import { config } from '../config/config.js';
 import { logger } from '../utils/logger.js';
 import { extractJsonObject } from '../interviewQuestion/interviewQuestion.service.js';
@@ -203,33 +203,54 @@ export default class ResumeAtsService {
 
         const jd = String(jobDescription || '').trim();
         const hasJd = jd.length >= 20;
+        const baseUser = buildAtsUserBlock(base, hasJd ? jd : '');
 
-        const { text, provider, model } = await this.llm.completeChat({
-            systemPrompt: RESUME_ATS_SYSTEM_PROMPT,
-            history: [],
-            userBlock: buildAtsUserBlock(base, hasJd ? jd : ''),
-            maxTokens: 3500,
-            temperature: 0.25,
-            maxChars: 24_000,
-        });
+        let lastErr;
+        for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+                const userBlock =
+                    attempt === 0
+                        ? baseUser
+                        : `${baseUser}\n\nIMPORTANT: Return ONLY one valid JSON object matching the schema. No markdown.`;
+                const { text, provider, model } = await this.llm.completeChat({
+                    systemPrompt: RESUME_ATS_SYSTEM_PROMPT,
+                    history: [],
+                    userBlock,
+                    maxTokens: 3500,
+                    temperature: attempt === 0 ? 0.25 : 0.1,
+                    maxChars: 24_000,
+                });
 
-        const parsed = extractJsonObject(text);
-        const analysis = normalizeAtsResult(parsed, { hasJd });
-        logger.info(
-            `Resume ATS scan via ${provider}/${model} · overall ${analysis.overallScore}` +
-                (hasJd ? ` · JD match ${analysis.jobMatch?.matchScore}` : '')
-        );
-        return { analysis, provider, model, hasJd };
+                const parsed = extractJsonObject(text);
+                const analysis = normalizeAtsResult(parsed, { hasJd });
+                logger.info(
+                    `Resume ATS scan via ${provider}/${model} · overall ${analysis.overallScore}` +
+                        (hasJd ? ` · JD match ${analysis.jobMatch?.matchScore}` : '') +
+                        (attempt ? ` · retry ${attempt}` : '')
+                );
+                return { analysis, provider, model, hasJd };
+            } catch (err) {
+                lastErr = err;
+                const msg = String(err?.message || err);
+                const retryable =
+                    isAssistLlmFallbackError(err) ||
+                    /json|Invalid ATS|parse|empty reply|All assist/i.test(msg);
+                logger.warn(`ATS analyze attempt ${attempt + 1} failed: ${msg}`);
+                if (!retryable || attempt >= 2) break;
+            }
+        }
+
+        throw lastErr || new Error('ATS analysis failed');
     }
 
     /**
-     * OCR fallback for scanned PDFs / image resumes via Gemini.
+     * OCR fallback for scanned PDFs / image resumes — Gemini → OpenRouter vision.
      * @param {{ buffer: Buffer, fileName?: string, mimetype?: string }} opts
      */
     async ocrResume({ buffer, fileName = '', mimetype = '' }) {
-        if (!this.llm.geminiKey) {
+        if (!this.llm.geminiKey && !this.llm.openrouter.isConfigured()) {
             throw new Error(
-                'Could not extract text locally, and Gemini OCR is unavailable (set GEMINI_API_KEY).'
+                'Could not extract text locally, and OCR is unavailable (set GEMINI_API_KEY or OPENROUTER_API_KEY).'
             );
         }
         let mime = String(mimetype || '').split(';')[0].trim().toLowerCase();
