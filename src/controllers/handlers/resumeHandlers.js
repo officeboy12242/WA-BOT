@@ -991,7 +991,9 @@ export async function handleAts(sock, chatId, senderJid, args, ctx) {
             hasJd: hasJdArg,
             stepParse: '✅',
             stepAudit: '🔄',
-            detail: hasJdArg ? 'Recruiter audit + JD match…' : 'Recruiter audit…',
+            detail: hasJdArg
+                ? 'Recruiter audit + JD match (AI fallback enabled)…'
+                : 'Recruiter audit (AI fallback enabled)…',
         });
 
         const resultPromise = resumeAtsService.analyze({

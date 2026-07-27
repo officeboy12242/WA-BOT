@@ -34,8 +34,11 @@ export function isAssistLlmFallbackError(err) {
     const msg = String(err?.message || err);
     const status = err?.response?.status;
     if (isGeminiRateLimitError(err) || isGroqRateLimitError(err) || isOpenRouterRateLimitError(err)) return true;
-    if (status === 429 || status === 503 || status === 502 || status === 504) return true;
-    return /rate limit|quota|timeout|ETIMEDOUT|ECONNABORTED|empty response|overloaded|unavailable/i.test(msg);
+    if (status === 429 || status === 503 || status === 502 || status === 504 || status === 408) return true;
+    if (status === 402 || status === 401 || status === 403) return true;
+    return /rate limit|quota|timeout|ETIMEDOUT|ECONNABORTED|empty response|overloaded|unavailable|credit|exhausted|capacity|RESOURCE_EXHAUSTED|high demand/i.test(
+        msg
+    );
 }
 
 function toOpenAiMessages(systemPrompt, history, userBlock) {
@@ -63,9 +66,35 @@ export default class AssistLlmRouter {
             ['deepseek-ai/deepseek-v4-flash']
         );
         this.openrouter = new OpenRouterLlmService(cfg);
-        this.providerOrder = parseList(cfg.ASSIST_LLM_PROVIDERS || cfg.TRADE_LLM_PROVIDERS, DEFAULT_PROVIDERS);
+        this.providerOrder = this._normalizeProviderOrder(
+            parseList(cfg.ASSIST_LLM_PROVIDERS || cfg.TRADE_LLM_PROVIDERS, DEFAULT_PROVIDERS)
+        );
         this.timeoutMs = Math.min(60_000, Math.max(15_000, Number(cfg.ASSIST_TIMEOUT_MS) || 45_000));
         this.nvidia = new NvidiaDeepSeekService(cfg);
+    }
+
+    /** Always keep OpenRouter as last-resort when an API key exists. */
+    _normalizeProviderOrder(order) {
+        const out = [];
+        for (const p of order || []) {
+            const id = String(p || '').toLowerCase().trim();
+            if (!id || out.includes(id)) continue;
+            out.push(id);
+        }
+        if (this.openrouter.isConfigured() && !out.includes('openrouter')) {
+            out.push('openrouter');
+        }
+        return out.length ? out : [...DEFAULT_PROVIDERS];
+    }
+
+    _availableProviders() {
+        return this.providerOrder.filter((p) => {
+            if (p === 'gemini') return Boolean(this.geminiKey);
+            if (p === 'groq') return Boolean(this.groqKey);
+            if (p === 'nvidia') return Boolean(this.nvidiaKey);
+            if (p === 'openrouter') return this.openrouter.isConfigured();
+            return false;
+        });
     }
 
     isConfigured() {
@@ -74,30 +103,18 @@ export default class AssistLlmRouter {
 
     getProviderChain() {
         const out = [];
-        if (this.geminiKey && this.providerOrder.includes('gemini')) {
-            out.push(`Gemini ${this.geminiModels[0]}`);
-        }
-        if (this.groqKey && this.providerOrder.includes('groq')) {
-            out.push(`Groq ${this.groqModels[0]}`);
-        }
-        if (this.nvidiaKey && this.providerOrder.includes('nvidia')) {
-            out.push(`NVIDIA ${this.nvidiaModels[0].split('/').pop()}`);
-        }
-        if (this.openrouter.isConfigured() && this.providerOrder.includes('openrouter')) {
-            out.push(`OpenRouter ${this.openrouter.tradeModel}`);
+        for (const p of this._availableProviders()) {
+            if (p === 'gemini') out.push(`Gemini ${this.geminiModels[0]}`);
+            else if (p === 'groq') out.push(`Groq ${this.groqModels[0]}`);
+            else if (p === 'nvidia') out.push(`NVIDIA ${this.nvidiaModels[0].split('/').pop()}`);
+            else if (p === 'openrouter') out.push(`OpenRouter ${this.openrouter.tradeModel}`);
         }
         return out;
     }
 
     async completeChat({ systemPrompt, history, userBlock, maxTokens = 512, temperature = 0.75, maxChars = 2000 }) {
         const outLimit = Math.min(50_000, Math.max(200, Number(maxChars) || 2000));
-        const providers = this.providerOrder.filter((p) => {
-            if (p === 'gemini') return Boolean(this.geminiKey);
-            if (p === 'groq') return Boolean(this.groqKey);
-            if (p === 'nvidia') return Boolean(this.nvidiaKey);
-            if (p === 'openrouter') return this.openrouter.isConfigured();
-            return false;
-        });
+        const providers = this._availableProviders();
 
         if (!providers.length) {
             throw new Error('No assist LLM configured (GEMINI, GROQ, NVIDIA, or OPENROUTER API key)');
@@ -135,7 +152,7 @@ export default class AssistLlmRouter {
                                 messages: toOpenAiMessages(systemPrompt, history, userBlock),
                                 temperature,
                                 maxTokens,
-                                timeoutMs: this.timeoutMs,
+                                timeoutMs: Math.max(this.timeoutMs, 90_000),
                             });
                             text = res.text;
                             usedModel = res.model;
@@ -166,10 +183,11 @@ export default class AssistLlmRouter {
                 }
             }
 
-            const hasNext = pi < providers.length - 1;
-            if (hasNext && isAssistLlmFallbackError(lastErr)) {
-                logger.warn(`Assist ${provider} exhausted — trying next provider`);
-                continue;
+            if (pi < providers.length - 1) {
+                logger.warn(
+                    `Assist ${provider} exhausted — trying next provider` +
+                        (lastErr ? ` (last: ${lastErr.message})` : '')
+                );
             }
         }
 
@@ -254,17 +272,13 @@ export default class AssistLlmRouter {
     }
 
     /**
-     * OCR / PDF text extraction via Gemini multimodal (PDF or image bytes).
+     * OCR / PDF text extraction — Gemini first, then OpenRouter vision models.
      * @param {{ buffer: Buffer, mimeType: string, prompt?: string, maxChars?: number }} opts
      */
     async extractMediaText({ buffer, mimeType, prompt, maxChars = 80_000 }) {
-        if (!this.geminiKey) {
-            throw new Error('Gemini API key required for OCR / scanned resume extraction');
-        }
         if (!Buffer.isBuffer(buffer) || !buffer.length) {
             throw new Error('Empty media for OCR');
         }
-        // Gemini inline upload practical ceiling for this bot
         if (buffer.length > 18 * 1024 * 1024) {
             throw new Error('File too large for OCR (max ~18MB)');
         }
@@ -278,55 +292,93 @@ export default class AssistLlmRouter {
                 'Return plain text only — no markdown fences, no commentary.',
             ].join(' ');
 
+        const providers = [];
+        if (this.geminiKey) providers.push('gemini');
+        if (this.openrouter.isConfigured()) providers.push('openrouter');
+
+        if (!providers.length) {
+            throw new Error('No OCR provider configured (set GEMINI_API_KEY or OPENROUTER_API_KEY)');
+        }
+
         let lastErr;
-        for (const model of this.geminiModels) {
+        for (const provider of providers) {
             try {
-                const url = `${GEMINI_ROOT}/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(this.geminiKey)}`;
-                const { data } = await axios.post(
-                    url,
-                    {
-                        contents: [
-                            {
-                                role: 'user',
-                                parts: [
-                                    { text: userPrompt },
-                                    {
-                                        inlineData: {
-                                            mimeType: mime,
-                                            data: buffer.toString('base64'),
+                if (provider === 'gemini') {
+                    for (const model of this.geminiModels) {
+                        try {
+                            const url = `${GEMINI_ROOT}/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(this.geminiKey)}`;
+                            const { data } = await axios.post(
+                                url,
+                                {
+                                    contents: [
+                                        {
+                                            role: 'user',
+                                            parts: [
+                                                { text: userPrompt },
+                                                {
+                                                    inlineData: {
+                                                        mimeType: mime,
+                                                        data: buffer.toString('base64'),
+                                                    },
+                                                },
+                                            ],
                                         },
-                                    },
-                                ],
-                            },
-                        ],
-                        generationConfig: { temperature: 0.1, maxOutputTokens: 8192 },
-                    },
-                    {
-                        timeout: Math.max(this.timeoutMs, 90_000),
-                        headers: { 'Content-Type': 'application/json' },
-                        validateStatus: (s) => s >= 200 && s < 300,
+                                    ],
+                                    generationConfig: { temperature: 0.1, maxOutputTokens: 8192 },
+                                },
+                                {
+                                    timeout: Math.max(this.timeoutMs, 90_000),
+                                    headers: { 'Content-Type': 'application/json' },
+                                    validateStatus: (s) => s >= 200 && s < 300,
+                                }
+                            );
+                            const parts = data?.candidates?.[0]?.content?.parts || [];
+                            const text = parts
+                                .map((p) => p?.text || '')
+                                .join('')
+                                .trim();
+                            if (!text) throw new Error(`${model} empty OCR reply`);
+                            return {
+                                text: text.slice(
+                                    0,
+                                    Math.min(100_000, Math.max(200, Number(maxChars) || 80_000))
+                                ),
+                                provider: 'gemini',
+                                model,
+                            };
+                        } catch (err) {
+                            lastErr = err;
+                            logger.warn(`Assist OCR gemini/${model} failed: ${err.message}`);
+                            if (!isAssistLlmFallbackError(err)) {
+                                // try next gemini model anyway for OCR
+                            }
+                        }
                     }
-                );
-                const parts = data?.candidates?.[0]?.content?.parts || [];
-                const text = parts
-                    .map((p) => p?.text || '')
-                    .join('')
-                    .trim();
-                if (!text) {
-                    throw new Error(`${model} empty OCR reply`);
+                    continue;
                 }
+
+                const res = await this.openrouter.chatVision({
+                    prompt: userPrompt,
+                    buffer,
+                    mimeType: mime,
+                    temperature: 0.1,
+                    maxTokens: 8192,
+                    timeoutMs: Math.max(this.timeoutMs, 90_000),
+                });
                 return {
-                    text: text.slice(0, Math.min(100_000, Math.max(200, Number(maxChars) || 80_000))),
-                    provider: 'gemini',
-                    model,
+                    text: String(res.text || '')
+                        .trim()
+                        .slice(0, Math.min(100_000, Math.max(200, Number(maxChars) || 80_000))),
+                    provider: res.provider,
+                    model: res.model,
                 };
             } catch (err) {
                 lastErr = err;
-                logger.warn(`Assist OCR ${model} failed: ${err.message}`);
-                if (!isAssistLlmFallbackError(err)) break;
+                logger.warn(`Assist OCR ${provider} failed: ${err.message}`);
             }
         }
-        throw lastErr || new Error('Gemini OCR failed');
+
+        throw lastErr || new Error('All OCR providers failed');
     }
 }
 
