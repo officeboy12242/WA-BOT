@@ -19,6 +19,7 @@ class InterviewQuestionStore {
             this.col.createIndex({ jid: 1, slot_key: 1 }, { unique: true, name: 'iq_jid_slot' }),
             this.col.createIndex({ status: 1, answer_due_at: 1 }, { name: 'iq_pending_answers' }),
             this.col.createIndex({ created_at: 1 }, { name: 'iq_created_at' }),
+            this.col.createIndex({ question_fp: 1, created_at: -1 }, { name: 'iq_question_fp' }),
         ]);
         logger.info('Mongo interview question store ready');
     }
@@ -77,6 +78,55 @@ class InterviewQuestionStore {
                 answer_due_at: { $lte: new Date(beforeMs) },
             })
             .sort({ answer_due_at: 1 })
+            .toArray();
+    }
+
+    /** Recent non-failed questions for LLM avoid-list + fingerprint checks. */
+    async findRecentQuestions(limit = 80) {
+        const n = Math.min(300, Math.max(10, Number(limit) || 80));
+        return this.col
+            .find(
+                { status: { $in: ['question_posted', 'answer_posted', 'scheduled'] } },
+                {
+                    projection: {
+                        question: 1,
+                        question_fp: 1,
+                        topic: 1,
+                        type: 1,
+                        difficulty: 1,
+                        created_at: 1,
+                    },
+                }
+            )
+            .sort({ created_at: -1 })
+            .limit(n)
+            .toArray();
+    }
+
+    async fingerprintExists(fp) {
+        if (!fp) return false;
+        const row = await this.col.findOne(
+            {
+                question_fp: fp,
+                status: { $in: ['question_posted', 'answer_posted', 'scheduled'] },
+            },
+            { projection: { _id: 1 } }
+        );
+        return Boolean(row);
+    }
+
+    /**
+     * Questions posted for a jid since `since` (inclusive), for weekly recap.
+     */
+    async findPostedSince(jid, since) {
+        if (!jid || !since) return [];
+        return this.col
+            .find({
+                jid,
+                status: { $in: ['question_posted', 'answer_posted'] },
+                question_posted_at: { $gte: since },
+            })
+            .sort({ question_posted_at: 1 })
             .toArray();
     }
 
