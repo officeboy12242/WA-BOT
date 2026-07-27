@@ -19,16 +19,12 @@ const EXT_BY_MIME = {
     'application/msword': 'doc',
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
     'application/vnd.ms-word': 'doc',
-    'image/jpeg': 'image',
-    'image/jpg': 'image',
-    'image/png': 'image',
-    'image/webp': 'image',
 };
 
 /**
  * @param {string} [fileName]
  * @param {string} [mimetype]
- * @returns {'pdf'|'doc'|'docx'|'txt'|'image'|null}
+ * @returns {'pdf'|'doc'|'docx'|'txt'|null}
  */
 export function detectResumeKind(fileName = '', mimetype = '') {
     const mime = String(mimetype || '').toLowerCase().split(';')[0].trim();
@@ -40,9 +36,7 @@ export function detectResumeKind(fileName = '', mimetype = '') {
     if (ext === 'pdf' || ext === 'doc' || ext === 'docx' || ext === 'txt' || ext === 'text') {
         return ext === 'text' ? 'txt' : ext;
     }
-    if (ext === 'jpg' || ext === 'jpeg' || ext === 'png' || ext === 'webp') return 'image';
     if (mime.startsWith('text/')) return 'txt';
-    if (mime.startsWith('image/')) return 'image';
     return null;
 }
 
@@ -73,7 +67,7 @@ export function unwrapResumeBuffer(buffer) {
 /**
  * Kind from file magic (WhatsApp often sends application/octet-stream with no extension).
  * @param {Buffer} buffer
- * @returns {'pdf'|'doc'|'docx'|'txt'|'image'|null}
+ * @returns {'pdf'|'doc'|'docx'|'txt'|null}
  */
 export function sniffResumeKind(buffer) {
     if (!Buffer.isBuffer(buffer) || buffer.length < 5) return null;
@@ -87,9 +81,6 @@ export function sniffResumeKind(buffer) {
         return 'docx'; // ponytail: resume uploads as ZIP are almost always DOCX
     }
     if (b[0] === 0xd0 && b[1] === 0xcf && b[2] === 0x11 && b[3] === 0xe0) return 'doc';
-    if (b[0] === 0xff && b[1] === 0xd8) return 'image';
-    if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'image';
-    if (b.toString('ascii', 0, 4) === 'RIFF' && b.toString('ascii', 8, 12) === 'WEBP') return 'image';
 
     // Mostly printable → treat as TXT (skip obvious binary)
     const sample = b.subarray(0, Math.min(b.length, 2048));
@@ -254,9 +245,7 @@ export async function extractResumeText(buffer, meta = {}) {
     let text = '';
     let palette = null;
     let typography = null;
-    if (kind === 'image') {
-        throw new Error('Image resume requires OCR');
-    } else if (kind === 'pdf') {
+    if (kind === 'pdf') {
         text = await extractPdfText(raw);
         palette = extractPdfColorPalette(raw);
         typography = extractPdfTypography(raw);
