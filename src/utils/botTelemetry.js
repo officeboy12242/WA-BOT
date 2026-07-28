@@ -4,6 +4,7 @@
  */
 
 import { getTodayDateStrIST } from './dateIST.js';
+import { logger } from './logger.js';
 
 const MAX_EVENTS = 400;
 
@@ -32,6 +33,71 @@ class BotTelemetry {
         this._col = mongoDb.collection('bot_events');
         await this._col.createIndex({ at: 1 }, { expireAfterSeconds: 14 * 24 * 3600, name: 'bot_events_ttl' });
         await this._col.createIndex({ type: 1, at: -1 }, { name: 'bot_events_type_at' });
+        await this.hydrateToday();
+    }
+
+    /** Rebuild today's counters + recent feed after redeploy. */
+    async hydrateToday() {
+        if (!this._col) return;
+        this._rollDay();
+        const day = this._day;
+        const start = new Date(`${day}T00:00:00+05:30`);
+        try {
+            const rows = await this._col
+                .find({ created_at: { $gte: start } })
+                .sort({ created_at: 1 })
+                .limit(2000)
+                .toArray();
+
+            this.commandCounts.clear();
+            this.postCounts.clear();
+            this.errorCount = 0;
+            this.commandOk = 0;
+            this.commandFail = 0;
+            this.latencySum = 0;
+            this.latencyN = 0;
+            this.events = [];
+
+            for (const row of rows) {
+                const ev = {
+                    id: row.id || String(row._id),
+                    type: row.type,
+                    at: row.at || (row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString()),
+                    cmd: row.cmd,
+                    kind: row.kind,
+                    status: row.status,
+                    ms: row.ms,
+                    query: row.query,
+                    title: row.title,
+                    message: row.message,
+                };
+                this.events.push(ev);
+                if (ev.type === 'command') {
+                    const key = String(ev.cmd || 'unknown');
+                    this.commandCounts.set(key, (this.commandCounts.get(key) || 0) + 1);
+                    if (ev.status === 'ok') {
+                        this.commandOk += 1;
+                        if (Number.isFinite(ev.ms)) {
+                            this.latencySum += ev.ms;
+                            this.latencyN += 1;
+                        }
+                    } else if (ev.status === 'err') {
+                        this.commandFail += 1;
+                    }
+                } else if (ev.type === 'post') {
+                    const key = String(ev.kind || 'other');
+                    this.postCounts.set(key, (this.postCounts.get(key) || 0) + 1);
+                } else if (ev.type === 'error') {
+                    this.errorCount += 1;
+                }
+            }
+            if (this.events.length > MAX_EVENTS) {
+                this.events = this.events.slice(-MAX_EVENTS);
+            }
+            logger.info(`📡 Telemetry hydrated: ${this.events.length} event(s) for ${day}`);
+        } catch (err) {
+            logger.warn(`Telemetry hydrate skipped: ${err.message}`);
+        }
     }
 
     _rollDay() {

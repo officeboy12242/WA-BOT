@@ -3,6 +3,7 @@
  */
 
 import { logger } from './logger.js';
+import { createDurableSlotStore } from './durableSlots.js';
 
 function zonedParts(date, timezone) {
     const formatter = new Intl.DateTimeFormat('en-CA', {
@@ -70,6 +71,12 @@ export function formatSlotKey(date, timezone, hour, minute) {
     return `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}T${hh}:${mm}`;
 }
 
+/** Day-only key (for once-per-day jobs with random wall-clock times). */
+export function formatDayKey(date, timezone) {
+    const p = zonedParts(date, timezone);
+    return `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`;
+}
+
 export function getCurrentDueSlot(postTimes, timezone, now = new Date()) {
     const p = zonedParts(now, timezone);
     const slots = parsePostTimes(postTimes);
@@ -94,12 +101,14 @@ export function getPastDueSlotsToday(postTimes, timezone, now = new Date()) {
  * @param {object} options.botState
  * @param {{ checkAndPostNews: Function, scrapeAndQueueOnly: Function }} options.newsController
  * @param {{ NEWS_POST_TIMES: string[], NEWS_TIMEZONE: string, NEWS_SCRAPE_INTERVAL: number }} options.config
+ * @param {import('../models/BotSettings.js').default} [options.botSettings]
  * @returns {{ stop: () => void }}
  */
-export function startNewsScheduler({ getSock, botState, newsController, config }) {
+export function startNewsScheduler({ getSock, botState, newsController, config, botSettings = null }) {
     let postTimeout = null;
     let scrapeInterval = null;
     let stopped = false;
+    const slots = createDurableSlotStore(botSettings, 'news');
 
     const scheduleNextPost = () => {
         if (stopped) {
@@ -121,10 +130,12 @@ export function startNewsScheduler({ getSock, botState, newsController, config }
                 const due = getCurrentDueSlot(config.NEWS_POST_TIMES, config.NEWS_TIMEZONE);
                 if (due) {
                     const slotKey = formatSlotKey(new Date(), config.NEWS_TIMEZONE, due.hour, due.minute);
-                    if (botState.lastNewsPostSlot !== slotKey) {
-                        botState.lastNewsPostSlot = slotKey;
-                        await newsController.checkAndPostNews(sock, botState);
+                    if (await slots.isDone(botState, slotKey, 'lastNewsPostSlot')) {
+                        return;
                     }
+                    if (!sock) return;
+                    await newsController.checkAndPostNews(sock, botState);
+                    await slots.markDone(botState, slotKey, 'lastNewsPostSlot');
                 }
             } catch (error) {
                 logger.error(`News scheduled post failed: ${error.message}`);

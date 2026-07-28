@@ -94,6 +94,26 @@ class BotSettings {
             { upsert: true }
         );
     }
+
+    /** Generic JSON blob helpers (scheduler slots, etc.). */
+    async getJson(key, fallback = null) {
+        const doc = await this.collection.findOne({ key: String(key) });
+        return doc?.value === undefined ? fallback : doc.value;
+    }
+
+    async setJson(key, value) {
+        await this.collection.updateOne(
+            { key: String(key) },
+            {
+                $set: {
+                    key: String(key),
+                    value,
+                    updated_at: new Date(),
+                },
+            },
+            { upsert: true }
+        );
+    }
 }
 
 export default BotSettings;

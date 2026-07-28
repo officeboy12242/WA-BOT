@@ -3,7 +3,8 @@
  */
 
 import { logger } from './logger.js';
-import { formatSlotKey, msUntilTimeInTimezone } from './newsScheduler.js';
+import { formatDayKey, msUntilTimeInTimezone } from './newsScheduler.js';
+import { createDurableSlotStore } from './durableSlots.js';
 
 function parseTime(str) {
     const [h, m = '0'] = str.trim().split(':');
@@ -35,11 +36,13 @@ function planNextMorningSend(startStr, endStr, timezone, fromMs = Date.now()) {
  * @param {object} options.botState
  * @param {{ sendDailyMorning: Function }} options.morningController
  * @param {object} options.config
+ * @param {import('../models/BotSettings.js').default} [options.botSettings]
  * @returns {{ stop: () => void }}
  */
-export function startMorningScheduler({ getSock, botState, morningController, config }) {
+export function startMorningScheduler({ getSock, botState, morningController, config, botSettings = null }) {
     let postTimeout = null;
     let stopped = false;
+    const slots = createDurableSlotStore(botSettings, 'morning');
 
     const startTime = config.MORNING_MESSAGE_TIME_START;
     const endTime = config.MORNING_MESSAGE_TIME_END;
@@ -67,16 +70,14 @@ export function startMorningScheduler({ getSock, botState, morningController, co
         postTimeout = setTimeout(async () => {
             try {
                 const sock = getSock();
-                const slotKey = formatSlotKey(
-                    new Date(),
-                    config.MORNING_TIMEZONE,
-                    plan.hour,
-                    plan.minute
-                );
-                if (botState.lastMorningPostSlot !== slotKey) {
-                    botState.lastMorningPostSlot = slotKey;
-                    await morningController.sendDailyMorning(sock, botState);
+                // Day key — random wall-clock changes after redeploy; once/day is the real constraint
+                const slotKey = formatDayKey(new Date(), config.MORNING_TIMEZONE);
+                if (await slots.isDone(botState, slotKey, 'lastMorningPostSlot')) {
+                    return;
                 }
+                if (!sock) return;
+                await morningController.sendDailyMorning(sock, botState);
+                await slots.markDone(botState, slotKey, 'lastMorningPostSlot');
             } catch (error) {
                 logger.error(`Morning scheduled send failed: ${error.message}`);
             } finally {
