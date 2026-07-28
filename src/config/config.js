@@ -219,6 +219,11 @@ export const config = {
         .map((s) => s.trim())
         .filter(Boolean),
     OPENROUTER_MODELS: (process.env.OPENROUTER_MODELS || '').trim(),
+    /** Preferred OpenRouter models for group day recap (comma-separated). Coder models are skipped. */
+    OPENROUTER_SUMMARY_MODELS: (process.env.OPENROUTER_SUMMARY_MODELS || '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean),
     OPENROUTER_TIMEOUT_MS: (() => {
         const n = parseInt(process.env.OPENROUTER_TIMEOUT_MS, 10);
         if (!Number.isFinite(n) || n <= 0) return 90_000;

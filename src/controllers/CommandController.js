@@ -468,14 +468,16 @@ class CommandController {
                 if (!this.movieController) {
                     await safeSendMessage(sock, chatId, { text: '⚠️ Movie features not available.' }, originalMsg);
                 } else {
-                    await this.movieController.handleUpcoming(sock, chatId, senderJid, originalMsg);
+                    void this.movieController.handleUpcoming(sock, chatId, senderJid, originalMsg)
+                        .catch((err) => logger.error(`Upcoming handler error: ${err?.message || err}`));
                 }
                 break;
             case 'genre':
                 if (!this.movieController) {
                     await safeSendMessage(sock, chatId, { text: '⚠️ Movie features not available.' }, originalMsg);
                 } else {
-                    await this.movieController.handleGenre(sock, chatId, senderJid, args, originalMsg);
+                    void this.movieController.handleGenre(sock, chatId, senderJid, args, originalMsg)
+                        .catch((err) => logger.error(`Genre handler error: ${err?.message || err}`));
                 }
                 break;
 

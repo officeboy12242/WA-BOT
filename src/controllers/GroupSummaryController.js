@@ -8,6 +8,39 @@ import NvidiaDeepSeekService, { SUMMARY_SYSTEM_PROMPT } from '../services/Nvidia
 import OpenRouterLlmService from '../services/OpenRouterLlmService.js';
 import SummarySelfHealService from '../services/SummarySelfHealService.js';
 
+/** Extra nudge for free/fallback models that otherwise emit vague "general chat" JSON. */
+const SUMMARY_FALLBACK_SYSTEM_PROMPT = [
+    SUMMARY_SYSTEM_PROMPT,
+    'CRITICAL: every topic title+detail must name concrete subjects from the transcript (people, jokes, plans, questions).',
+    'Reject vague fillers like "General discussion", "Casual chat", "Various topics", or "Members talked".',
+    'If the chat is thin, still describe what was actually said — do not invent filler topics.',
+].join(' ');
+
+const WEAK_TOPIC_RE =
+    /general (chat|discussion|talk)|casual (chat|conversation)|various topics|miscellaneous|random (chat|talk)|members (chatted|talked)|day.?s chat|group chat/i;
+
+/**
+ * True when LLM output is specific enough to post (not heuristic-grade fluff).
+ * @param {{ topics?: Array<{ title?: string, detail?: string }>, wrap_up?: string }} summary
+ */
+export function isUsableGroupSummary(summary) {
+    const topics = Array.isArray(summary?.topics) ? summary.topics : [];
+    if (topics.length < 2) return false;
+
+    let solid = 0;
+    for (const t of topics) {
+        const title = String(t?.title || '').trim();
+        const detail = String(t?.detail || '').trim();
+        if (!title) continue;
+        if (WEAK_TOPIC_RE.test(title) || WEAK_TOPIC_RE.test(detail)) continue;
+        if (detail.length >= 35) solid += 1;
+        else if (detail.length >= 15 && title.length >= 8) solid += 1;
+    }
+
+    const wrap = String(summary?.wrap_up || '').trim();
+    return solid >= 2 || (solid >= 1 && wrap.length >= 80);
+}
+
 function parseSummaryTime(timeStr) {
     const [h, m = '0'] = String(timeStr || '00:00').trim().split(':');
     return { hour: Number(h), minute: Number(m) };
@@ -129,16 +162,173 @@ class GroupSummaryController {
         return this.nvidia.isConfigured() || this.openrouter.isConfigured();
     }
 
-    async _summarizeViaOpenRouter(prompt) {
-        const { text, model } = await this.openrouter.chat({
-            system: SUMMARY_SYSTEM_PROMPT,
-            user: prompt,
-            temperature: 0.2,
-            maxTokens: 1200,
-            timeoutMs: this.config.GROUP_SUMMARY_LLM_TIMEOUT_MS || this.config.OPENROUTER_TIMEOUT_MS || 90_000,
-        });
-        logger.info(`Group summary: OpenRouter fallback via ${model}`);
-        return this.nvidia.parseSummaryJson(text);
+    _summaryTimeoutMs() {
+        return this.config.GROUP_SUMMARY_LLM_TIMEOUT_MS || this.config.OPENROUTER_TIMEOUT_MS || 90_000;
+    }
+
+    /**
+     * Try OpenRouter summary models one-by-one; skip weak/vague JSON and move on.
+     * @param {string} prompt
+     * @param {{ maxTokens?: number, system?: string }} [opts]
+     */
+    async _summarizeViaOpenRouter(prompt, opts = {}) {
+        const models = this.openrouter.summaryModels?.length
+            ? this.openrouter.summaryModels
+            : this.openrouter.models;
+        let lastErr;
+        let lastWeak = null;
+
+        for (const model of models) {
+            try {
+                const { text } = await this.openrouter.chat({
+                    system: opts.system || SUMMARY_FALLBACK_SYSTEM_PROMPT,
+                    user: prompt,
+                    temperature: 0.25,
+                    maxTokens: opts.maxTokens ?? 1200,
+                    timeoutMs: this._summaryTimeoutMs(),
+                    models: [model],
+                });
+                const summary = this.nvidia.parseSummaryJson(text);
+                if (!isUsableGroupSummary(summary)) {
+                    lastWeak = summary;
+                    logger.warn(
+                        `Group summary: OpenRouter ${model} returned weak/vague topics — trying next model`
+                    );
+                    continue;
+                }
+                logger.info(`Group summary: OpenRouter via ${model}`);
+                return summary;
+            } catch (err) {
+                lastErr = err;
+                logger.warn(`Group summary: OpenRouter ${model} failed: ${err.message}`);
+            }
+        }
+
+        if (lastWeak && (lastWeak.topics?.length || lastWeak.wrap_up)) {
+            logger.warn('Group summary: all OpenRouter models weak — using best-effort last result');
+            return lastWeak;
+        }
+        throw lastErr || new Error('OpenRouter summary failed');
+    }
+
+    /**
+     * Same map-reduce path as NVIDIA — used when NVIDIA fails or is unset.
+     * @param {string[]} chunkPrompts
+     * @param {{ groupName?: string, dateLabel?: string, totalMessages?: number }} [meta]
+     */
+    async _summarizeChunksViaOpenRouter(chunkPrompts, meta = {}) {
+        if (!chunkPrompts.length) {
+            throw new Error('No chunk prompts provided');
+        }
+        if (chunkPrompts.length === 1) {
+            return this._summarizeViaOpenRouter(chunkPrompts[0]);
+        }
+
+        const partials = [];
+        for (let i = 0; i < chunkPrompts.length; i++) {
+            logger.info(
+                `Group recap OpenRouter chunk ${i + 1}/${chunkPrompts.length} ` +
+                    `for ${meta.groupName || 'group'}`
+            );
+            try {
+                partials.push(await this._summarizeViaOpenRouter(chunkPrompts[i], { maxTokens: 900 }));
+            } catch (err) {
+                logger.warn(
+                    `Group recap OpenRouter chunk ${i + 1}/${chunkPrompts.length} failed: ${err.message}`
+                );
+            }
+        }
+
+        if (!partials.length) {
+            throw new Error('All OpenRouter recap chunks failed');
+        }
+        if (partials.length === 1) {
+            return partials[0];
+        }
+
+        const mergePrompt = [
+            'Merge these partial WhatsApp group recap JSON summaries into one final recap.',
+            meta.groupName ? `Group: ${meta.groupName}` : '',
+            meta.dateLabel ? `Date: ${meta.dateLabel}` : '',
+            meta.totalMessages ? `Total messages that day: ${meta.totalMessages}` : '',
+            'Combine overlapping topics, keep 3-5 topics total, 0-3 notable items, one wrap_up.',
+            'Keep concrete details (names, subjects) — drop vague fillers.',
+            '',
+            ...partials.map((part, idx) => `Part ${idx + 1}:\n${JSON.stringify(part)}`),
+        ]
+            .filter(Boolean)
+            .join('\n');
+
+        const mergeSystem = [
+            'You merge partial group chat recap JSON objects into one final recap.',
+            'Reply with ONLY valid JSON (no markdown fences) in this shape:',
+            '{"topics":[{"title":"short title","detail":"1-2 sentences"}],"notable":["bullet strings"],"wrap_up":"2-4 sentence paragraph"}',
+            'Deduplicate topics; preserve the most important concrete details from each part.',
+        ].join(' ');
+
+        try {
+            const merged = await this._summarizeViaOpenRouter(mergePrompt, {
+                system: mergeSystem,
+                maxTokens: 900,
+            });
+            if (isUsableGroupSummary(merged) || merged.topics?.length) {
+                return merged;
+            }
+            return this.nvidia.mergePartialsLocally(partials, meta);
+        } catch (err) {
+            logger.warn(`Group recap OpenRouter merge failed, using local merge: ${err.message}`);
+            return this.nvidia.mergePartialsLocally(partials, meta);
+        }
+    }
+
+    async _summarizeDay(messages, groupName, dateLabel) {
+        const useChunks = this.chatLog.shouldUseChunkedSummary(messages);
+        const chunkMeta = {
+            groupName,
+            dateLabel,
+            totalMessages: messages.length,
+        };
+
+        if (useChunks) {
+            const chunkPrompts = this.chatLog.buildChunkPrompts(messages, groupName, dateLabel);
+            logger.info(
+                `Group summary: ${groupName} — ${messages.length} msgs, ` +
+                    `${chunkPrompts.length} chunk(s) for map-reduce`
+            );
+            if (this.nvidia.isConfigured()) {
+                try {
+                    return await this.nvidia.summarizeGroupChatChunks(chunkPrompts, chunkMeta);
+                } catch (err) {
+                    logger.warn(`NVIDIA chunk recap failed for ${groupName}: ${err.message}`);
+                    if (!this.openrouter.isConfigured()) throw err;
+                    return this._summarizeChunksViaOpenRouter(chunkPrompts, chunkMeta);
+                }
+            }
+            return this._summarizeChunksViaOpenRouter(chunkPrompts, chunkMeta);
+        }
+
+        const prompt = this.chatLog.buildPrompt(messages, groupName, dateLabel);
+        logger.info(
+            `Group summary: ${groupName} — ${messages.length} msgs, prompt ${prompt.length} chars`
+        );
+        if (this.nvidia.isConfigured()) {
+            try {
+                const summary = await this.nvidia.summarizeGroupChat(prompt);
+                if (isUsableGroupSummary(summary) || summary?.topics?.length) {
+                    return summary;
+                }
+                logger.warn(`NVIDIA recap for ${groupName} looked weak — trying OpenRouter`);
+                if (this.openrouter.isConfigured()) {
+                    return this._summarizeViaOpenRouter(prompt);
+                }
+                return summary;
+            } catch (err) {
+                logger.warn(`NVIDIA recap failed for ${groupName}: ${err.message}`);
+                if (!this.openrouter.isConfigured()) throw err;
+                return this._summarizeViaOpenRouter(prompt);
+            }
+        }
+        return this._summarizeViaOpenRouter(prompt);
     }
 
     async init() {
@@ -343,60 +533,12 @@ class GroupSummaryController {
         }
 
         const stats = this.chatLog.computeStats(messages);
-        const useChunks = this.chatLog.shouldUseChunkedSummary(messages);
         const startedAt = Date.now();
         const heuristic = this.chatLog.buildHeuristicSummary(messages, stats);
 
         let summary;
         try {
-            if (useChunks) {
-                const chunkPrompts = this.chatLog.buildChunkPrompts(messages, groupName, dateLabel);
-                logger.info(
-                    `Group summary: ${groupName} — ${messages.length} msgs, ` +
-                        `${chunkPrompts.length} chunk(s) for map-reduce`
-                );
-                if (this.nvidia.isConfigured()) {
-                    try {
-                        summary = await this.nvidia.summarizeGroupChatChunks(chunkPrompts, {
-                            groupName,
-                            dateLabel,
-                            totalMessages: messages.length,
-                        });
-                    } catch (err) {
-                        logger.warn(`NVIDIA chunk recap failed for ${groupName}: ${err.message}`);
-                        if (this.openrouter.isConfigured()) {
-                            // Single-pass with first chunk merge via OpenRouter if NVIDIA fails
-                            const prompt = this.chatLog.buildPrompt(messages, groupName, dateLabel);
-                            summary = await this._summarizeViaOpenRouter(prompt);
-                        } else {
-                            throw err;
-                        }
-                    }
-                } else {
-                    const prompt = this.chatLog.buildPrompt(messages, groupName, dateLabel);
-                    summary = await this._summarizeViaOpenRouter(prompt);
-                }
-            } else {
-                const prompt = this.chatLog.buildPrompt(messages, groupName, dateLabel);
-                logger.info(
-                    `Group summary: ${groupName} — ${messages.length} msgs, ` +
-                        `prompt ${prompt.length} chars`
-                );
-                if (this.nvidia.isConfigured()) {
-                    try {
-                        summary = await this.nvidia.summarizeGroupChat(prompt);
-                    } catch (err) {
-                        logger.warn(`NVIDIA recap failed for ${groupName}: ${err.message}`);
-                        if (this.openrouter.isConfigured()) {
-                            summary = await this._summarizeViaOpenRouter(prompt);
-                        } else {
-                            throw err;
-                        }
-                    }
-                } else {
-                    summary = await this._summarizeViaOpenRouter(prompt);
-                }
-            }
+            summary = await this._summarizeDay(messages, groupName, dateLabel);
             logger.info(`Group summary: ${groupName} LLM done in ${Date.now() - startedAt}ms`);
         } catch (err) {
             logger.error(`Recap LLM failed for ${groupName}: ${err.message}`);
