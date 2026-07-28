@@ -11,6 +11,7 @@ export function getCyberDashboardHtml() {
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Sassy // Live Mission Control</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script type="module" src="https://unpkg.com/@splinetool/viewer@1.9.82/build/spline-viewer.js"></script>
 <style>
 :root {
   --bg0: #0a0612; --bg1: #16081f;
@@ -174,16 +175,15 @@ body::before {
 .dot.on { background: var(--ok); }
 .dot.wait { background: var(--warn); }
 #orbHost {
-  height: 280px; border-radius: 22px; overflow: hidden; position: relative;
+  height: 320px; border-radius: 22px; overflow: hidden; position: relative;
   padding: 0;
   background:
-    radial-gradient(circle at 50% 80%, rgba(255,79,216,0.2), transparent 50%),
-    radial-gradient(circle at 70% 20%, rgba(94,242,255,0.12), transparent 45%),
-    linear-gradient(180deg, rgba(12,6,18,0.55), rgba(6,2,12,0.75));
+    radial-gradient(circle at 50% 80%, rgba(255,79,216,0.22), transparent 55%),
+    radial-gradient(circle at 20% 20%, rgba(196,76,255,0.18), transparent 45%),
+    linear-gradient(180deg, rgba(12,6,18,0.35), rgba(6,2,12,0.65));
 }
-#orbHost iframe {
-  display: block; width: 100%; height: 100%; border: 0;
-  background: transparent;
+#orbHost spline-viewer {
+  display: block; width: 100%; height: 100%;
 }
 #orbHost .orb-label {
   position: absolute; left: 12px; bottom: 10px; z-index: 2;
@@ -409,15 +409,15 @@ body::before {
       </div>
     </div>
     <div class="glass" id="orbHost">
-      <iframe
-        title="Vanta Black cyber cat robot"
-        allow="autoplay; fullscreen; xr-spatial-tracking"
-        allowfullscreen
-        loading="lazy"
-        src="https://sketchfab.com/models/3bc73ed10e7842039fe8c640839d256d/embed?autostart=1&ui_theme=dark&ui_controls=0&ui_infos=0&ui_inspector=0&ui_watermark=0&ui_help=0&ui_settings=0&ui_vr=0&ui_fullscreen=0&ui_annotations=0&transparent=1&dnt=1"
-      ></iframe>
-      <div class="orb-label">vanta · cyber cat</div>
-      <a class="orb-credit" href="https://sketchfab.com/3d-models/vanta-black-demitsorou-v-3bc73ed10e7842039fe8c640839d256d" target="_blank" rel="noopener noreferrer">Sketchfab · Shriker1</a>
+      <!-- Official Spline Look-At demo: object tracks cursor. Swap url for any exported .splinecode -->
+      <spline-viewer
+        url="https://prod.spline.design/FVZWbQH2B6ndj9UU/scene.splinecode"
+        events-target="global"
+        background="transparent"
+        loading-anim-type="spinner-small-dark"
+      ></spline-viewer>
+      <div class="orb-label">spline · tracks your cursor</div>
+      <a class="orb-credit" href="https://viewer.spline.design/" target="_blank" rel="noopener noreferrer">Made in Spline</a>
     </div>
   </div>
 
