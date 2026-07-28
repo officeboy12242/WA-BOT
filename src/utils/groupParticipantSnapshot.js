@@ -39,12 +39,17 @@ class GroupParticipantSnapshot {
      * @param {import('baileys').WASocket} sock
      * @param {string} groupId
      */
-    async seedGroup(sock, groupId) {
+    /**
+     * @param {import('baileys').WASocket} sock
+     * @param {string} groupId
+     * @param {object|null} [meta] optional — skip WA fetch when already held
+     */
+    async seedGroup(sock, groupId, meta = null) {
         if (!groupId?.endsWith('@g.us')) return;
         try {
-            const meta = await sock.groupMetadata(groupId);
+            const data = meta || (await sock.groupMetadata(groupId));
             const keys = new Set();
-            for (const p of meta.participants || []) {
+            for (const p of data.participants || []) {
                 for (const k of participantKeys(p)) keys.add(k);
             }
             this._snapshots.set(groupId, keys);
@@ -55,16 +60,33 @@ class GroupParticipantSnapshot {
     }
 
     /**
+     * Seed all groups from one groupFetchAllParticipating() result (no N× refetch).
+     * @param {Record<string, object>} participating
+     */
+    seedFromParticipating(participating) {
+        if (!participating || typeof participating !== 'object') return 0;
+        let n = 0;
+        for (const [groupId, meta] of Object.entries(participating)) {
+            if (!groupId?.endsWith?.('@g.us') || !meta) continue;
+            const keys = new Set();
+            for (const p of meta.participants || []) {
+                for (const k of participantKeys(p)) keys.add(k);
+            }
+            this._snapshots.set(groupId, keys);
+            n += 1;
+        }
+        return n;
+    }
+
+    /**
      * @param {import('baileys').WASocket} sock
      */
     async seedAllGroups(sock) {
         if (!sock?.groupFetchAllParticipating) return;
         try {
             const groups = await sock.groupFetchAllParticipating();
-            for (const groupId of Object.keys(groups)) {
-                await this.seedGroup(sock, groupId);
-            }
-            logger.info(`👋 Participant snapshots seeded for ${Object.keys(groups).length} group(s)`);
+            const n = this.seedFromParticipating(groups);
+            logger.info(`👋 Participant snapshots seeded for ${n} group(s)`);
         } catch (err) {
             logger.warn(`Failed to seed participant snapshots: ${err.message}`);
         }

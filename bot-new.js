@@ -7,6 +7,7 @@ import { config } from './src/config/config.js';
 import { closeMongo, connectMongo } from './src/db/mongo.js';
 import { logger } from './src/utils/logger.js';
 import AdminPanel from './src/utils/adminPanel.js';
+import { botTelemetry } from './src/utils/botTelemetry.js';
 import DatabaseModel from './src/models/Database.js';
 import AuthDatabase from './src/models/AuthDatabase.js';
 import CourseAPI from './src/models/CourseAPI.js';
@@ -148,8 +149,14 @@ class WhatsAppCourseBot {
 
             await shortLinkService.init(mongoDb);
             urlShortener.setService(shortLinkService);
+            await botTelemetry.init(mongoDb);
             if (this.adminPanel) {
                 this.adminPanel.setShortLinkService(shortLinkService);
+                this.adminPanel.setDashboardContext({
+                    mongoDb,
+                    groupManager: this.groupManager,
+                    botState,
+                });
             }
 
             this.botSettings = new BotSettings(mongoDb);

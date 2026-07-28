@@ -92,6 +92,17 @@ class MessageQueue {
         this.queues.clear();
         this.processing.clear();
     }
+
+    /** Live queue depth for dashboard. */
+    stats() {
+        let pending = 0;
+        let processing = 0;
+        for (const q of this.queues.values()) pending += q.length;
+        for (const on of this.processing.values()) {
+            if (on) processing += 1;
+        }
+        return { chats: this.queues.size, pending, processing };
+    }
 }
 
 export const messageQueue = new MessageQueue();

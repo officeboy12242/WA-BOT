@@ -30,21 +30,27 @@ const BOT_ROLE_TTL_MS = 3 * 60_000;
 function buildAdminIndex(participants) {
     /** @type {Map<string, boolean>} */
     const index = new Map();
+    /** @type {Map<string, string>} */
+    const phoneByKey = new Map();
     for (const p of participants || []) {
         const isAdmin = p.admin === 'admin' || p.admin === 'superadmin';
-        if (p.id) index.set(String(p.id), isAdmin);
-        if (p.lid) index.set(String(p.lid), isAdmin);
-        if (p.pn) index.set(String(p.pn), isAdmin);
-        if (p.phoneNumber) index.set(String(p.phoneNumber), isAdmin);
         const phone = normalizePhoneNumber(participantToPhone(p));
-        if (phone) index.set(phone, isAdmin);
-        // Also index bare user part of jid
-        const idUser = String(p.id || '').split('@')[0];
-        if (idUser) index.set(idUser, isAdmin);
-        const lidUser = String(p.lid || '').split('@')[0];
-        if (lidUser) index.set(lidUser, isAdmin);
+        const keys = [
+            p.id,
+            p.lid,
+            p.pn,
+            p.phoneNumber,
+            phone,
+            String(p.id || '').split('@')[0],
+            String(p.lid || '').split('@')[0],
+        ].filter(Boolean);
+        for (const key of keys) {
+            const k = String(key);
+            index.set(k, isAdmin);
+            if (phone) phoneByKey.set(k, phone);
+        }
     }
-    return index;
+    return { adminIndex: index, phoneByKey };
 }
 
 class GroupManager {
@@ -207,8 +213,8 @@ class GroupManager {
 
         const fetchPromise = (async () => {
             const data = await sock.groupMetadata(groupId);
-            const adminIndex = buildAdminIndex(data.participants || []);
-            const entry = { data, at: Date.now(), adminIndex };
+            const { adminIndex, phoneByKey } = buildAdminIndex(data.participants || []);
+            const entry = { data, at: Date.now(), adminIndex, phoneByKey };
             if (this.groupMetaCache.size > 100) {
                 const oldest = this.groupMetaCache.keys().next().value;
                 if (oldest !== undefined) this.groupMetaCache.delete(oldest);
@@ -224,6 +230,50 @@ class GroupManager {
         } finally {
             this.groupMetaInflight.delete(inflightKey);
         }
+    }
+
+    /**
+     * Warm meta cache from groupFetchAllParticipating() — avoids N× groupMetadata in big groups.
+     * @param {Record<string, object>} participating
+     */
+    warmMetaFromParticipating(participating) {
+        if (!participating || typeof participating !== 'object') return 0;
+        const now = Date.now();
+        let n = 0;
+        for (const [groupId, data] of Object.entries(participating)) {
+            if (!groupId?.endsWith?.('@g.us') || !data) continue;
+            const id = jidNormalizedUser(String(groupId).replace(/:\d+(?=@)/, '')) || groupId;
+            const { adminIndex, phoneByKey } = buildAdminIndex(data.participants || []);
+            const entry = { data, at: now, adminIndex, phoneByKey };
+            this.groupMetaCache.set(id, entry);
+            if (groupId !== id) this.groupMetaCache.set(groupId, entry);
+            n += 1;
+        }
+        return n;
+    }
+
+    /** O(1) phone lookup from cached participant index. */
+    async resolveParticipantPhoneCached(sock, groupId, jid) {
+        if (!groupId?.endsWith('@g.us') || !jid) return '';
+        const direct = normalizePhoneNumber(extractPhoneNumber(jid));
+        if (direct) return direct;
+        try {
+            await this.getGroupMetadataCached(sock, groupId);
+            const id = jidNormalizedUser(String(groupId).replace(/:\d+(?=@)/, '')) || groupId;
+            const entry = this.groupMetaCache.get(id) || this.groupMetaCache.get(groupId);
+            const keys = [
+                jid,
+                jidNormalizedUser(String(jid).replace(/:\d+(?=@)/, '')) || '',
+                String(jid).split('@')[0],
+            ].filter(Boolean);
+            for (const key of keys) {
+                const phone = entry?.phoneByKey?.get(key);
+                if (phone) return phone;
+            }
+        } catch {
+            // ignore
+        }
+        return '';
     }
 
     _lookupAdminIndex(adminIndex, senderJid, phoneNumber) {
@@ -376,7 +426,7 @@ class GroupManager {
             return null;
         }
         try {
-            const groupMetadata = await sock.groupMetadata(groupId);
+            const groupMetadata = await this.getGroupMetadataCached(sock, groupId);
             const normalizedPhone = normalizePhoneNumber(phone || extractPhoneNumber(jid));
             const normalizedJid = jid ? jidNormalizedUser(jid.replace(/:\d+(?=@)/, '')) || jid : '';
 
@@ -413,7 +463,7 @@ class GroupManager {
         }
 
         try {
-            const groupMetadata = await sock.groupMetadata(groupId);
+            const groupMetadata = await this.getGroupMetadataCached(sock, groupId);
             const botPhone = getBotAccountPhone(sock);
             const botRaw = String(sock.user.id).replace(/:\d+(?=@)/, '');
             const botJid = jidNormalizedUser(botRaw) || botRaw;
@@ -559,19 +609,38 @@ class GroupManager {
     }
 
     async isPrivilegedAsync(sock, chatId, senderJid) {
-        const phoneNumber = extractPhoneNumber(senderJid);
-        if (!phoneNumber) {
-            return false;
+        const phoneNumber = normalizePhoneNumber(extractPhoneNumber(senderJid));
+        if (phoneNumber && (await this.isPrivileged(sock, chatId, phoneNumber))) {
+            return true;
         }
-        return this.isPrivileged(sock, chatId, phoneNumber);
+        // LID / missing phone: resolve via cached participant index, then WA admin check
+        if (chatId?.endsWith('@g.us') && senderJid) {
+            if (!phoneNumber) {
+                const resolved = await this.resolveParticipantPhoneCached(sock, chatId, senderJid);
+                if (resolved && (await this.isPrivileged(sock, chatId, resolved))) {
+                    return true;
+                }
+            }
+            return this.isSenderGroupAdmin(sock, chatId, senderJid);
+        }
+        return false;
     }
 
     async isStaffAsync(sock, chatId, senderJid) {
-        const phoneNumber = extractPhoneNumber(senderJid);
-        if (!phoneNumber) {
-            return false;
+        const phoneNumber = normalizePhoneNumber(extractPhoneNumber(senderJid));
+        if (phoneNumber && (await this.isStaff(sock, chatId, phoneNumber))) {
+            return true;
         }
-        return this.isStaff(sock, chatId, phoneNumber);
+        if (chatId?.endsWith('@g.us') && senderJid) {
+            if (!phoneNumber) {
+                const resolved = await this.resolveParticipantPhoneCached(sock, chatId, senderJid);
+                if (resolved && (await this.isStaff(sock, chatId, resolved))) {
+                    return true;
+                }
+            }
+            return this.isSenderGroupAdmin(sock, chatId, senderJid);
+        }
+        return false;
     }
 
     async isAdminAsync(sock, chatId, senderJid) {

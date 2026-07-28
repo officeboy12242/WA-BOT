@@ -497,6 +497,14 @@ async function withMovieSearchSlot(fn) {
     }
 }
 
+export function getMovieSearchConcurrency() {
+    return {
+        active: movieSearchActive,
+        max: MOVIE_SEARCH_MAX,
+        waiting: movieSearchWaiters.length,
+    };
+}
+
 async function withMovieSearchLock(chatId, senderJid, fn) {
     const key = `${chatId}|${senderJid || 'anon'}`;
     const prev = movieSearchByUser.get(key) || Promise.resolve();
@@ -1611,7 +1619,17 @@ class MovieController {
             }
 
             if (!unlimited) await this.incrementSearchCount(normalizedUserId);
-            void this.logSearch(normalizedUserId, query, results.length, chatId);
+            await this.logSearch(normalizedUserId, query, results.length, chatId);
+            try {
+                const { botTelemetry } = await import('../utils/botTelemetry.js');
+                botTelemetry.track('movie', {
+                    query: query.slice(0, 80),
+                    chatId,
+                    results: results.length,
+                });
+            } catch {
+                // ignore
+            }
 
             if (!servedFromCache) {
                 await progress.flush({

@@ -70,6 +70,8 @@ class GroupChatLogService {
         this.narrative = config.GROUP_SUMMARY_NARRATIVE !== false;
         /** @type {Set<string>} */
         this._enabledGroups = new Set();
+        /** @type {Map<string, number>} in-memory daily counts — avoid countDocuments on every msg */
+        this._dayCounts = new Map();
         this._refreshTimer = null;
         this.collection = null;
     }
@@ -149,12 +151,22 @@ class GroupChatLogService {
             : Date.now();
 
         try {
-            const count = await this.collection.countDocuments({ group_id: storageGroupId, date });
+            const countKey = `${storageGroupId}|${date}`;
+            let count = this._dayCounts.get(countKey);
+            if (count === undefined) {
+                count = await this.collection.countDocuments({ group_id: storageGroupId, date });
+                this._dayCounts.set(countKey, count);
+                // Bound memory — drop oldest keys if map grows
+                if (this._dayCounts.size > 200) {
+                    const first = this._dayCounts.keys().next().value;
+                    if (first !== undefined) this._dayCounts.delete(first);
+                }
+            }
             if (count >= this.maxPerDay) {
                 return;
             }
 
-            await this.collection.updateOne(
+            const result = await this.collection.updateOne(
                 { group_id: storageGroupId, date, message_id: messageId },
                 {
                     $setOnInsert: {
@@ -170,6 +182,9 @@ class GroupChatLogService {
                 },
                 { upsert: true }
             );
+            if (result.upsertedCount) {
+                this._dayCounts.set(countKey, count + 1);
+            }
         } catch (err) {
             if (err?.code !== 11000) {
                 logger.debug(`Group chat log skip: ${err.message}`);

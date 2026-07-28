@@ -368,9 +368,15 @@ function looksLikePhone(value) {
  */
 /** Optional fast metadata provider (GroupManager cache) — avoids full WA fetch in big groups. */
 let _groupMetaProvider = null;
+/** Optional O(1) phone resolver from cached participant index. */
+let _groupPhoneResolver = null;
 
 export function setGroupMetaProvider(provider) {
     _groupMetaProvider = typeof provider === 'function' ? provider : null;
+}
+
+export function setGroupPhoneResolver(resolver) {
+    _groupPhoneResolver = typeof resolver === 'function' ? resolver : null;
 }
 
 export async function resolveJidToPhone(sock, chatId, jid) {
@@ -385,6 +391,12 @@ export async function resolveJidToPhone(sock, chatId, jid) {
         return direct;
     }
     try {
+        if (_groupPhoneResolver) {
+            const phone = await _groupPhoneResolver(sock, chatId, jid);
+            if (looksLikePhone(String(phone || '').replace(/\D/g, ''))) {
+                return String(phone).replace(/\D/g, '');
+            }
+        }
         const meta = _groupMetaProvider
             ? await _groupMetaProvider(sock, chatId)
             : await sock.groupMetadata(chatId);

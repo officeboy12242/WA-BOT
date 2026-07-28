@@ -5,6 +5,7 @@
 
 import { logger } from '../utils/logger.js';
 import { formatCourseMessage } from '../utils/messageFormatter.js';
+import { botTelemetry } from '../utils/botTelemetry.js';
 
 class CourseController {
     constructor(database, courseAPI, config, groupManager, botSettings = null) {
@@ -124,6 +125,11 @@ class CourseController {
                         // Mark as posted for this specific group
                         await this.database.markPosted(cid, group.group_id, name, url);
                         successCount++;
+                        botTelemetry.track('post', {
+                            kind: 'course',
+                            title: String(name).slice(0, 100),
+                            chatId: group.group_id,
+                        });
                     }
                     // Small delay between group posts
                     await new Promise(resolve => setTimeout(resolve, 1000));
