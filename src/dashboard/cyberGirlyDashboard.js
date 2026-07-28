@@ -53,13 +53,22 @@ body::before {
   12% { opacity: 0.9; }
   100% { transform: translateY(-10vh) scale(1.2); opacity: 0; }
 }
-.wrap { max-width: 1280px; margin: 0 auto; padding: 14px 16px 48px; position: relative; z-index: 1; }
+.wrap {
+  max-width: 1280px; margin: 0 auto; padding: 14px 16px 48px; position: relative; z-index: 1;
+  perspective: 1400px; transform-style: preserve-3d;
+}
 
 .ticker {
   overflow: hidden; border-radius: 999px; margin-bottom: 14px;
   border: 1px solid var(--stroke);
   background: rgba(12,4,20,0.65);
-  box-shadow: 0 0 24px rgba(255,79,216,0.18);
+  box-shadow: 0 10px 28px rgba(255,79,216,0.18), 0 2px 0 rgba(255,255,255,0.08) inset;
+  transform: translateZ(20px);
+  transition: transform .35s ease, box-shadow .35s ease;
+}
+.ticker:hover {
+  transform: translateZ(40px) rotateX(6deg) scale(1.01);
+  box-shadow: 0 18px 40px rgba(94,242,255,0.22), 0 0 30px rgba(255,79,216,0.25);
 }
 .ticker-track {
   display: flex; gap: 40px; white-space: nowrap; width: max-content;
@@ -79,15 +88,31 @@ body::before {
 
 .hero {
   display: grid; grid-template-columns: 1.4fr 0.8fr; gap: 16px; align-items: stretch;
-  margin-bottom: 16px;
+  margin-bottom: 16px; transform-style: preserve-3d;
 }
 @media (max-width: 900px) { .hero { grid-template-columns: 1fr; } }
+.glass, .card, .kpi, .panel {
+  transform-style: preserve-3d;
+  will-change: transform;
+}
 .glass {
-  background: linear-gradient(145deg, rgba(255,79,216,0.12), rgba(94,242,255,0.05) 55%, rgba(196,76,255,0.1));
+  background:
+    linear-gradient(160deg, rgba(255,255,255,0.1), transparent 35%),
+    linear-gradient(145deg, rgba(255,79,216,0.14), rgba(94,242,255,0.06) 55%, rgba(196,76,255,0.12));
   border: 1px solid var(--stroke); border-radius: 22px;
-  box-shadow: 0 0 0 1px rgba(255,255,255,0.03) inset, 0 20px 50px rgba(255, 40, 180, 0.12);
+  box-shadow:
+    0 1px 0 rgba(255,255,255,0.12) inset,
+    0 -8px 20px rgba(0,0,0,0.35) inset,
+    0 18px 40px rgba(255, 40, 180, 0.16),
+    0 6px 0 rgba(90, 20, 80, 0.45);
   backdrop-filter: blur(14px);
   position: relative;
+  transition: transform .2s ease, box-shadow .25s ease;
+}
+.glass::before {
+  content: ""; position: absolute; inset: 1px; border-radius: 21px; pointer-events: none;
+  background: linear-gradient(180deg, rgba(255,255,255,0.14), transparent 28%);
+  opacity: 0.55;
 }
 .glass::after {
   content: ""; position: absolute; inset: -1px; border-radius: 22px; pointer-events: none;
@@ -98,6 +123,13 @@ body::before {
 @keyframes sheen {
   0%, 100% { transform: translateX(-30%); opacity: 0.15; }
   50% { transform: translateX(30%); opacity: 0.45; }
+}
+.tilt-active {
+  box-shadow:
+    0 1px 0 rgba(255,255,255,0.18) inset,
+    0 -10px 24px rgba(0,0,0,0.4) inset,
+    0 28px 55px rgba(255, 79, 216, 0.28),
+    0 0 40px rgba(94,242,255,0.18) !important;
 }
 .hero-main { padding: 22px 24px; overflow: hidden; }
 .hero-main h1 {
@@ -145,24 +177,36 @@ body::before {
 #orbHost { height: 180px; border-radius: 22px; overflow: hidden; }
 
 .kpi-grid {
-  display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; margin: 14px 0 18px;
+  display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; margin: 14px 0 18px;
+  perspective: 900px; transform-style: preserve-3d;
 }
 @media (max-width: 1100px) { .kpi-grid { grid-template-columns: repeat(3, 1fr); } }
 @media (max-width: 640px) { .kpi-grid { grid-template-columns: repeat(2, 1fr); } }
 .kpi {
-  padding: 14px; border-radius: 18px; min-height: 92px;
-  background: rgba(12, 4, 20, 0.55); border: 1px solid rgba(255,126,229,0.25);
-  transition: transform .25s ease, box-shadow .25s ease;
+  padding: 14px; border-radius: 18px; min-height: 96px; cursor: default;
+  background:
+    linear-gradient(165deg, rgba(255,255,255,0.12), transparent 40%),
+    rgba(12, 4, 20, 0.62);
+  border: 1px solid rgba(255,126,229,0.28);
+  box-shadow:
+    0 1px 0 rgba(255,255,255,0.1) inset,
+    0 10px 0 rgba(70, 15, 70, 0.55),
+    0 16px 28px rgba(255,79,216,0.12);
+  transition: transform .18s ease, box-shadow .22s ease, border-color .22s ease;
   animation: kpiBreathe 3.8s ease-in-out infinite;
+  transform: translateZ(0) rotateX(8deg);
 }
 .kpi:nth-child(odd) { animation-delay: .6s; }
 @keyframes kpiBreathe {
-  0%, 100% { box-shadow: 0 0 0 rgba(255,79,216,0); }
-  50% { box-shadow: 0 0 22px rgba(255,79,216,0.22); }
+  0%, 100% { filter: brightness(1); }
+  50% { filter: brightness(1.06); }
 }
-.kpi:hover { transform: translateY(-4px) scale(1.02); }
+.kpi:hover, .kpi.tilt-active {
+  border-color: rgba(94,242,255,0.55);
+  z-index: 3;
+}
 .kpi .label { font-size: 0.72rem; color: #d7a8ef; letter-spacing: 0.08em; text-transform: uppercase; }
-.kpi .value { font-size: 1.55rem; font-weight: 700; margin-top: 6px; color: #fff; }
+.kpi .value { font-size: 1.55rem; font-weight: 700; margin-top: 6px; color: #fff; text-shadow: 0 2px 0 rgba(0,0,0,0.35); }
 .kpi .hint { font-size: 0.72rem; color: var(--cyan); margin-top: 4px; opacity: 0.9; }
 .kpi.pop .value { animation: popNum .45s ease; }
 @keyframes popNum {
@@ -171,31 +215,79 @@ body::before {
   100% { transform: scale(1); }
 }
 
-.tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.tabs {
+  display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px;
+  perspective: 800px; transform-style: preserve-3d;
+}
 .tab {
-  border: 1px solid var(--stroke); background: rgba(0,0,0,0.28); color: var(--lilac);
-  padding: 10px 14px; border-radius: 999px; cursor: pointer; font-weight: 600; font-size: 0.85rem;
-  transition: .2s ease;
+  border: 1px solid var(--stroke); background: rgba(0,0,0,0.35); color: var(--lilac);
+  padding: 11px 16px; border-radius: 999px; cursor: pointer; font-weight: 600; font-size: 0.85rem;
+  transform: translateZ(0) rotateX(12deg);
+  box-shadow: 0 8px 0 rgba(60, 10, 55, 0.7), 0 12px 22px rgba(255,79,216,0.12);
+  transition: transform .18s ease, box-shadow .2s ease, color .2s ease, border-color .2s ease, background .2s ease;
+  position: relative; overflow: hidden;
 }
-.tab:hover { color: #fff; border-color: var(--pink); }
+.tab::before {
+  content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
+  background: radial-gradient(circle at var(--mx, 50%) var(--my, 50%), rgba(255,255,255,0.35), transparent 45%);
+  opacity: 0; transition: opacity .2s ease;
+}
+.tab:hover::before { opacity: 1; }
+.tab:hover {
+  color: #fff; border-color: var(--cyan);
+  transform: translateZ(28px) rotateX(0deg) rotateY(var(--ry, 0deg)) scale(1.06);
+  box-shadow:
+    0 0 0 1px rgba(94,242,255,0.35),
+    0 14px 0 rgba(40, 8, 50, 0.55),
+    0 22px 36px rgba(255,79,216,0.35),
+    0 0 28px rgba(94,242,255,0.25);
+}
+.tab:active {
+  transform: translateZ(8px) rotateX(8deg) scale(0.98);
+  box-shadow: 0 4px 0 rgba(60, 10, 55, 0.7), 0 8px 16px rgba(255,79,216,0.2);
+}
 .tab.active {
-  color: #1a0518; background: linear-gradient(90deg, var(--pink), var(--cyan));
-  box-shadow: 0 0 22px rgba(255,79,216,0.45);
-  animation: tabGlow 2.4s ease-in-out infinite;
+  color: #1a0518;
+  background: linear-gradient(120deg, var(--pink), var(--cyan));
+  border-color: transparent;
+  box-shadow:
+    0 10px 0 rgba(90, 20, 110, 0.45),
+    0 18px 34px rgba(255,79,216,0.4),
+    0 0 24px rgba(94,242,255,0.3);
+  animation: none;
 }
-@keyframes tabGlow {
-  0%, 100% { filter: brightness(1); }
-  50% { filter: brightness(1.12); }
+.tab.active:hover {
+  color: #120312;
+  filter: brightness(1.08);
 }
-.panel { display: none; padding: 16px; }
-.panel.active { display: block; animation: fadeUp .35s ease; }
-@keyframes fadeUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
-.grid-2 { display: grid; grid-template-columns: 1.2fr 0.8fr; gap: 12px; }
-.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.panel {
+  display: none; padding: 16px;
+  transform: translateZ(12px) rotateX(2deg);
+}
+.panel.active { display: block; animation: panelIn .4s cubic-bezier(.2,.8,.2,1); }
+@keyframes panelIn {
+  from { opacity: 0; transform: translateZ(-40px) rotateX(18deg) scale(0.96); }
+  to { opacity: 1; transform: translateZ(12px) rotateX(2deg) scale(1); }
+}
+.grid-2 { display: grid; grid-template-columns: 1.2fr 0.8fr; gap: 12px; transform-style: preserve-3d; }
+.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; transform-style: preserve-3d; }
 @media (max-width: 980px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
 .card {
-  padding: 14px; border-radius: 18px; background: rgba(8,3,16,0.55);
-  border: 1px solid rgba(255,126,229,0.22); min-height: 120px;
+  padding: 14px; border-radius: 18px;
+  background:
+    linear-gradient(165deg, rgba(255,255,255,0.1), transparent 38%),
+    rgba(8,3,16,0.62);
+  border: 1px solid rgba(255,126,229,0.24); min-height: 120px;
+  box-shadow:
+    0 1px 0 rgba(255,255,255,0.1) inset,
+    0 12px 0 rgba(55, 10, 60, 0.5),
+    0 18px 30px rgba(0,0,0,0.35);
+  transition: transform .18s ease, box-shadow .22s ease, border-color .22s ease;
+  transform: translateZ(0) rotateX(4deg);
+}
+.card:hover, .card.tilt-active {
+  border-color: rgba(255,122,229,0.55);
+  z-index: 2;
 }
 .card h3 {
   margin: 0 0 10px; font-size: 0.95rem; color: var(--pink2);
@@ -383,7 +475,7 @@ body::before {
     </div>
   </section>
 
-  <div class="footer">public live board · continuous neon motion · SSE + auto refresh · no login needed</div>
+  <div class="footer">public 3D live board · magnetic hover tilt · manual tabs only · SSE + auto refresh</div>
 </div>
 <div class="live-flash" id="toast"></div>
 
@@ -631,16 +723,43 @@ qsa('.tab').forEach(btn => btn.addEventListener('click', () => {
   qs('#panel-' + btn.dataset.tab).classList.add('active');
 }));
 
-/* Auto-rotate tabs gently to keep the wall interesting */
-(function autoTabs() {
-  const order = ['pulse','content','commands','groups','analytics'];
-  let i = 0;
-  setInterval(() => {
-    if (document.hidden) return;
-    i = (i + 1) % order.length;
-    const btn = qs('.tab[data-tab="' + order[i] + '"]');
-    if (btn) btn.click();
-  }, 22000);
+/* Magnetic 3D tilt — unique cursor-follow hover (no auto tab switching) */
+(function tilt3d() {
+  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) return;
+
+  function bindTilt(el, { maxX = 14, maxY = 18, lift = 26 } = {}) {
+    let raf = 0;
+    el.addEventListener('pointermove', (e) => {
+      const r = el.getBoundingClientRect();
+      const px = (e.clientX - r.left) / r.width;
+      const py = (e.clientY - r.top) / r.height;
+      const ry = (px - 0.5) * maxY;
+      const rx = (0.5 - py) * maxX;
+      el.style.setProperty('--mx', (px * 100) + '%');
+      el.style.setProperty('--my', (py * 100) + '%');
+      el.style.setProperty('--ry', ry.toFixed(2) + 'deg');
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        el.classList.add('tilt-active');
+        el.style.transform =
+          'translateZ(' + lift + 'px) rotateX(' + rx.toFixed(2) + 'deg) rotateY(' + ry.toFixed(2) + 'deg) scale(1.03)';
+      });
+    });
+    el.addEventListener('pointerleave', () => {
+      cancelAnimationFrame(raf);
+      el.classList.remove('tilt-active');
+      el.style.transform = '';
+      el.style.removeProperty('--mx');
+      el.style.removeProperty('--my');
+      el.style.removeProperty('--ry');
+    });
+  }
+
+  qsa('.tab').forEach((el) => bindTilt(el, { maxX: 10, maxY: 16, lift: 30 }));
+  qsa('.kpi').forEach((el) => bindTilt(el, { maxX: 16, maxY: 18, lift: 34 }));
+  qsa('.card').forEach((el) => bindTilt(el, { maxX: 10, maxY: 12, lift: 22 }));
+  qsa('.hero-main, #orbHost').forEach((el) => bindTilt(el, { maxX: 8, maxY: 10, lift: 18 }));
 })();
 
 /* Floating sparkles */
@@ -685,23 +804,48 @@ qsa('.tab').forEach(btn => btn.addEventListener('click', () => {
   renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
   host.appendChild(renderer.domElement);
   const mesh = new THREE.Mesh(
-    new THREE.IcosahedronGeometry(1.05, 2),
+    new THREE.IcosahedronGeometry(1.0, 2),
     new THREE.MeshStandardMaterial({
-      color: 0xff4fd8, emissive: 0xc44cff, emissiveIntensity: 0.65,
-      metalness: 0.35, roughness: 0.25, wireframe: true, transparent: true, opacity: 0.92
+      color: 0xff4fd8, emissive: 0xc44cff, emissiveIntensity: 0.7,
+      metalness: 0.4, roughness: 0.2, wireframe: true, transparent: true, opacity: 0.92
     })
   );
-  scene.add(mesh);
-  const light = new THREE.PointLight(0x5ef2ff, 1.5, 12);
+  const core = new THREE.Mesh(
+    new THREE.IcosahedronGeometry(0.55, 1),
+    new THREE.MeshStandardMaterial({
+      color: 0x5ef2ff, emissive: 0xff4fd8, emissiveIntensity: 0.85,
+      metalness: 0.6, roughness: 0.15, transparent: true, opacity: 0.7
+    })
+  );
+  const ring = new THREE.Mesh(
+    new THREE.TorusGeometry(1.35, 0.04, 12, 64),
+    new THREE.MeshStandardMaterial({
+      color: 0xff7ae5, emissive: 0x5ef2ff, emissiveIntensity: 0.6,
+      metalness: 0.5, roughness: 0.2, transparent: true, opacity: 0.85
+    })
+  );
+  ring.rotation.x = Math.PI / 2.6;
+  scene.add(mesh); scene.add(core); scene.add(ring);
+  const light = new THREE.PointLight(0x5ef2ff, 1.6, 12);
   light.position.set(2, 2, 3);
   scene.add(light);
   scene.add(new THREE.AmbientLight(0xff7ae5, 0.5));
   let t = 0;
+  let targetRX = 0, targetRY = 0;
+  host.addEventListener('pointermove', (e) => {
+    const r = host.getBoundingClientRect();
+    targetRY = ((e.clientX - r.left) / r.width - 0.5) * 0.8;
+    targetRX = ((e.clientY - r.top) / r.height - 0.5) * 0.6;
+  });
+  host.addEventListener('pointerleave', () => { targetRX = 0; targetRY = 0; });
   function frame() {
     t += 0.012;
-    mesh.rotation.x = t * 0.7;
-    mesh.rotation.y = t * 1.05;
-    mesh.scale.setScalar(1 + Math.sin(t * 2.2) * 0.06);
+    mesh.rotation.x = t * 0.7 + targetRX;
+    mesh.rotation.y = t * 1.05 + targetRY;
+    core.rotation.y = -t * 1.3;
+    core.rotation.z = t * 0.6;
+    ring.rotation.z = t * 0.45;
+    mesh.scale.setScalar(1 + Math.sin(t * 2.2) * 0.05);
     renderer.render(scene, camera);
     requestAnimationFrame(frame);
   }

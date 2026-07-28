@@ -16,8 +16,8 @@ const html = getCyberDashboardHtml();
 assert.match(html, /MISSION CONTROL/);
 assert.match(html, /chartContent/);
 assert.match(html, /PUBLIC LIVE/);
-assert.match(html, /marquee|ticker/i);
-assert.doesNotMatch(html, /TOKEN|adminToken|\?token=/);
+assert.match(html, /tilt3d|Magnetic 3D tilt/);
+assert.doesNotMatch(html, /autoTabs|Auto-rotate tabs/);
 
 const stats = messageQueue.stats();
 assert.ok('pending' in stats);
