@@ -423,8 +423,8 @@ export const COMMAND_REGISTRY = [
         names: ['/summarynow'],
         key: 'summarynow',
         scope: 'group_only',
-        role: 'staff',
-        help: 'Send group recap now for yesterday (test / catch-up)',
+        role: 'admins',
+        help: 'Send group recap now for yesterday (owners / bot admins / group admins)',
         category: 'movie',
     },
     {

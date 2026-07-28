@@ -50,6 +50,14 @@ const LEAVE_ACTIONS = new Set(['remove', 'leave', 'left']);
 /** @type {Map<string, { timer: NodeJS.Timeout, baseline: { keys: Set<string>, memberCount: number } }>} */
 const pendingWelcomeJobs = new Map();
 
+/** Prefer cached metadata — raw groupMetadata is brutal in 500–1000+ member groups. */
+async function getGroupMeta(sock, groupId, groupManager = null) {
+    if (groupManager?.getGroupMetadataCached) {
+        return groupManager.getGroupMetadataCached(sock, groupId);
+    }
+    return sock.groupMetadata(groupId);
+}
+
 function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -93,14 +101,14 @@ function shouldSendWelcome(groupId, memberJid) {
     return true;
 }
 
-async function resolveWelcomeMentionJid(sock, groupId, memberJid) {
+async function resolveWelcomeMentionJid(sock, groupId, memberJid, groupManager = null) {
     const normalized = normalizeParticipantEntry(memberJid);
     if (!normalized) {
         return '';
     }
 
     try {
-        const meta = await sock.groupMetadata(groupId);
+        const meta = await getGroupMeta(sock, groupId, groupManager);
         const targetPhone = extractPhoneNumber(normalized);
         for (const p of meta.participants || []) {
             const candidates = [
@@ -123,7 +131,7 @@ async function resolveWelcomeMentionJid(sock, groupId, memberJid) {
     return normalized;
 }
 
-async function captureWelcomeBaseline(sock, groupId) {
+async function captureWelcomeBaseline(sock, groupId, groupManager = null) {
     let keys = groupParticipantSnapshot.cloneGroupKeys(groupId);
     if (!keys.size) {
         await groupParticipantSnapshot.seedGroup(sock, groupId);
@@ -132,7 +140,7 @@ async function captureWelcomeBaseline(sock, groupId) {
 
     let memberCount = 0;
     try {
-        const meta = await sock.groupMetadata(groupId);
+        const meta = await getGroupMeta(sock, groupId, groupManager);
         memberCount = meta.participants?.length || 0;
     } catch (err) {
         logger.warn(`Welcome baseline count failed for ${groupId}: ${err.message}`);
@@ -147,7 +155,7 @@ async function sendWelcomeForMember(sock, groupManager, groupId, rawParticipant,
         return;
     }
 
-    const [verified] = await filterCurrentGroupMembers(sock, groupId, [rawParticipant]);
+    const [verified] = await filterCurrentGroupMembers(sock, groupId, [rawParticipant], groupManager);
     if (!verified) {
         logger.debug(`Welcome skipped — ${memberJid} is not in ${groupId}`);
         return;
@@ -172,7 +180,7 @@ async function sendWelcomeForMember(sock, groupManager, groupId, rawParticipant,
         logger.warn(`Welcome: could not fetch group name for ${groupId}: ${err.message}`);
     }
 
-    const mentionJid = await resolveWelcomeMentionJid(sock, groupId, memberJid);
+    const mentionJid = await resolveWelcomeMentionJid(sock, groupId, memberJid, groupManager);
     if (!isValidParticipantJid(mentionJid)) {
         logger.debug(`Welcome skipped — invalid mention JID for ${groupId}`);
         return;
@@ -229,14 +237,14 @@ export function cancelPendingWelcome(groupId) {
     pendingWelcomeJobs.delete(groupId);
 }
 
-async function filterCurrentGroupMembers(sock, groupId, entries) {
+async function filterCurrentGroupMembers(sock, groupId, entries, groupManager = null) {
     if (!entries?.length) {
         return [];
     }
 
     let meta;
     try {
-        meta = await sock.groupMetadata(groupId);
+        meta = await getGroupMeta(sock, groupId, groupManager);
     } catch (err) {
         logger.warn(`Welcome member filter failed for ${groupId}: ${err.message}`);
         return [];
@@ -268,7 +276,7 @@ async function runWelcomeAfterJoin(sock, groupManager, groupId, baseline) {
 
     let meta;
     try {
-        meta = await sock.groupMetadata(groupId);
+        meta = await getGroupMeta(sock, groupId, groupManager);
     } catch (err) {
         logger.warn(`Welcome metadata fetch failed for ${groupId}: ${err.message}`);
         return;
@@ -302,7 +310,7 @@ async function runWelcomeAfterJoin(sock, groupManager, groupId, baseline) {
 }
 
 async function captureAndScheduleWelcome(sock, groupManager, groupId) {
-    const baseline = await captureWelcomeBaseline(sock, groupId);
+    const baseline = await captureWelcomeBaseline(sock, groupId, groupManager);
     if (!baseline.keys.size) {
         logger.debug(`Welcome skipped for ${groupId} — no participant baseline`);
         return;
@@ -338,7 +346,7 @@ export async function handleActivate(sock, chatId, senderJid, { groupManager, or
         const senderPhone = extractPhoneNumber(senderJid);
         let groupName = 'Unknown Group';
         try {
-            const groupMetadata = await sock.groupMetadata(chatId);
+            const groupMetadata = await getGroupMeta(sock, chatId, groupManager);
             groupName = groupMetadata.subject;
         } catch (err) {
             logger.error(`Error fetching group metadata: ${err.message}`);
@@ -405,7 +413,7 @@ export async function handleInstaOn(sock, chatId, senderJid, { groupManager, ori
         const senderPhone = extractPhoneNumber(senderJid);
         let groupName = 'Unknown Group';
         try {
-            const groupMetadata = await sock.groupMetadata(chatId);
+            const groupMetadata = await getGroupMeta(sock, chatId, groupManager);
             groupName = groupMetadata.subject;
         } catch (err) {
             logger.error(`Error fetching group metadata: ${err.message}`);
@@ -444,7 +452,7 @@ export async function handleInstaOff(sock, chatId, senderJid, { groupManager, or
 
         let groupName = 'Unknown Group';
         try {
-            const groupMetadata = await sock.groupMetadata(chatId);
+            const groupMetadata = await getGroupMeta(sock, chatId, groupManager);
             groupName = groupMetadata.subject;
         } catch (err) {
             logger.error(`Error fetching group metadata: ${err.message}`);
@@ -473,7 +481,7 @@ export async function handleStickerOn(sock, chatId, senderJid, { groupManager, s
         const senderPhone = extractPhoneNumber(senderJid);
         let groupName = 'Unknown Group';
         try {
-            const groupMetadata = await sock.groupMetadata(chatId);
+            const groupMetadata = await getGroupMeta(sock, chatId, groupManager);
             groupName = groupMetadata.subject;
         } catch (err) {
             logger.error(`Error fetching group metadata: ${err.message}`);
@@ -514,7 +522,7 @@ export async function handleStickerOff(sock, chatId, senderJid, { groupManager, 
 
         let groupName = 'Unknown Group';
         try {
-            const groupMetadata = await sock.groupMetadata(chatId);
+            const groupMetadata = await getGroupMeta(sock, chatId, groupManager);
             groupName = groupMetadata.subject;
         } catch (err) {
             logger.error(`Error fetching group metadata: ${err.message}`);
@@ -746,7 +754,7 @@ export async function handleSetWelcome(sock, chatId, senderJid, fullCommand, { g
 
         let groupName = 'this group';
         try {
-            const groupMetadata = await sock.groupMetadata(chatId);
+            const groupMetadata = await getGroupMeta(sock, chatId, groupManager);
             groupName = groupMetadata.subject || groupName;
         } catch (err) {
             logger.error(`Error fetching group metadata: ${err.message}`);
@@ -930,7 +938,7 @@ export async function handleNewsOn(sock, chatId, senderJid, { groupManager, orig
 
         let groupName = 'Unknown Group';
         try {
-            const meta = await sock.groupMetadata(chatId);
+            const meta = await getGroupMeta(sock, chatId, groupManager);
             groupName = meta.subject;
         } catch (err) {
             logger.error(`Error fetching group metadata: ${err.message}`);
@@ -979,7 +987,7 @@ export async function handleNewsOff(sock, chatId, senderJid, { groupManager, ori
 
         let groupName = 'Unknown Group';
         try {
-            const meta = await sock.groupMetadata(chatId);
+            const meta = await getGroupMeta(sock, chatId, groupManager);
             groupName = meta.subject;
         } catch (err) {
             logger.error(`Error fetching group metadata: ${err.message}`);
@@ -1018,7 +1026,7 @@ export async function handleCoursesOn(sock, chatId, senderJid, { groupManager, o
 
         let groupName = 'Unknown Group';
         try {
-            const meta = await sock.groupMetadata(chatId);
+            const meta = await getGroupMeta(sock, chatId, groupManager);
             groupName = meta.subject;
         } catch (err) {
             logger.error(`Error fetching group metadata: ${err.message}`);
@@ -1067,7 +1075,7 @@ export async function handleCoursesOff(sock, chatId, senderJid, { groupManager, 
 
         let groupName = 'Unknown Group';
         try {
-            const meta = await sock.groupMetadata(chatId);
+            const meta = await getGroupMeta(sock, chatId, groupManager);
             groupName = meta.subject;
         } catch (err) {
             logger.error(`Error fetching group metadata: ${err.message}`);
@@ -1106,7 +1114,7 @@ export async function handleGithubOn(sock, chatId, senderJid, { groupManager, or
 
         let groupName = 'Unknown Group';
         try {
-            const meta = await sock.groupMetadata(chatId);
+            const meta = await getGroupMeta(sock, chatId, groupManager);
             groupName = meta.subject;
         } catch (err) {
             logger.error(`Error fetching group metadata: ${err.message}`);
@@ -1155,7 +1163,7 @@ export async function handleGithubOff(sock, chatId, senderJid, { groupManager, o
 
         let groupName = 'Unknown Group';
         try {
-            const meta = await sock.groupMetadata(chatId);
+            const meta = await getGroupMeta(sock, chatId, groupManager);
             groupName = meta.subject;
         } catch (err) {
             logger.error(`Error fetching group metadata: ${err.message}`);
@@ -1194,7 +1202,7 @@ export async function handleAwesomeOn(sock, chatId, senderJid, { groupManager, o
 
         let groupName = 'Unknown Group';
         try {
-            const meta = await sock.groupMetadata(chatId);
+            const meta = await getGroupMeta(sock, chatId, groupManager);
             groupName = meta.subject;
         } catch (err) {
             logger.error(`Error fetching group metadata: ${err.message}`);
@@ -1243,7 +1251,7 @@ export async function handleAwesomeOff(sock, chatId, senderJid, { groupManager, 
 
         let groupName = 'Unknown Group';
         try {
-            const meta = await sock.groupMetadata(chatId);
+            const meta = await getGroupMeta(sock, chatId, groupManager);
             groupName = meta.subject;
         } catch (err) {
             logger.error(`Error fetching group metadata: ${err.message}`);
@@ -1272,7 +1280,7 @@ export async function handleMovieOn(sock, chatId, senderJid, { groupManager }) {
         const senderPhone = extractPhoneNumber(senderJid);
         let groupName = 'Unknown Group';
         try {
-            const meta = await sock.groupMetadata(chatId);
+            const meta = await getGroupMeta(sock, chatId, groupManager);
             groupName = meta.subject;
         } catch {}
 
@@ -1310,7 +1318,7 @@ export async function handleMovieOff(sock, chatId, senderJid, { groupManager }) 
 
         let groupName = 'Unknown Group';
         try {
-            const meta = await sock.groupMetadata(chatId);
+            const meta = await getGroupMeta(sock, chatId, groupManager);
             groupName = meta.subject;
         } catch {}
 
@@ -1332,7 +1340,7 @@ export async function handleSummaryOn(sock, chatId, senderJid, { groupManager, g
         const senderPhone = extractPhoneNumber(senderJid);
         let groupName = 'Unknown Group';
         try {
-            const meta = await sock.groupMetadata(chatId);
+            const meta = await getGroupMeta(sock, chatId, groupManager);
             groupName = meta.subject;
         } catch {}
 
@@ -1375,7 +1383,7 @@ export async function handleSummaryOff(sock, chatId, senderJid, { groupManager, 
 
         let groupName = 'Unknown Group';
         try {
-            const meta = await sock.groupMetadata(chatId);
+            const meta = await getGroupMeta(sock, chatId, groupManager);
             groupName = meta.subject;
         } catch {}
 
@@ -1433,7 +1441,7 @@ export async function handleTrending(sock, chatId, senderJid, args, { groupManag
 
         let groupName = 'Unknown Group';
         try {
-            const meta = await sock.groupMetadata(chatId);
+            const meta = await getGroupMeta(sock, chatId, groupManager);
             groupName = meta.subject;
         } catch {}
 

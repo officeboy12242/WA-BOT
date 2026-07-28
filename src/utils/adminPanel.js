@@ -7,6 +7,9 @@ import http from 'http';
 import os from 'os';
 import { URL } from 'url';
 import { logger } from './logger.js';
+import { botTelemetry } from './botTelemetry.js';
+import { getCyberDashboardHtml } from '../dashboard/cyberGirlyDashboard.js';
+import DashboardService from '../services/DashboardService.js';
 
 /**
  * Get comprehensive system metrics
@@ -115,6 +118,90 @@ class AdminPanel {
         this.shortLinkService = null;
         this.adminToken = process.env.ADMIN_TOKEN || 'sassy123';
         this.lastActivity = new Date();
+        this.dashboardService = null;
+        /** @type {Set<import('http').ServerResponse>} */
+        this._sseClients = new Set();
+        this._sseUnsub = null;
+    }
+
+    setDashboardService(service) {
+        this.dashboardService = service;
+    }
+
+    setDashboardContext({ mongoDb, groupManager, botState } = {}) {
+        this.dashboardService = new DashboardService({
+            mongoDb,
+            groupManager,
+            adminPanel: this,
+            botState,
+        });
+        if (!this._sseUnsub) {
+            this._sseUnsub = botTelemetry.subscribe((ev) => this._broadcastSse(ev));
+        }
+    }
+
+    _broadcastSse(ev) {
+        const safe = this._publicEvent(ev);
+        const payload = `data: ${JSON.stringify(safe)}\n\n`;
+        for (const res of this._sseClients) {
+            try {
+                res.write(payload);
+            } catch {
+                this._sseClients.delete(res);
+            }
+        }
+    }
+
+    /** Strip phones / raw JIDs for the public board. */
+    _publicEvent(ev = {}) {
+        const out = { ...ev };
+        delete out.chatId;
+        delete out.phone;
+        delete out.userId;
+        delete out.senderJid;
+        if (out.query) out.query = String(out.query).slice(0, 80);
+        if (out.title) out.title = String(out.title).slice(0, 120);
+        if (out.message) out.message = String(out.message).slice(0, 120);
+        return out;
+    }
+
+    _sanitizePublicSnapshot(snap) {
+        const s = structuredClone ? structuredClone(snap) : JSON.parse(JSON.stringify(snap));
+        if (s.connection) {
+            s.connection = {
+                status: s.connection.status || 'unknown',
+                phone: null,
+            };
+        }
+        s.uptime = process.uptime();
+        if (s.live?.recent) {
+            s.live.recent = s.live.recent.map((ev) => this._publicEvent(ev));
+        }
+        if (s.content?.recentCourses) {
+            s.content.recentCourses = s.content.recentCourses.map((c) => ({
+                name: c.name,
+                at: c.at,
+            }));
+        }
+        if (s.content?.recentNews) {
+            s.content.recentNews = s.content.recentNews.map((n) => ({
+                title: n.title,
+                at: n.at,
+            }));
+        }
+        if (s.groups?.ranked) {
+            s.groups.ranked = s.groups.ranked.map((g) => ({
+                name: g.name,
+                score: g.score,
+                chat: g.chat,
+                movie: g.movie,
+                course: g.course,
+                news: g.news,
+                reasons: g.reasons,
+                flags: g.flags,
+            }));
+        }
+        return s;
     }
 
     setAuthDatabase(authDB) {
@@ -331,6 +418,7 @@ class AdminPanel {
         <div class="header">
             <h1>🤖 Sassy Bot</h1>
             <p>Admin Control Panel</p>
+            <p style="margin-top:12px"><a href="/dashboard" style="color:#ff7ae5;font-weight:700;text-decoration:none">💫 Open public Mission Control →</a></p>
         </div>
 
         <div id="alert" class="alert"></div>
@@ -542,6 +630,58 @@ class AdminPanel {
                 return;
             }
 
+            // Mission-control dashboard — PUBLIC (no token)
+            if (pathname === '/dashboard' || pathname === '/dash') {
+                res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+                res.end(getCyberDashboardHtml());
+                return;
+            }
+
+            if (pathname === '/api/dashboard/snapshot') {
+                try {
+                    if (!this.dashboardService) {
+                        res.writeHead(503, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Dashboard not ready' }));
+                        return;
+                    }
+                    const snap = await this.dashboardService.getSnapshot();
+                    res.writeHead(200, {
+                        'Content-Type': 'application/json',
+                        'Cache-Control': 'no-store',
+                    });
+                    res.end(JSON.stringify(this._sanitizePublicSnapshot(snap)));
+                } catch (err) {
+                    logger.error(`Dashboard snapshot failed: ${err.message}`);
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: err.message }));
+                }
+                return;
+            }
+
+            if (pathname === '/api/dashboard/stream') {
+                res.writeHead(200, {
+                    'Content-Type': 'text/event-stream',
+                    'Cache-Control': 'no-cache',
+                    Connection: 'keep-alive',
+                    'Access-Control-Allow-Origin': '*',
+                });
+                res.write(`data: ${JSON.stringify({ type: 'hello', at: new Date().toISOString() })}\n\n`);
+                this._sseClients.add(res);
+                const ping = setInterval(() => {
+                    try {
+                        res.write(`data: ${JSON.stringify({ type: 'ping', at: new Date().toISOString() })}\n\n`);
+                    } catch {
+                        clearInterval(ping);
+                        this._sseClients.delete(res);
+                    }
+                }, 15000);
+                req.on('close', () => {
+                    clearInterval(ping);
+                    this._sseClients.delete(res);
+                });
+                return;
+            }
+
             // API: Get detailed metrics (for monitoring dashboards)
             if (pathname === '/api/metrics' || pathname === '/metrics') {
                 const metrics = getSystemMetrics();
@@ -637,6 +777,7 @@ class AdminPanel {
         this.server.listen(this.port, '0.0.0.0', () => {
             logger.info(`🏥 Admin panel listening on 0.0.0.0:${this.port}`);
             logger.info(`🔗 Admin URL: http://localhost:${this.port}/admin?token=${this.adminToken}`);
+            logger.info(`💫 Public dashboard: http://localhost:${this.port}/dashboard`);
         });
 
         return this.server;

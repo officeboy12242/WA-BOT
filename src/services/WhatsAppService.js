@@ -20,6 +20,7 @@ import {
     safeSendMessage,
     resolveConversationChatId,
     setGroupMetaProvider,
+    setGroupPhoneResolver,
 } from '../utils/waMessage.js';
 import { rememberLidPnFromMessageKey } from '../utils/lid.js';
 import { resolveChannelSourceEntries } from '../utils/channelResolve.js';
@@ -77,6 +78,11 @@ class WhatsAppService {
         // Fast path for big groups: all metadata lookups share one cache
         if (groupManager?.getGroupMetadataCached) {
             setGroupMetaProvider((sock, chatId) => groupManager.getGroupMetadataCached(sock, chatId));
+        }
+        if (groupManager?.resolveParticipantPhoneCached) {
+            setGroupPhoneResolver((sock, chatId, jid) =>
+                groupManager.resolveParticipantPhoneCached(sock, chatId, jid)
+            );
         }
         this.stickerSourceChannelEntries = stickerSourceChannelEntries;
         this.channelStickerPoller = channelStickerPoller;
@@ -365,24 +371,14 @@ class WhatsAppService {
                     });
                     await this.resolveStickerSourceChannels();
 
-                    if (this.groupManager) {
-                        try {
-                            const welcomeGroups = await this.groupManager.getWelcomeEnabledGroups();
-                            for (const row of welcomeGroups) {
-                                await groupParticipantSnapshot.seedGroup(this.sock, row.group_id);
-                            }
-                            if (welcomeGroups.length) {
-                                logger.info(`👋 Pre-seeded ${welcomeGroups.length} welcome-enabled group(s)`);
-                            }
-                        } catch (err) {
-                            logger.warn(`Welcome group pre-seed failed: ${err.message}`);
-                        }
+                    // One fetch warms meta cache + welcome snapshots — no N× groupMetadata
+                    const warmed = this.groupManager?.warmMetaFromParticipating?.(chats) || 0;
+                    const seeded = groupParticipantSnapshot.seedFromParticipating(chats);
+                    if (warmed || seeded) {
+                        logger.info(
+                            `⚡ Big-group cache warm: ${warmed} meta, ${seeded} participant snapshot(s)`
+                        );
                     }
-
-                    void groupParticipantSnapshot.seedAllGroups(this.sock).catch((err) => {
-                        logger.warn(`Participant snapshot seed failed: ${err.message}`);
-                    });
-                    
                     // Send startup notification
                     await this._sendStartupNotification();
                 } catch (err) {

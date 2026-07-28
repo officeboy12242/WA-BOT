@@ -5,6 +5,7 @@
 
 import { logger } from '../utils/logger.js';
 import { formatNewsArticleMessages } from '../utils/newsFormatter.js';
+import { botTelemetry } from '../utils/botTelemetry.js';
 
 const MESSAGE_DELAY_MS = 400;
 
@@ -62,6 +63,12 @@ class NewsController {
 
         try {
             await this.sendArticleMessages(sock, groupId, unposted, { markPosted: true });
+            botTelemetry.track('post', {
+                kind: 'news',
+                title: String(unposted[0]?.title || 'news').slice(0, 100),
+                chatId: groupId,
+                count: unposted.length,
+            });
             return true;
         } catch (error) {
             logger.error(`Error posting news to ${groupId}: ${error.message}`);

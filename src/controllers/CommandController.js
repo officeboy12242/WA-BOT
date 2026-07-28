@@ -9,6 +9,7 @@ import { logger } from '../utils/logger.js';
 import { sendAndDelete } from '../utils/autoDelete.js';
 import { extractPhoneNumber } from '../utils/permissions.js';
 import { getSafeSendOptions, safeSendMessage, plainSendMessage } from '../utils/waMessage.js';
+import { botTelemetry } from '../utils/botTelemetry.js';
 
 import {
     handlePing,
@@ -326,7 +327,9 @@ class CommandController {
             }
 
         const ctx = { ...this._ctx(), originalMsg, replyOpts: getSafeSendOptions(originalMsg), fullCommand: command.trim() };
+        const t0 = Date.now();
 
+        try {
         switch (def.key) {
             /* ── Core ── */
             case 'ping':     await handlePing(sock, chatId, ctx); break;
@@ -525,12 +528,28 @@ class CommandController {
 
             default: break;
         }
+            botTelemetry.track('command', {
+                cmd: def.key,
+                chatId,
+                status: 'ok',
+                ms: Date.now() - t0,
+            });
         } catch (err) {
+            botTelemetry.track('command', {
+                cmd: def.key,
+                chatId,
+                status: 'err',
+                ms: Date.now() - t0,
+                message: String(err?.message || err).slice(0, 160),
+            });
             logger.error(`Command handler error (${cmd}): ${err?.message || err}`);
             logger.error(err?.stack);
             await plainSendMessage(sock, chatId, {
                 text: '⚠️ Something went wrong running that command. Please try again.',
             }, originalMsg?.key);
+        }
+        } catch (err) {
+            logger.error(`Command dispatch error (${cmd}): ${err?.message || err}`);
         }
     }
 }
