@@ -15,7 +15,8 @@ import { hdHubMoviesService } from '../services/HdHubMoviesService.js';
 import { pronoobDriveService } from '../services/PronoobDriveService.js';
 import { movieCacheService, cloneMovieResults } from '../services/MovieCacheService.js';
 import { urlShortener } from '../utils/urlShortener.js';
-import { safeSendMessage, plainSendMessage, fastSendMessage, resolveOutboundJid } from '../utils/waMessage.js';
+import { safeSendMessage, fastSendMessage, resolveOutboundJid } from '../utils/waMessage.js';
+import { messageQueue } from '../utils/messageQueue.js';
 import { formatProgressLine } from '../utils/progressBar.js';
 import { audioFromFilename, qualityFromFilename } from '../utils/movieMetadata.js';
 
@@ -374,6 +375,11 @@ function formatMovieSearchProgress(dialogue, query, state) {
     return msg.trimEnd();
 }
 
+/** Progress edits sit behind normal command replies so /movie never starves the chat. */
+const MOVIE_PROGRESS_PRIORITY = 2;
+/** Bulk result dumps sit behind progress + commands. */
+const MOVIE_RESULT_PRIORITY = 3;
+
 /**
  * Progress bar via rare milestone edits only (no pulse).
  * Fully await each edit — never Promise.race-abandon (late edits resurrect deleted loaders).
@@ -402,7 +408,11 @@ function makeMovieProgressEditor(sock, chatId, messageKey, dialogue, query) {
             .then(async () => {
                 if (closed) return;
                 try {
-                    await sock.sendMessage(jid, { text, edit: key, linkPreview: false });
+                    // ponytail: queue priority 2 — commands (0–1) cut in; upgrade to direct sock if edits lag badly
+                    await messageQueue.enqueue(chatId, async () => {
+                        if (closed) return;
+                        await sock.sendMessage(jid, { text, edit: key, linkPreview: false });
+                    }, MOVIE_PROGRESS_PRIORITY);
                 } catch (err) {
                     logger.warn(`Movie progress edit skipped: ${err?.message || err}`);
                 }
@@ -461,24 +471,48 @@ async function deleteMovieProgressMessage(sock, chatId, messageKey) {
     }
 }
 
-/** One in-flight /movie loader per chat — overlapping searches spawned duplicate loaders. */
-const movieSearchByChat = new Map();
+/**
+ * One in-flight /movie per user per chat (not whole-chat).
+ * Global slot cap keeps scrapes from melting the host while other users still run in parallel.
+ */
+const movieSearchByUser = new Map();
+const MOVIE_SEARCH_MAX = 6;
+let movieSearchActive = 0;
+/** @type {Array<() => void>} */
+const movieSearchWaiters = [];
 
-async function withMovieSearchLock(chatId, fn) {
-    const prev = movieSearchByChat.get(chatId) || Promise.resolve();
+async function withMovieSearchSlot(fn) {
+    if (movieSearchActive >= MOVIE_SEARCH_MAX) {
+        await new Promise((resolve) => {
+            movieSearchWaiters.push(resolve);
+        });
+    }
+    movieSearchActive += 1;
+    try {
+        return await fn();
+    } finally {
+        movieSearchActive -= 1;
+        const next = movieSearchWaiters.shift();
+        if (next) next();
+    }
+}
+
+async function withMovieSearchLock(chatId, senderJid, fn) {
+    const key = `${chatId}|${senderJid || 'anon'}`;
+    const prev = movieSearchByUser.get(key) || Promise.resolve();
     let unlock;
     const held = new Promise((resolve) => {
         unlock = resolve;
     });
     const tail = prev.then(() => held);
-    movieSearchByChat.set(chatId, tail);
+    movieSearchByUser.set(key, tail);
     await prev.catch(() => {});
     try {
-        return await fn();
+        return await withMovieSearchSlot(fn);
     } finally {
         unlock();
-        if (movieSearchByChat.get(chatId) === tail) {
-            movieSearchByChat.delete(chatId);
+        if (movieSearchByUser.get(key) === tail) {
+            movieSearchByUser.delete(key);
         }
     }
 }
@@ -513,11 +547,18 @@ function rankMovieResults(results, query) {
     return [...results].sort((a, b) => score(b) - score(a));
 }
 
-function movieQuickSend(sock, chatId, content, originalMsg = null) {
+function movieQuickSend(sock, chatId, content, originalMsg = null, priority = MOVIE_PROGRESS_PRIORITY) {
     if (isGroupMessage(chatId)) {
-        return fastSendMessage(sock, chatId, content, originalMsg?.key);
+        return fastSendMessage(sock, chatId, content, originalMsg?.key, priority);
     }
-    return safeSendMessage(sock, chatId, content, originalMsg);
+    return safeSendMessage(sock, chatId, content, originalMsg, { queuePriority: priority });
+}
+
+async function movieResultSend(sock, chatId, content, originalMsg = null) {
+    if (isGroupMessage(chatId)) {
+        return fastSendMessage(sock, chatId, content, originalMsg?.key, MOVIE_RESULT_PRIORITY);
+    }
+    return safeSendMessage(sock, chatId, content, originalMsg, { queuePriority: MOVIE_RESULT_PRIORITY });
 }
 
 const WHATSAPP_MAX_LENGTH = 4096;
@@ -1482,7 +1523,7 @@ class MovieController {
             return;
         }
 
-        return withMovieSearchLock(chatId, async () => {
+        return withMovieSearchLock(chatId, senderJid, async () => {
         const dialogue = getRandomDialogue(SEARCH_DIALOGUES);
         const initialProgress = formatMovieSearchProgress(dialogue, query, {
             percent: 10,
@@ -1640,16 +1681,14 @@ class MovieController {
 
                 try {
                     logger.info(`Sending movie result part ${i + 1}/${resultMessages.length} (${text.length} chars) to ${chatId}...`);
-                    let sent = await plainSendMessage(sock, chatId, { text, linkPreview: false });
-                    if (!sent?.key) {
-                        sent = await fastSendMessage(sock, chatId, { text, linkPreview: false }, originalMsg?.key);
-                    }
+                    let sent = await movieResultSend(sock, chatId, { text, linkPreview: false }, originalMsg);
                     if (!sent?.key && originalMsg) {
                         sent = await safeSendMessage(
                             sock,
                             chatId,
                             { text, linkPreview: false },
                             originalMsg,
+                            { queuePriority: MOVIE_RESULT_PRIORITY },
                         );
                     }
                     logger.info(`Sent movie result part ${i + 1} OK`);
@@ -1660,7 +1699,9 @@ class MovieController {
                     }
 
                     if (i < resultMessages.length - 1) {
-                        await new Promise((r) => setTimeout(r, 200));
+                        // Yield so other chats/commands can run between parts
+                        await new Promise((r) => setImmediate(r));
+                        await new Promise((r) => setTimeout(r, 120));
                     }
                 } catch (sendErr) {
                     logger.error(`Movie result send failed (part ${i + 1}/${resultMessages.length}): ${sendErr.stack || sendErr.message}`);

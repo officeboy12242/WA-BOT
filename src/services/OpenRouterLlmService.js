@@ -10,7 +10,18 @@ const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const DEFAULT_MODELS = [
     'meta-llama/llama-3.3-70b-instruct:free',
     'google/gemma-4-31b-it:free',
-    'qwen/qwen3-coder:free',
+    'google/gemma-4-26b-a4b-it:free',
+    'openai/gpt-oss-20b:free',
+];
+
+/** Models that are poor at narrative chat recaps (JSON topics). */
+const SUMMARY_SKIP_MODEL_RE = /coder|code-|devstral|codestral/i;
+
+const DEFAULT_SUMMARY_MODELS = [
+    'meta-llama/llama-3.3-70b-instruct:free',
+    'google/gemma-4-31b-it:free',
+    'google/gemma-4-26b-a4b-it:free',
+    'openai/gpt-oss-20b:free',
 ];
 
 function parseList(raw, fallback) {
@@ -33,8 +44,25 @@ export default class OpenRouterLlmService {
         this.apiKey = (cfg.OPENROUTER_API_KEY || '').trim();
         const fromCfg = [cfg.OPENROUTER_MODEL, ...(cfg.OPENROUTER_FALLBACK_MODELS || [])].filter(Boolean);
         this.models = parseList(cfg.OPENROUTER_MODELS, fromCfg.length ? fromCfg : DEFAULT_MODELS);
+        this.summaryModels = this._buildSummaryModels(cfg);
         this.tradeModel = this.models[0];
         this.timeoutMs = Math.min(120_000, Math.max(30_000, Number(cfg.OPENROUTER_TIMEOUT_MS) || 90_000));
+    }
+
+    _buildSummaryModels(cfg) {
+        const explicit = Array.isArray(cfg.OPENROUTER_SUMMARY_MODELS) && cfg.OPENROUTER_SUMMARY_MODELS.length
+            ? cfg.OPENROUTER_SUMMARY_MODELS
+            : [];
+        const base = explicit.length ? explicit : [...DEFAULT_SUMMARY_MODELS, ...this.models];
+        const seen = new Set();
+        const out = [];
+        for (const m of base) {
+            const id = String(m || '').trim();
+            if (!id || SUMMARY_SKIP_MODEL_RE.test(id) || seen.has(id)) continue;
+            seen.add(id);
+            out.push(id);
+        }
+        return out.length ? out : [...DEFAULT_SUMMARY_MODELS];
     }
 
     isConfigured() {

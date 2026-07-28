@@ -613,12 +613,14 @@ async function sendWithTimeout(sock, jid, content, opts) {
 
 /**
  * Send a message with DM fallbacks, per-chat queue, and optional quote reply.
+ * Pass `queuePriority` in extraOpts (lower = sooner). Default: DM 0, group 1.
  */
 export async function safeSendMessage(sock, chatId, content, waMessage = null, extraOpts = {}) {
     if (!sock?.sendMessage) {
         throw new Error('WhatsApp socket not ready');
     }
 
+    const { queuePriority, ...sendExtra } = extraOpts || {};
     const key = waMessage?.key;
     const conversationJid = chatId || resolveConversationChatId(key);
     const primaryJid = resolveOutboundJid(key, conversationJid);
@@ -627,6 +629,9 @@ export async function safeSendMessage(sock, chatId, content, waMessage = null, e
     }
 
     const isDm = isDirectMessage(conversationJid) || isDirectMessage(primaryJid);
+    const priority = Number.isFinite(queuePriority)
+        ? queuePriority
+        : (isDm ? 0 : 1);
 
     const doSend = async () => {
         if (isDm) {
@@ -641,7 +646,7 @@ export async function safeSendMessage(sock, chatId, content, waMessage = null, e
             throw new Error(`Send returned empty for ${dmJid}`);
         }
 
-        const primaryOpts = getSafeSendOptions(waMessage, extraOpts, content);
+        const primaryOpts = getSafeSendOptions(waMessage, sendExtra, content);
         const bareOpts = { linkPreview: false };
         let lastErr;
         for (const opts of [primaryOpts, bareOpts]) {
@@ -660,7 +665,7 @@ export async function safeSendMessage(sock, chatId, content, waMessage = null, e
         throw lastErr || new Error(`Send failed for ${primaryJid}`);
     };
 
-    return messageQueue.enqueue(conversationJid || primaryJid, doSend, isDm ? 0 : 1);
+    return messageQueue.enqueue(conversationJid || primaryJid, doSend, priority);
 }
 
 /** Best-effort message delete — never blocks the caller for long. */
@@ -729,10 +734,10 @@ export async function plainSendMessage(sock, chatId, content, key = null) {
 }
 
 /**
- * High-priority group reply — skips quotes, jumps ahead of normal queued sends.
- * Use for time-sensitive acks (movie search, etc.) in busy large groups.
+ * Queued group/DM send without quotes.
+ * @param {number} [priority=0] lower = sooner (0 = jump ahead of normal group cmds)
  */
-export async function fastSendMessage(sock, chatId, content, key = null) {
+export async function fastSendMessage(sock, chatId, content, key = null, priority = 0) {
     if (!sock?.sendMessage || !chatId) return null;
     const conversationJid = chatId || resolveConversationChatId(key);
     const jid = resolveOutboundJid(key, conversationJid);
@@ -745,5 +750,5 @@ export async function fastSendMessage(sock, chatId, content, key = null) {
             logger.warn(`fastSendMessage failed for ${jid}: ${err?.message || err}`);
             return null;
         }
-    }, 0);
+    }, priority);
 }
