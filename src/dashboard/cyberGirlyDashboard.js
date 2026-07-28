@@ -11,14 +11,6 @@ export function getCyberDashboardHtml() {
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Sassy // Live Mission Control</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-<script type="importmap">
-{
-  "imports": {
-    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
-  }
-}
-</script>
 <style>
 :root {
   --bg0: #0a0612; --bg1: #16081f;
@@ -182,17 +174,29 @@ body::before {
 .dot.on { background: var(--ok); }
 .dot.wait { background: var(--warn); }
 #orbHost {
-  height: 220px; border-radius: 22px; overflow: hidden; position: relative;
+  height: 280px; border-radius: 22px; overflow: hidden; position: relative;
+  padding: 0;
   background:
-    radial-gradient(circle at 50% 70%, rgba(255,79,216,0.22), transparent 55%),
-    linear-gradient(180deg, rgba(20,8,30,0.4), rgba(10,4,18,0.55));
+    radial-gradient(circle at 50% 80%, rgba(255,79,216,0.2), transparent 50%),
+    radial-gradient(circle at 70% 20%, rgba(94,242,255,0.12), transparent 45%),
+    linear-gradient(180deg, rgba(12,6,18,0.55), rgba(6,2,12,0.75));
 }
-#orbHost canvas { display: block; width: 100%; height: 100%; }
+#orbHost iframe {
+  display: block; width: 100%; height: 100%; border: 0;
+  background: transparent;
+}
 #orbHost .orb-label {
   position: absolute; left: 12px; bottom: 10px; z-index: 2;
   font-size: 0.68rem; letter-spacing: 0.12em; text-transform: uppercase;
-  color: #ffb6f0; opacity: 0.75; pointer-events: none;
+  color: #ffb6f0; opacity: 0.8; pointer-events: none;
+  text-shadow: 0 0 8px rgba(0,0,0,0.8);
 }
+#orbHost .orb-credit {
+  position: absolute; right: 10px; bottom: 8px; z-index: 2;
+  font-size: 0.58rem; color: #9a7ab0; opacity: 0.7;
+  text-decoration: none;
+}
+#orbHost .orb-credit:hover { color: #ff7ae5; opacity: 1; }
 
 .kpi-grid {
   display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; margin: 14px 0 18px;
@@ -404,7 +408,17 @@ body::before {
         <span class="pill">📡 <span id="sseState">SSE…</span></span>
       </div>
     </div>
-    <div class="glass" id="orbHost"><div class="orb-label">cyber girl · live</div></div>
+    <div class="glass" id="orbHost">
+      <iframe
+        title="Vanta Black cyber cat robot"
+        allow="autoplay; fullscreen; xr-spatial-tracking"
+        allowfullscreen
+        loading="lazy"
+        src="https://sketchfab.com/models/3bc73ed10e7842039fe8c640839d256d/embed?autostart=1&ui_theme=dark&ui_controls=0&ui_infos=0&ui_inspector=0&ui_watermark=0&ui_help=0&ui_settings=0&ui_vr=0&ui_fullscreen=0&ui_annotations=0&transparent=1&dnt=1"
+      ></iframe>
+      <div class="orb-label">vanta · cyber cat</div>
+      <a class="orb-credit" href="https://sketchfab.com/3d-models/vanta-black-demitsorou-v-3bc73ed10e7842039fe8c640839d256d" target="_blank" rel="noopener noreferrer">Sketchfab · Shriker1</a>
+    </div>
   </div>
 
   <div class="kpi-grid">
@@ -777,7 +791,7 @@ qsa('.tab').forEach(btn => btn.addEventListener('click', () => {
   qsa('.tab').forEach((el) => bindTilt(el, { maxX: 10, maxY: 16, lift: 30 }));
   qsa('.kpi').forEach((el) => bindTilt(el, { maxX: 16, maxY: 18, lift: 34 }));
   qsa('.card').forEach((el) => bindTilt(el, { maxX: 10, maxY: 12, lift: 22 }));
-  qsa('.hero-main, #orbHost').forEach((el) => bindTilt(el, { maxX: 8, maxY: 10, lift: 18 }));
+  qsa('.hero-main').forEach((el) => bindTilt(el, { maxX: 8, maxY: 10, lift: 18 }));
 })();
 
 /* Floating sparkles */
@@ -813,149 +827,6 @@ qsa('.tab').forEach(btn => btn.addEventListener('click', () => {
 refresh();
 connectSSE();
 setInterval(refresh, 10000);
-</script>
-
-<script type="module">
-import * as THREE from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-
-const host = document.getElementById('orbHost');
-if (host) {
-  const scene = new THREE.Scene();
-  const camera = new THREE.PerspectiveCamera(32, host.clientWidth / Math.max(host.clientHeight, 1), 0.1, 100);
-  camera.position.set(0, 0.35, 2.15);
-  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-  renderer.setSize(host.clientWidth, host.clientHeight);
-  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-  renderer.outputColorSpace = THREE.SRGBColorSpace;
-  host.appendChild(renderer.domElement);
-
-  const root = new THREE.Group();
-  scene.add(root);
-
-  const amb = new THREE.AmbientLight(0xff7ae5, 0.85);
-  const key = new THREE.PointLight(0xff4fd8, 2.2, 14);
-  key.position.set(1.6, 2.2, 2.4);
-  const fill = new THREE.PointLight(0xc44cff, 1.1, 12);
-  fill.position.set(-2, 0.6, 1.5);
-  const rim = new THREE.PointLight(0xff9ae8, 0.9, 10);
-  rim.position.set(0.2, 1.4, -2.2);
-  scene.add(amb, key, fill, rim);
-
-  function buildProceduralGirl() {
-    const g = new THREE.Group();
-    const skin = new THREE.MeshStandardMaterial({
-      color: 0xffc6e8, emissive: 0x3a1028, emissiveIntensity: 0.25,
-      metalness: 0.15, roughness: 0.45,
-    });
-    const hair = new THREE.MeshStandardMaterial({
-      color: 0x1a0618, emissive: 0xff4fd8, emissiveIntensity: 0.35,
-      metalness: 0.55, roughness: 0.35,
-    });
-    const visor = new THREE.MeshStandardMaterial({
-      color: 0xff4fd8, emissive: 0xc44cff, emissiveIntensity: 1.1,
-      metalness: 0.8, roughness: 0.15, transparent: true, opacity: 0.85,
-    });
-    const jacket = new THREE.MeshStandardMaterial({
-      color: 0x2a0a32, emissive: 0xff4fd8, emissiveIntensity: 0.2,
-      metalness: 0.7, roughness: 0.4,
-    });
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.42, 32, 32), skin);
-    head.scale.set(0.92, 1.05, 0.88);
-    head.position.y = 0.55;
-    const bang = new THREE.Mesh(new THREE.SphereGeometry(0.46, 24, 16, 0, Math.PI * 2, 0, Math.PI / 1.7), hair);
-    bang.position.set(0, 0.62, 0.02);
-    bang.scale.set(1.02, 0.85, 1.05);
-    const pony = new THREE.Mesh(new THREE.ConeGeometry(0.22, 0.7, 16), hair);
-    pony.position.set(0.28, 0.85, -0.15);
-    pony.rotation.z = -0.55;
-    pony.rotation.x = 0.35;
-    const glasses = new THREE.Mesh(new THREE.TorusGeometry(0.18, 0.025, 10, 32), visor);
-    glasses.position.set(0, 0.58, 0.34);
-    glasses.scale.set(1.35, 0.55, 1);
-    const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.38, 0.7, 20), jacket);
-    torso.position.y = -0.05;
-    const collar = new THREE.Mesh(
-      new THREE.TorusGeometry(0.32, 0.018, 8, 40),
-      new THREE.MeshStandardMaterial({
-        color: 0xff4fd8, emissive: 0xff4fd8, emissiveIntensity: 1.4,
-        metalness: 0.6, roughness: 0.2,
-      })
-    );
-    collar.rotation.x = Math.PI / 2;
-    collar.position.y = 0.22;
-    g.add(head, bang, pony, glasses, torso, collar);
-    g.position.y = -0.15;
-    return g;
-  }
-
-  let targetRX = 0, targetRY = 0;
-  host.addEventListener('pointermove', (e) => {
-    const r = host.getBoundingClientRect();
-    targetRY = ((e.clientX - r.left) / r.width - 0.5) * 0.55;
-    targetRX = ((e.clientY - r.top) / r.height - 0.5) * 0.35;
-  });
-  host.addEventListener('pointerleave', () => { targetRX = 0; targetRY = 0; });
-
-  const AVATAR_URLS = [
-    'https://models.readyplayer.me/64bfa15f0e72c63d7c393f43.glb?morphTargets=none&textureAtlas=1024&lod=1',
-    'https://models.readyplayer.me/6185a4acfb622cf1cdc49348.glb?morphTargets=none&textureAtlas=1024&lod=1',
-  ];
-
-  function mountAvatar(model) {
-    model.traverse((o) => {
-      if (o.isMesh) {
-        o.castShadow = false;
-        o.receiveShadow = false;
-      }
-    });
-    const box = new THREE.Box3().setFromObject(model);
-    const size = box.getSize(new THREE.Vector3());
-    const center = box.getCenter(new THREE.Vector3());
-    const scale = 1.55 / Math.max(size.y, 0.001);
-    model.scale.setScalar(scale);
-    model.position.sub(center.multiplyScalar(scale));
-    model.position.y -= 0.55;
-    root.add(model);
-    const label = host.querySelector('.orb-label');
-    if (label) label.textContent = 'cyber girl · rpm';
-  }
-
-  function tryLoad(i) {
-    if (i >= AVATAR_URLS.length) {
-      root.add(buildProceduralGirl());
-      const label = host.querySelector('.orb-label');
-      if (label) label.textContent = 'cyber girl · local';
-      return;
-    }
-    new GLTFLoader().load(
-      AVATAR_URLS[i],
-      (gltf) => mountAvatar(gltf.scene),
-      undefined,
-      () => tryLoad(i + 1)
-    );
-  }
-  tryLoad(0);
-
-  let t = 0;
-  function frame() {
-    t += 0.012;
-    root.rotation.y = Math.sin(t * 0.55) * 0.18 + targetRY;
-    root.rotation.x = Math.sin(t * 0.4) * 0.06 + targetRX;
-    root.position.y = Math.sin(t * 1.4) * 0.03;
-    key.intensity = 2.0 + Math.sin(t * 2.2) * 0.35;
-    renderer.render(scene, camera);
-    requestAnimationFrame(frame);
-  }
-  frame();
-
-  window.addEventListener('resize', () => {
-    const w = host.clientWidth, h = host.clientHeight;
-    camera.aspect = w / Math.max(h, 1);
-    camera.updateProjectionMatrix();
-    renderer.setSize(w, h);
-  });
-}
 </script>
 </body>
 </html>`;
