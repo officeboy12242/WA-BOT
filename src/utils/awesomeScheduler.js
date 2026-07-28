@@ -9,6 +9,7 @@ import {
     getMsUntilNextNewsPost,
     parsePostTimesFromConfig,
 } from './newsScheduler.js';
+import { createDurableSlotStore } from './durableSlots.js';
 
 export { parsePostTimesFromConfig };
 
@@ -18,18 +19,20 @@ export { parsePostTimesFromConfig };
  * @param {object} options.botState
  * @param {{ checkAndPostList: Function }} options.awesomeController
  * @param {{ AWESOME_LISTS_ENABLED: boolean, AWESOME_LISTS_TIMES: string[], AWESOME_LISTS_TIMEZONE: string }} options.config
+ * @param {import('../models/BotSettings.js').default} [options.botSettings]
  */
-export function startAwesomeScheduler({ getSock, botState, awesomeController, config }) {
+export function startAwesomeScheduler({ getSock, botState, awesomeController, config, botSettings = null }) {
     let postTimeout = null;
     let stopped = false;
+    const slots = createDurableSlotStore(botSettings, 'awesome');
 
     if (!config.AWESOME_LISTS_ENABLED) {
         logger.info('⭐ Awesome lists scheduler disabled');
         return { stop() {} };
     }
 
-    const slots = parsePostTimesFromConfig(config.AWESOME_LISTS_TIMES);
-    if (!slots.length) {
+    const slotList = parsePostTimesFromConfig(config.AWESOME_LISTS_TIMES);
+    if (!slotList.length) {
         logger.warn('⭐ Awesome lists enabled but no post times configured');
         return { stop() {} };
     }
@@ -51,18 +54,12 @@ export function startAwesomeScheduler({ getSock, botState, awesomeController, co
             try {
                 const sock = getSock();
                 const due = getCurrentDueSlot(config.AWESOME_LISTS_TIMES, config.AWESOME_LISTS_TIMEZONE);
-                if (!due) {
-                    scheduleNextPost();
-                    return;
-                }
+                if (!due) return;
 
-                const slotIndex = slots.findIndex(
+                const slotIndex = slotList.findIndex(
                     (slot) => slot.hour === due.hour && slot.minute === due.minute
                 );
-                if (slotIndex < 0) {
-                    scheduleNextPost();
-                    return;
-                }
+                if (slotIndex < 0) return;
 
                 const slotKey = formatSlotKey(
                     new Date(),
@@ -70,17 +67,11 @@ export function startAwesomeScheduler({ getSock, botState, awesomeController, co
                     due.hour,
                     due.minute
                 );
-                if (botState.lastAwesomePostSlots?.[slotKey]) {
-                    scheduleNextPost();
-                    return;
-                }
-
-                if (!botState.lastAwesomePostSlots) {
-                    botState.lastAwesomePostSlots = {};
-                }
-                botState.lastAwesomePostSlots[slotKey] = true;
+                if (await slots.isDone(botState, slotKey, 'lastAwesomePostSlots')) return;
+                if (!sock) return;
 
                 await awesomeController.checkAndPostList(sock, botState, slotIndex);
+                await slots.markDone(botState, slotKey, 'lastAwesomePostSlots');
             } catch (err) {
                 logger.error(`Awesome lists scheduled post failed: ${err.message}`);
             } finally {

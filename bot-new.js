@@ -363,6 +363,7 @@ class WhatsAppCourseBot {
                 botState,
                 newsController: this.newsController,
                 config,
+                botSettings: this.botSettings,
             });
 
             this.githubScheduler = startGithubScheduler({
@@ -377,6 +378,7 @@ class WhatsAppCourseBot {
                 botState,
                 awesomeController: this.awesomeListsController,
                 config,
+                botSettings: this.botSettings,
             });
 
             this.interviewQScheduler = startInterviewQuestionScheduler({
@@ -391,6 +393,7 @@ class WhatsAppCourseBot {
                 botState,
                 morningController: this.morningController,
                 config,
+                botSettings: this.botSettings,
             });
 
             this.groupSummaryScheduler = startGroupSummaryScheduler({
@@ -398,6 +401,7 @@ class WhatsAppCourseBot {
                 botState,
                 groupSummaryController: this.groupSummaryController,
                 config,
+                botSettings: this.botSettings,
             });
 
             this.tradeAlertScheduler = startTradeAlertScheduler({
@@ -405,6 +409,7 @@ class WhatsAppCourseBot {
                 botState,
                 tradeAlertController: this.tradeAlertController,
                 config,
+                botSettings: this.botSettings,
             });
 
             this.checkInterval = setInterval(async () => {

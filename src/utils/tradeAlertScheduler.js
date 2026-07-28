@@ -4,6 +4,7 @@
 
 import { logger } from './logger.js';
 import { formatSlotKey, msUntilTimeInTimezone } from './newsScheduler.js';
+import { createDurableSlotStore } from './durableSlots.js';
 
 function parseAlertTime(timeStr) {
     const [h, m = '0'] = String(timeStr || '09:20').trim().split(':');
@@ -16,10 +17,12 @@ function parseAlertTime(timeStr) {
  * @param {object} options.botState
  * @param {import('../controllers/TradeAlertController.js').default} options.tradeAlertController
  * @param {object} options.config
+ * @param {import('../models/BotSettings.js').default} [options.botSettings]
  */
-export function startTradeAlertScheduler({ getSock, botState, tradeAlertController, config }) {
+export function startTradeAlertScheduler({ getSock, botState, tradeAlertController, config, botSettings = null }) {
     let postTimeout = null;
     let stopped = false;
+    const slots = createDurableSlotStore(botSettings, 'trade');
 
     if (config.TRADE_ALERT_ENABLED === false) {
         return { stop() {} };
@@ -47,10 +50,12 @@ export function startTradeAlertScheduler({ getSock, botState, tradeAlertControll
             try {
                 const sock = getSock();
                 const slotKey = formatSlotKey(new Date(), timezone, hour, minute);
-                if (botState.lastTradeAlertSlot !== slotKey) {
-                    botState.lastTradeAlertSlot = slotKey;
-                    await tradeAlertController.postDailyAlerts(sock);
+                if (await slots.isDone(botState, slotKey, 'lastTradeAlertSlot')) {
+                    return;
                 }
+                if (!sock) return;
+                await tradeAlertController.postDailyAlerts(sock);
+                await slots.markDone(botState, slotKey, 'lastTradeAlertSlot');
             } catch (error) {
                 logger.error(`Trade alert scheduled send failed: ${error.message}`);
             } finally {
