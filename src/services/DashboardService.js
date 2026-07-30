@@ -383,15 +383,44 @@ export default class DashboardService {
         return { coursesDaily, newsDaily, moviesDaily };
     }
 
+    /** Latest durable scheduler records, read from the same Mongo store used to prevent reruns. */
+    async getSchedulerStatus() {
+        const settings = this.col('bot_settings');
+        const kinds = ['news', 'morning', 'trade', 'awesome', 'summary'];
+        if (!settings) return kinds.map((kind) => ({ kind, status: 'unavailable', at: null }));
+
+        try {
+            const rows = await settings.find({ key: { $in: kinds.map((kind) => `scheduler_slots_${kind}`) } }).toArray();
+            const byKey = new Map(rows.map((row) => [row.key, row.value]));
+            return kinds.map((kind) => {
+                const slots = byKey.get(`scheduler_slots_${kind}`);
+                const entries = slots && typeof slots === 'object' && !Array.isArray(slots)
+                    ? Object.entries(slots)
+                    : [];
+                const latest = entries
+                    .map(([slot, at]) => ({ slot, at: typeof at === 'string' ? at : null }))
+                    .filter((entry) => entry.at)
+                    .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))[0];
+                return latest
+                    ? { kind, status: 'completed', slot: latest.slot, at: latest.at }
+                    : { kind, status: 'not_run', at: null };
+            });
+        } catch (err) {
+            logger.debug(`Dashboard scheduler status failed: ${err.message}`);
+            return kinds.map((kind) => ({ kind, status: 'unavailable', at: null }));
+        }
+    }
+
     async getSnapshot() {
         const live = botTelemetry.liveStats();
         const queue = typeof messageQueue.stats === 'function' ? messageQueue.stats() : { chats: 0, pending: 0 };
         const movieConcurrency = await loadMovieConcurrency();
 
-        const [content, groups, analytics] = await Promise.all([
+        const [content, groups, analytics, schedules] = await Promise.all([
             this.getContentStats(),
             this.getGroupIntelligence(),
             this.getAnalytics(),
+            this.getSchedulerStatus(),
         ]);
 
         return {
@@ -411,6 +440,7 @@ export default class DashboardService {
             content,
             groups,
             analytics,
+            schedules,
         };
     }
 }

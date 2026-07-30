@@ -13,13 +13,15 @@ assert.ok(live.commandsToday.some((c) => c.cmd === 'movie'));
 assert.equal(live.postsToday.news, 1);
 
 const html = getCyberDashboardHtml();
-assert.match(html, /MISSION CONTROL/);
-assert.match(html, /chartContent/);
-assert.match(html, /PUBLIC LIVE/);
-assert.match(html, /tilt3d|Magnetic 3D tilt/);
-assert.doesNotMatch(html, /autoTabs|Auto-rotate tabs/);
+assert.match(html, /Live bot pulse/);
+assert.match(html, /Content Factory/);
+assert.match(html, /Command Center/);
+assert.match(html, /Durable scheduler/);
+assert.match(html, /api\/dashboard\/snapshot/);
+assert.match(html, /api\/dashboard\/stream/);
 
 const stats = messageQueue.stats();
 assert.ok('pending' in stats);
+messageQueue.destroy();
 
 console.log('check-dashboard: ok');
