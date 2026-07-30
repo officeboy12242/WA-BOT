@@ -13,10 +13,12 @@ assert.ok(live.commandsToday.some((c) => c.cmd === 'movie'));
 assert.equal(live.postsToday.news, 1);
 
 const html = getCyberDashboardHtml();
-assert.match(html, /Live bot pulse/);
+assert.match(html, /Bot Mission Control/);
 assert.match(html, /Content Factory/);
 assert.match(html, /Command Center/);
-assert.match(html, /Durable scheduler/);
+assert.match(html, /Scheduler durability/);
+assert.match(html, /data-range/);
+assert.match(html, /data-view/);
 assert.match(html, /api\/dashboard\/snapshot/);
 assert.match(html, /api\/dashboard\/stream/);
 
