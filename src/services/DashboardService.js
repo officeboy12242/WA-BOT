@@ -383,6 +383,39 @@ export default class DashboardService {
         return { coursesDaily, newsDaily, moviesDaily };
     }
 
+    /** Movie vault (Mongo cache) + freshness for the workload card. */
+    async getMovieCacheStats() {
+        const col = this.col('movie_search_cache');
+        const empty = { entries: 0, hits: 0, fresh: 0, top: [] };
+        if (!col) return empty;
+        try {
+            const freshSince = new Date(Date.now() - 24 * 60 * 60 * 1000);
+            const [entries, hitAgg, fresh, top] = await Promise.all([
+                col.countDocuments(),
+                col.aggregate([{ $group: { _id: null, hits: { $sum: { $ifNull: ['$hit_count', 0] } } } }]).toArray(),
+                col.countDocuments({ last_fetched_at: { $gte: freshSince } }),
+                col
+                    .find({}, { projection: { query_key: 1, hit_count: 1, last_fetched_at: 1 } })
+                    .sort({ hit_count: -1 })
+                    .limit(5)
+                    .toArray(),
+            ]);
+            return {
+                entries,
+                hits: Number(hitAgg[0]?.hits || 0),
+                fresh,
+                top: top.map((row) => ({
+                    query: row.query_key || 'unknown',
+                    hits: Number(row.hit_count || 0),
+                    at: row.last_fetched_at || null,
+                })),
+            };
+        } catch (err) {
+            logger.debug(`Dashboard movie cache stats failed: ${err.message}`);
+            return empty;
+        }
+    }
+
     /** Latest durable scheduler records, read from the same Mongo store used to prevent reruns. */
     async getSchedulerStatus() {
         const settings = this.col('bot_settings');
@@ -416,11 +449,12 @@ export default class DashboardService {
         const queue = typeof messageQueue.stats === 'function' ? messageQueue.stats() : { chats: 0, pending: 0 };
         const movieConcurrency = await loadMovieConcurrency();
 
-        const [content, groups, analytics, schedules] = await Promise.all([
+        const [content, groups, analytics, schedules, movieCache] = await Promise.all([
             this.getContentStats(),
             this.getGroupIntelligence(),
             this.getAnalytics(),
             this.getSchedulerStatus(),
+            this.getMovieCacheStats(),
         ]);
 
         return {
@@ -436,6 +470,7 @@ export default class DashboardService {
             },
             queue,
             movieConcurrency,
+            movieCache,
             live,
             content,
             groups,
