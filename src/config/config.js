@@ -97,6 +97,12 @@ export const config = {
     GROQ_TRADE_MODELS: process.env.GROQ_TRADE_MODELS?.trim() || 'llama-3.3-70b-versatile,llama-3.1-8b-instant',
     /** Provider order: gemini,groq,nvidia,openrouter */
     TRADE_LLM_PROVIDERS: (process.env.TRADE_LLM_PROVIDERS || 'gemini,groq,nvidia,openrouter').trim(),
+    /** After a provider 429, skip it for this many ms (daily scan keeps using fallbacks). */
+    TRADE_LLM_COOLDOWN_MS: (() => {
+        const n = parseInt(process.env.TRADE_LLM_COOLDOWN_MS, 10);
+        if (!Number.isFinite(n) || n <= 0) return 90_000;
+        return Math.min(5 * 60_000, Math.max(15_000, n));
+    })(),
     /** @deprecated Trade alerts use Gemini; kept for group summaries only */
     NVIDIA_TRADE_MODEL: process.env.NVIDIA_TRADE_MODEL?.trim() || 'z-ai/glm-5.2',
     /** Summary self-heal model (code fix proposals) */
@@ -155,9 +161,16 @@ export const config = {
     })(),
     /** Daily F&O trade alerts (/tradelert on groups). */
     TRADE_ALERT_ENABLED: process.env.TRADE_ALERT_ENABLED !== 'false',
-    /** Pre-market scan time IST — default 09:20. */
+    /** Pre-market scan time IST — default 09:20 so posts land ~09:22 after fast scan. */
     TRADE_ALERT_TIME: (process.env.TRADE_ALERT_TIME || '09:20').trim(),
     TRADE_ALERT_TIMEZONE: process.env.TRADE_ALERT_TIMEZONE || 'Asia/Kolkata',
+    /** Parallel symbol analyses during daily scan (1–3). */
+    TRADE_ALERT_SCAN_CONCURRENCY: Math.max(
+        1,
+        Math.min(3, parseInt(process.env.TRADE_ALERT_SCAN_CONCURRENCY, 10) || 2)
+    ),
+    /** Optional second LLM research step on daily path (off by default — too slow / rate-limit prone). */
+    TRADE_DAILY_RESEARCH: process.env.TRADE_DAILY_RESEARCH === 'true',
     /** Default watchlist when group has no /tradelert stocks set. */
     TRADE_ALERT_STOCKS: (process.env.TRADE_ALERT_STOCKS || 'NIFTY,BANKNIFTY,RELIANCE,TCS')
         .split(',')

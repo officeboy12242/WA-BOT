@@ -21,18 +21,23 @@ function clampTimeoutMs(raw, cap = MAX_TRADE_TIMEOUT_MS) {
     return Math.min(cap, Math.max(25_000, n));
 }
 
-function sleep(ms) {
-    return new Promise((r) => setTimeout(r, ms));
-}
-
 export function isGeminiRateLimitError(err) {
-    const status = err?.response?.status;
-    const msg = String(err?.response?.data?.error?.message || err?.message || err);
+    if (err?.isRateLimit) return true;
+    const status = err?.response?.status ?? err?.cause?.response?.status;
+    const msg = String(
+        err?.response?.data?.error?.message ||
+            err?.cause?.response?.data?.error?.message ||
+            err?.message ||
+            err
+    );
     return status === 429 || /quota|rate.?limit|resource.?exhausted/i.test(msg);
 }
 
-function rateLimitDelayMs(attemptIndex) {
-    return Math.min(12_000, 2000 * 2 ** attemptIndex);
+function rateLimitError(message, cause) {
+    const e = new Error(message);
+    e.isRateLimit = true;
+    if (cause) e.cause = cause;
+    return e;
 }
 
 export default class GeminiTradeService {
@@ -99,10 +104,7 @@ export default class GeminiTradeService {
             }));
         } catch (err) {
             if (isGeminiRateLimitError(err)) {
-                const e = new Error('Gemini rate limit — please wait 30–60 seconds and try again');
-                e.cause = err;
-                e.isRateLimit = true;
-                throw e;
+                throw rateLimitError('Gemini rate limit — switching provider', err);
             }
             throw err;
         }
@@ -140,53 +142,44 @@ export default class GeminiTradeService {
         ];
 
         let lastErr;
-        let sawRateLimit = false;
+        // Rate limits are project-wide — do not burn retries across Gemini models; escalate to router.
         for (const model of chain) {
             for (let i = 0; i < attempts.length; i++) {
                 const attempt = attempts[i];
-                for (let rateTry = 0; rateTry < 3; rateTry++) {
-                    try {
-                        if (i > 0 && rateTry === 0) {
-                            logger.warn(
-                                `Gemini trade retry ${i + 1} (${shortModelName(model)}, ${attempt.prompt.length} chars)`
-                            );
-                        }
-                        const text = await this.complete(systemPrompt, attempt.prompt, {
-                            model,
-                            maxTokens: attempt.maxTokens,
-                            timeoutMs: attempt.timeoutMs,
-                        });
-                        return { text, model: shortModelName(model) };
-                    } catch (err) {
-                        lastErr = err;
-                        const msg = String(err?.response?.data?.error?.message || err?.message || err);
-                        const status = err?.response?.status;
-                        if (isGeminiRateLimitError(err)) {
-                            sawRateLimit = true;
-                            if (rateTry < 2) {
-                                const waitMs = rateLimitDelayMs(rateTry);
-                                logger.warn(
-                                    `Gemini rate limited (${shortModelName(model)}) — retry ${rateTry + 1}/3 in ${waitMs}ms`
-                                );
-                                await sleep(waitMs);
-                                continue;
-                            }
-                            logger.warn(`Gemini rate limited (${shortModelName(model)}) — trying next model`);
-                            break;
-                        }
-                        if (status === 404 || /not found|invalid.*model/i.test(msg)) {
-                            break;
-                        }
-                        if (!this.isTimeoutError(err) && i === attempts.length - 1) {
-                            break;
-                        }
+                try {
+                    if (i > 0) {
+                        logger.warn(
+                            `Gemini trade retry ${i + 1} (${shortModelName(model)}, ${attempt.prompt.length} chars)`
+                        );
+                    }
+                    const text = await this.complete(systemPrompt, attempt.prompt, {
+                        model,
+                        maxTokens: attempt.maxTokens,
+                        timeoutMs: attempt.timeoutMs,
+                    });
+                    return { text, model: shortModelName(model) };
+                } catch (err) {
+                    lastErr = err;
+                    const msg = String(err?.response?.data?.error?.message || err?.message || err);
+                    const status = err?.response?.status;
+                    if (isGeminiRateLimitError(err)) {
+                        logger.warn(
+                            `Gemini rate limited (${shortModelName(model)}) — escalating to next trade provider`
+                        );
+                        throw rateLimitError('Gemini rate limit — switching provider', err);
+                    }
+                    if (status === 404 || /not found|invalid.*model/i.test(msg)) {
+                        break; // next model
+                    }
+                    if (!this.isTimeoutError(err) && i === attempts.length - 1) {
+                        break;
+                    }
+                    // timeout / empty → try smaller prompt on same model
+                    if (!this.isTimeoutError(err) && !/empty response/i.test(msg)) {
                         break;
                     }
                 }
             }
-        }
-        if (sawRateLimit) {
-            throw new Error('Gemini rate limit — please wait 30–60 seconds and try again');
         }
         throw lastErr || new Error('All Gemini trade models failed');
     }

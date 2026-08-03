@@ -16,10 +16,6 @@ function clampTimeoutMs(raw, cap = MAX_TRADE_TIMEOUT_MS) {
     return Math.min(cap, Math.max(25_000, n));
 }
 
-function sleep(ms) {
-    return new Promise((r) => setTimeout(r, ms));
-}
-
 export function isGroqRateLimitError(err) {
     const status = err?.response?.status;
     const msg = String(err?.response?.data?.error?.message || err?.message || err);
@@ -114,25 +110,26 @@ export default class GroqTradeService {
         for (const model of chain) {
             for (let i = 0; i < attempts.length; i++) {
                 const attempt = attempts[i];
-                for (let rateTry = 0; rateTry < 2; rateTry++) {
-                    try {
-                        if (i > 0 && rateTry === 0) {
-                            logger.warn(`Groq trade retry ${i + 1} (${model}, ${attempt.prompt.length} chars)`);
-                        }
-                        const text = await this.complete(systemPrompt, attempt.prompt, {
-                            model,
-                            maxTokens: attempt.maxTokens,
-                            timeoutMs: attempt.timeoutMs,
-                        });
-                        return { text, model };
-                    } catch (err) {
-                        lastErr = err;
-                        if (isGroqRateLimitError(err) && rateTry < 1) {
-                            await sleep(2000);
-                            continue;
-                        }
-                        break;
+                try {
+                    if (i > 0) {
+                        logger.warn(`Groq trade retry ${i + 1} (${model}, ${attempt.prompt.length} chars)`);
                     }
+                    const text = await this.complete(systemPrompt, attempt.prompt, {
+                        model,
+                        maxTokens: attempt.maxTokens,
+                        timeoutMs: attempt.timeoutMs,
+                    });
+                    return { text, model };
+                } catch (err) {
+                    lastErr = err;
+                    if (isGroqRateLimitError(err)) {
+                        logger.warn(`Groq rate limited (${model}) — escalating to next trade provider`);
+                        const e = new Error('Groq rate limit — switching provider');
+                        e.isRateLimit = true;
+                        e.cause = err;
+                        throw e;
+                    }
+                    break;
                 }
             }
         }

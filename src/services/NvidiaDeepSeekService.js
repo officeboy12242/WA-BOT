@@ -449,6 +449,14 @@ class NvidiaDeepSeekService {
                 });
             } catch (err) {
                 lastErr = err;
+                const status = err?.response?.status;
+                const msg = String(err?.message || err);
+                if (status === 429 || /rate.?limit|quota|too many requests/i.test(msg)) {
+                    const e = new Error('NVIDIA rate limit — switching provider');
+                    e.isRateLimit = true;
+                    e.cause = err;
+                    throw e;
+                }
                 if (!this.isTimeoutError(err) || i === attempts.length - 1) {
                     throw err;
                 }
