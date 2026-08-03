@@ -2,23 +2,24 @@
  * Schedule Interview Q of the Day at fixed times (default 13:00 & 18:00 IST),
  * plus Saturday 22:00 IST weekly learning recap.
  *
- * Durable-ish catch-up: if the bot was down at slot time, past-due slots
- * still post on startup / reconnect (per-group slot_key dedupes duplicates).
+ * Uses a 30s ticker (reliable vs long setTimeouts). Catch-up only within a
+ * grace window (~90m) so a missed 1pm Q does not dump together with 6pm.
  */
 
 import { logger } from '../utils/logger.js';
 import {
     formatSlotKey,
-    getCurrentDueSlot,
-    getMsUntilNextNewsPost,
-    getPastDueSlotsToday,
+    getCatchUpSlotsToday,
+    getExpiredSlotsToday,
     parsePostTimesFromConfig,
 } from '../utils/newsScheduler.js';
 
 const RETRY_MS = 45_000;
 const MAX_RETRIES = 3;
 const CATCHUP_GAP_MS = 2_500;
-const CATCHUP_RETRY_DELAY_MS = 60_000;
+const TICK_MS = 30_000;
+/** Missed slot still posts if bot wakes within this window; after that skip (no dump at 6pm). */
+const DEFAULT_CATCHUP_GRACE_MS = 90 * 60 * 1000;
 
 function zonedNow(timezone, fromMs = Date.now()) {
     const formatter = new Intl.DateTimeFormat('en-CA', {
@@ -30,6 +31,7 @@ function zonedNow(timezone, fromMs = Date.now()) {
         hour: '2-digit',
         minute: '2-digit',
         hour12: false,
+        hourCycle: 'h23',
     });
     const parts = formatter.formatToParts(new Date(fromMs));
     const get = (type) => parts.find((p) => p.type === type)?.value;
@@ -78,7 +80,7 @@ export function saturdaySummaryKey(timezone, fromMs = Date.now()) {
  * @param {object} options.config
  */
 export function startInterviewQuestionScheduler({ getSock, botState, service, config }) {
-    let postTimeout = null;
+    let tickInterval = null;
     let summaryTimeout = null;
     let stopped = false;
     /** @type {Set<string>} */
@@ -94,6 +96,12 @@ export function startInterviewQuestionScheduler({ getSock, botState, service, co
         logger.warn('🧠 Interview Q enabled but no post times configured');
         return { stop() {} };
     }
+
+    const tz = config.INTERVIEW_Q_TIMEZONE || 'Asia/Kolkata';
+    const graceMs = Math.max(
+        15 * 60_000,
+        Number(config.INTERVIEW_Q_CATCHUP_GRACE_MS) || DEFAULT_CATCHUP_GRACE_MS
+    );
 
     if (!botState.lastInterviewQSlots) {
         botState.lastInterviewQSlots = {};
@@ -196,23 +204,39 @@ export function startInterviewQuestionScheduler({ getSock, botState, service, co
         }
     }
 
-    async function catchUpMissedSlots() {
+    /**
+     * On-time + short-grace catch-up. Expired slots (e.g. missed 13:00 when it's 18:00)
+     * are marked done without posting so both Qs do not dump at 6pm.
+     */
+    async function tickSlots() {
         if (stopped) return;
-        const past = getPastDueSlotsToday(
-            config.INTERVIEW_Q_TIMES,
-            config.INTERVIEW_Q_TIMEZONE
-        );
-        for (const slot of past) {
-            if (stopped) return;
-            const slotKey = formatSlotKey(
-                new Date(),
-                config.INTERVIEW_Q_TIMEZONE,
-                slot.hour,
-                slot.minute
-            );
+
+        const expired = getExpiredSlotsToday(config.INTERVIEW_Q_TIMES, tz, new Date(), graceMs);
+        for (const slot of expired) {
+            const slotKey = formatSlotKey(new Date(), tz, slot.hour, slot.minute);
             if (await isDone(slotKey)) continue;
-            logger.info(`🧠 Catching up Interview Q slot ${slotKey}`);
-            await runSlot(slotKey, slot.index, 0);
+            markDone(slotKey);
+            logger.info(
+                `🧠 Interview Q slot ${slotKey} missed (outside ${Math.round(graceMs / 60_000)}m grace) — skipped`
+            );
+        }
+
+        const due = getCatchUpSlotsToday(config.INTERVIEW_Q_TIMES, tz, new Date(), graceMs);
+        for (const slot of due) {
+            if (stopped) return;
+            const slotKey = formatSlotKey(new Date(), tz, slot.hour, slot.minute);
+            if (await isDone(slotKey)) continue;
+            const slotIndex =
+                slot.index >= 0
+                    ? slot.index
+                    : slots.findIndex((s) => s.hour === slot.hour && s.minute === slot.minute);
+            logger.info(
+                `🧠 Interview Q due ${slotKey}` +
+                    (slot.ageMs > 60_000
+                        ? ` (catch-up +${Math.round(slot.ageMs / 60_000)}m)`
+                        : '')
+            );
+            await runSlot(slotKey, Math.max(0, slotIndex), 0);
             await new Promise((r) => setTimeout(r, CATCHUP_GAP_MS));
         }
     }
@@ -222,7 +246,6 @@ export function startInterviewQuestionScheduler({ getSock, botState, service, co
         const hm = parseHm(config.INTERVIEW_Q_SUMMARY_TIME);
         if (!hm) return;
 
-        const tz = config.INTERVIEW_Q_TIMEZONE || 'Asia/Kolkata';
         const now = zonedNow(tz);
         if (now.weekday !== 'Sat') return;
         if (now.hour !== hm.hour || now.minute !== hm.minute) return;
@@ -264,48 +287,6 @@ export function startInterviewQuestionScheduler({ getSock, botState, service, co
         }
     }
 
-    const scheduleNextPost = () => {
-        if (stopped) return;
-
-        const delay = getMsUntilNextNewsPost(config.INTERVIEW_Q_TIMES, config.INTERVIEW_Q_TIMEZONE);
-        const nextAt = new Date(Date.now() + delay).toLocaleString('en-IN', {
-            timeZone: config.INTERVIEW_Q_TIMEZONE,
-            dateStyle: 'medium',
-            timeStyle: 'short',
-        });
-        logger.info(`🧠 Next Interview Q at ${nextAt} (${config.INTERVIEW_Q_TIMEZONE})`);
-
-        postTimeout = setTimeout(async () => {
-            try {
-                const due = getCurrentDueSlot(
-                    config.INTERVIEW_Q_TIMES,
-                    config.INTERVIEW_Q_TIMEZONE
-                );
-                if (!due) {
-                    await catchUpMissedSlots();
-                    return;
-                }
-
-                const slotIndex = slots.findIndex(
-                    (slot) => slot.hour === due.hour && slot.minute === due.minute
-                );
-                if (slotIndex < 0) return;
-
-                const slotKey = formatSlotKey(
-                    new Date(),
-                    config.INTERVIEW_Q_TIMEZONE,
-                    due.hour,
-                    due.minute
-                );
-                await runSlot(slotKey, slotIndex, 0);
-            } catch (err) {
-                logger.error(`Interview Q scheduled post failed: ${err.message}`);
-            } finally {
-                scheduleNextPost();
-            }
-        }, delay);
-    };
-
     const scheduleNextSummary = () => {
         if (stopped) return;
         const hm = parseHm(config.INTERVIEW_Q_SUMMARY_TIME);
@@ -314,7 +295,6 @@ export function startInterviewQuestionScheduler({ getSock, botState, service, co
             return;
         }
 
-        const tz = config.INTERVIEW_Q_TIMEZONE || 'Asia/Kolkata';
         const delay = msUntilNextSaturday(hm.hour, hm.minute, tz);
         const nextAt = new Date(Date.now() + delay).toLocaleString('en-IN', {
             timeZone: tz,
@@ -334,41 +314,42 @@ export function startInterviewQuestionScheduler({ getSock, botState, service, co
         }, delay);
     };
 
-    void catchUpMissedSlots().catch((err) => {
-        logger.warn(`Interview Q catch-up failed: ${err.message}`);
-    });
-    setTimeout(() => {
-        void catchUpMissedSlots().catch((err) => {
-            logger.warn(`Interview Q delayed catch-up failed: ${err.message}`);
-        });
-    }, CATCHUP_RETRY_DELAY_MS);
+    const timesLabel = slots
+        .map((s) => `${String(s.hour).padStart(2, '0')}:${String(s.minute).padStart(2, '0')}`)
+        .join(', ');
+    logger.info(
+        `🧠 Interview Q scheduler: ${timesLabel} ${tz} · tick ${TICK_MS / 1000}s · catch-up grace ${Math.round(graceMs / 60_000)}m`
+    );
 
-    // If we restart on Saturday after 22:00, still try catch-up summary once
-    setTimeout(() => {
+    void tickSlots().catch((err) => {
+        logger.warn(`Interview Q startup tick failed: ${err.message}`);
+    });
+    tickInterval = setInterval(() => {
+        void tickSlots().catch((err) => {
+            logger.warn(`Interview Q tick failed: ${err.message}`);
+        });
+    }, TICK_MS);
+
+    // Saturday summary: also check on the minute ticker so we don't miss exact 22:00
+    const summaryTick = setInterval(() => {
         const hm = parseHm(config.INTERVIEW_Q_SUMMARY_TIME);
         if (!hm) return;
-        const tz = config.INTERVIEW_Q_TIMEZONE || 'Asia/Kolkata';
         const now = zonedNow(tz);
         if (now.weekday !== 'Sat') return;
-        const nowMin = now.hour * 60 + now.minute;
-        const dueMin = hm.hour * 60 + hm.minute;
-        if (nowMin < dueMin) return;
-        const summaryKey = saturdaySummaryKey(tz);
-        if (botState.lastInterviewQSummaries[summaryKey]) return;
-        logger.info(`📚 Catching up Interview Q weekly summary ${summaryKey}`);
+        if (now.hour !== hm.hour || now.minute !== hm.minute) return;
         void runWeeklySummary(0);
-    }, CATCHUP_RETRY_DELAY_MS + 5_000);
+    }, TICK_MS);
 
-    scheduleNextPost();
     scheduleNextSummary();
 
     return {
         stop() {
             stopped = true;
-            if (postTimeout) {
-                clearTimeout(postTimeout);
-                postTimeout = null;
+            if (tickInterval) {
+                clearInterval(tickInterval);
+                tickInterval = null;
             }
+            clearInterval(summaryTick);
             if (summaryTimeout) {
                 clearTimeout(summaryTimeout);
                 summaryTimeout = null;
