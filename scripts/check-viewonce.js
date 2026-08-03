@@ -67,3 +67,5 @@ import { extractViewOnceMedia } from '../src/controllers/handlers/viewOnceHandle
 }
 
 console.log('OK viewonce extract');
+process.exit(0);
+process.exit(0);
