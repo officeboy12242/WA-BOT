@@ -591,7 +591,7 @@ export const COMMAND_REGISTRY = [
         key: 'viewonce',
         scope: 'any',
         role: 'anyone',
-        help: 'Reply to a view-once message to reveal it',
+        help: 'Reply to a view-once message to reveal it (groups + DMs)',
     },
     {
         names: ['/deploy', '/redeploy'],

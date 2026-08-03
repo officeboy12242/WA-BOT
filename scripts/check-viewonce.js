@@ -51,13 +51,13 @@ import { extractViewOnceMedia } from '../src/controllers/handlers/viewOnceHandle
     assert.equal(r.kind, 'video');
 }
 
-// Normal image reply — reject
+// Normal image reply — /vv still accepts downloadable media (DM quotes strip flags)
 {
     const r = extractViewOnceMedia({
         imageMessage: { url: 'x', mediaKey: Buffer.from('a'), caption: 'normal' },
     });
-    assert.equal(r.ok, false);
-    assert.equal(r.reason, 'not_view_once');
+    assert.equal(r.ok, true);
+    assert.equal(r.kind, 'image');
 }
 
 // Empty / opened stub
