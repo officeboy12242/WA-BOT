@@ -14,6 +14,7 @@ function zonedParts(date, timezone) {
         hour: '2-digit',
         minute: '2-digit',
         hour12: false,
+        hourCycle: 'h23',
     });
     const parts = formatter.formatToParts(date);
     const get = (type) => parts.find((p) => p.type === type)?.value;
@@ -93,6 +94,44 @@ export function getPastDueSlotsToday(postTimes, timezone, now = new Date()) {
     return parsePostTimes(postTimes)
         .map((slot, index) => ({ ...slot, index }))
         .filter((slot) => slot.hour * 60 + slot.minute <= nowMinutes);
+}
+
+/**
+ * Past-due slots still inside a catch-up grace window (same calendar day).
+ * Stops a missed 13:00 interview Q from dumping alongside 18:00 after long downtime.
+ * @param {string[]} postTimes
+ * @param {string} timezone
+ * @param {Date} [now]
+ * @param {number} [graceMs] default 90 minutes
+ * @returns {{ hour: number, minute: number, index: number, ageMs: number }[]}
+ */
+export function getCatchUpSlotsToday(postTimes, timezone, now = new Date(), graceMs = 90 * 60 * 1000) {
+    const p = zonedParts(now, timezone);
+    const nowMinutes = p.hour * 60 + p.minute;
+    const graceMinutes = Math.max(0, Math.floor(Number(graceMs) / 60_000));
+    return parsePostTimes(postTimes)
+        .map((slot, index) => {
+            const due = slot.hour * 60 + slot.minute;
+            const ageMin = nowMinutes - due;
+            return { ...slot, index, ageMs: ageMin * 60_000 };
+        })
+        .filter((slot) => slot.ageMs >= 0 && slot.ageMs <= graceMinutes * 60_000);
+}
+
+/**
+ * Past-due slots that are older than the grace window (skip without posting).
+ */
+export function getExpiredSlotsToday(postTimes, timezone, now = new Date(), graceMs = 90 * 60 * 1000) {
+    const p = zonedParts(now, timezone);
+    const nowMinutes = p.hour * 60 + p.minute;
+    const graceMinutes = Math.max(0, Math.floor(Number(graceMs) / 60_000));
+    return parsePostTimes(postTimes)
+        .map((slot, index) => {
+            const due = slot.hour * 60 + slot.minute;
+            const ageMin = nowMinutes - due;
+            return { ...slot, index, ageMs: ageMin * 60_000 };
+        })
+        .filter((slot) => slot.ageMs > graceMinutes * 60_000);
 }
 
 /**

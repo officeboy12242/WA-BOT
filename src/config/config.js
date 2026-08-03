@@ -284,6 +284,12 @@ export const config = {
         .map((t) => t.trim())
         .filter(Boolean),
     INTERVIEW_Q_TIMEZONE: process.env.INTERVIEW_Q_TIMEZONE || 'Asia/Kolkata',
+    /** How long after a slot time we still catch up (default 90m). Past that, skip — no dump at 6pm. */
+    INTERVIEW_Q_CATCHUP_GRACE_MS: (() => {
+        const n = parseInt(process.env.INTERVIEW_Q_CATCHUP_GRACE_MS, 10);
+        if (!Number.isFinite(n) || n <= 0) return 90 * 60 * 1000;
+        return Math.min(6 * 60 * 60 * 1000, Math.max(15 * 60 * 1000, n));
+    })(),
     INTERVIEW_Q_ANSWER_DELAY_MS: (() => {
         const n = parseInt(process.env.INTERVIEW_Q_ANSWER_DELAY_MS, 10);
         if (Number.isFinite(n) && n >= 60_000) return n;

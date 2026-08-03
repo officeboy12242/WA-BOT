@@ -5,6 +5,7 @@
 
 import { downloadContentFromMessage } from 'baileys';
 import { logger } from '../../utils/logger.js';
+import { buildQuotedTargetMessage } from '../../utils/waMessage.js';
 
 async function streamToBuffer(stream) {
     const chunks = [];
@@ -14,77 +15,178 @@ async function streamToBuffer(stream) {
     return Buffer.concat(chunks);
 }
 
+/**
+ * Walk ephemeral / view-once wrappers and detect media with viewOnce flag.
+ * Modern WA often quotes view-once as plain imageMessage { viewOnce: true }.
+ * @param {object|null|undefined} quoted
+ * @returns {{ ok: true, kind: 'image'|'video'|'audio', media: object, caption: string } | { ok: false, reason: string }}
+ */
+export function extractViewOnceMedia(quoted) {
+    if (!quoted || typeof quoted !== 'object') {
+        return { ok: false, reason: 'missing' };
+    }
+
+    let cur = quoted;
+    let sawWrapper = false;
+
+    for (let i = 0; i < 8 && cur; i++) {
+        if (cur.ephemeralMessage?.message) {
+            cur = cur.ephemeralMessage.message;
+            continue;
+        }
+        if (cur.viewOnceMessage?.message) {
+            sawWrapper = true;
+            cur = cur.viewOnceMessage.message;
+            continue;
+        }
+        if (cur.viewOnceMessageV2?.message) {
+            sawWrapper = true;
+            cur = cur.viewOnceMessageV2.message;
+            continue;
+        }
+        if (cur.viewOnceMessageV2Extension?.message) {
+            sawWrapper = true;
+            cur = cur.viewOnceMessageV2Extension.message;
+            continue;
+        }
+        if (cur.documentWithCaptionMessage?.message) {
+            cur = cur.documentWithCaptionMessage.message;
+            continue;
+        }
+        break;
+    }
+
+    if (!cur || typeof cur !== 'object') {
+        return { ok: false, reason: 'empty' };
+    }
+
+    const image = cur.imageMessage;
+    const video = cur.videoMessage;
+    const audio = cur.audioMessage;
+    const flagOf = (m) => m && (m.viewOnce === true || m.viewOnce === 1 || m.viewOnce === '1');
+    const flagged = flagOf(image) || flagOf(video) || flagOf(audio);
+
+    if (!sawWrapper && !flagged) {
+        // Already-opened view-once quotes often leave a stub with no media keys
+        if (!image && !video && !audio) {
+            return { ok: false, reason: 'opened_or_missing' };
+        }
+        return { ok: false, reason: 'not_view_once' };
+    }
+
+    if (image) {
+        return {
+            ok: true,
+            kind: 'image',
+            media: image,
+            caption: String(image.caption || ''),
+        };
+    }
+    if (video) {
+        return {
+            ok: true,
+            kind: 'video',
+            media: video,
+            caption: String(video.caption || ''),
+        };
+    }
+    if (audio) {
+        return {
+            ok: true,
+            kind: 'audio',
+            media: audio,
+            caption: '',
+        };
+    }
+
+    return { ok: false, reason: 'unsupported' };
+}
+
+function resolveQuotedMessage(originalMsg) {
+    const viaHelper = buildQuotedTargetMessage(originalMsg)?.message;
+    if (viaHelper) return viaHelper;
+
+    const msg = originalMsg?.message;
+    return (
+        msg?.extendedTextMessage?.contextInfo?.quotedMessage ||
+        msg?.imageMessage?.contextInfo?.quotedMessage ||
+        msg?.videoMessage?.contextInfo?.quotedMessage ||
+        msg?.documentMessage?.contextInfo?.quotedMessage ||
+        msg?.buttonsResponseMessage?.contextInfo?.quotedMessage ||
+        msg?.templateButtonReplyMessage?.contextInfo?.quotedMessage ||
+        msg?.listResponseMessage?.contextInfo?.quotedMessage ||
+        null
+    );
+}
+
 export async function handleViewOnce(sock, chatId, senderJid, originalMsg) {
-    const quoted =
-        originalMsg?.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+    const quoted = resolveQuotedMessage(originalMsg);
 
     if (!quoted) {
-        await sock.sendMessage(chatId, {
-            text: '📸 *View Once Revealer* 🔓\n\n❌ Reply to a view-once message with `/vv`',
-        }, { quoted: originalMsg });
+        await sock.sendMessage(
+            chatId,
+            {
+                text: '📸 *View Once Revealer* 🔓\n\n❌ Reply to a view-once message with `/vv`',
+            },
+            { quoted: originalMsg }
+        );
         return;
     }
 
-    const viewOnceWrapper =
-        quoted.viewOnceMessageV2 ||
-        quoted.viewOnceMessageV2Extension ||
-        quoted.viewOnceMessage;
-
-    if (!viewOnceWrapper) {
-        await sock.sendMessage(chatId, {
-            text: '❌ That is not a view-once message.',
-        }, { quoted: originalMsg });
+    const extracted = extractViewOnceMedia(quoted);
+    if (!extracted.ok) {
+        const text =
+            extracted.reason === 'opened_or_missing'
+                ? '❌ View-once media is gone (already opened or expired). Reply before opening it.'
+                : extracted.reason === 'unsupported'
+                  ? '❌ Unsupported view-once media type.'
+                  : '❌ That is not a view-once message.\n_Reply to the view-once media itself (before opening it)._';
+        await sock.sendMessage(chatId, { text }, { quoted: originalMsg });
         return;
     }
 
-    const inner = viewOnceWrapper.message;
-    if (!inner) {
-        await sock.sendMessage(chatId, {
-            text: '❌ Could not read view-once content.',
-        }, { quoted: originalMsg });
-        return;
-    }
-
-    await sock.sendMessage(chatId, {
-        text: '⏳ Processing view-once media…',
-    }, { quoted: originalMsg });
+    await sock.sendMessage(
+        chatId,
+        { text: '⏳ Processing view-once media…' },
+        { quoted: originalMsg }
+    );
 
     try {
         let mediaMsg;
-
-        if (inner.imageMessage) {
+        if (extracted.kind === 'image') {
             const buf = await streamToBuffer(
-                await downloadContentFromMessage(inner.imageMessage, 'image'),
+                await downloadContentFromMessage(extracted.media, 'image')
             );
-            const caption = inner.imageMessage.caption || '';
-            mediaMsg = { image: buf, caption: caption || '📸 *View-once image revealed* 🔓' };
-        } else if (inner.videoMessage) {
+            mediaMsg = {
+                image: buf,
+                caption: extracted.caption || '📸 *View-once image revealed* 🔓',
+            };
+        } else if (extracted.kind === 'video') {
             const buf = await streamToBuffer(
-                await downloadContentFromMessage(inner.videoMessage, 'video'),
+                await downloadContentFromMessage(extracted.media, 'video')
             );
-            const caption = inner.videoMessage.caption || '';
-            mediaMsg = { video: buf, caption: caption || '🎥 *View-once video revealed* 🔓' };
-        } else if (inner.audioMessage) {
+            mediaMsg = {
+                video: buf,
+                caption: extracted.caption || '🎥 *View-once video revealed* 🔓',
+            };
+        } else {
             const buf = await streamToBuffer(
-                await downloadContentFromMessage(inner.audioMessage, 'audio'),
+                await downloadContentFromMessage(extracted.media, 'audio')
             );
             mediaMsg = {
                 audio: buf,
-                ptt: inner.audioMessage.ptt === true,
-                mimetype: inner.audioMessage.mimetype || 'audio/ogg; codecs=opus',
+                ptt: extracted.media.ptt === true,
+                mimetype: extracted.media.mimetype || 'audio/ogg; codecs=opus',
             };
-        } else {
-            await sock.sendMessage(chatId, {
-                text: '❌ Unsupported view-once media type.',
-            }, { quoted: originalMsg });
-            return;
         }
 
         await sock.sendMessage(chatId, mediaMsg, { quoted: originalMsg });
     } catch (err) {
         logger.error(`ViewOnce download failed: ${err.message}`);
-        await sock.sendMessage(chatId, {
-            text: `❌ Failed to reveal view-once: ${err.message}`,
-        }, { quoted: originalMsg });
+        await sock.sendMessage(
+            chatId,
+            { text: `❌ Failed to reveal view-once: ${err.message}` },
+            { quoted: originalMsg }
+        );
     }
 }
