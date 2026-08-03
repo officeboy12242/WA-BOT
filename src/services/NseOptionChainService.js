@@ -29,20 +29,29 @@ const INDEX_SYMBOLS = new Set([
 ]);
 
 let _cookieCache = { value: '', at: 0 };
+/** Serialize NSE warm-up so parallel symbol scans don't stampede cookies. */
+let _cookieLock = Promise.resolve();
 
 async function getNseCookie() {
-    if (_cookieCache.value && Date.now() - _cookieCache.at < COOKIE_TTL_MS) {
-        return _cookieCache.value;
-    }
-    const home = await axios.get('https://www.nseindia.com/option-chain', {
-        headers: { ...BASE_HEADERS, Accept: 'text/html,application/xhtml+xml' },
-        timeout: TIMEOUT_MS,
+    const run = _cookieLock.then(async () => {
+        if (_cookieCache.value && Date.now() - _cookieCache.at < COOKIE_TTL_MS) {
+            return _cookieCache.value;
+        }
+        const home = await axios.get('https://www.nseindia.com/option-chain', {
+            headers: { ...BASE_HEADERS, Accept: 'text/html,application/xhtml+xml' },
+            timeout: TIMEOUT_MS,
+        });
+        const cookie = home.headers['set-cookie']?.map((c) => c.split(';')[0]).join('; ') || '';
+        if (cookie) {
+            _cookieCache = { value: cookie, at: Date.now() };
+        }
+        return cookie;
     });
-    const cookie = home.headers['set-cookie']?.map((c) => c.split(';')[0]).join('; ') || '';
-    if (cookie) {
-        _cookieCache = { value: cookie, at: Date.now() };
-    }
-    return cookie;
+    _cookieLock = run.then(
+        () => undefined,
+        () => undefined
+    );
+    return run;
 }
 
 async function nseGet(path, cookie) {
@@ -167,6 +176,23 @@ class NseOptionChainService {
             lines.push('  n/a');
         }
 
+        const atmCe = atm?.CE
+            ? {
+                  strike: atm.strikePrice,
+                  ltp: atm.CE.lastPrice ?? null,
+                  oi: atm.CE.openInterest ?? null,
+                  iv: atm.CE.impliedVolatility ?? null,
+              }
+            : null;
+        const atmPe = atm?.PE
+            ? {
+                  strike: atm.strikePrice,
+                  ltp: atm.PE.lastPrice ?? null,
+                  oi: atm.PE.openInterest ?? null,
+                  iv: atm.PE.impliedVolatility ?? null,
+              }
+            : null;
+
         return {
             context: lines.join('\n'),
             snapshot: {
@@ -180,6 +206,8 @@ class NseOptionChainService {
                 topCe,
                 topPe,
                 atmStrike: atm?.strikePrice ?? null,
+                atmCe,
+                atmPe,
             },
         };
     }

@@ -30,7 +30,7 @@ import {
     buildDiscoveryUserPrompt,
 } from '../prompts/stockDiscoveryPrompt.js';
 import { parseTradeSignal, parseDiscoveryResult } from '../utils/tradeSignalParser.js';
-import { enforceLiveSpotPrice } from '../utils/tradeQuoteUtils.js';
+import { enforceLiveSpotPrice, enforceLiveOptionPremiums } from '../utils/tradeQuoteUtils.js';
 import { injectTradePlans } from '../utils/tradePlanFormatter.js';
 import {
     getIndianMarketClosedReason,
@@ -122,8 +122,11 @@ class TradeAlertController {
         const intel = await this.research.gatherIntel(symbol, { includeMarketBrief: false });
 
         let researchBrief = null;
-        // Live /tradenow: skip research brief (half the Gemini calls, faster response).
-        if (this.twoStepResearch && !skipResearch && mode === 'daily') {
+        // Daily batch: skip research brief (1 LLM call/symbol) so alerts land near open.
+        // Live /tradenow: skip unless caller opts in via two-step.
+        const wantResearch =
+            this.twoStepResearch && !skipResearch && mode === 'daily' && this.config.TRADE_DAILY_RESEARCH === true;
+        if (wantResearch) {
             researchBrief = await this.research.runResearchBrief(intel);
         }
 
@@ -150,6 +153,7 @@ class TradeAlertController {
         });
 
         body = enforceLiveSpotPrice(body, intel.quote);
+        body = enforceLiveOptionPremiums(body, intel.optionChainSnapshot);
 
         if (this.tradePlansEnabled) {
             body = injectTradePlans(body, intel.symbol, { partials: this.tradePlanPartials });
@@ -242,10 +246,12 @@ class TradeAlertController {
 
     async _runDailyAnalysis(symbol, { isHiddenGem = false } = {}) {
         try {
-            return await this._runAnalysis(symbol, { mode: 'daily', isHiddenGem });
+            // Always skip research on daily path — one LLM call per symbol.
+            return await this._runAnalysis(symbol, { mode: 'daily', skipResearch: true, isHiddenGem });
         } catch (err) {
-            if (this.isTimeoutError(err)) {
-                logger.warn(`Daily scan timeout for ${symbol}, retrying without research step…`);
+            if (this.isTimeoutError(err) || isTradeLlmRateLimitError(err)) {
+                logger.warn(`Daily scan retry for ${symbol}: ${err.message}`);
+                await new Promise((r) => setTimeout(r, isTradeLlmRateLimitError(err) ? 2500 : 400));
                 return await this._runAnalysis(symbol, {
                     mode: 'daily',
                     skipResearch: true,
@@ -254,6 +260,27 @@ class TradeAlertController {
             }
             throw err;
         }
+    }
+
+    /**
+     * Run async work over items with limited concurrency (keeps daily scan near 09:22 IST).
+     * @template T, R
+     * @param {T[]} items
+     * @param {number} limit
+     * @param {(item: T, index: number) => Promise<R>} worker
+     * @returns {Promise<R[]>}
+     */
+    async _mapPool(items, limit, worker) {
+        const out = new Array(items.length);
+        let next = 0;
+        const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+            while (next < items.length) {
+                const i = next++;
+                out[i] = await worker(items[i], i);
+            }
+        });
+        await Promise.all(runners);
+        return out;
     }
 
     /**
@@ -643,18 +670,19 @@ class TradeAlertController {
                     hiddenGemReason,
                     maxSends: this.maxSendsPerGroup,
                 });
-                await sock.sendMessage(group.group_id, { text: intro }).catch(() => {});
-                await new Promise((r) => setTimeout(r, 800));
+                // Fire-and-forget — don't block analysis for ~9:22 posts
+                sock.sendMessage(group.group_id, { text: intro }).catch(() => {});
             }
 
             const marketMode = getIndiaMarketMode();
             const discoveryFreshness = checkQuoteFreshness(autoDiscovery?.scannedAt);
             const strictMinConv = autoDiscovery?.gates?.minConfluence ?? this.minConfluence;
+            const concurrency = Math.max(1, Math.min(3, Number(this.config.TRADE_ALERT_SCAN_CONCURRENCY) || 2));
 
-            for (const symbol of symbols) {
+            const scanRows = await this._mapPool(symbols, concurrency, async (symbol) => {
                 try {
                     if (await this.wasDailySent(group.group_id, symbol, dateStr)) {
-                        continue;
+                        return { kind: 'already' };
                     }
 
                     const isHiddenGem = Boolean(hiddenGemSymbol && symbol === hiddenGemSymbol);
@@ -709,8 +737,7 @@ class TradeAlertController {
                         });
                         const cePe = `CE ${signal.ceConfidence}% / PE ${signal.peConfidence}%`;
                         const why = gate.pass ? '' : ` · ${gate.reason}`;
-                        skipped.push(`${symbol} (${gate.pass ? 'NO TRADE' : 'blocked'} · ${cePe}${why})`);
-                        scanResults.push(resultEntry);
+                        const skipLine = `${symbol} (${gate.pass ? 'NO TRADE' : 'blocked'} · ${cePe}${why})`;
 
                         if (softOk) {
                             const softItem = {
@@ -724,28 +751,39 @@ class TradeAlertController {
                                 resultEntry,
                                 softGate: true,
                             };
-                            if (isHiddenGem) softGem = softItem;
-                            else softRegular.push(softItem);
-                        } else {
-                            await this.markDailySent(group.group_id, symbol, dateStr, {
-                                skipped: true,
-                                signal: signal.recommendation,
-                                confidence: signal.confidence,
-                            });
+                            return { kind: 'soft', softItem, isHiddenGem, skipLine, resultEntry };
                         }
-                        continue;
+                        await this.markDailySent(group.group_id, symbol, dateStr, {
+                            skipped: true,
+                            signal: signal.recommendation,
+                            confidence: signal.confidence,
+                        });
+                        return { kind: 'skip', skipLine, resultEntry };
                     }
 
                     const item = { symbol, text, signal, resultEntry, softGate: false };
-                    if (isHiddenGem) {
-                        actionableGem = item;
-                    } else {
-                        actionableRegular.push(item);
-                    }
-                    scanResults.push(resultEntry);
+                    return { kind: 'actionable', item, isHiddenGem, resultEntry };
                 } catch (err) {
                     logger.error(`Trade alert failed ${symbol} in ${group.group_id}: ${err.message}`);
-                    skipped.push(`${symbol} (scan error)`);
+                    const short = isTradeLlmRateLimitError(err)
+                        ? 'rate limit'
+                        : this.isTimeoutError(err)
+                          ? 'timeout'
+                          : 'error';
+                    return { kind: 'error', skipLine: `${symbol} (scan error · ${short})` };
+                }
+            });
+
+            for (const row of scanRows) {
+                if (!row || row.kind === 'already') continue;
+                if (row.skipLine) skipped.push(row.skipLine);
+                if (row.resultEntry) scanResults.push(row.resultEntry);
+                if (row.kind === 'soft') {
+                    if (row.isHiddenGem) softGem = row.softItem;
+                    else softRegular.push(row.softItem);
+                } else if (row.kind === 'actionable') {
+                    if (row.isHiddenGem) actionableGem = row.item;
+                    else actionableRegular.push(row.item);
                 }
             }
 
@@ -801,7 +839,7 @@ class TradeAlertController {
                     logger.info(
                         `✅ Trade alert sent: ${item.symbol}${item.resultEntry.isHiddenGem ? ' 💎' : ''}${item.softGate ? ' (soft)' : ''} → ${group.group_name || group.group_id}`
                     );
-                    await new Promise((r) => setTimeout(r, 2000));
+                    await new Promise((r) => setTimeout(r, 800));
                 } catch (err) {
                     logger.error(`Trade alert send failed ${item.symbol} in ${group.group_id}: ${err.message}`);
                 }

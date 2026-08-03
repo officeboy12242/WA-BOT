@@ -62,7 +62,8 @@ RULES:
 • Primary Pick = best side only if confidence ≥70%; else NO TRADE
 • Only mark ✅ BUY CE or ✅ BUY PE when that side's confidence ≥70%
 • Use WEAK for 50–69%, AVOID for <50% or poor setup
-• Use Indian market context (IST, NSE, liquid strikes)
+• Entry / Targets / SL MUST be option *premiums* (₹), NEVER the stock spot price
+• When LIVE NSE OPTION CHAIN is provided, Strike MUST be the ATM strike + that expiry, and Entry MUST use the ATM CE/PE LTP from the chain (do not invent premiums)
 • Target 1/2/3 = premium levels (₹); bot adds lot P&L — space T1 < T2 < T3 for CE buys, reverse for PE buys
 • Keep bullets short
 • Do not mention AI or models
@@ -124,6 +125,9 @@ export function buildTradeUserPrompt({
                 ? `${optionChainContext.slice(0, 3500)}\n[...chain trimmed...]`
                 : optionChainContext;
         lines.push(chain);
+        lines.push(
+            'MANDATORY: CE Entry = ATM CE LTP from chain; PE Entry = ATM PE LTP from chain. Strike = ATM strike + expiry. Never use spot price as Entry.'
+        );
         lines.push('');
     } else {
         lines.push('=== LIVE NSE OPTION CHAIN ===');
