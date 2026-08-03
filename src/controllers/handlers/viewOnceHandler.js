@@ -5,7 +5,7 @@
 
 import { downloadContentFromMessage } from 'baileys';
 import { logger } from '../../utils/logger.js';
-import { buildQuotedTargetMessage } from '../../utils/waMessage.js';
+import { buildQuotedTargetMessage, safeSendMessage } from '../../utils/waMessage.js';
 
 async function streamToBuffer(stream) {
     const chunks = [];
@@ -65,13 +65,19 @@ export function extractViewOnceMedia(quoted) {
     const audio = cur.audioMessage;
     const flagOf = (m) => m && (m.viewOnce === true || m.viewOnce === 1 || m.viewOnce === '1');
     const flagged = flagOf(image) || flagOf(video) || flagOf(audio);
+    const downloadable = (m) =>
+        Boolean(m && (m.mediaKey || m.directPath || m.url || m.mediaKeyTimestamp));
 
     if (!sawWrapper && !flagged) {
-        // Already-opened view-once quotes often leave a stub with no media keys
-        if (!image && !video && !audio) {
+        // DM quotes often strip the viewOnce flag but still leave downloadable media.
+        // /vv is explicitly a reveal command — accept downloadable image/video/audio.
+        if (downloadable(image) || downloadable(video) || downloadable(audio)) {
+            sawWrapper = true;
+        } else if (!image && !video && !audio) {
             return { ok: false, reason: 'opened_or_missing' };
+        } else {
+            return { ok: false, reason: 'not_view_once' };
         }
-        return { ok: false, reason: 'not_view_once' };
     }
 
     if (image) {
@@ -123,12 +129,16 @@ export async function handleViewOnce(sock, chatId, senderJid, originalMsg) {
     const quoted = resolveQuotedMessage(originalMsg);
 
     if (!quoted) {
-        await sock.sendMessage(
+        await safeSendMessage(
+            sock,
             chatId,
             {
-                text: '📸 *View Once Revealer* 🔓\n\n❌ Reply to a view-once message with `/vv`',
+                text:
+                    '📸 *View Once Revealer* 🔓\n\n' +
+                    '❌ Reply to a view-once photo/video/voice with `/vv`.\n' +
+                    '_Works in groups and DMs (including chats with the bot number)._',
             },
-            { quoted: originalMsg }
+            originalMsg
         );
         return;
     }
@@ -141,15 +151,11 @@ export async function handleViewOnce(sock, chatId, senderJid, originalMsg) {
                 : extracted.reason === 'unsupported'
                   ? '❌ Unsupported view-once media type.'
                   : '❌ That is not a view-once message.\n_Reply to the view-once media itself (before opening it)._';
-        await sock.sendMessage(chatId, { text }, { quoted: originalMsg });
+        await safeSendMessage(sock, chatId, { text }, originalMsg);
         return;
     }
 
-    await sock.sendMessage(
-        chatId,
-        { text: '⏳ Processing view-once media…' },
-        { quoted: originalMsg }
-    );
+    await safeSendMessage(sock, chatId, { text: '⏳ Processing view-once media…' }, originalMsg);
 
     try {
         let mediaMsg;
@@ -180,13 +186,14 @@ export async function handleViewOnce(sock, chatId, senderJid, originalMsg) {
             };
         }
 
-        await sock.sendMessage(chatId, mediaMsg, { quoted: originalMsg });
+        await safeSendMessage(sock, chatId, mediaMsg, originalMsg);
     } catch (err) {
         logger.error(`ViewOnce download failed: ${err.message}`);
-        await sock.sendMessage(
+        await safeSendMessage(
+            sock,
             chatId,
             { text: `❌ Failed to reveal view-once: ${err.message}` },
-            { quoted: originalMsg }
+            originalMsg
         );
     }
 }

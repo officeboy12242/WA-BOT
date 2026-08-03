@@ -593,6 +593,7 @@ class WhatsAppService {
             'stickerMessage', 'contactMessage', 'locationMessage',
             'liveLocationMessage', 'templateMessage', 'buttonsMessage',
             'listMessage', 'viewOnceMessage', 'viewOnceMessageV2',
+            'viewOnceMessageV2Extension',
             'ephemeralMessage', 'documentWithCaptionMessage',
         ];
         
@@ -644,15 +645,18 @@ class WhatsAppService {
         }
 
         const selfChat = msg.key.fromMe && isBotSelfChat(this.sock, chatId);
-        if (msg.key.fromMe && !selfChat) {
+        // fromMe is normally ignored (bot echoes), but owner typing /vv etc. on the bot
+        // phone in a DM must work — especially view-once reveal in private chats.
+        if (msg.key.fromMe && !selfChat && !isCommandMessage) {
             return;
         }
 
         rememberLidPnFromMessageKey(this.sock, msg.key);
 
-        const senderJid = selfChat
-            ? getBotSelfSenderJid(this.sock)
-            : getMessageSenderJid(msg.key);
+        const senderJid =
+            selfChat || (msg.key.fromMe && isCommandMessage)
+                ? getBotSelfSenderJid(this.sock)
+                : getMessageSenderJid(msg.key);
         if (chatId.endsWith('@g.us') && !senderJid) {
             logger.warn('Group message with no sender participant; ignoring');
             return;
