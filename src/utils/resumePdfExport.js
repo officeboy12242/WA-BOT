@@ -2,7 +2,6 @@
  * Resume PDF export — ATS/classic layout, detected fonts/colors, hard 1-page fit.
  */
 
-import PDFDocument from 'pdfkit';
 import {
     normalizeResumeExtract,
     extractSectionTitles,
@@ -264,8 +263,9 @@ function paintResume(doc, text, opts, scale, fonts) {
     }
 }
 
-function renderResumeDoc(text, opts, scale) {
+async function renderResumeDoc(text, opts, scale) {
     const margin = Math.max(26, Math.round(34 * Math.min(1, scale + 0.08)));
+    const { default: PDFDocument } = await import('pdfkit');
 
     return new Promise((resolve, reject) => {
         const doc = new PDFDocument({

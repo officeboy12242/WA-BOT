@@ -7,9 +7,6 @@ import { downloadMediaMessage, downloadContentFromMessage, normalizeMessageConte
 import { getTextFromWAMessage, buildQuotedTargetMessage } from '../utils/waMessage.js';
 import { downloadStickerBuffer, createDownloadContext } from '../utils/stickerDownload.js';
 import { extractStickerFromMessage } from '../utils/stickerExtract.js';
-import WSF from 'wa-sticker-formatter';
-const { Exif: StickerExif } = WSF;
-import ffmpeg from 'fluent-ffmpeg';
 import fs from 'fs';
 import { writeFile } from 'fs/promises';
 import { logger } from '../utils/logger.js';
@@ -23,21 +20,37 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const BUNDLED_FONT_PATH = path.resolve(__dirname, '../../fonts/Roboto-Bold.ttf');
 
-// Configure FFmpeg path
-let ffmpegPath = process.env.FFMPEG_PATH;
-
-if (!ffmpegPath) {
-    try {
-        const { default: ffmpegStatic } = await import('ffmpeg-static');
-        const { existsSync } = await import('fs');
-        ffmpegPath = (ffmpegStatic && existsSync(ffmpegStatic)) ? ffmpegStatic : 'ffmpeg';
-    } catch (err) {
-        ffmpegPath = 'ffmpeg';
+/** Lazy ffmpeg — avoid loading fluent-ffmpeg/ffmpeg-static at boot. */
+let _ffmpeg = null;
+let _ffmpegReady = null;
+async function getFfmpeg() {
+    if (_ffmpeg) return _ffmpeg;
+    if (!_ffmpegReady) {
+        _ffmpegReady = (async () => {
+            const ffmpeg = (await import('fluent-ffmpeg')).default;
+            let ffmpegPath = process.env.FFMPEG_PATH;
+            if (!ffmpegPath) {
+                try {
+                    const { default: ffmpegStatic } = await import('ffmpeg-static');
+                    ffmpegPath =
+                        ffmpegStatic && fs.existsSync(ffmpegStatic) ? ffmpegStatic : 'ffmpeg';
+                } catch {
+                    ffmpegPath = 'ffmpeg';
+                }
+            }
+            ffmpeg.setFfmpegPath(ffmpegPath);
+            logger.info(`🎬 Sticker functionality using FFmpeg: ${ffmpegPath}`);
+            _ffmpeg = ffmpeg;
+            return ffmpeg;
+        })();
     }
+    return _ffmpegReady;
 }
 
-logger.info(`🎬 Sticker functionality using FFmpeg: ${ffmpegPath}`);
-ffmpeg.setFfmpegPath(ffmpegPath);
+async function getStickerExif() {
+    const WSF = (await import('wa-sticker-formatter')).default;
+    return WSF.Exif;
+}
 
 class StickerController {
     constructor(config = {}) {
@@ -197,6 +210,7 @@ class StickerController {
             'fps=15',
         ].join(',');
 
+        const ffmpeg = await getFfmpeg();
         const command = ffmpeg(mediaPath);
         if (/\.gif$/i.test(mediaPath)) {
             command.inputOptions(['-ignore_loop', '0']);
@@ -238,6 +252,7 @@ class StickerController {
                 '-vf', "scale='min(220,iw)':min'(220,ih)':force_original_aspect_ratio=decrease,fps=15, pad=220:220:-1:-1:color=white@0.0, split [a][b]; [a] palettegen=reserve_transparent=on:transparency_color=ffffff [p]; [b][p] paletteuse",
             ];
 
+        const ffmpeg = await getFfmpeg();
         await this._enqueueFfmpeg(() => this._runFfmpeg(
             ffmpeg(mediaPath).addOutputOptions(outputOptions).toFormat('webp').save(outputPath)
         ));
@@ -249,6 +264,7 @@ class StickerController {
 
         if (!noMetadata) {
             try {
+                const StickerExif = await getStickerExif();
                 const exif = new StickerExif({ pack: packName, author: authorName });
                 stickerBuffer = await exif.add(stickerBuffer);
             } catch (metaErr) {
@@ -559,14 +575,17 @@ class StickerController {
 
             await writeFile(stickerPath, buffer);
 
-            await this._enqueueFfmpeg(() => new Promise((resolve, reject) => {
-                const ffmpegProcess = ffmpeg(stickerPath)
-                    .fromFormat('webp_pipe')
-                    .save(imagePath);
+            await this._enqueueFfmpeg(async () => {
+                const ffmpeg = await getFfmpeg();
+                return new Promise((resolve, reject) => {
+                    const ffmpegProcess = ffmpeg(stickerPath)
+                        .fromFormat('webp_pipe')
+                        .save(imagePath);
 
-                ffmpegProcess.on('error', reject);
-                ffmpegProcess.on('end', resolve);
-            }));
+                    ffmpegProcess.on('error', reject);
+                    ffmpegProcess.on('end', resolve);
+                });
+            });
 
             if (!fs.existsSync(imagePath)) {
                 throw new Error('Output image file not created');
@@ -722,6 +741,7 @@ class StickerController {
             outputPath = this._generateTempFileName('.webp');
 
             // Combine frames → animated WebP
+            const ffmpeg = await getFfmpeg();
             await new Promise((resolve, reject) => {
                 ffmpeg()
                     .input(concatFile)
@@ -744,6 +764,7 @@ class StickerController {
             // Read WebP buffer and inject metadata via Exif
             let buffer = fs.readFileSync(outputPath);
             try {
+                const StickerExif = await getStickerExif();
                 const exif = new StickerExif({ pack: this.defaultPack, author: this.defaultAuthor });
                 buffer = await exif.add(buffer);
             } catch (metaErr) {

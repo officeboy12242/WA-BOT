@@ -31,6 +31,7 @@ import {
 } from '../prompts/stockDiscoveryPrompt.js';
 import { parseTradeSignal, parseDiscoveryResult } from '../utils/tradeSignalParser.js';
 import { enforceLiveSpotPrice, enforceLiveOptionPremiums } from '../utils/tradeQuoteUtils.js';
+import { startMorningPick, formatMorningPickCard } from '../utils/tradeMorningPick.js';
 import { injectTradePlans } from '../utils/tradePlanFormatter.js';
 import {
     getIndianMarketClosedReason,
@@ -615,11 +616,12 @@ class TradeAlertController {
             const mode = await this.resolveModeForGroup(group);
             let symbols;
             let autoDiscovery = null;
+            let source = this.defaultDiscoverySource;
             if (mode === 'manual') {
                 const groupSymbols = await this.groupManager.getTradeAlertSymbols(group.group_id);
                 symbols = groupSymbols.length ? groupSymbols : this.defaultSymbols;
             } else {
-                const source = await this.resolveDiscoverySourceForGroup(group.group_id);
+                source = await this.resolveDiscoverySourceForGroup(group.group_id);
                 if (!discoveriesBySource.has(source)) {
                     try {
                         discoveriesBySource.set(
@@ -747,6 +749,7 @@ class TradeAlertController {
                                     confluence,
                                     strictMin: strictMinConv,
                                 }),
+                                body: text,
                                 signal,
                                 resultEntry,
                                 softGate: true,
@@ -761,7 +764,7 @@ class TradeAlertController {
                         return { kind: 'skip', skipLine, resultEntry };
                     }
 
-                    const item = { symbol, text, signal, resultEntry, softGate: false };
+                    const item = { symbol, text, body: text, signal, resultEntry, softGate: false };
                     return { kind: 'actionable', item, isHiddenGem, resultEntry };
                 } catch (err) {
                     logger.error(`Trade alert failed ${symbol} in ${group.group_id}: ${err.message}`);
@@ -817,6 +820,21 @@ class TradeAlertController {
             }
 
             const postSymbols = new Set(toPost.map((p) => p.symbol));
+
+            // Kick live ATM premium for morning pick while alerts send (no extra wait after scan).
+            const morning = toPost.length
+                ? startMorningPick(
+                      toPost.map((p) => ({
+                          symbol: p.symbol,
+                          signal: p.signal,
+                          resultEntry: p.resultEntry,
+                          softGate: p.softGate,
+                          body: p.body || p.text,
+                          text: p.text,
+                      })),
+                      { discoverySource: source }
+                  )
+                : { pick: null, livePromise: Promise.resolve(null) };
 
             for (const item of toPost) {
                 try {
@@ -878,6 +896,25 @@ class TradeAlertController {
                         scanSummary +
                         `\n\n_Use \`/tradenow SYMBOL\` anytime for full analysis._`,
                 }).catch(() => {});
+
+                // Morning pick of day — Format B + fresh NSE ATM premium (fetched in parallel above)
+                try {
+                    const live = await morning.livePromise;
+                    const pickText = formatMorningPickCard(morning.pick, {
+                        live,
+                        discoverySource: source,
+                    });
+                    if (pickText) {
+                        await sock.sendMessage(group.group_id, { text: pickText }).catch(() => {});
+                        logger.info(
+                            `🏆 Morning pick ${morning.pick?.winner?.symbol} ${morning.pick?.winner?.side}` +
+                                (live?.entry != null ? ` @ ₹${live.entry}` : ' (alert premium)') +
+                                ` → ${group.group_name || group.group_id}`
+                        );
+                    }
+                } catch (err) {
+                    logger.warn(`Morning pick card failed: ${err.message}`);
+                }
             } else if (this.onlyBuySignals) {
                 const skipNote = skipped.length
                     ? `\n_Scanned: ${skipped.slice(0, 8).join('; ')}_`

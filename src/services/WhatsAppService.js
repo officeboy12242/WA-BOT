@@ -504,7 +504,7 @@ class WhatsAppService {
         
         if (!jids.length) {
             logger.info('📢 No sticker channels configured (use /addchannel or .env)');
-            if (this.channelStickerPoller) {
+            if (this.channelStickerPoller && config.CHANNEL_STICKER_POLLER_ENABLED) {
                 this.channelStickerPoller.setChannels([]);
                 this.channelStickerPoller.start(this.sock);
             }
@@ -523,9 +523,11 @@ class WhatsAppService {
         
         logger.info(`📡 Channel sticker forwarding active (${jids.length} channel(s))`);
 
-        if (this.channelStickerPoller) {
+        if (this.channelStickerPoller && config.CHANNEL_STICKER_POLLER_ENABLED) {
             this.channelStickerPoller.setChannels(jids);
             this.channelStickerPoller.start(this.sock);
+        } else if (!config.CHANNEL_STICKER_POLLER_ENABLED) {
+            logger.info('Channel sticker poller disabled (CHANNEL_STICKER_POLLER_ENABLED=false)');
         }
     }
 

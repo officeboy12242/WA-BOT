@@ -5,7 +5,6 @@
  */
 
 import { jidNormalizedUser } from 'baileys';
-import { Sticker } from 'wa-sticker-formatter';
 import { logger } from '../utils/logger.js';
 import { downloadStickerBuffer, isValidWebpBuffer } from '../utils/stickerDownload.js';
 import { extractStickerFromMessage, isNewsletterChat } from '../utils/stickerExtract.js';
@@ -359,6 +358,7 @@ class StickerForwarder {
 
         let stickerBuffer = buffer;
         try {
+            const { Sticker } = await import('wa-sticker-formatter');
             const sticker = new Sticker(buffer, {
                 pack: this.packName,
                 author: this.packAuthor,

@@ -55,6 +55,7 @@ import { startGroupSummaryScheduler } from './src/utils/groupSummaryScheduler.js
 import TradeAlertController from './src/controllers/TradeAlertController.js';
 import { startTradeAlertScheduler } from './src/utils/tradeAlertScheduler.js';
 import { deployNotificationService } from './src/services/DeployNotificationService.js';
+import { createJobQueue, startJobRuntime } from './src/jobs/index.js';
 
 // Bot state
 const botState = {
@@ -101,6 +102,8 @@ class WhatsAppCourseBot {
         this.groupSummaryController = null;
         this.tradeAlertController = null;
         this.tradeAlertScheduler = null;
+        this.jobQueue = null;
+        this.jobRuntime = null;
         this.morningDatabase = null;
         this.stickerController = null;
         this.adminPanel = null;
@@ -150,12 +153,14 @@ class WhatsAppCourseBot {
             await shortLinkService.init(mongoDb);
             urlShortener.setService(shortLinkService);
             await botTelemetry.init(mongoDb);
+            this.jobQueue = await createJobQueue(mongoDb);
             if (this.adminPanel) {
                 this.adminPanel.setShortLinkService(shortLinkService);
                 this.adminPanel.setDashboardContext({
                     mongoDb,
                     groupManager: this.groupManager,
                     botState,
+                    jobQueue: this.jobQueue,
                 });
             }
 
@@ -356,6 +361,21 @@ class WhatsAppCourseBot {
             this.commandController.setGetSock(() => this.whatsappService.getSock());
             this.interviewQuestionService.setGetSock(() => this.whatsappService.getSock());
 
+            this.jobRuntime = startJobRuntime({
+                queue: this.jobQueue,
+                concurrency: config.JOB_WORKER_CONCURRENCY,
+                handlers: {
+                    'trade.daily_alerts': async () => {
+                        const sock = this.whatsappService?.getSock?.();
+                        if (!sock) throw new Error('WhatsApp not ready for trade.daily_alerts');
+                        await this.tradeAlertController.postDailyAlerts(sock);
+                    },
+                    'news.scrape': async () => {
+                        await this.newsController.scrapeAndQueueOnly();
+                    },
+                },
+            });
+
             await this.courseController.checkAndPostCourses(sock, botState);
 
             this.newsScheduler = startNewsScheduler({
@@ -364,6 +384,7 @@ class WhatsAppCourseBot {
                 newsController: this.newsController,
                 config,
                 botSettings: this.botSettings,
+                jobQueue: this.jobQueue,
             });
 
             this.githubScheduler = startGithubScheduler({
@@ -410,6 +431,7 @@ class WhatsAppCourseBot {
                 tradeAlertController: this.tradeAlertController,
                 config,
                 botSettings: this.botSettings,
+                jobQueue: this.jobQueue,
             });
 
             this.checkInterval = setInterval(async () => {
@@ -459,6 +481,13 @@ class WhatsAppCourseBot {
         }
         if (this.tradeAlertScheduler) {
             this.tradeAlertScheduler.stop();
+        }
+        if (this.jobRuntime?.stop) {
+            await Promise.resolve(this.jobRuntime.stop()).catch(() => {});
+            this.jobRuntime = null;
+        }
+        if (this.jobQueue?.close) {
+            await this.jobQueue.close().catch(() => {});
         }
         if (this.groupChatLogService) {
             this.groupChatLogService.stop();

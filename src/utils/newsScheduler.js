@@ -141,9 +141,17 @@ export function getExpiredSlotsToday(postTimes, timezone, now = new Date(), grac
  * @param {{ checkAndPostNews: Function, scrapeAndQueueOnly: Function }} options.newsController
  * @param {{ NEWS_POST_TIMES: string[], NEWS_TIMEZONE: string, NEWS_SCRAPE_INTERVAL: number }} options.config
  * @param {import('../models/BotSettings.js').default} [options.botSettings]
+ * @param {{ enqueue: Function }|null} [options.jobQueue]
  * @returns {{ stop: () => void }}
  */
-export function startNewsScheduler({ getSock, botState, newsController, config, botSettings = null }) {
+export function startNewsScheduler({
+    getSock,
+    botState,
+    newsController,
+    config,
+    botSettings = null,
+    jobQueue = null,
+}) {
     let postTimeout = null;
     let scrapeInterval = null;
     let stopped = false;
@@ -186,13 +194,23 @@ export function startNewsScheduler({ getSock, botState, newsController, config, 
 
     scrapeInterval = setInterval(async () => {
         try {
-            await newsController.scrapeAndQueueOnly();
+            if (jobQueue) {
+                await jobQueue.enqueue('news.scrape', {}, { jobKey: 'news.scrape', maxAttempts: 2 });
+            } else {
+                await newsController.scrapeAndQueueOnly();
+            }
         } catch (error) {
             logger.error(`News background scrape failed: ${error.message}`);
         }
     }, config.NEWS_SCRAPE_INTERVAL * 1000);
 
-    void newsController.scrapeAndQueueOnly();
+    if (jobQueue) {
+        void jobQueue.enqueue('news.scrape', {}, { jobKey: 'news.scrape', maxAttempts: 2 }).catch((err) => {
+            logger.error(`News scrape enqueue failed: ${err.message}`);
+        });
+    } else {
+        void newsController.scrapeAndQueueOnly();
+    }
     scheduleNextPost();
 
     return {

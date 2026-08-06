@@ -3,9 +3,6 @@
  */
 
 import zlib from 'zlib';
-import mammoth from 'mammoth';
-import WordExtractor from 'word-extractor';
-import pdfParse from 'pdf-parse/lib/pdf-parse.js';
 import { normalizeResumeExtract } from './resumeStructure.js';
 import { extractPdfColorPalette } from './resumePdfColors.js';
 import { extractPdfTypography } from './resumePdfFonts.js';
@@ -200,6 +197,7 @@ async function extractPdfText(buffer) {
     let text = '';
     let parseErr = null;
     try {
+        const { default: pdfParse } = await import('pdf-parse/lib/pdf-parse.js');
         const data = await pdfParse(buffer);
         text = data?.text || '';
     } catch (err) {
@@ -250,9 +248,11 @@ export async function extractResumeText(buffer, meta = {}) {
         palette = extractPdfColorPalette(raw);
         typography = extractPdfTypography(raw);
     } else if (kind === 'docx') {
+        const { default: mammoth } = await import('mammoth');
         const result = await mammoth.extractRawText({ buffer: raw });
         text = result?.value || '';
     } else if (kind === 'doc') {
+        const { default: WordExtractor } = await import('word-extractor');
         const extractor = new WordExtractor();
         const doc = await extractor.extract(raw);
         text = doc?.getBody?.() || '';

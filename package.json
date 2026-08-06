@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "start": "node --max-old-space-size=450 bot-new.js",
+    "worker": "node --max-old-space-size=300 worker.js",
     "dev": "node --watch bot-new.js",
     "clear-auth": "node scripts/clear-auth.js"
   },
@@ -25,11 +26,13 @@
     "@napi-rs/canvas": "^1.0.0",
     "axios": "^1.6.5",
     "baileys": "7.0.0-rc13",
+    "bullmq": "^6.0.8",
     "cheerio": "^1.2.0",
     "dotenv": "^16.4.1",
     "ffmpeg-static": "^5.3.0",
     "file-type": "^18.7.0",
     "fluent-ffmpeg": "^2.1.3",
+    "ioredis": "^6.0.0",
     "link-preview-js": "^3.0.0",
     "mammoth": "^1.12.0",
     "mongodb": "^6.21.0",

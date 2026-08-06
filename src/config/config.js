@@ -51,6 +51,16 @@ export const config = {
     /** Parallel sticker download/send workers (1–8, default 3). */
     STICKER_FORWARD_CONCURRENCY: Math.max(1, Math.min(8, parseInt(process.env.STICKER_FORWARD_CONCURRENCY, 10) || 3)),
     STICKER_INTER_SEND_DELAY_MS: Math.max(50, parseInt(process.env.STICKER_INTER_SEND_DELAY_MS, 10) || 150),
+    /** Channel newsletter sticker backfill poller (set false to save CPU). */
+    CHANNEL_STICKER_POLLER_ENABLED: process.env.CHANNEL_STICKER_POLLER_ENABLED !== 'false',
+    /** Ping movie APIs on an interval (set false to save outbound bandwidth). */
+    MOVIE_API_KEEPALIVE_ENABLED: process.env.MOVIE_API_KEEPALIVE_ENABLED !== 'false',
+    /** Global concurrent /movie searches (1–6). */
+    MOVIE_SEARCH_MAX: Math.max(1, Math.min(6, parseInt(process.env.MOVIE_SEARCH_MAX, 10) || 4)),
+    /** Redis URL enables BullMQ job driver (Phase 3). */
+    REDIS_URL: process.env.REDIS_URL?.trim() || '',
+    /** In-process job worker concurrency. */
+    JOB_WORKER_CONCURRENCY: Math.max(1, Math.min(4, parseInt(process.env.JOB_WORKER_CONCURRENCY, 10) || 2)),
     TMDB_API_KEY: process.env.TMDB_API_KEY?.trim() || '',
     /** HDHub4u movie search API (free-udemy-courses-bot). */
     MOVIES_API_URL: process.env.MOVIES_API_URL?.trim() || 'https://free-udemy-courses-bot.onrender.com/api/movies',
