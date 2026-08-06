@@ -18,8 +18,16 @@ function parseAlertTime(timeStr) {
  * @param {import('../controllers/TradeAlertController.js').default} options.tradeAlertController
  * @param {object} options.config
  * @param {import('../models/BotSettings.js').default} [options.botSettings]
+ * @param {{ enqueue: Function }|null} [options.jobQueue]
  */
-export function startTradeAlertScheduler({ getSock, botState, tradeAlertController, config, botSettings = null }) {
+export function startTradeAlertScheduler({
+    getSock,
+    botState,
+    tradeAlertController,
+    config,
+    botSettings = null,
+    jobQueue = null,
+}) {
     let postTimeout = null;
     let stopped = false;
     const slots = createDurableSlotStore(botSettings, 'trade');
@@ -53,8 +61,18 @@ export function startTradeAlertScheduler({ getSock, botState, tradeAlertControll
                 if (await slots.isDone(botState, slotKey, 'lastTradeAlertSlot')) {
                     return;
                 }
-                if (!sock) return;
-                await tradeAlertController.postDailyAlerts(sock);
+                if (!sock && !jobQueue) return;
+                if (jobQueue) {
+                    await jobQueue.enqueue(
+                        'trade.daily_alerts',
+                        { slotKey },
+                        { jobKey: `trade.daily:${slotKey}`, maxAttempts: 2 }
+                    );
+                    logger.info(`📈 Trade daily alert enqueued (${slotKey})`);
+                } else {
+                    if (!sock) return;
+                    await tradeAlertController.postDailyAlerts(sock);
+                }
                 await slots.markDone(botState, slotKey, 'lastTradeAlertSlot');
             } catch (error) {
                 logger.error(`Trade alert scheduled send failed: ${error.message}`);

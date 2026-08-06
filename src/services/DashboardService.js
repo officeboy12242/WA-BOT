@@ -48,6 +48,25 @@ export default class DashboardService {
         this.groupManager = deps.groupManager || null;
         this.adminPanel = deps.adminPanel || null;
         this.botState = deps.botState || {};
+        this.jobQueue = deps.jobQueue || null;
+        /** @type {{ snap: object, expires: number }|null} */
+        this._snapCache = null;
+        this.snapTtlMs = 5_000;
+    }
+
+    invalidateSnapshotCache() {
+        this._snapCache = null;
+    }
+
+    /** Aggregate once, reuse for ~5s across dashboard clients. */
+    async getCachedSnapshot(ttlMs = this.snapTtlMs) {
+        const now = Date.now();
+        if (this._snapCache && this._snapCache.expires > now) {
+            return this._snapCache.snap;
+        }
+        const snap = await this.getSnapshot();
+        this._snapCache = { snap, expires: now + Math.max(1_000, Number(ttlMs) || 5_000) };
+        return snap;
     }
 
     col(name) {
@@ -449,12 +468,13 @@ export default class DashboardService {
         const queue = typeof messageQueue.stats === 'function' ? messageQueue.stats() : { chats: 0, pending: 0 };
         const movieConcurrency = await loadMovieConcurrency();
 
-        const [content, groups, analytics, schedules, movieCache] = await Promise.all([
+        const [content, groups, analytics, schedules, movieCache, jobs] = await Promise.all([
             this.getContentStats(),
             this.getGroupIntelligence(),
             this.getAnalytics(),
             this.getSchedulerStatus(),
             this.getMovieCacheStats(),
+            this.getJobQueueStats(),
         ]);
 
         return {
@@ -469,6 +489,7 @@ export default class DashboardService {
                 lastNewsCheckTime: this.botState?.lastNewsCheckTime || null,
             },
             queue,
+            jobs,
             movieConcurrency,
             movieCache,
             live,
@@ -477,5 +498,16 @@ export default class DashboardService {
             analytics,
             schedules,
         };
+    }
+
+    async getJobQueueStats() {
+        const empty = { pending: 0, running: 0, failed: 0, driver: 'none' };
+        if (!this.jobQueue || typeof this.jobQueue.stats !== 'function') return empty;
+        try {
+            return await this.jobQueue.stats();
+        } catch (err) {
+            logger.debug(`Dashboard job stats failed: ${err.message}`);
+            return empty;
+        }
     }
 }

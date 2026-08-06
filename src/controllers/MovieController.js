@@ -476,7 +476,10 @@ async function deleteMovieProgressMessage(sock, chatId, messageKey) {
  * Global slot cap keeps scrapes from melting the host while other users still run in parallel.
  */
 const movieSearchByUser = new Map();
-const MOVIE_SEARCH_MAX = 6;
+const MOVIE_SEARCH_MAX = Math.max(
+    1,
+    Math.min(6, parseInt(process.env.MOVIE_SEARCH_MAX, 10) || 4)
+);
 let movieSearchActive = 0;
 /** @type {Array<() => void>} */
 const movieSearchWaiters = [];
@@ -769,6 +772,10 @@ class MovieController {
     }
 
     _startKeepAlive() {
+        if (process.env.MOVIE_API_KEEPALIVE_ENABLED === 'false') {
+            logger.info('Movie API keep-alive disabled (MOVIE_API_KEEPALIVE_ENABLED=false)');
+            return;
+        }
         pronoobDriveService.startKeepAlive();
         atozService.startKeepAlive();
         hdHubMoviesService.startKeepAlive();

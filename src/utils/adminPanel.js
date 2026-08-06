@@ -5,6 +5,8 @@
 
 import http from 'http';
 import os from 'os';
+import crypto from 'crypto';
+import zlib from 'zlib';
 import { URL } from 'url';
 import { logger } from './logger.js';
 import { botTelemetry } from './botTelemetry.js';
@@ -122,34 +124,79 @@ class AdminPanel {
         /** @type {Set<import('http').ServerResponse>} */
         this._sseClients = new Set();
         this._sseUnsub = null;
+        this._sseDirty = false;
+        this._sseTickTimer = null;
+        /** @type {{ etag: string, body: Buffer }|null} */
+        this._dashHtmlCache = null;
+    }
+
+    _wantsGzip(req) {
+        return String(req.headers['accept-encoding'] || '').includes('gzip');
+    }
+
+    /** Send body with optional gzip; sets Content-Length. */
+    _sendBody(req, res, status, headers, body) {
+        const buf = Buffer.isBuffer(body) ? body : Buffer.from(String(body), 'utf8');
+        const outHeaders = { ...headers };
+        if (this._wantsGzip(req) && buf.length > 512) {
+            const gz = zlib.gzipSync(buf);
+            outHeaders['Content-Encoding'] = 'gzip';
+            outHeaders.Vary = outHeaders.Vary
+                ? `${outHeaders.Vary}, Accept-Encoding`
+                : 'Accept-Encoding';
+            outHeaders['Content-Length'] = gz.length;
+            res.writeHead(status, outHeaders);
+            res.end(gz);
+            return;
+        }
+        outHeaders['Content-Length'] = buf.length;
+        res.writeHead(status, outHeaders);
+        res.end(buf);
+    }
+
+    _dashboardHtmlPack() {
+        if (this._dashHtmlCache) return this._dashHtmlCache;
+        const body = Buffer.from(getCyberDashboardHtml(), 'utf8');
+        const etag = `W/"dash-${crypto.createHash('sha1').update(body).digest('hex').slice(0, 16)}"`;
+        this._dashHtmlCache = { etag, body };
+        return this._dashHtmlCache;
     }
 
     setDashboardService(service) {
         this.dashboardService = service;
     }
 
-    setDashboardContext({ mongoDb, groupManager, botState } = {}) {
+    setDashboardContext({ mongoDb, groupManager, botState, jobQueue } = {}) {
         this.dashboardService = new DashboardService({
             mongoDb,
             groupManager,
             adminPanel: this,
             botState,
+            jobQueue: jobQueue || null,
         });
         if (!this._sseUnsub) {
             this._sseUnsub = botTelemetry.subscribe((ev) => this._broadcastSse(ev));
         }
     }
 
-    _broadcastSse(ev) {
-        const safe = this._publicEvent(ev);
-        const payload = `data: ${JSON.stringify(safe)}\n\n`;
-        for (const res of this._sseClients) {
-            try {
-                res.write(payload);
-            } catch {
-                this._sseClients.delete(res);
+    _broadcastSse(_ev) {
+        // Coalesce bursts into one light tick (~2s) instead of shipping every event.
+        this._sseDirty = true;
+        if (this._sseTickTimer) return;
+        this._sseTickTimer = setTimeout(() => {
+            this._sseTickTimer = null;
+            if (!this._sseDirty) return;
+            this._sseDirty = false;
+            this.dashboardService?.invalidateSnapshotCache?.();
+            const payload = `data: ${JSON.stringify({ type: 'tick', at: new Date().toISOString() })}\n\n`;
+            for (const res of this._sseClients) {
+                try {
+                    res.write(payload);
+                } catch {
+                    this._sseClients.delete(res);
+                }
             }
-        }
+        }, 2000);
     }
 
     /** Strip phones / raw JIDs for the public board. */
@@ -632,8 +679,27 @@ class AdminPanel {
 
             // Mission-control dashboard — PUBLIC (no token)
             if (pathname === '/dashboard' || pathname === '/dash') {
-                res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-                res.end(getCyberDashboardHtml());
+                const pack = this._dashboardHtmlPack();
+                const inm = String(req.headers['if-none-match'] || '');
+                if (inm && inm === pack.etag) {
+                    res.writeHead(304, {
+                        ETag: pack.etag,
+                        'Cache-Control': 'public, max-age=60',
+                    });
+                    res.end();
+                    return;
+                }
+                this._sendBody(
+                    req,
+                    res,
+                    200,
+                    {
+                        'Content-Type': 'text/html; charset=utf-8',
+                        ETag: pack.etag,
+                        'Cache-Control': 'public, max-age=60',
+                    },
+                    pack.body
+                );
                 return;
             }
 
@@ -644,12 +710,29 @@ class AdminPanel {
                         res.end(JSON.stringify({ error: 'Dashboard not ready' }));
                         return;
                     }
-                    const snap = await this.dashboardService.getSnapshot();
-                    res.writeHead(200, {
-                        'Content-Type': 'application/json',
-                        'Cache-Control': 'no-store',
-                    });
-                    res.end(JSON.stringify(this._sanitizePublicSnapshot(snap)));
+                    const snap = await this.dashboardService.getCachedSnapshot();
+                    const publicSnap = this._sanitizePublicSnapshot(snap);
+                    const etag = `W/"snap-${publicSnap.at || snap.at}"`;
+                    const inm = String(req.headers['if-none-match'] || '');
+                    if (inm && inm === etag) {
+                        res.writeHead(304, {
+                            ETag: etag,
+                            'Cache-Control': 'private, no-cache',
+                        });
+                        res.end();
+                        return;
+                    }
+                    this._sendBody(
+                        req,
+                        res,
+                        200,
+                        {
+                            'Content-Type': 'application/json; charset=utf-8',
+                            ETag: etag,
+                            'Cache-Control': 'private, no-cache',
+                        },
+                        JSON.stringify(publicSnap)
+                    );
                 } catch (err) {
                     logger.error(`Dashboard snapshot failed: ${err.message}`);
                     res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -674,7 +757,7 @@ class AdminPanel {
                         clearInterval(ping);
                         this._sseClients.delete(res);
                     }
-                }, 15000);
+                }, 30000);
                 req.on('close', () => {
                     clearInterval(ping);
                     this._sseClients.delete(res);

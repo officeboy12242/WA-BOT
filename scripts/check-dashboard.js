@@ -1,10 +1,11 @@
 /**
- * Self-check: dashboard HTML + telemetry counters.
+ * Self-check: dashboard HTML + telemetry counters + bandwidth-aware refresh.
  */
 import assert from 'node:assert/strict';
 import { botTelemetry } from '../src/utils/botTelemetry.js';
 import { getCyberDashboardHtml } from '../src/dashboard/cyberGirlyDashboard.js';
 import { messageQueue } from '../src/utils/messageQueue.js';
+import DashboardService from '../src/services/DashboardService.js';
 
 botTelemetry.track('command', { cmd: 'movie', status: 'ok', ms: 40, chatId: 'g@g.us' });
 botTelemetry.track('post', { kind: 'news', title: 'AI chips' });
@@ -26,6 +27,29 @@ assert.match(html, /data-range/);
 assert.match(html, /data-view/);
 assert.match(html, /api\/dashboard\/snapshot/);
 assert.match(html, /api\/dashboard\/stream/);
+
+// Bandwidth-aware client
+assert.match(html, /POLL_MS=60000/);
+assert.match(html, /DEBOUNCE_MS=2500/);
+assert.match(html, /If-None-Match/);
+assert.match(html, /scheduleRefresh/);
+assert.match(html, /visibilitychange/);
+assert.match(html, /pageVisible/);
+assert.match(html, /every 60 seconds/);
+assert.doesNotMatch(html, /every 15 seconds/);
+assert.doesNotMatch(html, /setInterval\(refresh,15000\)/);
+assert.match(html, /Jobs pending/);
+assert.match(html, /s\.jobs\?\.pending/);
+
+const svc = new DashboardService({});
+assert.equal(typeof svc.getCachedSnapshot, 'function');
+assert.equal(typeof svc.invalidateSnapshotCache, 'function');
+assert.equal(typeof svc.getJobQueueStats, 'function');
+svc._snapCache = { snap: { at: 'cached' }, expires: Date.now() + 10_000 };
+const cached = await svc.getCachedSnapshot();
+assert.equal(cached.at, 'cached');
+svc.invalidateSnapshotCache();
+assert.equal(svc._snapCache, null);
 
 const stats = messageQueue.stats();
 assert.ok('pending' in stats);
