@@ -4,6 +4,7 @@
 
 import axios from 'axios';
 import { logger } from '../utils/logger.js';
+import { buildKeyPool } from '../utils/apiKeyPool.js';
 
 const DEFAULT_BASE_URL = 'https://integrate.api.nvidia.com/v1/chat/completions';
 const DEFAULT_SUMMARY_MODEL = 'deepseek-ai/deepseek-v4-flash';
@@ -34,7 +35,7 @@ function clampTimeoutMs(raw, cap = MAX_TIMEOUT_MS) {
 
 class NvidiaDeepSeekService {
     constructor(config = {}) {
-        this.apiKey = config.NVIDIA_API_KEY || '';
+        this.keyPool = buildKeyPool(config.NVIDIA_API_KEYS, config.NVIDIA_API_KEY);
         this.model = config.NVIDIA_MODEL || DEFAULT_SUMMARY_MODEL;
         this.tradeModel = config.NVIDIA_TRADE_MODEL?.trim() || DEFAULT_TRADE_MODEL;
         this.baseUrl = config.NVIDIA_API_BASE_URL || DEFAULT_BASE_URL;
@@ -49,7 +50,7 @@ class NvidiaDeepSeekService {
     }
 
     isConfigured() {
-        return Boolean(this.apiKey);
+        return this.keyPool.size > 0;
     }
 
     isRetryableError(err) {
@@ -108,7 +109,7 @@ class NvidiaDeepSeekService {
      * @returns {Promise<string>}
      */
     async complete(systemPrompt, userPrompt, opts = {}) {
-        if (!this.apiKey) {
+        if (!this.keyPool.size) {
             throw new Error('NVIDIA_API_KEY is not configured');
         }
 
@@ -123,28 +124,40 @@ class NvidiaDeepSeekService {
 
         const body = this.buildRequestBody(model, systemPrompt, userPrompt, maxTokens);
 
-        try {
-            const { data } = await axios.post(this.baseUrl, body, {
-                timeout: timeoutMs,
-                headers: {
-                    Authorization: `Bearer ${this.apiKey}`,
-                    'Content-Type': 'application/json',
-                },
-            });
+        // Quotas are per key — rotate through spare keys before failing over.
+        let lastErr;
+        for (let attempt = 0; attempt < this.keyPool.size; attempt++) {
+            const key = this.keyPool.next();
+            try {
+                const { data } = await axios.post(this.baseUrl, body, {
+                    timeout: timeoutMs,
+                    headers: {
+                        Authorization: `Bearer ${key}`,
+                        'Content-Type': 'application/json',
+                    },
+                });
 
-            const content = this.extractMessageContent(data);
-            if (!content?.trim()) {
-                throw new Error('Empty response from NVIDIA API');
+                const content = this.extractMessageContent(data);
+                if (!content?.trim()) {
+                    throw new Error('Empty response from NVIDIA API');
+                }
+                return content.trim();
+            } catch (err) {
+                const status = err.response?.status;
+                const detail =
+                    err.response?.data?.detail || err.response?.data?.message || err.message;
+                const msg = status ? `NVIDIA ${status}: ${detail}` : String(detail || err.message);
+                const wrapped = new Error(msg);
+                wrapped.cause = err;
+                lastErr = wrapped;
+                if (status !== 429) throw wrapped;
+                this.keyPool.markRateLimited(key);
+                if (attempt < this.keyPool.size - 1) {
+                    logger.warn(`NVIDIA key ${attempt + 1} rate limited — rotating to next key`);
+                }
             }
-            return content.trim();
-        } catch (err) {
-            const status = err.response?.status;
-            const detail = err.response?.data?.detail || err.response?.data?.message || err.message;
-            const msg = status ? `NVIDIA ${status}: ${detail}` : String(detail || err.message);
-            const wrapped = new Error(msg);
-            wrapped.cause = err;
-            throw wrapped;
         }
+        throw lastErr || new Error('NVIDIA request failed');
     }
 
     /**

@@ -113,6 +113,73 @@ export const config = {
         if (!Number.isFinite(n) || n <= 0) return 90_000;
         return Math.min(5 * 60_000, Math.max(15_000, n));
     })(),
+    /** Per-provider requests/minute budget: "gemini:8,groq:25,nvidia:35,openrouter:15". */
+    TRADE_LLM_RPM: (process.env.TRADE_LLM_RPM || '').trim(),
+    /** Max simultaneous LLM calls across all trade providers. */
+    TRADE_LLM_MAX_CONCURRENT: Math.max(1, parseInt(process.env.TRADE_LLM_MAX_CONCURRENT, 10) || 3),
+    /** Max simultaneous LLM calls against a single provider. */
+    TRADE_LLM_MAX_PER_PROVIDER: Math.max(
+        1,
+        parseInt(process.env.TRADE_LLM_MAX_PER_PROVIDER, 10) || 2
+    ),
+    /** How long a burst request may queue for provider capacity before firing anyway. */
+    TRADE_LLM_QUEUE_WAIT_MS: Math.min(
+        120_000,
+        Math.max(0, parseInt(process.env.TRADE_LLM_QUEUE_WAIT_MS, 10) || 45_000)
+    ),
+    /** Extra keys per provider (comma separated) — multiplies free-tier headroom. */
+    GEMINI_API_KEYS: process.env.GEMINI_API_KEYS?.trim() || '',
+    GROQ_API_KEYS: process.env.GROQ_API_KEYS?.trim() || '',
+    NVIDIA_API_KEYS: process.env.NVIDIA_API_KEYS?.trim() || '',
+    OPENROUTER_API_KEYS: process.env.OPENROUTER_API_KEYS?.trim() || '',
+    /** Reuse an identical /tradenow result for this long instead of re-running the pipeline. */
+    TRADENOW_CACHE_TTL_MS: Math.min(
+        15 * 60_000,
+        Math.max(0, parseInt(process.env.TRADENOW_CACHE_TTL_MS, 10) || 120_000)
+    ),
+
+    /* ── Swing momentum scan (/swing) ───────────────────────────────────────
+     * Deterministic ranking + breakout timing + regime gate. No LLM involved. */
+    /** Override the scan universe entirely: SWING_UNIVERSE=RELIANCE,TCS,... */
+    SWING_UNIVERSE: process.env.SWING_UNIVERSE?.trim() || '',
+    SWING_SCAN_CONCURRENCY: Math.max(
+        1,
+        Math.min(10, parseInt(process.env.SWING_SCAN_CONCURRENCY, 10) || 6)
+    ),
+    /** Risk-free rate used to compute excess return in the momentum ratio. */
+    SWING_RISK_FREE_RATE: Number(process.env.SWING_RISK_FREE_RATE) || 0.065,
+    /** Entry must be within this % of the 52-week high. */
+    SWING_MAX_PCT_FROM_HIGH: Number(process.env.SWING_MAX_PCT_FROM_HIGH) || 5,
+    /** Breakout day volume must exceed this multiple of the 20-day average. */
+    SWING_MIN_VOLUME_RATIO: Number(process.env.SWING_MIN_VOLUME_RATIO) || 1.5,
+    /** Liquidity floor in ₹ crore of average daily turnover — keeps slippage sane. */
+    SWING_MIN_TURNOVER_CR: Number(process.env.SWING_MIN_TURNOVER_CR) || 5,
+    SWING_MAX_PICKS: Math.max(1, parseInt(process.env.SWING_MAX_PICKS, 10) || 5),
+    /** Stop distance in ATR(14) multiples. Research supports 1.5–2.0. */
+    SWING_ATR_STOP_MULT: Number(process.env.SWING_ATR_STOP_MULT) || 2,
+    /** Capital and per-trade risk used for position sizing in the message. */
+    SWING_CAPITAL: Number(process.env.SWING_CAPITAL) || 100_000,
+    SWING_RISK_PCT: Number(process.env.SWING_RISK_PCT) || 0.5,
+
+    /* ── Expiry-day index options (/expiry) ─────────────────────────────────
+     * NIFTY settles every Tuesday; BANKNIFTY/FINNIFTY/MIDCPNIFTY on the last
+     * Tuesday only (SEBI limited each exchange to one weekly index in Nov 2024). */
+    EXPIRY_ALERT_ENABLED: process.env.EXPIRY_ALERT_ENABLED !== 'false',
+    EXPIRY_MORNING_TIME: (process.env.EXPIRY_MORNING_TIME || '09:35').trim(),
+    EXPIRY_AFTERNOON_TIME: (process.env.EXPIRY_AFTERNOON_TIME || '13:15').trim(),
+    EXPIRY_RISK_FREE_RATE: Number(process.env.EXPIRY_RISK_FREE_RATE) || 0.065,
+    /** Hero-zero strike selection band, by absolute delta. */
+    EXPIRY_HERO_DELTA_MIN: Number(process.env.EXPIRY_HERO_DELTA_MIN) || 0.02,
+    EXPIRY_HERO_DELTA_MAX: Number(process.env.EXPIRY_HERO_DELTA_MAX) || 0.12,
+    EXPIRY_HERO_MAX_PREMIUM: Number(process.env.EXPIRY_HERO_MAX_PREMIUM) || 25,
+    /** Directional ATM trade: premium stop and R-multiple targets. */
+    EXPIRY_ATM_STOP_PCT: Number(process.env.EXPIRY_ATM_STOP_PCT) || 20,
+    EXPIRY_ATM_T1_PCT: Number(process.env.EXPIRY_ATM_T1_PCT) || 50,
+    EXPIRY_ATM_T2_PCT: Number(process.env.EXPIRY_ATM_T2_PCT) || 100,
+    /** Break must extend this fraction beyond the opening range to count. */
+    EXPIRY_MIN_RANGE_EXPANSION: Number(process.env.EXPIRY_MIN_RANGE_EXPANSION) || 0.3,
+    /** Lot sizes change at SEBI revisions: "NIFTY:75,BANKNIFTY:30". */
+    EXPIRY_LOT_SIZES: (process.env.EXPIRY_LOT_SIZES || '').trim(),
     /** @deprecated Trade alerts use Gemini; kept for group summaries only */
     NVIDIA_TRADE_MODEL: process.env.NVIDIA_TRADE_MODEL?.trim() || 'z-ai/glm-5.2',
     /** Summary self-heal model (code fix proposals) */

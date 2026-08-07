@@ -476,6 +476,22 @@ export const COMMAND_REGISTRY = [
         category: 'trade',
     },
     {
+        names: ['/expiry'],
+        key: 'expiry',
+        scope: 'any',
+        role: 'anyone',
+        help: 'Expiry-day index options — `/expiry`, `/expiry nifty`, `/expiry nifty hero`',
+        category: 'trade',
+    },
+    {
+        names: ['/swing'],
+        key: 'swing',
+        scope: 'any',
+        role: 'anyone',
+        help: 'Swing setups — momentum rank + 52w breakout — `/swing`, `/swing top`',
+        category: 'trade',
+    },
+    {
         names: ['/addpremium'],
         key: 'addpremium',
         scope: 'any',

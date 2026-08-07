@@ -54,6 +54,9 @@ import ResumeTailorService from './src/services/ResumeTailorService.js';
 import { startGroupSummaryScheduler } from './src/utils/groupSummaryScheduler.js';
 import TradeAlertController from './src/controllers/TradeAlertController.js';
 import { startTradeAlertScheduler } from './src/utils/tradeAlertScheduler.js';
+import { startExpiryAlertScheduler } from './src/utils/expiryAlertScheduler.js';
+import ExpiryTradeService from './src/services/ExpiryTradeService.js';
+import { formatExpiryDigest } from './src/utils/expiryAlertFormatter.js';
 import { deployNotificationService } from './src/services/DeployNotificationService.js';
 import { createJobQueue, startJobRuntime } from './src/jobs/index.js';
 
@@ -102,6 +105,8 @@ class WhatsAppCourseBot {
         this.groupSummaryController = null;
         this.tradeAlertController = null;
         this.tradeAlertScheduler = null;
+        this.expiryAlertScheduler = null;
+        this.expiryTradeService = null;
         this.jobQueue = null;
         this.jobRuntime = null;
         this.morningDatabase = null;
@@ -434,6 +439,37 @@ class WhatsAppCourseBot {
                 jobQueue: this.jobQueue,
             });
 
+            // Expiry-day option alerts — two slots, quiet on non-expiry days.
+            this.expiryTradeService = new ExpiryTradeService(config);
+            this.expiryAlertScheduler = startExpiryAlertScheduler({
+                getSock: () => this.whatsappService.getSock(),
+                botState,
+                config,
+                botSettings: this.botSettings,
+                postExpiryAlerts: async (sock, slot) => {
+                    const groups = await this.groupManager.getTradeAlertGroups();
+                    if (!groups.length) {
+                        logger.info('Expiry alert: no trade-alert groups enabled');
+                        return;
+                    }
+                    const digest = await this.expiryTradeService.analyzeAllExpiring({ slot });
+                    if (!digest.results.length) {
+                        logger.warn('Expiry alert: no chain data, nothing posted');
+                        return;
+                    }
+                    const text = formatExpiryDigest(digest, { slot });
+                    for (const g of groups) {
+                        const chatId = g.group_id || g.groupId || g;
+                        try {
+                            await sock.sendMessage(chatId, { text });
+                        } catch (err) {
+                            logger.warn(`Expiry alert post failed for ${chatId}: ${err.message}`);
+                        }
+                    }
+                    logger.info(`📅 Expiry ${slot} alerts posted to ${groups.length} group(s)`);
+                },
+            });
+
             this.checkInterval = setInterval(async () => {
                 try {
                     await this.courseController.checkAndPostCourses(
@@ -481,6 +517,9 @@ class WhatsAppCourseBot {
         }
         if (this.tradeAlertScheduler) {
             this.tradeAlertScheduler.stop();
+        }
+        if (this.expiryAlertScheduler) {
+            this.expiryAlertScheduler.stop();
         }
         if (this.jobRuntime?.stop) {
             await Promise.resolve(this.jobRuntime.stop()).catch(() => {});

@@ -1,5 +1,5 @@
 /**
- * Trade alert handlers: /tradelert, /tradenow
+ * Trade alert handlers: /tradelert, /tradenow, /swing
  */
 
 import { logger } from '../../utils/logger.js';
@@ -7,6 +7,12 @@ import { extractPhoneNumber } from '../../utils/permissions.js';
 import { config } from '../../config/config.js';
 import { editMessageText } from '../../utils/waMessage.js';
 import { formatTradeScanPreview } from '../../utils/tradeScanFormatter.js';
+import SwingMomentumScanService from '../../services/SwingMomentumScanService.js';
+import { formatSwingScan, formatSwingRanking } from '../../utils/swingAlertFormatter.js';
+import { createTradeOutcomeService } from '../../services/TradeOutcomeService.js';
+import ExpiryTradeService, { EXPIRY_INDICES } from '../../services/ExpiryTradeService.js';
+import { formatExpiryAlert, formatExpiryDigest } from '../../utils/expiryAlertFormatter.js';
+import { nextExpiry } from '../../utils/expiryCalendar.js';
 
 function parseSymbolList(raw) {
     return String(raw || '')
@@ -94,7 +100,15 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
                       ? 'NSE top gainers/losers + option chain'
                       : 'NSE macro + hot sectors + Yahoo + news'
             }\n`;
-            r += `🤖 *AI:* ${llmOk ? llmChain : 'Set GEMINI / GROQ / NVIDIA API key'}\n\n`;
+            r += `🤖 *AI:* ${llmOk ? llmChain : 'Set GEMINI / GROQ / NVIDIA API key'}\n`;
+            const gate = tradeAlertController?.tradeLlm?.getGateStatus?.() || [];
+            if (gate.length) {
+                const budget = gate
+                    .map((p) => `${p.name} ${p.used}/${p.limit}${p.cooled ? ' 🧊' : ''}`)
+                    .join(' · ');
+                r += `⚡ *Budget (last 60s):* ${budget}\n`;
+            }
+            r += '\n';
             r += '*Commands:*\n';
             r += '• `/tradelert on` — enable daily AI scan\n';
             r += '• `/tradelert off` — disable\n';
@@ -104,7 +118,8 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
             r += '• `/tradelert source nse` — NIFTY50 top 5G+5L\n';
             r += '• `/tradelert source legacy` — old multi-signal scan\n';
             r += '• `/tradelert scan` — preview today\'s watchlist\n';
-            r += '• `/tradenow RELIANCE` — full analysis (incl. NO TRADE)\n\n';
+            r += '• `/tradenow RELIANCE` — full analysis (incl. NO TRADE)\n';
+            r += '• `/swing` — swing setups (2–6 wk holds, no AI)\n\n';
             r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━';
             await sock.sendMessage(chatId, { text: r });
             return;
@@ -279,12 +294,15 @@ export async function handleTradenow(sock, chatId, senderJid, args, { tradeAlert
     try {
         const senderPhone = extractPhoneNumber(senderJid);
         const symbol = (args[0] || '').trim().toUpperCase();
+        // `/tradenow TCS fresh` bypasses the short reuse window.
+        const forceRefresh = /^(fresh|new|refresh|force)$/i.test(args[1] || '');
 
         if (!symbol) {
             await sock.sendMessage(chatId, {
                 text:
                     '❌ Usage: `/tradenow RELIANCE`\n\n' +
-                    'Examples: `/tradenow TCS`, `/tradenow BANKNIFTY`',
+                    'Examples: `/tradenow TCS`, `/tradenow BANKNIFTY`\n' +
+                    '_Add `fresh` to skip the 2-min reuse window: `/tradenow TCS fresh`_',
             });
             return;
         }
@@ -306,16 +324,22 @@ export async function handleTradenow(sock, chatId, senderJid, args, { tradeAlert
         });
 
         try {
-            const text = await tradeAlertController.analyzeSymbol(symbol, { mode: 'live' });
+            const text = await tradeAlertController.analyzeSymbol(symbol, {
+                mode: 'live',
+                forceRefresh,
+            });
             await editMessageText(sock, chatId, loading?.key, text);
             logger.info(`📈 Tradenow ${symbol} in ${chatId} by ${senderPhone}`);
         } catch (error) {
             logger.error(`Error in tradenow: ${error.message}`);
+            const chain = tradeAlertController.tradeLlm?.getGateStatus?.() || [];
+            const cooled = chain.filter((p) => p.cooled).map((p) => p.name);
             let msg;
             if (/rate limit|429|quota|resource.?exhausted|all trade llm/i.test(error.message)) {
                 msg =
-                    '❌ *AI rate limit* — Gemini/Groq/NVIDIA all busy.\n' +
-                    '_Wait 30–60 seconds and try again, or use `/tradenow NIFTY`._';
+                    '❌ *AI rate limit* — every provider is at its per-minute budget.\n' +
+                    (cooled.length ? `_Cooling down: ${cooled.join(', ')}_\n` : '') +
+                    '_Wait 30–60 seconds and try again._';
             } else if (/timeout/i.test(error.message)) {
                 msg =
                     '❌ Analysis timed out after retries.\n' +
@@ -327,6 +351,241 @@ export async function handleTradenow(sock, chatId, senderJid, args, { tradeAlert
         }
     } catch (error) {
         logger.error(`Error in tradenow handler: ${error.message}`);
+        await sock.sendMessage(chatId, { text: `❌ ${error.message}` }).catch(() => {});
+    }
+}
+
+/* ── /swing — deterministic momentum + breakout swing scan ────────────────── */
+
+/** Built once; the daily-bar cache inside lives for the trading day. */
+let _swingScanner = null;
+function getSwingScanner() {
+    if (!_swingScanner) _swingScanner = new SwingMomentumScanService(config);
+    return _swingScanner;
+}
+
+/** In-flight dedupe — the scan is ~200 HTTP calls, never run it twice at once. */
+let _swingInflight = null;
+
+async function runSwingScan(opts) {
+    if (_swingInflight) {
+        logger.info('Swing scan already running — joining in-flight request');
+        return _swingInflight;
+    }
+    _swingInflight = getSwingScanner()
+        .scan(opts)
+        .finally(() => {
+            _swingInflight = null;
+        });
+    return _swingInflight;
+}
+
+/** Record posted picks so real expectancy accumulates from day one. */
+async function logSwingPicks(result, chatId, tradeAlertController) {
+    const mongoDb = tradeAlertController?.mongoDb;
+    if (!mongoDb || !result?.picks?.length) return;
+    try {
+        const outcomes = createTradeOutcomeService(mongoDb, config);
+        for (const p of result.picks) {
+            await outcomes.logPostedAlert({
+                symbol: p.symbol,
+                side: 'SWING_LONG',
+                entry: p.plan.entry,
+                stopLoss: p.plan.stop,
+                target1: p.plan.target1,
+                target2: p.plan.target2,
+                confidence: p.percentile,
+                confluence: Number(p.momentumScore?.toFixed(3)) || null,
+                groupId: chatId,
+            });
+        }
+        logger.info(`📊 Logged ${result.picks.length} swing picks for outcome tracking`);
+    } catch (err) {
+        // Never let journalling break the user-facing reply.
+        logger.warn(`Swing outcome logging failed: ${err.message}`);
+    }
+}
+
+export async function handleSwing(sock, chatId, senderJid, args, { tradeAlertController }) {
+    try {
+        const senderPhone = extractPhoneNumber(senderJid);
+        const action = String(args[0] || '').trim().toLowerCase();
+
+        if (action === 'help') {
+            await sock.sendMessage(chatId, {
+                text:
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n📊 *SWING MOMENTUM* 📊\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                    'Ranks the NIFTY 200 by *risk-adjusted 6M+12M momentum* ' +
+                    '(NSE Momentum-30 method), then takes only names breaking out ' +
+                    'near 52-week highs on expanding volume — and only while NIFTY ' +
+                    'holds its 200 DMA.\n\n' +
+                    '*Commands:*\n' +
+                    '• `/swing` — today\'s entryable setups\n' +
+                    '• `/swing top` — momentum leaderboard only\n' +
+                    '• `/swing force` — ignore the regime gate (not advised)\n\n' +
+                    '_Hold 2–6 weeks. Ranking is pure arithmetic — no AI._\n' +
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+            });
+            return;
+        }
+
+        const wantRanking = action === 'top' || action === 'rank' || action === 'leaderboard';
+        const ignoreRegime = action === 'force';
+
+        const loading = await sock.sendMessage(chatId, {
+            text:
+                '📊 _Scanning NIFTY 200 for swing setups…_\n' +
+                '_6M+12M momentum · 52w breakout · volume · regime (~30–90s first run)_',
+        });
+
+        try {
+            const result = await runSwingScan({ ignoreRegime });
+            const text = wantRanking ? formatSwingRanking(result) : formatSwingScan(result);
+            await editMessageText(sock, chatId, loading?.key, text);
+
+            if (!wantRanking) await logSwingPicks(result, chatId, tradeAlertController);
+
+            logger.info(
+                `📊 Swing scan by ${senderPhone} in ${chatId}: ${result.picks?.length || 0} picks`
+            );
+        } catch (error) {
+            logger.error(`Swing scan failed: ${error.message}`);
+            await editMessageText(
+                sock,
+                chatId,
+                loading?.key,
+                `❌ Swing scan failed: ${error.message}\n\n_Price data source may be unreachable — try again in a minute._`
+            );
+        }
+    } catch (error) {
+        logger.error(`Error in swing handler: ${error.message}`);
+        await sock.sendMessage(chatId, { text: `❌ ${error.message}` }).catch(() => {});
+    }
+}
+
+/* ── /expiry — expiry-day index option alerts ─────────────────────────────── */
+
+let _expirySvc = null;
+function getExpiryService() {
+    if (!_expirySvc) _expirySvc = new ExpiryTradeService(config);
+    return _expirySvc;
+}
+
+function parseExpiryArgs(args) {
+    let index = null;
+    let slot = 'auto';
+    for (const raw of args) {
+        const a = String(raw || '').trim().toUpperCase();
+        if (!a) continue;
+        if (EXPIRY_INDICES[a]) { index = a; continue; }
+        if (a === 'BNF' || a === 'BANK') { index = 'BANKNIFTY'; continue; }
+        if (a === 'FIN') { index = 'FINNIFTY'; continue; }
+        if (a === 'MIDCAP' || a === 'MIDCP') { index = 'MIDCPNIFTY'; continue; }
+        const l = a.toLowerCase();
+        if (l === 'morning' || l === 'setup' || l === 'directional') slot = 'morning';
+        if (l === 'hero' || l === 'herozero' || l === 'afternoon' || l === 'zero') slot = 'afternoon';
+    }
+    return { index, slot };
+}
+
+/** Log expiry picks so real outcomes accumulate alongside the swing journal. */
+async function logExpiryPicks(result, chatId, tradeAlertController) {
+    const mongoDb = tradeAlertController?.mongoDb;
+    const s = result?.setup;
+    if (!mongoDb || !s?.tradeable || s.strategy !== 'DIRECTIONAL') return;
+    try {
+        const outcomes = createTradeOutcomeService(mongoDb, config);
+        await outcomes.logPostedAlert({
+            symbol: `${result.index}${s.leg.strike}${s.leg.type}`,
+            side: `EXPIRY_${s.direction}`,
+            entry: s.entry,
+            stopLoss: s.stop,
+            target1: s.target1,
+            target2: s.target2,
+            confidence: s.leg.probItm != null ? Math.round(s.leg.probItm * 100) : null,
+            confluence: null,
+            groupId: chatId,
+        });
+    } catch (err) {
+        logger.warn(`Expiry outcome logging failed: ${err.message}`);
+    }
+}
+
+export async function handleExpiry(sock, chatId, senderJid, args, { tradeAlertController }) {
+    try {
+        const senderPhone = extractPhoneNumber(senderJid);
+        const first = String(args[0] || '').trim().toLowerCase();
+
+        if (first === 'help') {
+            const next = nextExpiry();
+            await sock.sendMessage(chatId, {
+                text:
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n📅 *EXPIRY TRADES* 📅\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                    '*Two setups, whichever suits the clock:*\n' +
+                    '• *Morning* (>3.5h left) — ATM directional on a 15m opening-range break, 20% stop, 1:2.5\n' +
+                    '• *Afternoon* (<3.5h) — hero-zero deep OTM, with P(ITM) and the required move printed\n\n' +
+                    '*Commands:*\n' +
+                    '• `/expiry` — everything expiring today\n' +
+                    '• `/expiry nifty` — one index\n' +
+                    '• `/expiry nifty hero` — force the hero-zero view\n' +
+                    '• `/expiry nifty setup` — force the directional view\n\n' +
+                    '*Schedule:* NIFTY every Tuesday · BANKNIFTY/FINNIFTY/MIDCPNIFTY last Tuesday\n' +
+                    (next ? `*Next:* ${next.dateStr} (${next.indices.join(', ')})\n\n` : '\n') +
+                    '_Hero-zero is a lottery ticket by construction. The card shows the odds._\n' +
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+            });
+            return;
+        }
+
+        const svc = getExpiryService();
+        const { index, slot } = parseExpiryArgs(args);
+
+        const loading = await sock.sendMessage(chatId, {
+            text: `📅 _Reading ${index || 'today\'s expiry'} option chain…_`,
+        });
+
+        try {
+            if (index) {
+                const result = await svc.analyze(index, { slot });
+                await editMessageText(sock, chatId, loading?.key, formatExpiryAlert(result));
+                await logExpiryPicks(result, chatId, tradeAlertController);
+            } else {
+                const digest = await svc.analyzeAllExpiring({ slot });
+                if (!digest.indices.length) {
+                    // Not an expiry day — fall back to the nearest weekly so the
+                    // command is never a dead end.
+                    const result = await svc.analyze('NIFTY', { slot });
+                    const next = nextExpiry();
+                    await editMessageText(
+                        sock,
+                        chatId,
+                        loading?.key,
+                        `ℹ️ _No expiry today — showing the next NIFTY expiry` +
+                            (next ? ` (${next.dateStr})` : '') + `._\n\n` +
+                            formatExpiryAlert(result)
+                    );
+                } else {
+                    await editMessageText(
+                        sock,
+                        chatId,
+                        loading?.key,
+                        formatExpiryDigest(digest, { slot })
+                    );
+                    for (const r of digest.results) await logExpiryPicks(r, chatId, tradeAlertController);
+                }
+            }
+            logger.info(`📅 Expiry scan by ${senderPhone}: ${index || 'all'} slot=${slot}`);
+        } catch (error) {
+            logger.error(`Expiry scan failed: ${error.message}`);
+            await editMessageText(
+                sock,
+                chatId,
+                loading?.key,
+                `❌ Expiry scan failed: ${error.message}\n\n_NSE option chain may be rate-limiting — retry in a minute._`
+            );
+        }
+    } catch (error) {
+        logger.error(`Error in expiry handler: ${error.message}`);
         await sock.sendMessage(chatId, { text: `❌ ${error.message}` }).catch(() => {});
     }
 }

@@ -5,6 +5,7 @@
 import axios from 'axios';
 import { logger } from '../utils/logger.js';
 import { config } from '../config/config.js';
+import { buildKeyPool } from '../utils/apiKeyPool.js';
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const DEFAULT_MODELS = [
@@ -41,7 +42,7 @@ export function isOpenRouterRateLimitError(err) {
 export default class OpenRouterLlmService {
     constructor(cfg = config) {
         this.config = cfg;
-        this.apiKey = (cfg.OPENROUTER_API_KEY || '').trim();
+        this.keyPool = buildKeyPool(cfg.OPENROUTER_API_KEYS, cfg.OPENROUTER_API_KEY);
         const fromCfg = [cfg.OPENROUTER_MODEL, ...(cfg.OPENROUTER_FALLBACK_MODELS || [])].filter(Boolean);
         this.models = parseList(cfg.OPENROUTER_MODELS, fromCfg.length ? fromCfg : DEFAULT_MODELS);
         this.summaryModels = this._buildSummaryModels(cfg);
@@ -66,15 +67,17 @@ export default class OpenRouterLlmService {
     }
 
     isConfigured() {
-        return Boolean(this.apiKey);
+        return this.keyPool.size > 0;
     }
 
     async chat({ system, user, messages, temperature = 0.2, maxTokens = 4000, timeoutMs, models } = {}) {
-        if (!this.apiKey) throw new Error('OPENROUTER_API_KEY is not configured');
+        if (!this.keyPool.size) throw new Error('OPENROUTER_API_KEY is not configured');
 
         const modelList = Array.isArray(models) && models.length ? models : this.models;
         let lastErr;
         for (const model of modelList) {
+            // Free-tier quotas are per key — rotate so a burst spreads across keys.
+            const key = this.keyPool.next();
             try {
                 const msgs = messages?.length
                     ? messages
@@ -92,7 +95,7 @@ export default class OpenRouterLlmService {
                     },
                     {
                         headers: {
-                            Authorization: `Bearer ${this.apiKey}`,
+                            Authorization: `Bearer ${key}`,
                             'Content-Type': 'application/json',
                             'HTTP-Referer': this.config.PUBLIC_URL || 'https://github.com/officeboy12242/WA-BOT',
                             'X-Title': 'WA-BOT',
@@ -107,7 +110,10 @@ export default class OpenRouterLlmService {
                 lastErr = err;
                 const detail = err?.response?.data?.error?.message || err.message;
                 logger.warn(`OpenRouter ${model} failed: ${detail}`);
-                if (isOpenRouterRateLimitError(err)) continue;
+                if (isOpenRouterRateLimitError(err)) {
+                    this.keyPool.markRateLimited(key);
+                    continue;
+                }
             }
         }
         throw lastErr || new Error('All OpenRouter models failed');

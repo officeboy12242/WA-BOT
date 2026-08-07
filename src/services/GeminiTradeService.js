@@ -6,6 +6,7 @@
 import axios from 'axios';
 import { logger } from '../utils/logger.js';
 import { config } from '../config/config.js';
+import { buildKeyPool } from '../utils/apiKeyPool.js';
 
 const API_ROOT = 'https://generativelanguage.googleapis.com/v1beta/models';
 const DEFAULT_TRADE_MODELS = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash'];
@@ -42,7 +43,10 @@ function rateLimitError(message, cause) {
 
 export default class GeminiTradeService {
     constructor(cfg = config) {
-        this.apiKey = (cfg.GEMINI_API_KEY || process.env.GEMINI_API_KEY || '').trim();
+        this.keyPool = buildKeyPool(
+            cfg.GEMINI_API_KEYS || process.env.GEMINI_API_KEYS,
+            cfg.GEMINI_API_KEY || process.env.GEMINI_API_KEY
+        );
         this.models = this._parseModelChain(cfg.GEMINI_TRADE_MODELS || cfg.GEMINI_TRADE_MODEL);
         this.tradeModel = this.models[0];
         this.tradeTimeoutMs = clampTimeoutMs(cfg.TRADE_ANALYSIS_TIMEOUT_MS || 150_000);
@@ -66,7 +70,7 @@ export default class GeminiTradeService {
     }
 
     isConfigured() {
-        return Boolean(this.apiKey);
+        return this.keyPool.size > 0;
     }
 
     isTimeoutError(err) {
@@ -79,13 +83,11 @@ export default class GeminiTradeService {
      * @param {{ model?: string, maxTokens?: number, timeoutMs?: number, temperature?: number }} [opts]
      */
     async complete(systemPrompt, userPrompt, opts = {}) {
-        if (!this.apiKey) {
+        if (!this.keyPool.size) {
             throw new Error('GEMINI_API_KEY is not configured');
         }
 
         const model = opts.model || this.tradeModel;
-        const url = `${API_ROOT}/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(this.apiKey)}`;
-
         const body = {
             contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
             systemInstruction: { parts: [{ text: systemPrompt }] },
@@ -95,18 +97,31 @@ export default class GeminiTradeService {
             },
         };
 
+        // Quotas are per key — rotate through spare keys before escalating providers.
         let data;
-        try {
-            ({ data } = await axios.post(url, body, {
-                timeout: opts.timeoutMs ?? this.tradeTimeoutMs,
-                headers: { 'Content-Type': 'application/json' },
-                validateStatus: (s) => s >= 200 && s < 300,
-            }));
-        } catch (err) {
-            if (isGeminiRateLimitError(err)) {
-                throw rateLimitError('Gemini rate limit — switching provider', err);
+        let lastErr;
+        for (let attempt = 0; attempt < this.keyPool.size; attempt++) {
+            const key = this.keyPool.next();
+            const url = `${API_ROOT}/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
+            try {
+                ({ data } = await axios.post(url, body, {
+                    timeout: opts.timeoutMs ?? this.tradeTimeoutMs,
+                    headers: { 'Content-Type': 'application/json' },
+                    validateStatus: (s) => s >= 200 && s < 300,
+                }));
+                lastErr = null;
+                break;
+            } catch (err) {
+                lastErr = err;
+                if (!isGeminiRateLimitError(err)) throw err;
+                this.keyPool.markRateLimited(key);
+                if (attempt < this.keyPool.size - 1) {
+                    logger.warn(`Gemini key ${attempt + 1} rate limited — rotating to next key`);
+                }
             }
-            throw err;
+        }
+        if (lastErr) {
+            throw rateLimitError('Gemini rate limit — switching provider', lastErr);
         }
 
         const parts = data?.candidates?.[0]?.content?.parts || [];

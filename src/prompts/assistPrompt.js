@@ -26,6 +26,8 @@ export function buildAssistSystemPrompt(ownerName = getOwnerDisplayName()) {
         '• /horo <sign> — daily horoscope (/horo cap, /horo leo)',
         '• /advice — random advice',
         '• /tradenow <symbol> — Indian F&O / stock analysis',
+        '• /swing — swing trade setups (momentum rank + 52-week breakout, 2–6 week holds)',
+        '• /expiry — expiry-day index option trades (NIFTY every Tuesday; auto-posts 9:35am & 1:15pm)',
         '• Send Instagram link — auto reel/post download in DM',
         '• Groups: /summaryon — end-of-day chat recap; /movieon — movie search in group',
         '• /tradelert on — daily trade alerts in groups',
