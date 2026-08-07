@@ -724,6 +724,94 @@ function fmtCmd(def) {
     return `  • ${primaryCmd}${aliases}\n    ↳ ${def.help}`;
 }
 
+/* ────────────────────────────────────────────────────────────────────────────
+ * HELP MENU GROUPING
+ *
+ * `/help` groups by WHAT A COMMAND DOES, then filters by what the caller may
+ * actually run. This is deliberately separate from `def.category`, which is a
+ * legacy GATING flag ('movie' hides commands until a group enables movies).
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** Display bucket per command key. Every registry key should appear here. */
+export const HELP_CATEGORY = {
+    // Essentials
+    ping: 'core', help: 'core', status: 'core', posted: 'core',
+    checklimit: 'core', viewonce: 'core',
+
+    // Movies
+    movie: 'movie', upcoming: 'movie', genre: 'movie',
+
+    // Media download / convert
+    insta: 'media', toimg: 'media',
+
+    // Stickers
+    sticker: 'sticker', steal: 'sticker', rgb: 'sticker',
+
+    // Markets
+    tradenow: 'trade', swing: 'trade', expiry: 'trade', tradelert: 'trade',
+
+    // Scheduled feeds
+    news: 'daily', github: 'daily', awesome: 'daily', interviewq: 'daily',
+    interviewqon: 'daily', interviewqoff: 'daily',
+
+    // Fun
+    horo: 'fun', advice: 'fun', facts: 'fun',
+
+    // Resume tools
+    resume: 'resume', tailor: 'resume', cover: 'resume',
+
+    // Group setup & feature toggles
+    activate: 'group', deactivate: 'group', newson: 'group', newsoff: 'group',
+    courson: 'group', coursesoff: 'group', githubon: 'group', githuboff: 'group',
+    awesomeon: 'group', awesomeoff: 'group', instaon: 'group', instaoff: 'group',
+    stickeron: 'group', stickeroff: 'group', movieon: 'group', movieoff: 'group',
+    summaryon: 'group', summaryoff: 'group', trending: 'group', setwc: 'group',
+
+    // Moderation
+    warn: 'moderation', warns: 'moderation', mywarns: 'moderation',
+    clearwarns: 'moderation', dellast: 'moderation', delall: 'moderation',
+
+    // Bot administration
+    groups: 'admin', pause: 'admin', resumecourses: 'admin', clear: 'admin',
+    confirm: 'admin', cancel: 'admin', admins: 'admin', addadmin: 'admin',
+    removeadmin: 'admin', increaselimit: 'admin', summarynow: 'admin',
+
+    // Owner
+    fix: 'owner', heal: 'owner', assist: 'owner', deploy: 'owner',
+    addpremium: 'owner', removepremium: 'owner', premium: 'owner',
+    addmod: 'owner', removemod: 'owner', addchannel: 'owner',
+    removechannel: 'owner', channels: 'owner', scrap: 'owner',
+    scrapmembers: 'owner', broadcast: 'owner', grouppost: 'owner',
+    driveurl: 'owner',
+};
+
+/** Section order and presentation. */
+export const HELP_CATEGORIES = [
+    { key: 'core', emoji: '📱', title: 'ESSENTIALS', blurb: 'Status & basics' },
+    {
+        key: 'movie',
+        emoji: '🎬',
+        title: 'MOVIES & SHOWS',
+        blurb: 'Search and download',
+        footer: '📊 *Free:* 5 searches/day · ⭐ *Premium:* unlimited\n💡 `/movie Pushpa 2` · `/genre horror`',
+    },
+    { key: 'media', emoji: '📥', title: 'MEDIA DOWNLOAD', blurb: 'Instagram & conversions' },
+    { key: 'sticker', emoji: '🎭', title: 'STICKERS', blurb: 'Create, steal, animate' },
+    { key: 'trade', emoji: '📈', title: 'TRADING & MARKETS', blurb: 'NSE stocks, options & swing setups' },
+    { key: 'daily', emoji: '📰', title: 'DAILY FEEDS', blurb: 'News, repos & interview prep' },
+    { key: 'fun', emoji: '🎲', title: 'FUN', blurb: 'Horoscope, advice, facts' },
+    { key: 'resume', emoji: '📄', title: 'RESUME TOOLS', blurb: 'Tailor a CV to a job description' },
+    { key: 'group', emoji: '⚙️', title: 'GROUP SETUP', blurb: 'Staff — enable features per group' },
+    { key: 'moderation', emoji: '🛡️', title: 'MODERATION', blurb: 'Warnings & message cleanup' },
+    { key: 'admin', emoji: '🔧', title: 'BOT ADMIN', blurb: 'Manage the bot & its admins' },
+    { key: 'owner', emoji: '👑', title: 'OWNER TOOLS', blurb: 'Premium, broadcast, deploy, self-heal' },
+];
+
+/** Display bucket for a command, defaulting to Essentials. */
+export function helpCategoryOf(def) {
+    return HELP_CATEGORY[def.key] || 'core';
+}
+
 /**
  * @param {object} opts
  * @param {boolean} opts.isStaff
@@ -747,132 +835,53 @@ export function formatHelpText({
 } = {}) {
     const movieEnabled = features.movie || movieOnly || isDirectMessage;
 
-    const all = COMMAND_REGISTRY;
-    const isMovieCmd = (d) => d.category === 'movie';
+    /** Can this caller actually run the command? Mirrors access.js. */
+    const canUse = (def) => {
+        switch (def.role) {
+            case 'staff':
+                return isStaff;
+            case 'admins':
+            case 'group_admins':
+                return isPrivileged;
+            case 'admin_managers':
+                return canManageAdmins;
+            case 'welcome_setters':
+                return canSetWelcome;
+            case 'owner':
+                return isOwner;
+            default:
+                return true; // 'anyone' and unset
+        }
+    };
+
+    const visible = COMMAND_REGISTRY.filter(
+        (d) => canUse(d) && (movieEnabled || d.category !== 'movie')
+    );
 
     let out = '╔════════════════════════════════╗\n';
     out += '║   🤖 BOT COMMAND GUIDE 🤖   ║\n';
     out += '╚════════════════════════════════╝\n\n';
 
-    // ─── GENERAL SECTION ───
-    const anyoneGeneral = all.filter((d) => d.role === 'anyone' && !isMovieCmd(d));
-    if (anyoneGeneral.length) {
+    let shown = 0;
+    for (const section of HELP_CATEGORIES) {
+        const cmds = visible.filter((d) => helpCategoryOf(d) === section.key);
+        if (!cmds.length) continue;
+
         out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-        out += '📱 *GENERAL COMMANDS*\n';
+        out += `${section.emoji} *${section.title}*\n`;
         out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-        out += '_Everyone can use:_\n\n';
-        for (const def of anyoneGeneral) out += fmtCmd(def) + '\n';
+        if (section.blurb) out += `_${section.blurb}_\n`;
         out += '\n';
-    }
-
-    // ─── MEDIA SECTION ───
-    const mediaCommands = all.filter(d => ['insta', 'toimg'].some(k => d.key.includes(k)) && d.role === 'anyone');
-    if (mediaCommands.length) {
-        out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-        out += '🎨 *MEDIA TOOLS*\n';
-        out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-        out += '_Download & create content:_\n\n';
-        for (const def of mediaCommands) out += fmtCmd(def) + '\n';
+        for (const def of cmds) out += fmtCmd(def) + '\n';
+        if (section.footer) out += `\n${section.footer}\n`;
         out += '\n';
+        shown += cmds.length;
     }
 
-    // ─── STICKER SECTION ───
-    const stickerCommands = all.filter(d => ['sticker', 'steal'].includes(d.key) && d.role === 'anyone');
-    if (stickerCommands.length) {
-        out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-        out += '🎭 *STICKER CREATOR*\n';
-        out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-        out += '_Create & modify stickers:_\n\n';
-        for (const def of stickerCommands) out += fmtCmd(def) + '\n';
-        out += '\n';
+    if (!shown) {
+        out += '_No commands are available to you in this chat._\n\n';
     }
 
-    // ─── MOVIE SECTION ───
-    const anyoneMovie = all.filter((d) => d.role === 'anyone' && isMovieCmd(d));
-    if (movieEnabled && anyoneMovie.length) {
-        out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-        out += '🎬 *MOVIE SEARCH*\n';
-        out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-        out += '_Search for movies & shows:_\n\n';
-        for (const def of anyoneMovie) out += fmtCmd(def) + '\n';
-        out += '\n📊 *Daily Limit:* 5 free searches\n';
-        out += '⭐ *Premium:* Unlimited searches\n';
-        out += '💡 *Tip:* `/movie Pushpa 2` · `/search Avengers` · `/m Animal`\n\n';
-    }
-
-    // ─── GROUP SETTINGS (Staff) ───
-    if (isStaff) {
-        const staffCommands = all.filter((d) => d.role === 'staff' && !isMovieCmd(d));
-        if (staffCommands.length) {
-            out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-            out += '👮 *GROUP SETTINGS* (Staff)\n';
-            out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-            out += '_Owners, admins, moderators:_\n\n';
-            for (const def of staffCommands) out += fmtCmd(def) + '\n';
-            out += '\n';
-        }
-    }
-
-    // ─── ADMIN TOOLS (Privileged) ───
-    if (isPrivileged) {
-        const adminCmds = all.filter((d) => d.role === 'admins');
-        if (adminCmds.length) {
-            out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-            out += '🔧 *ADMIN TOOLS*\n';
-            out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-            out += '_Manage bot & group:_\n\n';
-            for (const def of adminCmds) out += fmtCmd(def) + '\n';
-            out += '\n';
-        }
-    }
-
-    // ─── ADMIN MANAGERS ───
-    if (canManageAdmins) {
-        const adminMgr = all.filter((d) => d.role === 'admin_managers');
-        if (adminMgr.length) {
-            out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-            out += '👑 *BOT ADMIN MANAGER*\n';
-            out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-            out += '_Manage who is a bot admin:_\n\n';
-            for (const def of adminMgr) out += fmtCmd(def) + '\n';
-            out += '\n';
-        }
-    }
-
-    // ─── WELCOME MESSAGES ───
-    if (canSetWelcome) {
-        const wc = all.filter((d) => d.role === 'welcome_setters');
-        if (wc.length) {
-            out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-            out += '👋 *WELCOME MESSAGES*\n';
-            out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-            out += '_Set group welcome text:_\n\n';
-            for (const def of wc) out += fmtCmd(def) + '\n';
-            out += '\n';
-        }
-    }
-
-    // ─── OWNER SECTION ───
-    if (isOwner) {
-        const ownerGeneral = all.filter((d) => d.role === 'owner' && !isMovieCmd(d));
-        const ownerMovie = all.filter((d) => d.role === 'owner' && isMovieCmd(d));
-
-        if (ownerGeneral.length) {
-            out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-            out += '👑 *OWNER ONLY COMMANDS*\n';
-            out += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-            for (const def of ownerGeneral) out += fmtCmd(def) + '\n';
-            out += '\n';
-        }
-
-        if (ownerMovie.length) {
-            out += '👑⭐ *OWNER — MOVIE MANAGEMENT*\n\n';
-            for (const def of ownerMovie) out += fmtCmd(def) + '\n';
-            out += '\n';
-        }
-    }
-
-    // ─── FOOTER ───
     out += '╔════════════════════════════════╗\n';
     if (movieOnly) {
         out += '║ 🎬 MOVIE FEATURES ENABLED 🎬 ║\n';
