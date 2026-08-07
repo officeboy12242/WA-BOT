@@ -54,6 +54,7 @@ import ResumeTailorService from './src/services/ResumeTailorService.js';
 import { startGroupSummaryScheduler } from './src/utils/groupSummaryScheduler.js';
 import TradeAlertController from './src/controllers/TradeAlertController.js';
 import { startTradeAlertScheduler } from './src/utils/tradeAlertScheduler.js';
+import { initAutoDelete } from './src/utils/autoDelete.js';
 import { startExpiryAlertScheduler } from './src/utils/expiryAlertScheduler.js';
 import ExpiryTradeService from './src/services/ExpiryTradeService.js';
 import { formatExpiryDigest } from './src/utils/expiryAlertFormatter.js';
@@ -125,6 +126,13 @@ class WhatsAppCourseBot {
             const mongoDb = await connectMongo({
                 uri: config.MONGODB_URI,
                 dbName: config.MONGODB_DB_NAME,
+            });
+
+            // Persisted auto-deletes — a plain setTimeout is lost on deploy,
+            // leaving those messages undeleted forever.
+            initAutoDelete({
+                mongoDb,
+                getSock: () => this.whatsappService?.getSock?.() || null,
             });
 
             // Initialize databases

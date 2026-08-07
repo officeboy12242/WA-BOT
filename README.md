@@ -95,7 +95,10 @@ Exact checks live in `src/commands/registry.js` + `src/commands/access.js`. In-c
 Use `/help` on WhatsApp for the live list filtered by your role and chat type.
 
 ### Anyone
-`/ping` · `/help` · `/movie` · `/upcoming` · `/genre` · `/insta` · `/sticker` · `/steal` · `/toimg` · `/rgb` · `/horo` · `/advice` · `/facts` · `/news` · `/github` · `/tradenow` · `/swing` · `/expiry` · `/posted` · `/status` · `/checklimit`
+`/ping` · `/help` · `/movie` · `/upcoming` · `/genre` · `/insta` · `/sticker` · `/steal` · `/toimg` · `/rgb` · `/horo` · `/advice` · `/facts` · `/news` · `/github` · `/posted` · `/status` · `/checklimit`
+
+### Admin trading (groups only)
+`/tradenow` · `/swing` · `/expiry`
 
 ### Staff (group toggles)
 `/activate` · `/deactivate` · `/courson` · `/coursesoff` · `/newson` · `/newsoff` · `/githubon` · `/githuboff` · `/instaon` · `/instaoff` · `/stickeron` · `/stickeroff` · `/movieon` · `/movieoff` · `/summaryon` · `/summaryoff` · `/summarynow` · `/trending` · `/tradelert`

@@ -202,13 +202,14 @@ class CommandController {
 
         if (senderJid?.includes('@lid') && chatId?.endsWith('@g.us')) {
             try {
-                const groupMeta = await this.groupManager.getGroupMetadataCached(sock, chatId);
-                for (const p of groupMeta.participants || []) {
-                    if (p.lid === senderJid || p.id === senderJid) {
-                        const realPhone = extractPhoneNumber(p.id || p.phoneNumber || p.pn || '');
-                        if (this.groupManager.isOwner(realPhone)) return true;
-                    }
-                }
+                // O(1) via the cached phoneByKey index — this used to scan every
+                // participant, which is 900+ iterations per command in big groups.
+                const phone = await this.groupManager.resolveParticipantPhoneCached(
+                    sock,
+                    chatId,
+                    senderJid
+                );
+                if (phone && this.groupManager.isOwner(phone)) return true;
             } catch {}
         }
 

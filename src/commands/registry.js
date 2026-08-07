@@ -470,24 +470,24 @@ export const COMMAND_REGISTRY = [
     {
         names: ['/tradenow'],
         key: 'tradenow',
-        scope: 'any',
-        role: 'anyone',
+        scope: 'group_only',
+        role: 'admins',
         help: 'Indian options analysis — `/tradenow RELIANCE`',
         category: 'trade',
     },
     {
         names: ['/expiry'],
         key: 'expiry',
-        scope: 'any',
-        role: 'anyone',
+        scope: 'group_only',
+        role: 'admins',
         help: 'Expiry-day index options — `/expiry`, `/expiry nifty`, `/expiry nifty hero`',
         category: 'trade',
     },
     {
         names: ['/swing'],
         key: 'swing',
-        scope: 'any',
-        role: 'anyone',
+        scope: 'group_only',
+        role: 'admins',
         help: 'Swing setups — momentum rank + 52w breakout — `/swing`, `/swing top`',
         category: 'trade',
     },
@@ -854,8 +854,18 @@ export function formatHelpText({
         }
     };
 
+    /**
+     * Hide commands that cannot run in this chat type at all. Listing a
+     * group-only command in a DM just invites a "GROUPS ONLY" rejection.
+     */
+    const inScope = (def) => {
+        if (def.scope === 'group_only') return !isDirectMessage;
+        if (def.scope === 'dm_only') return isDirectMessage;
+        return true;
+    };
+
     const visible = COMMAND_REGISTRY.filter(
-        (d) => canUse(d) && (movieEnabled || d.category !== 'movie')
+        (d) => canUse(d) && inScope(d) && (movieEnabled || d.category !== 'movie')
     );
 
     let out = '╔════════════════════════════════╗\n';
