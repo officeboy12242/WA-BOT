@@ -93,6 +93,14 @@ class TradeAlertController {
         this.softMinConfluence = Number.isFinite(config.TRADE_ALERT_DAILY_SOFT_MIN_CONFLUENCE)
             ? config.TRADE_ALERT_DAILY_SOFT_MIN_CONFLUENCE
             : 25;
+        /** Repeat `/tradenow SYMBOL` reuses a recent result instead of re-running the pipeline. */
+        this.liveCacheTtlMs = Number.isFinite(config.TRADENOW_CACHE_TTL_MS)
+            ? config.TRADENOW_CACHE_TTL_MS
+            : 120_000;
+        /** @type {Map<string, { text: string, expiresAt: number }>} */
+        this._liveCache = new Map();
+        /** @type {Map<string, Promise<string>>} concurrent callers share one run */
+        this._liveInflight = new Map();
     }
 
     async init() {
@@ -301,18 +309,69 @@ class TradeAlertController {
         return sortedRegular.slice(0, maxTotal);
     }
 
-    async analyzeSymbol(rawSymbol, { mode = 'live', skipResearch = false } = {}) {
+    /**
+     * On-demand analysis for `/tradenow`.
+     *
+     * Repeat calls for the same symbol are the main source of 429s, so two
+     * guards sit in front of the pipeline: concurrent calls share one in-flight
+     * run, and a completed run is reused for TRADENOW_CACHE_TTL_MS.
+     */
+    async analyzeSymbol(rawSymbol, { mode = 'live', skipResearch = false, forceRefresh = false } = {}) {
         const symbol = String(rawSymbol || '').trim().toUpperCase();
         if (!symbol) throw new Error('Stock symbol required');
         if (!this.tradeLlm.isConfigured()) throw new Error('No trade LLM configured (GEMINI, GROQ, or NVIDIA API key)');
 
+        const cacheKey = `${mode}:${symbol}`;
+        if (!forceRefresh) {
+            const cached = this._liveCache.get(cacheKey);
+            if (cached && cached.expiresAt > Date.now()) {
+                logger.info(`Trade analysis cache hit for ${symbol} (${mode})`);
+                return cached.text;
+            }
+            const inflight = this._liveInflight.get(cacheKey);
+            if (inflight) {
+                logger.info(`Trade analysis already running for ${symbol} — joining in-flight request`);
+                return inflight;
+            }
+        }
+
+        const run = this._analyzeSymbolUncached(symbol, { mode, skipResearch })
+            .then((text) => {
+                if (this.liveCacheTtlMs > 0) {
+                    this._liveCache.set(cacheKey, {
+                        text,
+                        expiresAt: Date.now() + this.liveCacheTtlMs,
+                    });
+                    this._pruneLiveCache();
+                }
+                return text;
+            })
+            .finally(() => {
+                if (this._liveInflight.get(cacheKey) === run) this._liveInflight.delete(cacheKey);
+            });
+
+        this._liveInflight.set(cacheKey, run);
+        return run;
+    }
+
+    /** Drop expired entries; the bot is memory-capped at 450MB. */
+    _pruneLiveCache() {
+        if (this._liveCache.size < 40) return;
+        const now = Date.now();
+        for (const [key, entry] of this._liveCache) {
+            if (entry.expiresAt <= now) this._liveCache.delete(key);
+        }
+    }
+
+    async _analyzeSymbolUncached(symbol, { mode, skipResearch }) {
         try {
             const result = await this._runAnalysis(symbol, { mode, skipResearch });
             return result.text;
         } catch (err) {
-            if (!skipResearch && (this.isTimeoutError(err) || isTradeLlmRateLimitError(err))) {
+            // The router already walked every provider; only retry when dropping
+            // research could make the request itself cheaper.
+            if (!skipResearch && this.isTimeoutError(err)) {
                 logger.warn(`Trade analysis retry for ${symbol} (skip research): ${err.message}`);
-                await new Promise((r) => setTimeout(r, isTradeLlmRateLimitError(err) ? 3000 : 0));
                 const result = await this._runAnalysis(symbol, { mode, skipResearch: true });
                 return result.text;
             }

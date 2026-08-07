@@ -5,6 +5,7 @@
 import axios from 'axios';
 import { logger } from '../utils/logger.js';
 import { config } from '../config/config.js';
+import { buildKeyPool } from '../utils/apiKeyPool.js';
 
 const API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const DEFAULT_MODELS = ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant'];
@@ -31,7 +32,10 @@ function stripFences(text) {
 
 export default class GroqTradeService {
     constructor(cfg = config) {
-        this.apiKey = (cfg.GROQ_API_KEY || process.env.GROQ_API_KEY || '').trim();
+        this.keyPool = buildKeyPool(
+            cfg.GROQ_API_KEYS || process.env.GROQ_API_KEYS,
+            cfg.GROQ_API_KEY || process.env.GROQ_API_KEY
+        );
         this.models = this._parseModelChain(cfg.GROQ_TRADE_MODELS || cfg.GROQ_TRADE_MODEL);
         this.tradeModel = this.models[0];
         this.tradeTimeoutMs = clampTimeoutMs(cfg.TRADE_ANALYSIS_TIMEOUT_MS || 150_000);
@@ -52,7 +56,7 @@ export default class GroqTradeService {
     }
 
     isConfigured() {
-        return Boolean(this.apiKey);
+        return this.keyPool.size > 0;
     }
 
     isTimeoutError(err) {
@@ -60,7 +64,7 @@ export default class GroqTradeService {
     }
 
     async complete(systemPrompt, userPrompt, opts = {}) {
-        if (!this.apiKey) {
+        if (!this.keyPool.size) {
             throw new Error('GROQ_API_KEY is not configured');
         }
 
@@ -75,13 +79,31 @@ export default class GroqTradeService {
             max_tokens: opts.maxTokens ?? 8192,
         };
 
-        const { data } = await axios.post(API_URL, body, {
-            timeout: opts.timeoutMs ?? this.tradeTimeoutMs,
-            headers: {
-                Authorization: `Bearer ${this.apiKey}`,
-                'Content-Type': 'application/json',
-            },
-        });
+        // Quotas are per key — rotate through spare keys before escalating providers.
+        let data;
+        let lastErr;
+        for (let attempt = 0; attempt < this.keyPool.size; attempt++) {
+            const key = this.keyPool.next();
+            try {
+                ({ data } = await axios.post(API_URL, body, {
+                    timeout: opts.timeoutMs ?? this.tradeTimeoutMs,
+                    headers: {
+                        Authorization: `Bearer ${key}`,
+                        'Content-Type': 'application/json',
+                    },
+                }));
+                lastErr = null;
+                break;
+            } catch (err) {
+                lastErr = err;
+                if (!isGroqRateLimitError(err)) throw err;
+                this.keyPool.markRateLimited(key);
+                if (attempt < this.keyPool.size - 1) {
+                    logger.warn(`Groq key ${attempt + 1} rate limited — rotating to next key`);
+                }
+            }
+        }
+        if (lastErr) throw lastErr;
 
         const text = stripFences(data?.choices?.[0]?.message?.content || '');
         if (!text) {

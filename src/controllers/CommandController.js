@@ -51,7 +51,7 @@ import {
     handleTrending,
 } from './handlers/groupHandlers.js';
 
-import { handleTradelert, handleTradenow } from './handlers/tradeHandlers.js';
+import { handleTradelert, handleTradenow, handleSwing, handleExpiry } from './handlers/tradeHandlers.js';
 import { handleHeal, handleFix } from './handlers/healHandlers.js';
 import { handleAssist } from './handlers/assistHandlers.js';
 
@@ -387,6 +387,8 @@ class CommandController {
             case 'trending':   await handleTrending(sock, chatId, senderJid, args, ctx); break;
             case 'tradelert':  await handleTradelert(sock, chatId, senderJid, args, ctx); break;
             case 'tradenow':   await handleTradenow(sock, chatId, senderJid, args, ctx); break;
+            case 'swing':      await handleSwing(sock, chatId, senderJid, args, ctx); break;
+            case 'expiry':     await handleExpiry(sock, chatId, senderJid, args, ctx); break;
 
             /* ── Admin management ── */
             case 'addadmin':    await handleAddAdmin(sock, chatId, senderJid, args, originalMsg, ctx); break;

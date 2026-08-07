@@ -1,5 +1,11 @@
 /**
  * Trade LLM router: Gemini → Groq → NVIDIA → OpenRouter fallback chain.
+ *
+ * Two things keep repeated `/tradenow` calls from failing:
+ *  1. LlmRateGate — per-provider RPM budget + concurrency cap, so a burst of
+ *     commands spreads across providers instead of stampeding provider[0].
+ *  2. Every provider error falls through to the next provider. Only a genuine
+ *     "nothing left to try" state surfaces an error to the user.
  * Rate-limited providers are cooled so the next symbol skips straight to a working one.
  */
 
@@ -9,10 +15,28 @@ import GeminiTradeService, { isGeminiRateLimitError } from './GeminiTradeService
 import GroqTradeService, { isGroqRateLimitError } from './GroqTradeService.js';
 import NvidiaDeepSeekService from './NvidiaDeepSeekService.js';
 import OpenRouterLlmService, { isOpenRouterRateLimitError } from './OpenRouterLlmService.js';
+import LlmRateGate, { parseRpmMap } from './LlmRateGate.js';
 
 const DEFAULT_PROVIDER_ORDER = ['gemini', 'groq', 'nvidia', 'openrouter'];
 /** After a 429, skip this provider for a bit (shared across daily scan symbols). */
 const DEFAULT_COOLDOWN_MS = 90_000;
+/** A bad/expired key is not going to fix itself in 90s. */
+const AUTH_COOLDOWN_MS = 10 * 60_000;
+
+/** 401/403 — the key is wrong, not busy. Cool it long and move on. */
+export function isAuthError(err) {
+    const status = err?.response?.status ?? err?.cause?.response?.status ?? err?.status;
+    return status === 401 || status === 403;
+}
+
+function errorDetail(err) {
+    const msg =
+        err?.response?.data?.error?.message ||
+        err?.cause?.response?.data?.error?.message ||
+        err?.message ||
+        String(err);
+    return String(msg).replace(/\s+/g, ' ').slice(0, 160);
+}
 
 export function isTradeLlmRateLimitError(err) {
     if (err?.isRateLimit) return true;
@@ -58,6 +82,21 @@ export default class TradeLlmRouterService {
             15_000,
             Math.min(5 * 60_000, Number(cfg.TRADE_LLM_COOLDOWN_MS) || DEFAULT_COOLDOWN_MS)
         );
+        /** How long a queued request may wait for provider capacity before best-effort firing. */
+        this.queueWaitMs = Math.max(
+            0,
+            Math.min(120_000, Number(cfg.TRADE_LLM_QUEUE_WAIT_MS) ?? 45_000)
+        );
+        this.gate = new LlmRateGate({
+            rpm: parseRpmMap(cfg.TRADE_LLM_RPM),
+            perProvider: Number(cfg.TRADE_LLM_MAX_PER_PROVIDER) || 2,
+            maxConcurrent: Number(cfg.TRADE_LLM_MAX_CONCURRENT) || 3,
+        });
+        // Extra keys on a provider raise its effective per-minute budget.
+        for (const { name, svc } of Object.values(this._providerMap())) {
+            const keys = svc?.keyPool?.size;
+            if (keys > 1) this.gate.setKeyCount(name, keys);
+        }
     }
 
     _parseProviderOrder(raw) {
@@ -69,8 +108,8 @@ export default class TradeLlmRouterService {
         return parts.length ? parts : [...DEFAULT_PROVIDER_ORDER];
     }
 
-    _providers() {
-        const map = {
+    _providerMap() {
+        return {
             gemini: { name: 'gemini', svc: this.gemini, label: () => `Gemini ${this.gemini.tradeModel}` },
             groq: { name: 'groq', svc: this.groq, label: () => `Groq ${this.groq.tradeModel}` },
             nvidia: {
@@ -84,31 +123,83 @@ export default class TradeLlmRouterService {
                 label: () => `OpenRouter ${this.openrouter.tradeModel}`,
             },
         };
+    }
+
+    _providers() {
+        const map = this._providerMap();
         return this.providerOrder
             .map((key) => map[key])
             .filter((p) => p && p.svc.isConfigured());
     }
 
+    _isCooled(name) {
+        return (this._cooledUntil.get(name) || 0) > Date.now();
+    }
+
     /** Prefer live providers; cooled (rate-limited) ones go last. */
     _providersForAttempt() {
-        const now = Date.now();
         const all = this._providers();
-        const live = [];
-        const cooled = [];
-        for (const p of all) {
-            const until = this._cooledUntil.get(p.name) || 0;
-            if (until > now) cooled.push(p);
-            else live.push(p);
-        }
+        const live = all.filter((p) => !this._isCooled(p.name));
+        const cooled = all.filter((p) => this._isCooled(p.name));
         return [...live, ...cooled];
     }
 
-    _markCooled(name) {
-        const until = Date.now() + this.cooldownMs;
-        this._cooledUntil.set(name, until);
-        logger.warn(
-            `Trade LLM provider ${name} cooled for ${Math.round(this.cooldownMs / 1000)}s after rate limit`
-        );
+    _markCooled(name, ms = this.cooldownMs) {
+        this._cooledUntil.set(name, Date.now() + ms);
+        logger.warn(`Trade LLM provider ${name} cooled for ${Math.round(ms / 1000)}s`);
+    }
+
+    /**
+     * Choose the next provider to try: live before cooled, ready before queued,
+     * least-loaded before busy, configured priority as the tiebreak.
+     * Returns the provider together with its already-reserved gate slot, so no
+     * other concurrent request can claim the same capacity in between.
+     * @param {Set<string>} tried
+     * @param {number} queueDeadline epoch ms — shared across all hops of one request
+     * @returns {Promise<{ provider: object, release: () => void }|null>}
+     */
+    async _pickProvider(all, tried, queueDeadline = 0) {
+        const pool = all.filter((p) => !tried.has(p.name));
+        if (!pool.length) return null;
+
+        const live = pool.filter((p) => !this._isCooled(p.name));
+        // Everything cooled → the cooldowns are stale guesses, retry anyway.
+        const candidates = live.length ? live : pool;
+        const rank = (p) => this.providerOrder.indexOf(p.name);
+        const byLoad = (a, b) =>
+            this.gate.inflight(a.name) - this.gate.inflight(b.name) || rank(a) - rank(b);
+
+        let queued = false;
+        for (;;) {
+            for (const provider of [...candidates].sort(byLoad)) {
+                const release = this.gate.tryTake(provider.name);
+                if (release) {
+                    if (queued) logger.info(`Trade LLM dequeued onto ${provider.name}`);
+                    return { provider, release };
+                }
+            }
+
+            // All at capacity — wait rather than burning a guaranteed 429.
+            // The budget is shared across hops so a 4-provider chain can't wait 4×.
+            const budget = Math.max(0, queueDeadline - Date.now());
+            if (!budget) break;
+            if (!queued) {
+                queued = true;
+                logger.info(
+                    `Trade LLM queueing — [${candidates.map((p) => p.name).join(', ')}] at capacity`
+                );
+            }
+            const freed = await this.gate.waitForAny(
+                candidates.map((p) => p.name),
+                budget
+            );
+            // freed may have been claimed by another request — loop and re-reserve.
+            if (!freed) break;
+        }
+
+        // Queue budget spent: fire best-effort rather than failing without trying.
+        const provider = [...candidates].sort(byLoad)[0];
+        return { provider, release: this.gate.take(provider.name) };
     }
 
     isConfigured() {
@@ -130,59 +221,80 @@ export default class TradeLlmRouterService {
     }
 
     async _route(method, systemPrompt, userPrompt, opts = {}) {
-        const providers = this._providersForAttempt();
-        if (!providers.length) {
+        const all = this._providers();
+        if (!all.length) {
             throw new Error(
                 'No trade LLM configured (set GEMINI_API_KEY, GROQ_API_KEY, NVIDIA_API_KEY, or OPENROUTER_API_KEY)'
             );
         }
 
+        const tried = new Set();
+        const failures = [];
+        const queueDeadline = Date.now() + this.queueWaitMs;
         let lastErr;
         let sawRateLimit = false;
-        for (let i = 0; i < providers.length; i++) {
-            const provider = providers[i];
-            const cooledUntil = this._cooledUntil.get(provider.name) || 0;
-            if (cooledUntil > Date.now() && i < providers.length - 1) {
-                // Still have another provider — skip cooled one entirely
-                logger.info(`Trade LLM skipping cooled provider ${provider.name}`);
+
+        // One hop per configured provider — every failure falls through to the next.
+        for (let hop = 0; hop < all.length; hop++) {
+            const picked = await this._pickProvider(all, tried, queueDeadline);
+            if (!picked) break;
+            const { provider, release } = picked;
+            tried.add(provider.name);
+
+            if (!provider.svc[method]) {
+                release();
+                failures.push(`${provider.name}: missing ${method}`);
                 continue;
             }
+
             try {
-                if (!provider.svc[method]) {
-                    throw new Error(`${provider.name} missing ${method}`);
-                }
                 const text = await provider.svc[method](systemPrompt, userPrompt, opts);
                 this.lastProvider = provider.name;
-                if (i > 0 || this._cooledUntil.has(provider.name)) {
+                this._cooledUntil.delete(provider.name);
+                if (tried.size > 1) {
                     logger.info(`Trade LLM fallback succeeded via ${provider.name}`);
                 }
                 return text;
             } catch (err) {
                 lastErr = err;
-                const rateLimited = isTradeLlmRateLimitError(err);
-                if (rateLimited) {
+                failures.push(`${provider.name}: ${errorDetail(err)}`);
+                if (isTradeLlmRateLimitError(err)) {
                     sawRateLimit = true;
                     this._markCooled(provider.name);
+                } else if (isAuthError(err)) {
+                    this._markCooled(provider.name, AUTH_COOLDOWN_MS);
+                } else if (!isTradeLlmFallbackError(err)) {
+                    // Prompt too long, safety block, bad model id — provider-specific,
+                    // so cool it briefly and let a different provider handle it.
+                    this._markCooled(provider.name, Math.min(this.cooldownMs, 30_000));
                 }
-                const hasNext = i < providers.length - 1;
-                if (hasNext && isTradeLlmFallbackError(err)) {
-                    logger.warn(
-                        `Trade ${provider.name} failed — trying next provider: ${err.message}`
-                    );
-                    continue;
-                }
-                throw err;
+                logger.warn(`Trade ${provider.name} failed — trying next provider: ${errorDetail(err)}`);
+            } finally {
+                release();
             }
         }
+
         if (sawRateLimit) {
             const e = new Error(
                 'All trade LLM providers rate limited — wait 30–60 seconds and try `/tradenow` again.'
             );
             e.isRateLimit = true;
             e.cause = lastErr;
+            e.providerErrors = failures;
             throw e;
         }
-        throw lastErr || new Error('All trade LLM providers failed');
+        const e = new Error(`All trade LLM providers failed — ${failures.join(' | ')}`);
+        e.cause = lastErr;
+        e.providerErrors = failures;
+        throw e;
+    }
+
+    /** Per-provider budget snapshot for `/tradelert status`. */
+    getGateStatus() {
+        return this.gate.snapshot(this._providers().map((p) => p.name)).map((s) => ({
+            ...s,
+            cooled: this._isCooled(s.name),
+        }));
     }
 
     async completeTrade(systemPrompt, userPrompt, opts = {}) {

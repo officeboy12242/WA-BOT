@@ -17,7 +17,7 @@ WhatsApp multipurpose bot built on [Baileys](https://github.com/WhiskeySockets/B
 | **News** | Scheduled Inshorts tech digests (`/newson`) |
 | **GitHub** | Scheduled trending repos (`/githubon`) |
 | **Group recap** | End-of-day AI summary (`/summaryon`) |
-| **Trade** | NSE F&O style alerts (`/tradelert`) and on-demand `/tradenow` |
+| **Trade** | NSE F&O alerts (`/tradelert`), on-demand `/tradenow`, `/swing` momentum setups, and `/expiry` expiry-day index options |
 | **Fun** | Horoscope, advice, fun facts, RGB stickers |
 | **Moderation** | Warns, message delete helpers, welcome messages |
 | **Owner** | Premium/mods, member scrape & broadcast, Drive sources, `/assist` DM persona, `/fix` self-heal, `/deploy` |
@@ -95,7 +95,7 @@ Exact checks live in `src/commands/registry.js` + `src/commands/access.js`. In-c
 Use `/help` on WhatsApp for the live list filtered by your role and chat type.
 
 ### Anyone
-`/ping` · `/help` · `/movie` · `/upcoming` · `/genre` · `/insta` · `/sticker` · `/steal` · `/toimg` · `/rgb` · `/horo` · `/advice` · `/facts` · `/news` · `/github` · `/tradenow` · `/posted` · `/status` · `/checklimit`
+`/ping` · `/help` · `/movie` · `/upcoming` · `/genre` · `/insta` · `/sticker` · `/steal` · `/toimg` · `/rgb` · `/horo` · `/advice` · `/facts` · `/news` · `/github` · `/tradenow` · `/swing` · `/expiry` · `/posted` · `/status` · `/checklimit`
 
 ### Staff (group toggles)
 `/activate` · `/deactivate` · `/courson` · `/coursesoff` · `/newson` · `/newsoff` · `/githubon` · `/githuboff` · `/instaon` · `/instaoff` · `/stickeron` · `/stickeroff` · `/movieon` · `/movieoff` · `/summaryon` · `/summaryoff` · `/summarynow` · `/trending` · `/tradelert`
