@@ -28,6 +28,7 @@ import { extractStickerFromMessage, isNewsletterChat } from '../utils/stickerExt
 import { isStickerForwardReady } from '../utils/stickerDownload.js';
 import { groupMessageTracker } from '../utils/groupMessageTracker.js';
 import { groupParticipantSnapshot } from '../utils/groupParticipantSnapshot.js';
+import { restorePendingDeletes } from '../utils/autoDelete.js';
 import { config } from '../config/config.js';
 import { resolveNotificationJid, extractPhoneNumber, isBotSelfChat, getBotSelfSenderJid, isDirectMessage } from '../utils/permissions.js';
 import {
@@ -247,6 +248,24 @@ class WhatsAppService {
             browser: ['Ubuntu', 'Chrome', '20.0.04'],
             fireInitQueries: true,
             patchMessageBeforeSending: (msg) => msg,
+            /**
+             * Without this, Baileys refetches the FULL participant list from
+             * WhatsApp on every group send — see messages-send.js, which falls
+             * back to `groupMetadata(jid)` when the cache returns undefined (the
+             * library default is `async () => undefined`). In a 900-member group
+             * that is a multi-second round-trip added to every single reply.
+             * Reuse the cache we already maintain; returning undefined on any
+             * failure lets Baileys fall back to its own fetch.
+             */
+            cachedGroupMetadata: async (jid) => {
+                try {
+                    if (!jid?.endsWith('@g.us')) return undefined;
+                    if (!this.sock || !this.groupManager?.getGroupMetadataCached) return undefined;
+                    return await this.groupManager.getGroupMetadataCached(this.sock, jid);
+                } catch {
+                    return undefined;
+                }
+            },
         });
 
         this._wrapOutgoingMessageTracking();
@@ -379,6 +398,12 @@ class WhatsAppService {
                             `⚡ Big-group cache warm: ${warmed} meta, ${seeded} participant snapshot(s)`
                         );
                     }
+
+                    // Re-arm auto-deletes that were pending across the restart,
+                    // and clear any whose time passed while we were down.
+                    void restorePendingDeletes().catch((err) =>
+                        logger.warn(`Auto-delete restore failed: ${err.message}`)
+                    );
                     // Send startup notification
                     await this._sendStartupNotification();
                 } catch (err) {

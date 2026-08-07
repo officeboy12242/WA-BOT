@@ -115,19 +115,17 @@ export async function checkCommandAccess(sock, chatId, senderJid, def, groupMana
         if (groupManager.isOwner(senderPhone)) {
             return { ok: true };
         }
-        // LID owners: resolve via cached group metadata (never full uncached fetch)
+        // LID owners: O(1) lookup through the cached phoneByKey index rather than
+        // scanning every participant (900+ iterations per command in big groups).
         if (senderJid?.includes('@lid') && chatId?.endsWith('@g.us')) {
             try {
-                const meta = await groupManager.getGroupMetadataCached(sock, chatId);
-                for (const p of meta.participants || []) {
-                    if (p.lid === senderJid || p.id === senderJid) {
-                        const phone = String(p.id || p.phoneNumber || p.pn || '')
-                            .replace(/\D/g, '')
-                            .split('@')[0];
-                        if (groupManager.isOwner(phone)) {
-                            return { ok: true };
-                        }
-                    }
+                const phone = await groupManager.resolveParticipantPhoneCached(
+                    sock,
+                    chatId,
+                    senderJid
+                );
+                if (phone && groupManager.isOwner(phone)) {
+                    return { ok: true };
                 }
             } catch {
                 // fall through

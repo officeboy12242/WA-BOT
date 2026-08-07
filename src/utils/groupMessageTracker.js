@@ -12,6 +12,19 @@ class GroupMessageTracker {
     constructor() {
         /** @type {Map<string, Array<{ key: import('baileys').proto.IMessageKey, ts: number }>>} */
         this._groups = new Map();
+        /**
+         * Mirror of the ids in each list, so the duplicate check on the hot path
+         * is O(1). It previously scanned up to MAX_PER_GROUP entries for every
+         * inbound message — real CPU in a busy 900-member group, and it ran
+         * synchronously inside the messages.upsert loop.
+         * @type {Map<string, Set<string>>}
+         */
+        this._ids = new Map();
+    }
+
+    /** Keep the id mirror aligned with a list we just replaced or trimmed. */
+    _reindex(storageKey, list) {
+        this._ids.set(storageKey, new Set(list.map((e) => e.key.id)));
     }
 
     _normalizeGroupId(chatId) {
@@ -118,8 +131,13 @@ class GroupMessageTracker {
             list = [];
             this._groups.set(chatId, list);
         }
+        let ids = this._ids.get(chatId);
+        if (!ids) {
+            ids = new Set(list.map((e) => e.key.id));
+            this._ids.set(chatId, ids);
+        }
 
-        if (list.some((entry) => entry.key.id === msg.key.id)) {
+        if (ids.has(msg.key.id)) {
             return;
         }
 
@@ -133,9 +151,11 @@ class GroupMessageTracker {
             },
             ts: Date.now(),
         });
+        ids.add(msg.key.id);
 
         if (list.length > MAX_PER_GROUP) {
-            list.splice(0, list.length - MAX_PER_GROUP);
+            const dropped = list.splice(0, list.length - MAX_PER_GROUP);
+            for (const entry of dropped) ids.delete(entry.key.id);
         }
     }
 
@@ -233,10 +253,9 @@ class GroupMessageTracker {
         if (!list.length) {
             return;
         }
-        this._groups.set(
-            storageKey,
-            list.filter((entry) => !idSet.has(entry.key.id)),
-        );
+        const next = list.filter((entry) => !idSet.has(entry.key.id));
+        this._groups.set(storageKey, next);
+        this._reindex(storageKey, next);
     }
 }
 
