@@ -464,7 +464,7 @@ export const COMMAND_REGISTRY = [
         key: 'tradelert',
         scope: 'group_only',
         role: 'staff',
-        help: 'Daily F&O alerts — `/tradelert on`, `source heatmap|nse|legacy`, `scan`',
+        help: 'Daily F&O alerts — `/tradelert on`, `source heatmap2|heatmap|nse|legacy`, `scan`, `stats`',
         category: 'trade',
     },
     {

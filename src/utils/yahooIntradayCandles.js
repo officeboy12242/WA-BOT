@@ -44,7 +44,12 @@ export async function fetchYahooIntradayCandles(yahooSymbol, { interval = '15m',
                 const low = Number(q.low?.[i]);
                 const close = Number(q.close?.[i]);
                 const volume = Number(q.volume?.[i]) || 0;
-                if (![open, high, low, close].every(Number.isFinite)) continue;
+                // Yahoo pads some series with an all-zero final bar (seen on the
+                // 15:15 IST candle for SBIN, HAL and others). Zero is finite, so a
+                // plain isFinite check lets it through — and one zero close turns
+                // today's change into −100%, flips the trade direction and blows
+                // up ATR. Prices are never legitimately ≤ 0.
+                if (![open, high, low, close].every((v) => Number.isFinite(v) && v > 0)) continue;
                 candles.push({ ts: ts[i] * 1000, open, high, low, close, volume });
             }
             if (candles.length) return candles;

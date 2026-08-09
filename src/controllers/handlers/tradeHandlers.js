@@ -10,6 +10,8 @@ import { formatTradeScanPreview } from '../../utils/tradeScanFormatter.js';
 import SwingMomentumScanService from '../../services/SwingMomentumScanService.js';
 import { formatSwingScan, formatSwingRanking } from '../../utils/swingAlertFormatter.js';
 import { createTradeOutcomeService } from '../../services/TradeOutcomeService.js';
+import { createTradeOutcomeResolver } from '../../services/TradeOutcomeResolver.js';
+import { discoverySourceLabel, parseDiscoverySource } from '../../utils/discoverySource.js';
 import ExpiryTradeService, { EXPIRY_INDICES } from '../../services/ExpiryTradeService.js';
 import { formatExpiryAlert, formatExpiryDigest } from '../../utils/expiryAlertFormatter.js';
 import { nextExpiry } from '../../utils/expiryCalendar.js';
@@ -30,18 +32,53 @@ function modeLabel(mode) {
     return mode === 'manual' ? '📋 Manual watchlist' : '🤖 AI auto (live news + movers)';
 }
 
-function sourceLabel(source) {
-    if (source === 'heatmap') return 'NSE Heatmap + 15m OR / 8 EMA';
-    if (source === 'nse') return 'NSE NIFTY50 top 5G+5L';
-    return 'Legacy (sectors · movers · smart money)';
-}
+const sourceLabel = discoverySourceLabel;
+const normalizeSourceArg = parseDiscoverySource;
 
-function normalizeSourceArg(raw) {
-    const s = String(raw || '').trim().toLowerCase();
-    if (s === 'heatmap' || s === 'breakout' || s === 'ema' || s === 'or') return 'heatmap';
-    if (s === 'nse' || s === 'nse_gl' || s === 'gl' || s === 'gainers') return 'nse';
-    if (s === 'legacy' || s === 'old' || s === 'enhanced') return 'legacy';
-    return null;
+/** One line per strategy: posted / decided / win rate. */
+function formatOutcomeStats(stats) {
+    if (!stats) return '❌ Outcome tracking needs the database — none connected.';
+
+    const pct = (v) => (v == null ? '—' : `${Math.round(v * 100)}%`);
+    const line = (name, b) => {
+        const decided = b.win + b.loss;
+        const parts = [`${b.posted} posted`];
+        if (decided) parts.push(`*${pct(b.winRate)}* (${b.win}W/${b.loss}L)`);
+        if (b.pending) parts.push(`${b.pending} pending`);
+        if (b.expired) parts.push(`${b.expired} expired`);
+        if (b.noData) parts.push(`${b.noData} no data`);
+        return `${name} — ${parts.join(' · ')}`;
+    };
+
+    const out = [
+        '━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+        '📊 *ALERT OUTCOMES* 📊',
+        '━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+        '',
+        `_Last ${stats.lookbackDays} days_`,
+        '',
+        line('*Overall*', stats.overall),
+    ];
+
+    if (stats.bySource.length > 1) {
+        out.push('', '*By strategy*');
+        for (const s of stats.bySource) out.push(`• ${line(s.source, s)}`);
+    }
+
+    if (stats.overall.directional > 0) {
+        out.push(
+            '',
+            `_⚠️ ${stats.overall.directional} row(s) graded on the underlying's direction only — ` +
+                'CE/PE alerts price in premiums, and historical premiums are not retrievable. ' +
+                'Those say the call was right, not that the option paid._'
+        );
+    }
+    if (!stats.overall.win && !stats.overall.loss) {
+        out.push('', '_Nothing graded yet — the resolver runs daily after the close._');
+    }
+
+    out.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    return out.join('\n');
 }
 
 
@@ -77,11 +114,13 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
             const llmChain = tradeAlertController?.tradeLlm?.getModelChain?.()?.join(' → ') || 'none';
             let symbolLine = mode === 'manual'
                 ? (symbols.length ? symbols.join(', ') : (defaultSymbols.join(', ') || '_env default_'))
-                : discoverySource === 'heatmap'
-                  ? `_Heatmap ±2% sectors → top ${heatmapMax} OR/EMA setups_`
-                  : discoverySource === 'nse'
-                    ? `_NSE NIFTY50 top ${nseEach}G + ${nseEach}L_`
-                    : '_AI picks daily from live news & top movers_';
+                : discoverySource === 'heatmap2'
+                  ? `_Live movers in hot sectors → top ${heatmapMax} filtered setups_`
+                  : discoverySource === 'heatmap'
+                    ? `_Heatmap ±2% sectors → top ${heatmapMax} OR/EMA setups_`
+                    : discoverySource === 'nse'
+                      ? `_NSE NIFTY50 top ${nseEach}G + ${nseEach}L_`
+                      : '_AI picks daily from live news & top movers_';
 
             let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
             r += '📈 *TRADE ALERTS* 📈\n';
@@ -94,11 +133,13 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
             r += `📊 *Symbols:* ${symbolLine}\n`;
             r += `🔔 *Posts:* CE/PE when AI ≥70% · confluence ≥40 (soft ≥25 if quiet day)\n`;
             r += `🌐 *Data:* ${
-                discoverySource === 'heatmap'
-                    ? 'NSE heatmap sectors + Yahoo 15m OR/8EMA + option chain'
-                    : discoverySource === 'nse'
-                      ? 'NSE top gainers/losers + option chain'
-                      : 'NSE macro + hot sectors + Yahoo + news'
+                discoverySource === 'heatmap2'
+                    ? 'Live sector % + 15m intraday (VWAP · RS · ATR) + option chain'
+                    : discoverySource === 'heatmap'
+                      ? 'NSE heatmap sectors + Yahoo 15m OR/8EMA + option chain'
+                      : discoverySource === 'nse'
+                        ? 'NSE top gainers/losers + option chain'
+                        : 'NSE macro + hot sectors + Yahoo + news'
             }\n`;
             r += `🤖 *AI:* ${llmOk ? llmChain : 'Set GEMINI / GROQ / NVIDIA API key'}\n`;
             const gate = tradeAlertController?.tradeLlm?.getGateStatus?.() || [];
@@ -114,10 +155,12 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
             r += '• `/tradelert off` — disable\n';
             r += '• `/tradelert auto` — AI picks stocks (default)\n';
             r += '• `/tradelert manual` + `/tradelert stocks A,B` — fixed list\n';
-            r += '• `/tradelert source heatmap` — heatmap + 15m OR / 8 EMA\n';
+            r += '• `/tradelert source heatmap2` — live intraday + VWAP/RS/ATR\n';
+            r += '• `/tradelert source heatmap` — v1: heatmap + 15m OR / 8 EMA\n';
             r += '• `/tradelert source nse` — NIFTY50 top 5G+5L\n';
             r += '• `/tradelert source legacy` — old multi-signal scan\n';
             r += '• `/tradelert scan` — preview today\'s watchlist\n';
+            r += '• `/tradelert stats` — measured win rate per strategy\n';
             r += '• `/tradenow RELIANCE` — full analysis (incl. NO TRADE)\n';
             r += '• `/swing` — swing setups (2–6 wk holds, no AI)\n\n';
             r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━';
@@ -202,11 +245,13 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
         if (action === 'scan') {
             const loading = await sock.sendMessage(chatId, {
                 text:
-                    discoverySource === 'heatmap'
-                        ? '📡 _Heatmap scan: sectors ±2% → 15m OR + 8 EMA… (~30–90s)_'
-                        : discoverySource === 'nse'
-                          ? `📡 _Fetching NSE NIFTY50 top ${nseEach}G+${nseEach}L…_`
-                          : '📡 _Running enhanced market scan (sectors · macro · smart money)… (~60–120s)_',
+                    discoverySource === 'heatmap2'
+                        ? '📡 _Heatmap v2: live movers in hot sectors → VWAP / RS / ATR filters… (~10–30s)_'
+                        : discoverySource === 'heatmap'
+                          ? '📡 _Heatmap scan: sectors ±2% → 15m OR + 8 EMA… (~30–90s)_'
+                          : discoverySource === 'nse'
+                            ? `📡 _Fetching NSE NIFTY50 top ${nseEach}G+${nseEach}L…_`
+                            : '📡 _Running enhanced market scan (sectors · macro · smart money)… (~60–120s)_',
             });
             try {
                 const preview = await tradeAlertController.previewDiscovery(discoverySource);
@@ -228,7 +273,8 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
                 await sock.sendMessage(chatId, {
                     text:
                         '❌ Usage:\n' +
-                        '`/tradelert source heatmap` — NSE heatmap ±2% + 15m OR / 8 EMA\n' +
+                        '`/tradelert source heatmap2` — live intraday % + VWAP + RS + ATR stops\n' +
+                        '`/tradelert source heatmap` — v1: NSE heatmap ±2% + 15m OR / 8 EMA\n' +
                         '`/tradelert source nse` — NIFTY50 top 5 gainers + 5 losers\n' +
                         '`/tradelert source legacy` — sectors / movers / smart money\n\n' +
                         `Current: *${sourceLabel(discoverySource)}*`,
@@ -244,13 +290,47 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
             await sock.sendMessage(chatId, {
                 text:
                     `✅ *Discovery source:* ${sourceLabel(saved)}\n\n` +
-                    (saved === 'heatmap'
-                        ? 'Daily auto scan uses *heatmap bias* → stocks ±2% in hot sectors → ranks *15m opening-range breakouts* with *8 EMA* filters, then CE/PE trades.\n'
-                        : saved === 'nse'
-                          ? `Daily auto scan uses NSE NIFTY50 top *${nseEach} gainers + ${nseEach} losers*, then CE/PE trades.\n`
-                          : 'Daily auto scan uses the legacy multi-signal watchlist.\n') +
-                    '_Preview with `/tradelert scan`._',
+                    (saved === 'heatmap2'
+                        ? 'Ranks sectors on the *live* index move, then takes constituents ' +
+                          'actually moving today (not their pre-open gap). Each must break the ' +
+                          '15m opening range on the right side of *VWAP*, be *outperforming ' +
+                          'NIFTY*, have a stop inside *0.6–2×ATR*, break *before noon*, and be ' +
+                          '*confirmed by the next candle*. Targets 1R / 2R.\n\n' +
+                          '_Backtested over 22 sessions × 230 symbols: *66% to T1*, +0.22R per ' +
+                          'trade (64.8% on the held-out half). Gross of costs, and measured on ' +
+                          'the stock — the CE/PE leg will not track it 1:1._\n'
+                        : saved === 'heatmap'
+                          ? 'Daily auto scan uses *heatmap bias* → stocks ±2% in hot sectors → ranks *15m opening-range breakouts* with *8 EMA* filters, then CE/PE trades.\n'
+                          : saved === 'nse'
+                            ? `Daily auto scan uses NSE NIFTY50 top *${nseEach} gainers + ${nseEach} losers*, then CE/PE trades.\n`
+                            : 'Daily auto scan uses the legacy multi-signal watchlist.\n') +
+                    '_Preview with `/tradelert scan` · compare with `/tradelert stats`._',
             });
+            return;
+        }
+
+        if (action === 'stats' || action === 'outcomes' || action === 'winrate') {
+            const mongoDb = tradeAlertController?.mongoDb;
+            if (!mongoDb) {
+                await sock.sendMessage(chatId, {
+                    text: '❌ Outcome tracking needs the database — none connected.',
+                });
+                return;
+            }
+            const loading = await sock.sendMessage(chatId, {
+                text: '📊 _Grading posted alerts against what price actually did…_',
+            });
+            try {
+                const resolver = createTradeOutcomeResolver(mongoDb, config);
+                // Resolve on demand so the numbers are current, not last night's.
+                await resolver.resolvePending({ limit: 200 });
+                const days = Math.max(1, Math.min(180, parseInt(args[1], 10) || 30));
+                const stats = await resolver.stats({ lookbackDays: days });
+                await editMessageText(sock, chatId, loading?.key, formatOutcomeStats(stats));
+            } catch (err) {
+                logger.error(`Trade stats failed: ${err.message}`);
+                await editMessageText(sock, chatId, loading?.key, `❌ Stats failed: ${err.message}`);
+            }
             return;
         }
 
@@ -280,7 +360,8 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
                 '❌ Usage:\n' +
                 '`/tradelert on` · `/tradelert off`\n' +
                 '`/tradelert auto` · `/tradelert manual`\n' +
-                '`/tradelert source heatmap` · `/tradelert source nse` · `/tradelert source legacy`\n' +
+                '`/tradelert source heatmap2` · `heatmap` · `nse` · `legacy`\n' +
+                '`/tradelert stats [days]` — measured win rate\n' +
                 '`/tradelert stocks SYMBOL1,SYMBOL2`\n' +
                 '`/tradelert scan`',
         });
@@ -397,6 +478,12 @@ async function logSwingPicks(result, chatId, tradeAlertController) {
                 confidence: p.percentile,
                 confluence: Number(p.momentumScore?.toFixed(3)) || null,
                 groupId: chatId,
+                strategySource: 'swing',
+                // Equity levels — these resolve exactly against daily candles.
+                underlyingSymbol: p.symbol,
+                underlyingEntry: p.plan.entry,
+                underlyingStop: p.plan.stop,
+                underlyingTarget: p.plan.target1,
             });
         }
         logger.info(`📊 Logged ${result.picks.length} swing picks for outcome tracking`);
@@ -505,6 +592,13 @@ async function logExpiryPicks(result, chatId, tradeAlertController) {
             confidence: s.leg.probItm != null ? Math.round(s.leg.probItm * 100) : null,
             confluence: null,
             groupId: chatId,
+            strategySource: 'expiry',
+            // Entry/stop/target above are option premiums. The index spot is
+            // recorded so the resolver can at least grade the direction — an
+            // option's own history is not retrievable from any feed here.
+            // Store the Yahoo ticker, not 'NIFTY', so the resolver can fetch it.
+            underlyingSymbol: EXPIRY_INDICES[result.index]?.yahoo || result.index,
+            underlyingEntry: result.context?.spot ?? null,
         });
     } catch (err) {
         logger.warn(`Expiry outcome logging failed: ${err.message}`);

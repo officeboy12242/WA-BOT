@@ -17,7 +17,7 @@ WhatsApp multipurpose bot built on [Baileys](https://github.com/WhiskeySockets/B
 | **News** | Scheduled Inshorts tech digests (`/newson`) |
 | **GitHub** | Scheduled trending repos (`/githubon`) |
 | **Group recap** | End-of-day AI summary (`/summaryon`) |
-| **Trade** | NSE F&O alerts (`/tradelert`), on-demand `/tradenow`, `/swing` momentum setups, and `/expiry` expiry-day index options |
+| **Trade** | NSE F&O alerts (`/tradelert`), on-demand `/tradenow`, `/swing` momentum setups, `/expiry` expiry-day index options, and measured win rates via `/tradelert stats` |
 | **Fun** | Horoscope, advice, fun facts, RGB stickers |
 | **Moderation** | Warns, message delete helpers, welcome messages |
 | **Owner** | Premium/mods, member scrape & broadcast, Drive sources, `/assist` DM persona, `/fix` self-heal, `/deploy` |

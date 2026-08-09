@@ -12,6 +12,18 @@ class TradeOutcomeService {
         this.config = config;
     }
 
+    /**
+     * Journal a posted alert so `TradeOutcomeResolver` can grade it later.
+     *
+     * `underlying*` matter for CE/PE and expiry alerts: their entry/stop/target
+     * are option premiums, and historical premiums are not retrievable from any
+     * feed here. Recording the underlying and its spot levels is the only way
+     * those alerts can ever be scored — without them the resolver can do
+     * nothing but mark the row NO_DATA.
+     *
+     * `strategySource` is what lets the win rate be split per strategy, which is
+     * the whole point of running heatmap v1 and v2 side by side.
+     */
     async logPostedAlert({
         symbol,
         side,
@@ -22,6 +34,12 @@ class TradeOutcomeService {
         confidence,
         confluence,
         groupId = null,
+        strategySource = null,
+        setupScore = null,
+        underlyingSymbol = null,
+        underlyingEntry = null,
+        underlyingStop = null,
+        underlyingTarget = null,
     }) {
         if (!this._col) return;
         await this._col.insertOne({
@@ -35,6 +53,12 @@ class TradeOutcomeService {
             confidence,
             confluence,
             group_id: groupId,
+            strategy_source: strategySource,
+            setup_score: setupScore,
+            underlying_symbol: underlyingSymbol ? String(underlyingSymbol).toUpperCase() : null,
+            underlying_entry: underlyingEntry,
+            underlying_stop: underlyingStop,
+            underlying_target: underlyingTarget,
             outcome: 'PENDING',
             posted_at: new Date(),
         });

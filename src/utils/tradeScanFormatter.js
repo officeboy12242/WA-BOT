@@ -39,7 +39,9 @@ export function formatTradeScanPreview(discovery) {
         : formatNowLabelIST();
     lines.push(`🕐 *Scanned:* ${scanned} IST`);
     lines.push(`📍 *Mode:* ${d.marketModeLabel || d.marketMode || 'MARKET'}`);
-    if (d.discoverySource === 'heatmap') {
+    if (d.discoverySource === 'heatmap2') {
+        lines.push('📡 *Discovery:* Heatmap v2 — live intraday · VWAP · RS · ATR');
+    } else if (d.discoverySource === 'heatmap') {
         lines.push('📡 *Discovery:* NSE Heatmap + 15m OR / 8 EMA');
     } else if (d.discoverySource === 'nse') {
         lines.push('📡 *Discovery:* NSE NIFTY50 top gainers + losers');
@@ -51,9 +53,31 @@ export function formatTradeScanPreview(discovery) {
     }
     lines.push('');
 
-    // Heatmap OR/EMA setups
+    // Heatmap v2 — different shape from v1: no `status`, targets are 1R/2R,
+    // and a pick may legitimately carry no setup before the opening range closes.
     const hm = d.heatmap;
-    if (hm?.picks?.length) {
+    if (hm?.version === 2 && hm.picks?.length) {
+        lines.push('┌─ *HEATMAP v2 — LIVE BREAKOUTS* ─');
+        lines.push(`│ Sectors: ${hm.sentiment?.label || 'n/a'} (G${hm.sentiment?.green ?? '?'} / R${hm.sentiment?.red ?? '?'})`);
+        lines.push(`│ Regime: ${hm.regime?.label || 'n/a'}`);
+        if (hm.preOpeningRange) {
+            lines.push('│ ⏳ Opening range still forming — watchlist only');
+        }
+        for (const p of hm.picks) {
+            const s = p.setup;
+            const rs = p.relStrength != null ? ` · RS ${fmtPct(p.relStrength)}` : '';
+            if (!s) {
+                lines.push(`│ • *${p.symbol}* ${fmtPct(p.changePct)} · ${String(p.side).toUpperCase()}${rs} · watch`);
+                continue;
+            }
+            lines.push(
+                `│ • *${p.symbol}* ${fmtPct(p.changePct)} · ${s.direction.toUpperCase()} · score ${s.score}${rs}`
+            );
+            lines.push(`│    E ${s.entry} · SL ${s.stop} · T1 ${s.target1} · T2 ${s.target2}`);
+        }
+        lines.push('└────────────────────────────');
+        lines.push('');
+    } else if (hm?.picks?.length) {
         lines.push('┌─ *HEATMAP + 15m OR / 8 EMA* ─');
         lines.push(`│ Bias: ${hm.sentiment?.label || 'n/a'} (G${hm.sentiment?.green ?? '?'} / R${hm.sentiment?.red ?? '?'})`);
         for (const p of hm.picks) {

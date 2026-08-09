@@ -4,6 +4,7 @@
  */
 
 import dotenv from 'dotenv';
+import { normalizeDiscoverySource, DEFAULT_DISCOVERY_SOURCE } from '../utils/discoverySource.js';
 
 dotenv.config();
 
@@ -263,17 +264,15 @@ export const config = {
     TRADE_ALERT_DISCOVERY_COUNT: Math.max(8, Math.min(15, parseInt(process.env.TRADE_ALERT_DISCOVERY_COUNT, 10) || 10)),
     /**
      * Discovery source for auto mode:
-     * - heatmap = NSE heatmap ±2% + 15m OR breakout + 8 EMA (recommended)
-     * - nse = NIFTY 50 top gainers + losers
-     * - legacy = sectors/movers/smart-money merge
-     * Overridable per group via `/tradelert source heatmap|nse|legacy`
+     * - heatmap  = v1: NSE heatmap ±2% + 15m OR breakout + 8 EMA
+     * - heatmap2 = v2: live intraday % + VWAP + relative strength + ATR stops
+     * - nse      = NIFTY 50 top gainers + losers
+     * - legacy   = sectors/movers/smart-money merge
+     * Overridable per group via `/tradelert source heatmap|heatmap2|nse|legacy`
      */
-    TRADE_ALERT_DISCOVERY_SOURCE: (() => {
-        const s = (process.env.TRADE_ALERT_DISCOVERY_SOURCE || 'heatmap').trim().toLowerCase();
-        if (s === 'heatmap' || s === 'breakout' || s === 'ema' || s === 'or') return 'heatmap';
-        if (s === 'nse' || s === 'nse_gl' || s === 'gl' || s === 'gainers') return 'nse';
-        return 'legacy';
-    })(),
+    TRADE_ALERT_DISCOVERY_SOURCE: normalizeDiscoverySource(
+        process.env.TRADE_ALERT_DISCOVERY_SOURCE || DEFAULT_DISCOVERY_SOURCE
+    ),
     /** Top N gainers + top N losers when discovery source is nse (default 5+5). */
     TRADE_ALERT_NSE_GL_EACH: Math.max(1, Math.min(10, parseInt(process.env.TRADE_ALERT_NSE_GL_EACH, 10) || 5)),
     /** Heatmap path: max symbols to analyze after OR/EMA scan. */
@@ -283,6 +282,28 @@ export const config = {
         1,
         Math.min(5, parseFloat(process.env.TRADE_ALERT_HEATMAP_MIN_MOVE_PCT) || 2)
     ),
+
+    /* ── Heatmap v2 ─────────────────────────────────────────────────────────
+     * v2 measures the live intraday move rather than the pre-open gap, so a
+     * lower floor here selects more than v1's ±2% did against stale data.
+     */
+    /** v2: minimum live |% change| for a candidate (default 1.5%). */
+    HEATMAP_V2_MIN_MOVE_PCT: Math.max(
+        0.5,
+        Math.min(5, parseFloat(process.env.HEATMAP_V2_MIN_MOVE_PCT) || 1.5)
+    ),
+    /** v2: minimum setup score 0–100 (quality dimensions only). */
+    HEATMAP_V2_MIN_SCORE: Math.max(0, Math.min(100, parseInt(process.env.HEATMAP_V2_MIN_SCORE, 10) || 60)),
+    /** v2: cap picks per sector so N picks aren't one sector N times. */
+    HEATMAP_V2_MAX_PER_SECTOR: Math.max(1, Math.min(8, parseInt(process.env.HEATMAP_V2_MAX_PER_SECTOR, 10) || 3)),
+    /** v2: parallel candle fetches. */
+    HEATMAP_V2_CONCURRENCY: Math.max(1, Math.min(12, parseInt(process.env.HEATMAP_V2_CONCURRENCY, 10) || 6)),
+
+    /* ── Outcome resolution ─────────────────────────────────────────────── */
+    /** Grade posted alerts against what price actually did. */
+    TRADE_OUTCOME_RESOLVER_ENABLED: process.env.TRADE_OUTCOME_RESOLVER_ENABLED !== 'false',
+    /** IST time to run the resolver — after the close so sessions are complete. */
+    TRADE_OUTCOME_RESOLVE_TIME: (process.env.TRADE_OUTCOME_RESOLVE_TIME || '16:15').trim(),
     /** Strict confluence floor (0–100) for high-quality daily posts */
     TRADE_ALERT_MIN_CONFLUENCE: Math.max(25, Math.min(80, parseInt(process.env.TRADE_ALERT_MIN_CONFLUENCE, 10) || 40)),
     /** If no strict posts, still send daily AI≥70% picks with softer confluence */
