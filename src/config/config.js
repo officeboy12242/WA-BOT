@@ -299,6 +299,18 @@ export const config = {
     /** v2: parallel candle fetches. */
     HEATMAP_V2_CONCURRENCY: Math.max(1, Math.min(12, parseInt(process.env.HEATMAP_V2_CONCURRENCY, 10) || 6)),
 
+    /* ── Member broadcast pacing ─────────────────────────────────────────
+     * WhatsApp limits accounts that send lots of cold DMs. These defaults are
+     * deliberately slow (~150/day, randomised gaps): a uniform cadence is a
+     * machine signature, and volume is what draws reports in the first place.
+     * Raising them raises ban risk — the account is the thing you cannot
+     * restore from a backup.
+     */
+    BROADCAST_MIN_GAP_MS: Math.max(3_000, parseInt(process.env.BROADCAST_MIN_GAP_MS, 10) || 8_000),
+    BROADCAST_MAX_GAP_MS: Math.max(5_000, parseInt(process.env.BROADCAST_MAX_GAP_MS, 10) || 25_000),
+    BROADCAST_BATCH_SIZE: Math.max(1, parseInt(process.env.BROADCAST_BATCH_SIZE, 10) || 20),
+    BROADCAST_DAILY_CAP: Math.max(1, parseInt(process.env.BROADCAST_DAILY_CAP, 10) || 150),
+
     /* ── Outcome resolution ─────────────────────────────────────────────── */
     /** Grade posted alerts against what price actually did. */
     TRADE_OUTCOME_RESOLVER_ENABLED: process.env.TRADE_OUTCOME_RESOLVER_ENABLED !== 'false',

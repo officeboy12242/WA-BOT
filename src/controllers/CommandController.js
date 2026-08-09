@@ -8,6 +8,7 @@ import { findCommand, findSimilarCommands } from '../commands/registry.js';
 import { logger } from '../utils/logger.js';
 import { sendAndDelete } from '../utils/autoDelete.js';
 import { extractPhoneNumber } from '../utils/permissions.js';
+import { classifyOptMessage } from '../models/BroadcastOptOutStore.js';
 import { getSafeSendOptions, safeSendMessage, plainSendMessage } from '../utils/waMessage.js';
 import { botTelemetry } from '../utils/botTelemetry.js';
 
@@ -189,6 +190,11 @@ class CommandController {
         this.tradeAlertController = tradeAlertController;
     }
 
+    setBroadcastServices(broadcastService, broadcastOptOutStore) {
+        this.broadcastService = broadcastService;
+        this.broadcastOptOutStore = broadcastOptOutStore;
+    }
+
     setGetSock(getSock) {
         this.getSock = getSock;
     }
@@ -226,6 +232,8 @@ class CommandController {
             githubTrendingController: this.githubTrendingController,
             awesomeListsController: this.awesomeListsController,
             memberScrapeController: this.memberScrapeController,
+            broadcastService: this.broadcastService,
+            broadcastOptOutStore: this.broadcastOptOutStore,
             warnDatabase: this.warnDatabase,
             movieController: this.movieController,
             userManager: this.userManager,
@@ -253,9 +261,42 @@ class CommandController {
         };
     }
 
+    /**
+     * "STOP" in a DM removes someone from every future broadcast.
+     *
+     * Checked before anything else: a person asking not to be messaged must
+     * not have that request swallowed by an unrelated pending session.
+     */
+    async _tryHandleBroadcastOptOut(sock, chatId, messageText, senderJid) {
+        const store = this.broadcastOptOutStore;
+        if (!store || !chatId?.endsWith('@s.whatsapp.net')) return false;
+
+        const intent = classifyOptMessage(messageText);
+        if (!intent) return false;
+
+        const target = senderJid || chatId;
+        if (intent === 'out') {
+            await store.optOut(target, { reason: 'replied STOP', source: chatId });
+            await sock.sendMessage(chatId, {
+                text: '🚫 Done — you will not receive broadcast messages again.\n\n_Reply START if you change your mind._',
+            }).catch(() => {});
+            return true;
+        }
+
+        const restored = await store.optIn(target);
+        if (restored) {
+            await sock.sendMessage(chatId, { text: '✅ You will receive broadcasts again.' }).catch(() => {});
+        }
+        return restored;
+    }
+
     async tryHandlePendingInput(sock, chatId, messageText, senderJid, originalMsg = null) {
         if (messageText?.trim()?.startsWith('/')) {
             return false;
+        }
+
+        if (await this._tryHandleBroadcastOptOut(sock, chatId, messageText, senderJid)) {
+            return true;
         }
 
         const ctx = { ...this._ctx(), originalMsg };

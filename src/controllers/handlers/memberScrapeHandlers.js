@@ -5,15 +5,14 @@
 import { jidNormalizedUser } from 'baileys';
 import { logger } from '../../utils/logger.js';
 import { extractPhoneNumber } from '../../utils/permissions.js';
-import { resolvePostMessage } from '../../utils/waMessage.js';
+import { resolvePostMessage, editMessageText } from '../../utils/waMessage.js';
+import { withOptOutFooter } from '../../services/BroadcastService.js';
 
 const BROADCAST_CMDS = ['broadcast'];
 const GROUPPOST_CMDS = ['grouppost', 'groupmsg'];
 
 const SCRAP_SESSION_MS = 5 * 60 * 1000;
-const BROADCAST_DELAY_MS = 3500;
 const GROUP_POST_DELAY_MS = 2500;
-const TCTOKEN_RECOVERY_DELAY_MS = 6000;
 
 function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -59,9 +58,10 @@ function formatGroupList(groups, { stored = false } = {}) {
         text += `   👥 ${count} member(s)`;
         if (stored && group.dm_count != null) {
             text += `\n   📱 DM-able: ${group.dm_count}`;
-            if (group.phone_dm_count != null || group.lid_dm_count != null) {
-                text += ` (${group.phone_dm_count || 0} phone · ${group.lid_dm_count || 0} LID)`;
-            }
+            if (group.lid_dm_count) text += ` (${group.lid_dm_count} via resolved LID)`;
+            // Unreachable members are stated rather than folded into the total,
+            // which is what used to make the broadcast promise more than it sent.
+            if (group.unreachable_count) text += `\n   🚫 Unreachable: ${group.unreachable_count}`;
         }
         if (stored && group.scraped_at) {
             text += `\n   📅 Last scraped: ${new Date(group.scraped_at).toLocaleString('en-IN', {
@@ -87,46 +87,40 @@ function formatGroupList(groups, { stored = false } = {}) {
     return text;
 }
 
-/**
- * Check if we already hold a privacy token (tctoken) for the given JID.
- * Tokens are stored in the auth database under `tctoken-{jid}`.  For phone
- * JIDs the token is stored under the LID equivalent, so we resolve via the
- * Baileys LID mapping.
- */
-async function hasTcToken(authDB, sock, targetJid) {
-    if (!authDB) return false;
-    if (authDB.get(`tctoken-${targetJid}`)) return true;
+/** Twenty cells, so each block is a clean 5%. */
+function progressBar(done, total, width = 20) {
+    const pct = total > 0 ? Math.min(1, done / total) : 0;
+    const filled = Math.round(pct * width);
+    return `${'█'.repeat(filled)}${'░'.repeat(width - filled)}  ${Math.round(pct * 100)}%`;
+}
 
-    if (targetJid.endsWith('@s.whatsapp.net')) {
-        try {
-            const phone = targetJid.split('@')[0];
-            const lid = await sock?.signalRepository?.lidMapping?.getLIDForPN?.(phone);
-            if (lid) {
-                const lidJid = jidNormalizedUser(lid) || lid;
-                if (authDB.get(`tctoken-${lidJid}`)) return true;
-            }
-        } catch { /* ignore */ }
-    }
-
-    return false;
+function humanDuration(ms) {
+    if (!Number.isFinite(ms) || ms <= 0) return '—';
+    const mins = Math.round(ms / 60000);
+    if (mins < 60) return `${mins} min`;
+    const hrs = Math.floor(mins / 60);
+    const rem = mins % 60;
+    if (hrs < 24) return rem ? `${hrs}h ${rem}m` : `${hrs}h`;
+    return `${Math.floor(hrs / 24)}d ${hrs % 24}h`;
 }
 
 /**
- * Send a DM for broadcast.  When the target has no tctoken the first
- * sendMessage triggers a background 463 recovery issuance inside Baileys.
- * The original message is silently lost, so we wait for the recovery to
- * complete and then re-send.
+ * Live progress card. Pacing is deliberately slow, so a run spans hours or
+ * days — without this the owner has no idea whether it is working or stuck.
  */
-async function sendDmWithRetry(sock, targetJid, message, authDB) {
-    const hadToken = await hasTcToken(authDB, sock, targetJid);
-
-    await sock.sendMessage(targetJid, { text: message });
-
-    if (!hadToken) {
-        logger.info(`No tctoken for ${targetJid} — waiting for 463 recovery before re-send`);
-        await delay(TCTOKEN_RECOVERY_DELAY_MS);
-        await sock.sendMessage(targetJid, { text: message });
-    }
+function formatBroadcastProgress({ label, sent, failed, skippedOptOut, cursor, total, avgGapMs, capLeft, status }) {
+    const remaining = Math.max(0, total - cursor);
+    const eta = avgGapMs ? humanDuration(remaining * avgGapMs) : null;
+    const lines = [
+        `📤 *${status || 'Broadcasting…'}*${label ? ` — ${label}` : ''}`,
+        '',
+        progressBar(cursor, total),
+        '',
+        `✅ Sent *${sent}*${failed ? ` · ❌ ${failed}` : ''}${skippedOptOut ? ` · 🚫 ${skippedOptOut} opted out` : ''}`,
+        `⏳ *${remaining}* remaining${eta ? ` · ~${eta} left` : ''}`,
+    ];
+    if (capLeft != null) lines.push(`📅 ${capLeft} left in today's cap`);
+    return lines.join('\n');
 }
 
 export async function handleScrap(sock, chatId, senderJid, args, { memberScrapeController, isOwnerFromJid, pendingScrapSessions, originalMsg }) {
@@ -174,7 +168,9 @@ export async function handleScrapMembers(sock, chatId, senderJid, { memberScrape
         return;
     }
 
-    const groups = await memberScrapeController.getStoredGroupsWithCounts();
+    // Pass the socket so LIDs resolve — without it the DM-able count reads
+    // lower than reality and looks like the scrape lost members.
+    const groups = await memberScrapeController.getStoredGroupsWithCounts(sock);
     if (!groups.length) {
         await sock.sendMessage(chatId, {
             text: '📭 No scraped members yet.\n\nUse `/scrap` to pick a group and save its members.',
@@ -185,7 +181,11 @@ export async function handleScrapMembers(sock, chatId, senderJid, { memberScrape
     await sock.sendMessage(chatId, { text: formatGroupList(groups, { stored: true }) }, { quoted: originalMsg });
 }
 
-export async function handleBroadcast(sock, chatId, senderJid, args, { memberScrapeController, isOwnerFromJid, getSock, originalMsg, authDatabase, fullCommand }) {
+export async function handleBroadcast(sock, chatId, senderJid, args, ctx) {
+    const {
+        memberScrapeController, isOwnerFromJid, getSock, originalMsg,
+        fullCommand, broadcastService, broadcastOptOutStore,
+    } = ctx;
     try {
         const isOwner = await isOwnerFromJid(sock, chatId, senderJid);
         if (!isOwner) {
@@ -193,19 +193,66 @@ export async function handleBroadcast(sock, chatId, senderJid, args, { memberScr
             return;
         }
 
-        if (!memberScrapeController) {
+        if (!memberScrapeController || !broadcastService) {
             await sock.sendMessage(chatId, { text: '⚠️ Member broadcast is not configured.' }, { quoted: originalMsg });
             return;
         }
 
         const firstArg = args[0]?.toLowerCase();
+
+        /* ── control verbs ───────────────────────────────────────────────── */
+
+        if (firstArg === 'stop' || firstArg === 'abort' || firstArg === 'cancel') {
+            const running = await broadcastService.findResumable();
+            if (!running.length) {
+                await sock.sendMessage(chatId, { text: '📭 No broadcast is running.' }, { quoted: originalMsg });
+                return;
+            }
+            for (const job of running) broadcastService.abort(job._id);
+            await sock.sendMessage(chatId, {
+                text: `🛑 Stopping ${running.length} broadcast(s). Progress is saved — \`/broadcast resume\` picks up where it stopped.`,
+            }, { quoted: originalMsg });
+            return;
+        }
+
+        if (firstArg === 'status') {
+            const jobs = await broadcastService.findResumable();
+            const remaining = await broadcastService.remainingToday();
+            let text = `📊 *Broadcast status*\n\n📅 Left in today's cap: *${remaining}*\n🚫 Opted out: *${broadcastOptOutStore?.size ?? 0}*\n\n`;
+            text += jobs.length
+                ? jobs.map((j) => broadcastService.formatJobSummary(j, { label: j.label })).join('\n\n')
+                : '_No active or paused broadcasts._';
+            await sock.sendMessage(chatId, { text }, { quoted: originalMsg });
+            return;
+        }
+
+        if (firstArg === 'resume') {
+            const jobs = await broadcastService.findResumable();
+            if (!jobs.length) {
+                await sock.sendMessage(chatId, { text: '📭 Nothing to resume.' }, { quoted: originalMsg });
+                return;
+            }
+            await sock.sendMessage(chatId, {
+                text: `▶️ Resuming ${jobs.length} broadcast(s) from where they stopped.`,
+            }, { quoted: originalMsg });
+            for (const job of jobs) {
+                void startBroadcastJob(broadcastService, getSock, chatId, job._id, job.label);
+            }
+            return;
+        }
+
+        // `dry` anywhere in the args previews the audience without sending.
+        const isDryRun = args.some((a) => /^(dry|dryrun|preview|test)$/i.test(String(a || '')));
         const isAll = firstArg === 'all';
-        const message = resolvePostMessage(
+        let message = resolvePostMessage(
             fullCommand || '',
             BROADCAST_CMDS,
             isAll ? { type: 'all' } : { type: 'index' },
             originalMsg,
         ).trim();
+        if (isDryRun) {
+            message = message.replace(/^\s*(dry|dryrun|preview|test)\b\s*/i, '').trim() || '(preview)';
+        }
 
         if (isAll) {
             if (!message) {
@@ -219,28 +266,30 @@ export async function handleBroadcast(sock, chatId, senderJid, args, { memberScr
                 return;
             }
 
-            const { groups, targets } = await memberScrapeController.getAllDedupedDmTargets(sock);
+            const { groups, targets, unreachable } = await memberScrapeController.getAllDedupedDmTargets(sock);
             if (!groups.length) {
                 await sock.sendMessage(chatId, {
                     text: '❌ No scraped groups yet. Run `/scrap` on your groups first.',
                 }, { quoted: originalMsg });
                 return;
             }
-            if (!targets.length) {
+
+            const sendable = broadcastOptOutStore ? broadcastOptOutStore.filter(targets) : targets;
+            if (!sendable.length) {
                 await sock.sendMessage(chatId, {
-                    text: '📭 No DM targets across scraped groups. Re-run `/scrap` on your groups.',
+                    text: '📭 No reachable DM targets across scraped groups. Re-run `/scrap` on your groups.',
                 }, { quoted: originalMsg });
                 return;
             }
 
-            await sock.sendMessage(chatId, {
-                text:
-                    `📤 Broadcasting to *${targets.length}* unique member(s) across *${groups.length}* scraped group(s)...\n\n` +
-                    '_Running in background — other bot commands keep working._',
-            }, { quoted: originalMsg });
-
-            void runBroadcastAllJob(getSock, sock, chatId, groups.length, message, targets, authDatabase).catch((err) => {
-                logger.error(`Broadcast-all job error: ${formatError(err)}`);
+            await launchBroadcast({
+                sock, chatId, originalMsg, getSock, broadcastService, broadcastOptOutStore,
+                label: `all groups (${groups.length})`,
+                message,
+                targets: sendable,
+                suppressed: targets.length - sendable.length,
+                unreachable,
+                dryRun: isDryRun,
             });
             return;
         }
@@ -259,7 +308,7 @@ export async function handleBroadcast(sock, chatId, senderJid, args, { memberScr
             return;
         }
 
-        const groups = await memberScrapeController.getStoredGroupsWithCounts();
+        const groups = await memberScrapeController.getStoredGroupsWithCounts(sock);
         const selected = groups[groupIndex - 1];
         if (!selected) {
             await sock.sendMessage(chatId, {
@@ -270,27 +319,31 @@ export async function handleBroadcast(sock, chatId, senderJid, args, { memberScr
             return;
         }
 
-        const rawTargets = await memberScrapeController.getDmTargets(selected.group_id);
-        const targets = memberScrapeController.filterTargetsForBroadcast(rawTargets, sock);
-        const dmStats = await memberScrapeController.getDmTargetStats(selected.group_id);
-        if (!targets.length) {
+        const resolved = await memberScrapeController.resolveDmTargets(selected.group_id, sock);
+        const reachable = memberScrapeController.filterTargetsForBroadcast(resolved.targets, sock);
+        const sendable = broadcastOptOutStore ? broadcastOptOutStore.filter(reachable) : reachable;
+
+        if (!sendable.length) {
             await sock.sendMessage(chatId, {
                 text:
-                    `📭 No DM targets found for *${selected.group_name}*.\n\n` +
-                    'Re-run `/scrap` on that group first.',
+                    `📭 No reachable DM targets for *${selected.group_name}*.\n` +
+                    (resolved.unreachable
+                        ? `_${resolved.unreachable} member(s) hide their number and WhatsApp has never revealed it to this account._\n`
+                        : '') +
+                    '\nRe-run `/scrap` on that group first.',
             }, { quoted: originalMsg });
             return;
         }
 
-        await sock.sendMessage(chatId, {
-            text:
-                `📤 Broadcasting to *${targets.length}* member(s) from *${selected.group_name}*...\n` +
-                `📱 Phone: *${dmStats.phone_dm_count}* · 🔒 LID: *${dmStats.lid_dm_count}*\n\n` +
-                '_Running in background — other bot commands keep working._',
-        }, { quoted: originalMsg });
-
-        void runBroadcastJob(getSock, sock, chatId, selected, message, targets, authDatabase).catch((err) => {
-            logger.error(`Broadcast job error: ${formatError(err)}`);
+        await launchBroadcast({
+            sock, chatId, originalMsg, getSock, broadcastService, broadcastOptOutStore,
+            label: selected.group_name,
+            message,
+            targets: sendable,
+            suppressed: reachable.length - sendable.length,
+            unreachable: resolved.unreachable,
+            lidResolved: resolved.lidResolved,
+            dryRun: isDryRun,
         });
     } catch (err) {
         logger.error(`Broadcast command failed: ${formatError(err)}`);
@@ -300,104 +353,128 @@ export async function handleBroadcast(sock, chatId, senderJid, args, { memberScr
     }
 }
 
-async function runBroadcastAllJob(getSock, fallbackSock, chatId, groupCount, message, targets, authDB) {
-    let sent = 0;
-    let failed = 0;
+/** Edits are API traffic too — refresh the bar at most this often. */
+const PROGRESS_EDIT_MS = 25_000;
 
-    try {
-        for (const targetJid of targets) {
-            const sock = resolveSock(getSock, fallbackSock);
-            if (!sock) {
-                throw new Error('WhatsApp disconnected during broadcast');
-            }
+/**
+ * Confirm the audience, then start (or just preview) the job.
+ *
+ * The preview exists because the old code announced a recipient count that
+ * included LID-only members it could never actually deliver to.
+ */
+async function launchBroadcast({
+    sock, chatId, originalMsg, getSock, broadcastService, broadcastOptOutStore,
+    label, message, targets, suppressed = 0, unreachable = 0, lidResolved = 0, dryRun = false,
+}) {
+    const capLeft = await broadcastService.remainingToday();
+    const o = broadcastService.opts;
+    const avgGap = (o.minGapMs + o.maxGapMs) / 2;
+    const pauses = Math.floor(targets.length / o.batchSize) * ((o.batchPauseMinMs + o.batchPauseMaxMs) / 2);
+    const days = Math.ceil(targets.length / Math.max(1, o.dailyCap));
 
-            try {
-                await sendDmWithRetry(sock, targetJid, message, authDB);
-                sent++;
-            } catch (err) {
-                failed++;
-                logger.warn(`Broadcast-all failed for ${targetJid}: ${formatError(err)}`);
-            }
+    const plan = [
+        `📋 *Broadcast plan* — ${label}`,
+        '',
+        `👥 Will DM: *${targets.length}*`,
+        lidResolved ? `🔓 LIDs resolved to numbers: *${lidResolved}*` : null,
+        unreachable ? `🚫 Unreachable (number hidden): *${unreachable}*` : null,
+        suppressed ? `🔕 Skipped (opted out): *${suppressed}*` : null,
+        '',
+        `⏱ Pace: ${Math.round(o.minGapMs / 1000)}–${Math.round(o.maxGapMs / 1000)}s apart, ` +
+            `pausing after every ${o.batchSize}`,
+        `📅 Daily cap ${o.dailyCap} · *${capLeft}* left today` + (days > 1 ? ` · spans ~${days} day(s)` : ''),
+        `⌛ Estimated: ~${humanDuration(targets.length * avgGap + pauses)} of sending`,
+    ].filter(Boolean).join('\n');
 
-            await delay(BROADCAST_DELAY_MS);
-        }
-
-        const notifySock = resolveSock(getSock, fallbackSock);
-        if (notifySock) {
-            await notifySock.sendMessage(chatId, {
-                text:
-                    `✅ Broadcast-all done\n\n` +
-                    `📢 Groups scraped: *${groupCount}*\n` +
-                    `📤 Sent: *${sent}*\n` +
-                    `❌ Failed: *${failed}*`,
-            });
-        }
-
-        logger.info(`Broadcast-all: groups=${groupCount}, sent=${sent}, failed=${failed}`);
-    } catch (err) {
-        logger.error(`Broadcast-all job failed: ${formatError(err)}`);
-        try {
-            const notifySock = resolveSock(getSock, fallbackSock);
-            await notifySock?.sendMessage(chatId, {
-                text:
-                    `❌ Broadcast-all stopped\n\n` +
-                    `📤 Sent: *${sent}*\n` +
-                    `❌ Failed: *${failed}*\n` +
-                    `⚠️ Error: ${formatError(err)}`,
-            });
-        } catch (notifyErr) {
-            logger.error(`Could not send broadcast-all failure notice: ${formatError(notifyErr)}`);
-        }
+    if (dryRun) {
+        await sock.sendMessage(chatId, {
+            text: `${plan}\n\n_Dry run — nothing sent. Remove \`dry\` to go ahead._`,
+        }, { quoted: originalMsg });
+        return;
     }
+
+    const jobId = await broadcastService.createJob({
+        label,
+        message: withOptOutFooter(message),
+        targets,
+        chatId,
+    });
+
+    await sock.sendMessage(chatId, {
+        text: `${plan}\n\n_Starting. \`/broadcast status\` anytime · \`/broadcast stop\` to halt._`,
+    }, { quoted: originalMsg });
+
+    void startBroadcastJob(broadcastService, getSock, chatId, jobId, label);
 }
 
-async function runBroadcastJob(getSock, fallbackSock, chatId, selected, message, targets, authDB) {
-    let sent = 0;
-    let failed = 0;
+/**
+ * Run a job and keep one message updated with a live progress bar, rather
+ * than posting a new status line per recipient.
+ */
+async function startBroadcastJob(broadcastService, getSock, chatId, jobId, label) {
+    const sock = getSock?.();
+    let progressKey = null;
+    let lastEdit = 0;
+    const startedAt = Date.now();
+
+    const render = async (p, status) => {
+        const notify = getSock?.();
+        if (!notify) return;
+        const avgGapMs = p.sent > 0 ? (Date.now() - startedAt) / p.sent : null;
+        const text = formatBroadcastProgress({
+            label,
+            ...p,
+            avgGapMs,
+            capLeft: await broadcastService.remainingToday().catch(() => null),
+            status,
+        });
+        try {
+            if (progressKey) await editMessageText(notify, chatId, progressKey, text);
+            else progressKey = (await notify.sendMessage(chatId, { text }))?.key || null;
+        } catch {
+            // A failed progress edit must never abort the broadcast itself.
+        }
+    };
 
     try {
-        for (const targetJid of targets) {
-            const sock = resolveSock(getSock, fallbackSock);
-            if (!sock) {
-                throw new Error('WhatsApp disconnected during broadcast');
-            }
+        const job = await broadcastService.getJob(jobId);
+        await render(
+            { sent: job?.sent || 0, failed: job?.failed || 0, skippedOptOut: job?.skipped_opt_out || 0, cursor: job?.cursor || 0, total: job?.targets?.length || 0 },
+            'Broadcasting…'
+        );
 
-            try {
-                await sendDmWithRetry(sock, targetJid, message, authDB);
-                sent++;
-            } catch (err) {
-                failed++;
-                logger.warn(`Broadcast failed for ${targetJid}: ${formatError(err)}`);
-            }
+        const final = await broadcastService.run({
+            getSock,
+            jobId,
+            onProgress: (p) => {
+                const now = Date.now();
+                if (now - lastEdit < PROGRESS_EDIT_MS) return;
+                lastEdit = now;
+                void render(p, 'Broadcasting…');
+            },
+        });
 
-            await delay(BROADCAST_DELAY_MS);
+        await render(
+            {
+                sent: final.sent,
+                failed: final.failed,
+                skippedOptOut: final.skipped_opt_out || 0,
+                cursor: final.cursor,
+                total: final.targets?.length || 0,
+            },
+            final.status === 'DONE' ? 'Broadcast complete' : `Broadcast ${final.status}`
+        );
+
+        const notify = getSock?.() || sock;
+        if (notify && final.note) {
+            await notify.sendMessage(chatId, { text: broadcastService.formatJobSummary(final, { label }) }).catch(() => {});
         }
-
-        const notifySock = resolveSock(getSock, fallbackSock);
-        if (notifySock) {
-            await notifySock.sendMessage(chatId, {
-                text:
-                    `✅ Broadcast done for *${selected.group_name}*\n\n` +
-                    `📤 Sent: *${sent}*\n` +
-                    `❌ Failed: *${failed}*`,
-            });
-        }
-
-        logger.info(`Broadcast to ${selected.group_name}: sent=${sent}, failed=${failed}`);
     } catch (err) {
-        logger.error(`Broadcast job failed: ${formatError(err)}`);
-        try {
-            const notifySock = resolveSock(getSock, fallbackSock);
-            await notifySock?.sendMessage(chatId, {
-                text:
-                    `❌ Broadcast stopped for *${selected.group_name}*\n\n` +
-                    `📤 Sent: *${sent}*\n` +
-                    `❌ Failed: *${failed}*\n` +
-                    `⚠️ Error: ${formatError(err)}`,
-            });
-        } catch (notifyErr) {
-            logger.error(`Could not send broadcast failure notice: ${formatError(notifyErr)}`);
-        }
+        logger.error(`Broadcast job ${jobId} crashed: ${formatError(err)}`);
+        const notify = getSock?.() || sock;
+        await notify?.sendMessage(chatId, {
+            text: `❌ Broadcast stopped: ${formatError(err)}\n\n_Progress is saved — \`/broadcast resume\` continues._`,
+        }).catch(() => {});
     }
 }
 

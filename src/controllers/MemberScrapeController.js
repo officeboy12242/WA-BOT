@@ -28,8 +28,16 @@ function normalizeLidJid(value) {
 }
 
 /**
- * Prefer phone JID; fall back to LID when WhatsApp hides the number.
- * @returns {{ jid: string, via: 'phone' | 'lid' } | null}
+ * Prefer phone JID; otherwise report the LID so it can be RESOLVED later.
+ *
+ * A `@lid` is a group-scoped privacy identifier, not an addressable inbox —
+ * `sendMessage` to one cannot deliver a DM. This used to return the LID as a
+ * ready-to-send target, so every hidden-number member was counted as
+ * reachable and then silently failed. `via: 'lid'` now means "needs
+ * resolving", and `resolveDmTargets()` below turns it into a phone JID or
+ * drops it.
+ *
+ * @returns {{ jid: string, via: 'phone' } | { lid: string, via: 'lid' } | null}
  */
 export function dmTargetForMember(member) {
     const phone = normalizePhoneNumber(member.phone);
@@ -48,10 +56,33 @@ export function dmTargetForMember(member) {
     const lidSource = member.lid || (jid.endsWith('@lid') ? jid : '');
     const lidJid = normalizeLidJid(lidSource);
     if (lidJid.endsWith('@lid')) {
-        return { jid: lidJid, via: 'lid' };
+        return { lid: lidJid, via: 'lid' };
     }
 
     return null;
+}
+
+/**
+ * Turn a LID into the phone JID that can actually receive a DM.
+ *
+ * Baileys keeps the mapping it learned from group metadata and message
+ * receipts; `getPNForLID` is the reverse of the `getLIDForPN` lookup already
+ * used for privacy tokens. Members whose number WhatsApp has never revealed
+ * to us stay unresolvable, and are excluded rather than counted and skipped.
+ *
+ * @returns {Promise<string|null>} phone JID
+ */
+export async function resolveLidToPhoneJid(sock, lidJid) {
+    const store = sock?.signalRepository?.lidMapping;
+    if (!store?.getPNForLID) return null;
+    try {
+        const pn = await store.getPNForLID(lidJid);
+        if (!pn) return null;
+        const phone = extractPhoneNumber(String(pn).split('@')[0].split(':')[0]);
+        return /^\d{10,15}$/.test(phone) ? `${phone}@s.whatsapp.net` : null;
+    } catch {
+        return null;
+    }
 }
 
 class MemberScrapeController {
@@ -122,75 +153,99 @@ class MemberScrapeController {
         });
     }
 
-    async getStoredGroupsWithCounts() {
+    async getStoredGroupsWithCounts(sock = null) {
         const groups = await this.groupMemberDatabase.getScrapedGroups();
         const rows = [];
         for (const group of groups) {
             const count = await this.groupMemberDatabase.getMemberCount(group.group_id);
-            const dmStats = await this.getDmTargetStats(group.group_id);
+            const dmStats = await this.getDmTargetStats(group.group_id, sock);
             rows.push({ ...group, stored_count: count, ...dmStats });
         }
         return rows;
     }
 
-    async getDmTargetStats(groupId) {
-        const members = await this.groupMemberDatabase.getMembersForGroup(groupId);
-        const seen = new Set();
-        let dm_count = 0;
-        let phone_dm_count = 0;
-        let lid_dm_count = 0;
-
-        for (const member of members) {
-            const target = dmTargetForMember(member);
-            if (!target || seen.has(target.jid)) {
-                continue;
-            }
-            seen.add(target.jid);
-            dm_count++;
-            if (target.via === 'lid') {
-                lid_dm_count++;
-            } else {
-                phone_dm_count++;
-            }
-        }
-
-        return { dm_count, phone_dm_count, lid_dm_count };
+    /**
+     * Reachability breakdown for one group.
+     *
+     * `dm_count` is now what can ACTUALLY be delivered. It used to include
+     * every LID, so the bot announced a reach it could not achieve and the
+     * difference vanished into silent send failures.
+     */
+    async getDmTargetStats(groupId, sock = null) {
+        const { targets, lidResolved, unreachable } = await this.resolveDmTargets(groupId, sock);
+        return {
+            dm_count: targets.length,
+            phone_dm_count: targets.length - lidResolved,
+            lid_dm_count: lidResolved,
+            unreachable_count: unreachable,
+        };
     }
 
-    async getDmTargets(groupId) {
+    /**
+     * Deliverable phone JIDs for a group.
+     *
+     * @param {object|null} sock needed to resolve LIDs; without it, LID-only
+     *   members are reported unreachable rather than silently included.
+     * @returns {Promise<{ targets: string[], lidResolved: number, unreachable: number }>}
+     */
+    async resolveDmTargets(groupId, sock = null) {
         const members = await this.groupMemberDatabase.getMembersForGroup(groupId);
         const seen = new Set();
         const targets = [];
+        let lidResolved = 0;
+        let unreachable = 0;
 
         for (const member of members) {
             const target = dmTargetForMember(member);
-            if (!target || seen.has(target.jid)) {
+            if (!target) {
+                unreachable += 1;
                 continue;
             }
-            seen.add(target.jid);
-            targets.push(target.jid);
+
+            let jid = target.jid;
+            let fromLid = false;
+            if (target.via === 'lid') {
+                jid = sock ? await resolveLidToPhoneJid(sock, target.lid) : null;
+                if (!jid) {
+                    unreachable += 1;
+                    continue;
+                }
+                fromLid = true;
+            }
+
+            if (seen.has(jid)) continue;
+            seen.add(jid);
+            targets.push(jid);
+            if (fromLid) lidResolved += 1;
         }
 
+        return { targets, lidResolved, unreachable };
+    }
+
+    /** Back-compat: deliverable JIDs only. */
+    async getDmTargets(groupId, sock = null) {
+        const { targets } = await this.resolveDmTargets(groupId, sock);
         return targets;
     }
 
     /** Unique DM targets across every scraped group (one message per person). */
     async getAllDedupedDmTargets(sock) {
-        const groups = await this.getStoredGroupsWithCounts();
+        const groups = await this.getStoredGroupsWithCounts(sock);
         const seen = new Set();
         const targets = [];
+        let unreachable = 0;
 
         for (const group of groups) {
-            const raw = await this.getDmTargets(group.group_id);
-            const filtered = this.filterTargetsForBroadcast(raw, sock);
-            for (const jid of filtered) {
+            const res = await this.resolveDmTargets(group.group_id, sock);
+            unreachable += res.unreachable;
+            for (const jid of this.filterTargetsForBroadcast(res.targets, sock)) {
                 if (seen.has(jid)) continue;
                 seen.add(jid);
                 targets.push(jid);
             }
         }
 
-        return { groups, targets };
+        return { groups, targets, unreachable };
     }
 }
 

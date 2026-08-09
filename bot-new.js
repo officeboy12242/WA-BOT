@@ -57,6 +57,8 @@ import { startTradeAlertScheduler } from './src/utils/tradeAlertScheduler.js';
 import { initAutoDelete } from './src/utils/autoDelete.js';
 import { startExpiryAlertScheduler } from './src/utils/expiryAlertScheduler.js';
 import { startOutcomeResolverScheduler } from './src/utils/outcomeResolverScheduler.js';
+import BroadcastOptOutStore from './src/models/BroadcastOptOutStore.js';
+import { createBroadcastService } from './src/services/BroadcastService.js';
 import ExpiryTradeService from './src/services/ExpiryTradeService.js';
 import { formatExpiryDigest } from './src/utils/expiryAlertFormatter.js';
 import { deployNotificationService } from './src/services/DeployNotificationService.js';
@@ -109,6 +111,8 @@ class WhatsAppCourseBot {
         this.tradeAlertScheduler = null;
         this.expiryAlertScheduler = null;
         this.outcomeResolverScheduler = null;
+        this.broadcastOptOutStore = null;
+        this.broadcastService = null;
         this.expiryTradeService = null;
         this.jobQueue = null;
         this.jobRuntime = null;
@@ -147,6 +151,7 @@ class WhatsAppCourseBot {
             this.awesomeListsDatabase = new AwesomeListsDatabase(mongoDb);
             this.interviewQuestionStore = new InterviewQuestionStore(mongoDb);
             this.groupMemberDatabase = new GroupMemberDatabase(mongoDb);
+            this.broadcastOptOutStore = new BroadcastOptOutStore(mongoDb);
             this.warnDatabase = new WarnDatabase(mongoDb);
             this.morningDatabase = new MorningMessageDatabase(mongoDb);
             this.groupManager = new GroupManager(mongoDb);
@@ -159,6 +164,7 @@ class WhatsAppCourseBot {
                 this.awesomeListsDatabase.init(),
                 this.interviewQuestionStore.init(),
                 this.groupMemberDatabase.init(),
+                this.broadcastOptOutStore.init(),
                 this.warnDatabase.init(),
                 this.morningDatabase.init(),
                 this.groupManager.init(),
@@ -167,6 +173,9 @@ class WhatsAppCourseBot {
             await this.groupManager.initChannels();
             await this.groupManager.initPremium();
             await this.groupManager.initDynamicModerators();
+
+            this.broadcastService = createBroadcastService(mongoDb, this.broadcastOptOutStore, config);
+            await this.broadcastService.init();
 
             await shortLinkService.init(mongoDb);
             urlShortener.setService(shortLinkService);
@@ -315,6 +324,7 @@ class WhatsAppCourseBot {
             this.commandController.setStickerForwarder(this.stickerForwarder);
             this.commandController.setGroupChatLogService(this.groupChatLogService);
             this.commandController.setGroupSummaryController(this.groupSummaryController);
+            this.commandController.setBroadcastServices(this.broadcastService, this.broadcastOptOutStore);
             this.commandController.setTradeAlertController(this.tradeAlertController);
             this.commandController.setAssistService(this.assistService);
             this.commandController.setResumeTailor(this.resumeStore, this.resumeTailorService);

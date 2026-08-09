@@ -585,7 +585,7 @@ export const COMMAND_REGISTRY = [
         key: 'broadcast',
         scope: 'any',
         role: 'owner',
-        help: 'DM scraped members — multiline/reply supported — `/broadcast <#> <msg>` or `/broadcast all <msg>` (owner only)',
+        help: 'DM scraped members, paced + resumable — `/broadcast <#|all> <msg>`, add `dry` to preview · `status` · `stop` · `resume` (owner only)',
     },
     {
         names: ['/grouppost', '/groupmsg'],
