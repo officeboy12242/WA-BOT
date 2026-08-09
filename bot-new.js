@@ -56,6 +56,7 @@ import TradeAlertController from './src/controllers/TradeAlertController.js';
 import { startTradeAlertScheduler } from './src/utils/tradeAlertScheduler.js';
 import { initAutoDelete } from './src/utils/autoDelete.js';
 import { startExpiryAlertScheduler } from './src/utils/expiryAlertScheduler.js';
+import { startOutcomeResolverScheduler } from './src/utils/outcomeResolverScheduler.js';
 import ExpiryTradeService from './src/services/ExpiryTradeService.js';
 import { formatExpiryDigest } from './src/utils/expiryAlertFormatter.js';
 import { deployNotificationService } from './src/services/DeployNotificationService.js';
@@ -107,6 +108,7 @@ class WhatsAppCourseBot {
         this.tradeAlertController = null;
         this.tradeAlertScheduler = null;
         this.expiryAlertScheduler = null;
+        this.outcomeResolverScheduler = null;
         this.expiryTradeService = null;
         this.jobQueue = null;
         this.jobRuntime = null;
@@ -134,6 +136,9 @@ class WhatsAppCourseBot {
                 mongoDb,
                 getSock: () => this.whatsappService?.getSock?.() || null,
             });
+
+            // Kept on the instance so schedulers started later can reach it.
+            this.mongoDb = mongoDb;
 
             // Initialize databases
             this.database = new DatabaseModel(mongoDb);
@@ -478,6 +483,14 @@ class WhatsAppCourseBot {
                 },
             });
 
+            // Grade yesterday's alerts against what price actually did, then let
+            // the graded results move the confidence gates. Without this every
+            // alert stays PENDING forever and the win rate is unknowable.
+            this.outcomeResolverScheduler = startOutcomeResolverScheduler({
+                mongoDb: this.mongoDb,
+                config,
+            });
+
             this.checkInterval = setInterval(async () => {
                 try {
                     await this.courseController.checkAndPostCourses(
@@ -525,6 +538,9 @@ class WhatsAppCourseBot {
         }
         if (this.tradeAlertScheduler) {
             this.tradeAlertScheduler.stop();
+        }
+        if (this.outcomeResolverScheduler) {
+            this.outcomeResolverScheduler.stop();
         }
         if (this.expiryAlertScheduler) {
             this.expiryAlertScheduler.stop();

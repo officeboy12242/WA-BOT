@@ -37,17 +37,12 @@ import {
     getIndianMarketClosedReason,
     isIndianEquityTradingDay,
 } from '../utils/indianMarketCalendar.js';
+import { normalizeDiscoverySource, isPrescriptiveSource } from '../utils/discoverySource.js';
+import { createTradeOutcomeService } from '../services/TradeOutcomeService.js';
 
 function parseAlertTime(timeStr) {
     const [h, m = '0'] = String(timeStr || '09:20').trim().split(':');
     return { hour: Number(h), minute: Number(m) };
-}
-
-function normalizeDiscoverySource(v) {
-    const s = String(v || '').trim().toLowerCase();
-    if (s === 'heatmap' || s === 'breakout' || s === 'ema' || s === 'or') return 'heatmap';
-    if (s === 'nse' || s === 'nse_gl' || s === 'gl' || s === 'gainers') return 'nse';
-    return 'legacy';
 }
 
 class TradeAlertController {
@@ -454,7 +449,7 @@ class TradeAlertController {
         let gemPick = { hiddenGem: null, hiddenGemReason: null };
 
         // Heatmap / NSE lists are authoritative — skip AI overlay / hidden-gem rewrite.
-        if (discoverySource !== 'nse' && discoverySource !== 'heatmap') {
+        if (!isPrescriptiveSource(discoverySource)) {
             let discovery = { symbols: [], hiddenGem: null, hiddenGemReason: null };
             if (this.tradeLlm.isConfigured()) {
                 const userPrompt = buildDiscoveryUserPrompt(intel.context, this.discoveryCount);
@@ -702,7 +697,7 @@ class TradeAlertController {
                 }
                 autoDiscovery = discoveriesBySource.get(source);
                 symbols = autoDiscovery.symbols;
-                if (autoDiscovery.movers && source !== 'nse' && source !== 'heatmap') {
+                if (autoDiscovery.movers && !isPrescriptiveSource(source)) {
                     symbols = marketScanService.orderSymbolsByMovers(symbols, autoDiscovery.movers);
                 }
             }
@@ -909,6 +904,14 @@ class TradeAlertController {
                         hidden_gem: item.resultEntry.isHiddenGem,
                     });
                     sentCount += 1;
+                    await this._logPostedAlert({
+                        symbol: item.symbol,
+                        signal: item.signal,
+                        resultEntry: item.resultEntry,
+                        source,
+                        meta: autoDiscovery?.symbolMeta?.find((m) => m.symbol === item.symbol),
+                        groupId: group.group_id,
+                    });
                     const softTag = item.softGate ? ' ⚡' : '';
                     actionableSent.push(
                         `${item.resultEntry.isHiddenGem ? `${item.symbol} 💎` : item.symbol}${softTag}`
@@ -986,6 +989,47 @@ class TradeAlertController {
                         `\n\nUse \`/tradenow SYMBOL\` for full analysis including NO TRADE.`,
                 }).catch(() => {});
             }
+        }
+    }
+
+    /**
+     * Journal a posted daily alert so it can be graded later.
+     *
+     * Daily alerts were the one path that never wrote to `trade_alert_outcomes`
+     * at all — only /swing and /expiry did — so the main strategy was the one
+     * with no record of how it performed.
+     *
+     * The card's own entry/SL/targets are CE/PE *premiums*, and historical
+     * option premiums cannot be fetched from any feed here. Where the scan
+     * produced an equity setup (heatmap v1/v2), those underlying levels are
+     * recorded too, and that is what makes an exact WIN/LOSS possible.
+     */
+    async _logPostedAlert({ symbol, signal, resultEntry, source, meta, groupId }) {
+        if (!this.mongoDb) return;
+        try {
+            const outcomes = createTradeOutcomeService(this.mongoDb, this.config);
+            const setup = meta?.setup || null;
+            const side = signal?.isBuyPut ? 'BUY_PE' : 'BUY_CE';
+            await outcomes.logPostedAlert({
+                symbol,
+                side,
+                entry: null,
+                stopLoss: null,
+                target1: null,
+                target2: null,
+                confidence: signal?.confidence ?? null,
+                confluence: resultEntry?.confluence ?? null,
+                groupId,
+                strategySource: source,
+                setupScore: setup?.score ?? null,
+                underlyingSymbol: symbol,
+                underlyingEntry: setup?.entry ?? null,
+                underlyingStop: setup?.stop ?? null,
+                underlyingTarget: setup?.target1 ?? setup?.target15 ?? null,
+            });
+        } catch (err) {
+            // Journalling must never break a send that already succeeded.
+            logger.debug(`Daily alert outcome logging failed for ${symbol}: ${err.message}`);
         }
     }
 

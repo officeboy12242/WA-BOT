@@ -5,6 +5,7 @@
 import { parsePremium, parseTargets } from './tradePlanFormatter.js';
 import { nseOptionChainService } from '../services/NseOptionChainService.js';
 import { logger } from './logger.js';
+import { normalizeDiscoverySource } from './discoverySource.js';
 
 const CE_SECTION =
     /━━━\s*CALL\s*\(CE\)\s*SETUP\s*━━━[\s\S]*?(?=━━━\s*PUT\s*\(PE\)\s*SETUP|Primary Pick:|$)/i;
@@ -72,11 +73,15 @@ function rescaleLevel(oldLevel, oldEntry, liveEntry) {
  * Pick strategy label from discovery + signal shape (all 4 available; auto best-fit).
  */
 export function pickStrategy({ discoverySource, confluence, signal, softGate } = {}) {
-    const src = String(discoverySource || '').toLowerCase();
+    const src = normalizeDiscoverySource(discoverySource);
     const conf = Number(confluence || 0);
     const ai = Number(signal?.confidence || 0);
 
-    if (src === 'heatmap' || src === 'breakout' || src === 'or' || src === 'ema') {
+    // Both heatmap generations select on an opening-range break, so the pick
+    // must be labelled that way. Matching the literal 'heatmap' let 'heatmap2'
+    // fall through to the confluence heuristics below and get tagged VWAP —
+    // naming a strategy the trade was not chosen by.
+    if (src === 'heatmap' || src === 'heatmap2') {
         return STRATEGIES.orEma;
     }
     if (conf >= 55 && ai >= 78 && !softGate) {

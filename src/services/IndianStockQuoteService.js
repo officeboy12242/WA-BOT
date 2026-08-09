@@ -66,6 +66,8 @@ function formatQuoteContext(quote) {
 export function normalizeYahooSymbol(raw) {
     const s = String(raw || '').trim().toUpperCase().replace(/\.NS$|\.BO$/i, '').replace(/\s+/g, '');
     if (!s) return '';
+    // Already a Yahoo index ticker (^NSEI, ^NSEBANK) — appending .NS breaks it.
+    if (s.startsWith('^')) return s;
     if (s === 'NIFTY' || s === 'NIFTY50') return '^NSEI';
     if (s === 'BANKNIFTY') return '^NSEBANK';
     if (s.endsWith('.NS') || s.endsWith('.BO')) return s;

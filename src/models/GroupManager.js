@@ -6,6 +6,7 @@
 import { jidNormalizedUser } from 'baileys';
 import { logger } from '../utils/logger.js';
 import { extractPhoneNumber, normalizePhoneNumber, getBotAccountPhone } from '../utils/permissions.js';
+import { normalizeDiscoverySource, DISCOVERY_SOURCES } from '../utils/discoverySource.js';
 
 function participantToPhone(participant) {
     if (!participant) {
@@ -1266,10 +1267,7 @@ class GroupManager {
 
     async setTradeAlertDiscoverySource(groupId, groupName, source, setBy) {
         const normalizedId = jidNormalizedUser(String(groupId).replace(/:\d+(?=@)/, '')) || groupId;
-        const s = String(source || '').trim().toLowerCase();
-        let normalized = 'legacy';
-        if (s === 'heatmap' || s === 'breakout' || s === 'ema' || s === 'or') normalized = 'heatmap';
-        else if (s === 'nse' || s === 'nse_gl' || s === 'gl' || s === 'gainers') normalized = 'nse';
+        const normalized = normalizeDiscoverySource(source);
         await this.groups.updateOne(
             { group_id: normalizedId },
             {
@@ -1293,8 +1291,7 @@ class GroupManager {
             { projection: { trade_alert_discovery_source: 1 } }
         );
         const s = row?.trade_alert_discovery_source;
-        if (s === 'heatmap' || s === 'nse' || s === 'legacy') return s;
-        return null;
+        return DISCOVERY_SOURCES.includes(s) ? s : null;
     }
 
     async setWeeklyTrendingEnabled(groupId, groupName, enabled, setBy) {

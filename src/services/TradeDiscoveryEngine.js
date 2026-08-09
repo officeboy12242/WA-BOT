@@ -13,6 +13,8 @@ import { getIndiaMarketMode, checkQuoteFreshness } from '../utils/indianMarketCa
 import { createMarketDeltaService } from './MarketDeltaService.js';
 import { createTradeOutcomeService } from './TradeOutcomeService.js';
 import { heatmapBreakoutScanService } from './HeatmapBreakoutScanService.js';
+import { heatmapV2ScanService } from './HeatmapV2ScanService.js';
+import { normalizeDiscoverySource } from '../utils/discoverySource.js';
 
 const MOMENTUM_RS_MIN = 1.5;
 const MOMENTUM_TURNOVER_MIN_CR = 500;
@@ -132,13 +134,6 @@ function mergeWatchlist({
     };
 }
 
-function normalizeDiscoverySource(v) {
-    const s = String(v || '').trim().toLowerCase();
-    if (s === 'heatmap' || s === 'breakout' || s === 'ema' || s === 'or') return 'heatmap';
-    if (s === 'nse' || s === 'nse_gl' || s === 'gl' || s === 'gainers') return 'nse';
-    return 'legacy';
-}
-
 class TradeDiscoveryEngine {
     constructor(config = {}, mongoDb = null) {
         this.config = config;
@@ -154,6 +149,9 @@ class TradeDiscoveryEngine {
         const discoverySource = normalizeDiscoverySource(
             source ?? this.config.TRADE_ALERT_DISCOVERY_SOURCE
         );
+        if (discoverySource === 'heatmap2') {
+            return this.runHeatmapV2();
+        }
         if (discoverySource === 'heatmap') {
             return this.runHeatmapBreakout();
         }
@@ -161,6 +159,133 @@ class TradeDiscoveryEngine {
             return this.runNseGainersLosers();
         }
         return this.runLegacy({ forceRefresh });
+    }
+
+    /**
+     * Heatmap v2 — live intraday selection with VWAP / RS / ATR filters.
+     *
+     * Shape-compatible with `runHeatmapBreakout()` so every downstream consumer
+     * (confluence scoring, the scan card, the morning pick) works unchanged.
+     */
+    async runHeatmapV2() {
+        const marketMode = getIndiaMarketMode();
+        const scannedAt = new Date();
+
+        const [scan, marketNewsPack, calibration] = await Promise.all([
+            heatmapV2ScanService.scan({ maxSymbols: this.heatmapMax }),
+            stockNewsService.fetchMarketHeadlines(),
+            this.outcomes.getCalibration(),
+        ]);
+
+        const macro = scan.macro;
+        const headlines = String(marketNewsPack?.context || '').split('\n').filter(Boolean);
+        const symbols = [...(scan.symbols || [])];
+
+        const universeRows = (scan.picks || []).map((p) => ({
+            symbol: p.symbol,
+            changePct: p.changePct,
+            price: p.last,
+            volume: null,
+        }));
+
+        const movers = {
+            gainers: (scan.picks || [])
+                .filter((p) => p.side === 'long')
+                .map((p) => ({ symbol: p.symbol, changePct: p.changePct, price: p.last })),
+            losers: (scan.picks || [])
+                .filter((p) => p.side === 'short')
+                .map((p) => ({ symbol: p.symbol, changePct: p.changePct, price: p.last })),
+        };
+
+        const catalystItems = catalystRadarService.scanHeadlines(headlines, new Set(symbols));
+        const catalystHighlights = catalystRadarService.formatHighlights(catalystItems);
+
+        const symbolMeta = (scan.picks || []).map((p) => {
+            const row = universeRows.find((r) => r.symbol === p.symbol);
+            const conf = scoreConfluence({
+                symbol: p.symbol,
+                quote: row,
+                movers,
+                macro,
+                catalystItems,
+                smartMoneyDeals: [],
+                sectorTag: p.sector,
+            });
+            return {
+                symbol: p.symbol,
+                sources: p.setup
+                    ? [`heatmap2 ${p.setup.direction}`, `score ${p.setup.score}`]
+                    : [`heatmap2 ${p.side}`, 'pre-breakout watch'],
+                confluence: conf.score,
+                confluencePass: conf.passes,
+                blocked: conf.blocked,
+                setup: p.setup,
+                sector: p.sector,
+                changePct: p.changePct,
+                relStrength: p.relStrength,
+            };
+        });
+
+        const moversBrief = (scan.picks || [])
+            .map(
+                (p) =>
+                    `${p.symbol} ${p.changePct >= 0 ? '+' : ''}${p.changePct}% ` +
+                    `(${p.side}${p.setup ? ` ${p.setup.score}` : ' watch'})`
+            )
+            .join(', ');
+
+        const context = [
+            nseMarketDataService.formatMacroBlock(macro),
+            heatmapV2ScanService.formatBlock(scan),
+            scan.preOpeningRange
+                ? 'Strategy rules: the opening range has not closed, so these are ' +
+                  'direction-confirmed watches, not entries. They are already filtered for ' +
+                  'live move, sector agreement and relative strength vs NIFTY. Trade only ' +
+                  'in the listed direction, and only after the 15m opening range breaks.'
+                : 'Strategy rules: every level below is already filtered for VWAP side, ' +
+                  'relative strength vs NIFTY and an ATR-bounded stop. Trade only in the ' +
+                  'listed direction. Entry is a stop order beyond the breakout bar; SL and ' +
+                  'targets are given — do not widen them.',
+        ]
+            .filter(Boolean)
+            .join('\n\n');
+
+        logger.info(
+            `📡 Heatmap v2 discovery: ${symbols.length} symbols from ${scan.candidatesScanned} scanned · ` +
+                `${scan.sentiment?.label} · ${scan.regime?.label}`
+        );
+
+        return {
+            symbols,
+            symbolMeta,
+            context,
+            universeRows,
+            movers,
+            moversBrief,
+            marketNews: headlines.slice(0, 6).join('\n'),
+            macro,
+            hotSectors: { hot: scan.longSectors, cold: scan.shortSectors, all: scan.sectors },
+            phase4Picks: [],
+            momentumAlerts: [],
+            smartMoney: { deals: [] },
+            catalystItems,
+            catalystHighlights,
+            niftyGl: null,
+            heatmap: scan,
+            delta: null,
+            marketMode: marketMode.mode,
+            marketModeLabel: marketMode.label,
+            freshness: checkQuoteFreshness(scannedAt),
+            gates: {
+                minConfluence: calibration.minConfluence || getMinConfluenceScore(this.config),
+                minConfidence: calibration.minConfidence || adjustConfidenceFloor(macro, 70),
+                watchOnly: marketMode.watchOnly,
+                allowsLiveEntry: marketMode.allowsLiveEntry,
+            },
+            scannedAt,
+            calibration,
+            discoverySource: 'heatmap2',
+        };
     }
 
     /**
