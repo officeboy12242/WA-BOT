@@ -80,8 +80,13 @@ function formatGroupList(groups, { stored = false } = {}) {
         text += '⏰ Expires in 5 minutes.';
     } else {
         text += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-        text += '💡 `/broadcast <#> <message>` or `/broadcast all <message>` — DM members\n';
-        text += '💡 `/grouppost <#> <message>` or `/grouppost all <message>` — post in group(s)';
+        const totalMembers = groups.reduce((s, g) => s + (g.stored_count || 0), 0);
+        const totalDmable = groups.reduce((s, g) => s + (g.dm_count || 0), 0);
+        text += `📊 *${groups.length} group(s)* · ${totalMembers} member(s) · 📱 ${totalDmable} DM-able\n`;
+        text += '_Combined counts are before de-duplication across groups._\n\n';
+        text += '💡 `/broadcast <#|all> <msg>` — DM members (add `dry` to preview)\n';
+        text += '💡 `/scrapclear <#|all|stale>` — delete saved members\n';
+        text += '💡 `/grouppost <#|all> <msg>` — post in group(s)';
     }
 
     return text;
@@ -179,6 +184,104 @@ export async function handleScrapMembers(sock, chatId, senderJid, { memberScrape
     }
 
     await sock.sendMessage(chatId, { text: formatGroupList(groups, { stored: true }) }, { quoted: originalMsg });
+}
+
+/**
+ * Delete saved members — one group, everything, or just the stale rows.
+ *
+ * Confirmation is required for anything irreversible: scraping a 900-member
+ * group again is slow, and there is no undo on a delete.
+ */
+export async function handleScrapClear(sock, chatId, senderJid, args, ctx) {
+    const { memberScrapeController, isOwnerFromJid, originalMsg, pendingScrapSessions } = ctx;
+
+    const isOwner = await isOwnerFromJid(sock, chatId, senderJid);
+    if (!isOwner) {
+        await sock.sendMessage(chatId, { text: '❌ Only bot owners can clear scraped members.' }, { quoted: originalMsg });
+        return;
+    }
+    if (!memberScrapeController) {
+        await sock.sendMessage(chatId, { text: '⚠️ Member scrape is not configured.' }, { quoted: originalMsg });
+        return;
+    }
+
+    const arg = String(args[0] || '').trim().toLowerCase();
+    const groups = await memberScrapeController.getStoredGroupsWithCounts(sock);
+
+    if (!groups.length) {
+        await sock.sendMessage(chatId, { text: '📭 Nothing saved to clear.' }, { quoted: originalMsg });
+        return;
+    }
+
+    // Stale purge is safe enough to run without a confirmation step: it only
+    // removes people who have not appeared in a scrape for a long time.
+    if (arg === 'stale') {
+        const days = Math.max(7, parseInt(args[1], 10) || 60);
+        const res = await memberScrapeController.pruneStale(days);
+        await sock.sendMessage(chatId, {
+            text: res.removed
+                ? `🧹 Removed *${res.removed}* member(s) not seen in a scrape for ${days}+ days.`
+                : `✅ Nothing stale — every saved member was scraped within ${days} days.`,
+        }, { quoted: originalMsg });
+        return;
+    }
+
+    if (!arg) {
+        const list = groups
+            .map((g, i) => `*${i + 1}.* ${g.group_name} — ${g.stored_count} member(s)`)
+            .join('\n');
+        await sock.sendMessage(chatId, {
+            text:
+                '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🗑️ *CLEAR SCRAPED MEMBERS* 🗑️\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                `${list}\n\n` +
+                '• `/scrapclear <#>` — delete one group\n' +
+                '• `/scrapclear all` — delete everything\n' +
+                '• `/scrapclear stale [days]` — drop members not seen in 60+ days\n\n' +
+                '_Deleting is permanent; re-scraping a large group takes a while._',
+        }, { quoted: originalMsg });
+        return;
+    }
+
+    const wantsAll = arg === 'all';
+    const index = wantsAll ? null : parseInt(arg, 10);
+    const selected = wantsAll ? null : groups[index - 1];
+
+    if (!wantsAll && !selected) {
+        await sock.sendMessage(chatId, {
+            text: `❌ Invalid group number. Choose 1–${groups.length}, \`all\`, or \`stale\`.`,
+        }, { quoted: originalMsg });
+        return;
+    }
+
+    const target = wantsAll
+        ? { label: `ALL ${groups.length} group(s)`, count: groups.reduce((s, g) => s + (g.stored_count || 0), 0) }
+        : { label: selected.group_name, count: selected.stored_count };
+
+    const key = sessionKey(chatId, senderJid);
+    const pending = pendingScrapSessions?.get(key);
+
+    if (pending?.clearTarget && pending.clearTarget.arg === arg && Date.now() < pending.expiresAt) {
+        pendingScrapSessions.delete(key);
+        const res = wantsAll
+            ? await memberScrapeController.clearAllGroups()
+            : await memberScrapeController.clearGroup(selected.group_id);
+        await sock.sendMessage(chatId, {
+            text: `🗑️ Deleted *${res.removed}* saved member(s) from *${target.label}*.`,
+        }, { quoted: originalMsg });
+        logger.info(`Scrape data cleared: ${target.label} (${res.removed} members) by ${extractPhoneNumber(senderJid)}`);
+        return;
+    }
+
+    pendingScrapSessions?.set(key, {
+        clearTarget: { arg },
+        groups: [],
+        expiresAt: Date.now() + 60_000,
+    });
+    await sock.sendMessage(chatId, {
+        text:
+            `⚠️ This deletes *${target.count}* saved member(s) from *${target.label}*.\n\n` +
+            `Run \`/scrapclear ${arg}\` again within 60s to confirm.`,
+    }, { quoted: originalMsg });
 }
 
 export async function handleBroadcast(sock, chatId, senderJid, args, ctx) {
@@ -631,10 +734,25 @@ async function runScrapeJob(getSock, fallbackSock, chatId, memberScrapeControlle
         }
 
         const result = await memberScrapeController.scrapeGroup(sock, selected.group_id, selected.group_name);
-        const dmStats = await memberScrapeController.getDmTargetStats(selected.group_id);
+        // Pass the socket so LIDs resolve; otherwise the DM-able figure reads
+        // low and looks like the scrape lost people.
+        const dmStats = await memberScrapeController.getDmTargetStats(selected.group_id, sock);
 
         const notifySock = resolveSock(getSock, fallbackSock);
         if (notifySock) {
+            // Roll-up of every stored group, so one card answers "what do I
+            // actually have saved right now" without a second command.
+            const allGroups = await memberScrapeController.getStoredGroupsWithCounts(notifySock);
+            const totalMembers = allGroups.reduce((s, g) => s + (g.stored_count || 0), 0);
+            const totalDmable = allGroups.reduce((s, g) => s + (g.dm_count || 0), 0);
+
+            const roster = allGroups
+                .map((g, i) => {
+                    const mark = g.group_id === selected.group_id ? ' ⬅️ just scraped' : '';
+                    return `${i + 1}. *${g.group_name}* — ${g.stored_count} member(s) · 📱 ${g.dm_count} DM-able${mark}`;
+                })
+                .join('\n');
+
             await notifySock.sendMessage(chatId, {
                 text:
                     '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
@@ -644,15 +762,27 @@ async function runScrapeJob(getSock, fallbackSock, chatId, memberScrapeControlle
                     `👥 *Total:* ${result.total}\n` +
                     `🆕 *New:* ${result.inserted}\n` +
                     `🔄 *Updated:* ${result.updated}\n` +
-                    `📱 *DM-able:* ${dmStats.dm_count} (${dmStats.phone_dm_count} phone · ${dmStats.lid_dm_count} LID)\n\n` +
+                    (result.removed ? `🗑️ *Left the group:* ${result.removed} (removed)\n` : '') +
+                    `📱 *DM-able:* ${dmStats.dm_count}` +
+                    (dmStats.lid_dm_count ? ` (${dmStats.lid_dm_count} via resolved LID)` : '') +
+                    '\n' +
+                    (dmStats.unreachable_count ? `🚫 *Unreachable:* ${dmStats.unreachable_count} (number hidden)\n` : '') +
+                    '\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
+                    `📚 *ALL SAVED GROUPS* (${allGroups.length})\n\n` +
+                    `${roster}\n\n` +
+                    `📊 *Combined:* ${totalMembers} member(s) · 📱 ${totalDmable} DM-able\n` +
+                    '_Combined counts are before de-duplication across groups._\n' +
                     '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
-                    '💡 `/scrapmembers` — view saved groups\n' +
-                    '💡 `/broadcast <#> <message>` or `/broadcast all <message>`\n' +
-                    '💡 `/grouppost <#> <message>` or `/grouppost all <message>`',
+                    '💡 `/broadcast <#|all> <msg>` · add `dry` to preview\n' +
+                    '💡 `/scrapclear <#|all>` — delete saved members\n' +
+                    '💡 `/grouppost <#|all> <msg>` — post in group(s)',
             });
         }
 
-        logger.info(`Scraped ${result.total} members from ${result.group_name}`);
+        logger.info(
+            `Scraped ${result.total} members from ${result.group_name}` +
+                (result.removed ? ` (${result.removed} left the group, removed)` : '')
+        );
     } catch (err) {
         logger.error(`Member scrape failed: ${formatError(err)}`);
         try {
@@ -670,6 +800,12 @@ export async function handlePendingScrapSelection(sock, chatId, senderJid, text,
     const key = sessionKey(chatId, senderJid);
     const session = pendingScrapSessions.get(key);
     if (!session) {
+        return false;
+    }
+    // A pending /scrapclear confirmation shares this store but has no group
+    // list — without this, a stray number would be answered with
+    // "reply with a number between 1 and 0".
+    if (session.clearTarget) {
         return false;
     }
 

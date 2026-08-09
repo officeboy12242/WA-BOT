@@ -581,6 +581,13 @@ export const COMMAND_REGISTRY = [
         help: 'List scraped groups and member counts (owner only)',
     },
     {
+        names: ['/scrapclear'],
+        key: 'scrapclear',
+        scope: 'any',
+        role: 'owner',
+        help: 'Delete saved members — `/scrapclear <#>`, `all`, or `stale [days]` (owner only)',
+    },
+    {
         names: ['/broadcast'],
         key: 'broadcast',
         scope: 'any',
@@ -781,7 +788,7 @@ export const HELP_CATEGORY = {
     addpremium: 'owner', removepremium: 'owner', premium: 'owner',
     addmod: 'owner', removemod: 'owner', addchannel: 'owner',
     removechannel: 'owner', channels: 'owner', scrap: 'owner',
-    scrapmembers: 'owner', broadcast: 'owner', grouppost: 'owner',
+    scrapmembers: 'owner', scrapclear: 'owner', broadcast: 'owner', grouppost: 'owner',
     driveurl: 'owner',
 };
 

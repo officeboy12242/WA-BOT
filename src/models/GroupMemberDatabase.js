@@ -102,6 +102,20 @@ class GroupMemberDatabase {
             await new Promise((resolve) => setImmediate(resolve));
         }
 
+        // Drop anyone who was stored before but is not in the group now.
+        // Every current participant just had `updated_at` set to `now`, so
+        // anything older than this scrape has left. Without this the store
+        // only ever grew, and broadcasts kept DMing people who had gone —
+        // which is both wasted sends and a reliable way to collect reports.
+        let removed = 0;
+        if (ops.length) {
+            const stale = await this.members.deleteMany({
+                group_id: groupId,
+                updated_at: { $lt: now },
+            });
+            removed = stale.deletedCount || 0;
+        }
+
         await this.scrapes.updateOne(
             { group_id: groupId },
             {
@@ -115,7 +129,32 @@ class GroupMemberDatabase {
             { upsert: true }
         );
 
-        return { inserted, updated, total: participants.length };
+        return { inserted, updated, removed, total: participants.length };
+    }
+
+    /** Forget one group entirely — members and scrape record. */
+    async clearGroup(groupId) {
+        const res = await this.members.deleteMany({ group_id: groupId });
+        await this.scrapes.deleteOne({ group_id: groupId });
+        return { removed: res.deletedCount || 0 };
+    }
+
+    /** Forget every scraped group. */
+    async clearAllGroups() {
+        const res = await this.members.deleteMany({});
+        const groups = await this.scrapes.deleteMany({});
+        return { removed: res.deletedCount || 0, groups: groups.deletedCount || 0 };
+    }
+
+    /** Members not refreshed since `cutoff` — stale data from old scrapes. */
+    async countStaleMembers(cutoff) {
+        return this.members.countDocuments({ updated_at: { $lt: cutoff } });
+    }
+
+    /** Purge members whose last scrape predates `cutoff`. */
+    async pruneStaleMembers(cutoff) {
+        const res = await this.members.deleteMany({ updated_at: { $lt: cutoff } });
+        return { removed: res.deletedCount || 0 };
     }
 
     async getScrapedGroups() {

@@ -135,4 +135,43 @@ ok(BROADCAST_STATUS.PAUSED_CAP && BROADCAST_STATUS.ABORTED, 'paused and aborted 
 const fast = new BroadcastService(null, null, { BROADCAST_MIN_GAP_MS: 1000, BROADCAST_MAX_GAP_MS: 2000 });
 ok(fast.opts.minGapMs === 1000, 'gaps are configurable');
 
+/* ── stale-member pruning ────────────────────────────────────────────────── */
+
+// upsertMembers only ever added rows, so people who LEFT a group stayed in the
+// store forever and kept receiving broadcasts.
+let deleted = null;
+const fakeDb = {
+    members: {
+        bulkWrite: async () => ({ upsertedCount: 2, modifiedCount: 1 }),
+        deleteMany: async (q) => { deleted = q; return { deletedCount: 3 }; },
+        countDocuments: async () => 7,
+    },
+    scrapes: { updateOne: async () => {}, deleteOne: async () => {}, deleteMany: async () => ({ deletedCount: 2 }) },
+};
+const { default: GroupMemberDatabase } = await import('../src/models/GroupMemberDatabase.js');
+const gdb = new GroupMemberDatabase({ collection: () => null });
+gdb.members = fakeDb.members;
+gdb.scrapes = fakeDb.scrapes;
+
+const up = await gdb.upsertMembers('g@g.us', 'Test', [
+    { id: '919876543210@s.whatsapp.net', phoneNumber: '919876543210' },
+    { id: '919876543211@s.whatsapp.net', phoneNumber: '919876543211' },
+]);
+eq(up.removed, 3, 're-scraping removes members who left the group');
+ok(deleted && deleted.group_id === 'g@g.us', 'the prune is scoped to the group just scraped');
+ok(deleted.updated_at && deleted.updated_at.$lt instanceof Date, 'the prune targets rows older than this scrape');
+
+// An empty participant list must not wipe the group — that would be a scrape
+// failure silently deleting real data.
+deleted = null;
+const empty = await gdb.upsertMembers('g@g.us', 'Test', []);
+eq(empty.removed, 0, 'an empty scrape removes nothing');
+eq(deleted, null, 'an empty scrape issues no delete at all');
+
+const cleared = await gdb.clearGroup('g@g.us');
+eq(cleared.removed, 3, 'clearGroup deletes that group\'s members');
+const clearedAll = await gdb.clearAllGroups();
+eq(clearedAll.removed, 3, 'clearAllGroups deletes every member');
+eq(clearedAll.groups, 2, 'clearAllGroups deletes the scrape records too');
+
 console.log(`OK broadcast — ${checks} checks passed`);

@@ -125,6 +125,31 @@ class MemberScrapeController {
         return { ...stats, group_name: name, group_id: groupId };
     }
 
+    /** Forget one group's scraped members. */
+    async clearGroup(groupId) {
+        return this.groupMemberDatabase.clearGroup(groupId);
+    }
+
+    /** Forget every scraped group. */
+    async clearAllGroups() {
+        return this.groupMemberDatabase.clearAllGroups();
+    }
+
+    /**
+     * Purge members not seen in a scrape for `days`.
+     *
+     * Groups that stopped being re-scraped leave rows behind indefinitely, and
+     * those people may have left long ago. Sending to them wastes the daily
+     * cap and invites reports.
+     */
+    async pruneStale(days = 60) {
+        const cutoff = new Date(Date.now() - days * 24 * 3600 * 1000);
+        const stale = await this.groupMemberDatabase.countStaleMembers(cutoff);
+        if (!stale) return { removed: 0, days };
+        const res = await this.groupMemberDatabase.pruneStaleMembers(cutoff);
+        return { ...res, days };
+    }
+
     async _cacheParticipantNames(participants) {
         for (const participant of participants) {
             if (!participant.id || !participant.notify) {
