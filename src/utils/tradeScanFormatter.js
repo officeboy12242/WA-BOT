@@ -43,6 +43,8 @@ export function formatTradeScanPreview(discovery) {
         lines.push('📡 *Discovery:* Heatmap v2 — live intraday · VWAP · RS · ATR');
     } else if (d.discoverySource === 'heatmap') {
         lines.push('📡 *Discovery:* NSE Heatmap + 15m OR / 8 EMA');
+    } else if (d.discoverySource === 'preopen') {
+        lines.push('📡 *Discovery:* Pre-open auction — IEP · order imbalance');
     } else if (d.discoverySource === 'nse') {
         lines.push('📡 *Discovery:* NSE NIFTY50 top gainers + losers');
     }
@@ -56,7 +58,30 @@ export function formatTradeScanPreview(discovery) {
     // Heatmap v2 — different shape from v1: no `status`, targets are 1R/2R,
     // and a pick may legitimately carry no setup before the opening range closes.
     const hm = d.heatmap;
-    if (hm?.version === 2 && hm.picks?.length) {
+    // Pre-open has no sector sentiment, no regime and no `status` — rendering it
+    // through either heatmap branch would print "15m OR / 8 EMA" for a scan that
+    // ran before a single bar existed.
+    if (hm?.version === 'preopen' && hm.picks?.length) {
+        lines.push('┌─ *PRE-OPEN AUCTION* ─');
+        lines.push(`│ Auction closed: ${hm.asOf || '09:08'}`);
+        lines.push(`│ Board median: ${fmtPct(hm.marketGapPct)}`);
+        for (const p of hm.picks) {
+            const s = p.setup;
+            const book = `book ${p.imbalance >= 0 ? '+' : ''}${Math.round(p.imbalance * 100)}%`;
+            lines.push(
+                `│ • *${p.symbol}* ${fmtPct(p.relGapPct)} vs board · ` +
+                `${String(p.side).toUpperCase()} · ${book} · score ${p.score}`
+            );
+            if (s) {
+                lines.push(`│    E ${s.entry} · SL ${s.stop} · T1 ${s.target1} · T2 ${s.target2}`);
+            } else {
+                lines.push(`│    IEP ₹${p.iep} · levels unavailable`);
+            }
+        }
+        lines.push('└────────────────────────────');
+        lines.push('│ _Auction consensus only — no opening range or VWAP yet._');
+        lines.push('');
+    } else if (hm?.version === 2 && hm.picks?.length) {
         lines.push('┌─ *HEATMAP v2 — LIVE BREAKOUTS* ─');
         lines.push(`│ Sectors: ${hm.sentiment?.label || 'n/a'} (G${hm.sentiment?.green ?? '?'} / R${hm.sentiment?.red ?? '?'})`);
         lines.push(`│ Regime: ${hm.regime?.label || 'n/a'}`);
@@ -109,23 +134,29 @@ export function formatTradeScanPreview(discovery) {
     }
 
     // Macro block
-    lines.push('┌─ *MACRO PULSE* ─────────────');
+    // Built separately so an empty macro (pre-open runs before the index ticks)
+    // renders nothing at all rather than a bare header/footer pair.
     const macro = d.macro || {};
+    const macroLines = [];
     if (macro.nifty?.pct != null) {
-        lines.push(`│ NIFTY 50: *${fmtPct(macro.nifty.pct)}*`);
+        macroLines.push(`│ NIFTY 50: *${fmtPct(macro.nifty.pct)}*`);
     }
     if (macro.vix?.last != null) {
-        lines.push(`│ India VIX: *${macro.vix.last}*`);
+        macroLines.push(`│ India VIX: *${macro.vix.last}*`);
     }
-    if (macro.fiiNet != null) lines.push(`│ FII: *${fmtCr(macro.fiiNet)}*`);
-    if (macro.diiNet != null) lines.push(`│ DII: *${fmtCr(macro.diiNet)}*`);
+    if (macro.fiiNet != null) macroLines.push(`│ FII: *${fmtCr(macro.fiiNet)}*`);
+    if (macro.diiNet != null) macroLines.push(`│ DII: *${fmtCr(macro.diiNet)}*`);
     if (macro.bias) {
-        lines.push(
+        macroLines.push(
             `│ Bias: *${macro.bias.emoji} ${macro.bias.label}* (${macro.bias.score >= 0 ? '+' : ''}${macro.bias.score})`
         );
     }
-    lines.push('└────────────────────────────');
-    lines.push('');
+    if (macroLines.length) {
+        lines.push('┌─ *MACRO PULSE* ─────────────');
+        lines.push(...macroLines);
+        lines.push('└────────────────────────────');
+        lines.push('');
+    }
 
     // Delta
     if (d.delta?.lines?.length) {
@@ -222,9 +253,16 @@ export function formatTradeScanPreview(discovery) {
                 r.wrongRs ? `${r.wrongRs} lagging the index` : null,
                 r.illiquid ? `${r.illiquid} too illiquid` : null,
                 r.noData ? `${r.noData} with no price data` : null,
+                // pre-open reject reasons
+                r.thinAuction ? `${r.thinAuction} with too thin an auction` : null,
+                r.noRelMove ? `${r.noRelMove} moving with the board` : null,
+                r.bookDisagrees ? `${r.bookDisagrees} where the order book disagreed` : null,
+                r.lopsided ? `${r.lopsided} with a one-sided book` : null,
+                r.noBook ? `${r.noBook} with no resting orders` : null,
             ].filter(Boolean);
             if (why.length) {
-                lines.push(`  _Of ${d.heatmap.candidatesScanned} scanned: ${why.join(', ')}._`);
+                const scanned = d.heatmap.candidatesScanned ?? d.heatmap.scanned ?? '?';
+                lines.push(`  _Of ${scanned} scanned: ${why.join(', ')}._`);
             }
         }
     }

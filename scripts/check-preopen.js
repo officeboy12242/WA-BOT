@@ -18,6 +18,7 @@ import {
     isPrescriptiveSource,
 } from '../src/utils/discoverySource.js';
 import { pickStrategy } from '../src/utils/tradeMorningPick.js';
+import { formatTradeScanPreview } from '../src/utils/tradeScanFormatter.js';
 
 let pass = 0, fail = 0;
 const ok = (cond, label) => {
@@ -193,6 +194,55 @@ ok(strategyFor('preopen', { confluence: 0, signal: {} }) === 'Pre-open auction +
 ok(strategyFor('heatmap2') === 'Opening Range Breakout + 8 EMA', 'heatmap2 label intact');
 ok(strategyFor('heatmap') === 'Opening Range Breakout + 8 EMA', 'heatmap label intact');
 ok(strategyFor('legacy') === 'Momentum continuation', 'legacy heuristics intact');
+
+// ------------------------------------------------------------- scan card
+// version is the string 'preopen', so it fails `version === 2` and would fall
+// into the v1 branch — printing "15m OR / 8 EMA" and reading s.status for a scan
+// that ran before a single bar existed.
+const scanFixture = {
+    discoverySource: 'preopen',
+    symbols: ['AAA', 'BBB'],
+    marketModeLabel: 'PRE-OPEN',
+    heatmap: {
+        version: 'preopen',
+        asOf: '11-Aug-2026 09:07:59',
+        marketGapPct: 0.12,
+        scanned: 208,
+        picks: [
+            {
+                symbol: 'AAA', side: 'long', iep: 100, gapPct: 3.4, relGapPct: 3.28,
+                imbalance: 0.62, inPlayPct: 97, turnoverCr: 12.5, score: 88,
+                setup: { direction: 'LONG', entry: 100, stop: 97, target1: 103, target2: 106 },
+            },
+            {
+                symbol: 'BBB', side: 'short', iep: 50, gapPct: -2.1, relGapPct: -2.22,
+                imbalance: -0.55, inPlayPct: 90, turnoverCr: 4, score: 71, setup: null,
+            },
+        ],
+    },
+};
+const card = formatTradeScanPreview(scanFixture);
+ok(card.includes('PRE-OPEN AUCTION'), 'renders the pre-open block');
+ok(!card.includes('15m OR / 8 EMA'), 'does NOT render as the v1 heatmap block');
+ok(!card.includes('HEATMAP v2'), 'does NOT render as the v2 block');
+ok(card.includes('Pre-open auction — IEP · order imbalance'), 'discovery line names the source');
+ok(card.includes('11-Aug-2026 09:07:59'), 'auction timestamp shown');
+ok(card.includes('E 100 · SL 97 · T1 103 · T2 106'), 'levels rendered when a setup exists');
+ok(card.includes('levels unavailable'), 'pick without a setup degrades gracefully');
+ok(card.includes('book +62%'), 'order imbalance shown as a percentage');
+ok(!/\d\.\d{6}/.test(card), 'no unrounded floats leak into the card');
+ok(!card.includes('MACRO PULSE'), 'empty macro block omitted entirely, not left as a bare frame');
+
+// reject tally must speak pre-open reasons, not heatmap ones
+const emptyCard = formatTradeScanPreview({
+    discoverySource: 'preopen',
+    symbols: [],
+    heatmap: { version: 'preopen', picks: [], scanned: 208, rejects: { thinAuction: 160, noRelMove: 26, bookDisagrees: 11 } },
+});
+ok(emptyCard.includes('No qualifying names'), 'empty watchlist explained');
+ok(emptyCard.includes('too thin an auction'), 'thinAuction reason surfaced');
+ok(emptyCard.includes('order book disagreed'), 'bookDisagrees reason surfaced');
+ok(emptyCard.includes('Of 208 scanned'), 'falls back to `scanned` when candidatesScanned is absent');
 
 console.log(`\ncheck-preopen: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

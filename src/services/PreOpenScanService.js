@@ -177,18 +177,28 @@ export function rankPreOpen(rows, opts = {}) {
             inPlay * 35 + moveStrength * 30 + bookStrength * 25 + atoBonus * 10
         );
 
+        // Round at the source: fmtPct and the prompt block both render these
+        // straight through, and a raw float prints as +7.361963190184049%.
         scored.push({
             ...r,
+            gapPct: Number(r.gapPct.toFixed(2)),
             side,
-            relGapPct,
-            marketGapPct,
+            relGapPct: Number(relGapPct.toFixed(2)),
+            marketGapPct: Number(marketGapPct.toFixed(2)),
+            imbalance: Number(r.imbalance.toFixed(4)),
+            turnoverCr: Number(r.turnoverCr.toFixed(2)),
             inPlayPct: Math.round(inPlay * 100),
             score,
         });
     });
 
     scored.sort((a, b) => b.score - a.score || Math.abs(b.relGapPct) - Math.abs(a.relGapPct));
-    return { picks: scored.slice(0, maxPicks), marketGapPct, rejects, scanned: usable.length };
+    return {
+        picks: scored.slice(0, maxPicks),
+        marketGapPct: Number(marketGapPct.toFixed(2)),
+        rejects,
+        scanned: usable.length,
+    };
 }
 
 /** Wilder-style ATR over the last `n` completed daily candles. */
