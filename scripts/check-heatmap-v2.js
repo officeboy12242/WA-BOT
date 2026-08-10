@@ -313,14 +313,19 @@ ok(!/T1 /.test(cardWatch), 'pre-breakout pick shows no targets');
 // where the measured edge lives.
 const { config: cfg } = await import('../src/config/config.js');
 const toMin = (s) => { const [h, m] = s.split(':').map(Number); return h * 60 + m; };
-ok(Array.isArray(cfg.TRADE_ALERT_HEATMAP2_TIMES), 'heatmap2 has its own slot list');
-ok(cfg.TRADE_ALERT_HEATMAP2_TIMES.length >= 1, 'at least one v2 slot is configured');
+
+ok(Array.isArray(cfg.TRADE_ALERT_HEATMAP2_TIMES), 'the v2 slot list is always an array');
+// Default is EMPTY: every source shares the main clock, because a breakout
+// entry decays and a later post fills above the level.
+eq(cfg.TRADE_ALERT_HEATMAP2_TIMES.length, 0, 'by default heatmap2 rides the shared alert time');
+
+// When someone does configure extra slots they must land where v2 can work:
+// after the opening range closes, and before the noon cutoff where its edge dies.
 for (const t of cfg.TRADE_ALERT_HEATMAP2_TIMES) {
     ok(toMin(t) >= 9 * 60 + 45, `v2 slot ${t} is after the opening range closes`);
     ok(toMin(t) < 12 * 60, `v2 slot ${t} is inside the pre-noon window`);
+    ok(toMin(cfg.TRADE_ALERT_TIME) < toMin(t), `main slot runs before v2 slot ${t}`);
 }
-ok(toMin(cfg.TRADE_ALERT_TIME) < toMin(cfg.TRADE_ALERT_HEATMAP2_TIMES[0]),
-    'the default pre-market slot still runs before the first v2 slot');
 
 /* ── sector map integrity ────────────────────────────────────────────────── */
 

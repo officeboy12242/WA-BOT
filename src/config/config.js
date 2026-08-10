@@ -243,13 +243,17 @@ export const config = {
     TRADE_ALERT_TIME: (process.env.TRADE_ALERT_TIME || '09:20').trim(),
     TRADE_ALERT_TIMEZONE: process.env.TRADE_ALERT_TIMEZONE || 'Asia/Kolkata',
     /**
-     * Separate clock for heatmap2 groups. v2 requires a closed opening range
-     * plus a confirming bar, so no breakout can exist before ~09:45 — at the
-     * 09:20 pre-market slot it can only offer watches with no levels. Its
-     * measured edge also dies after noon, so both slots sit inside 09:45–12:00.
-     * Groups on v1 / legacy / nse keep TRADE_ALERT_TIME.
+     * Optional extra clock for heatmap2 groups. EMPTY BY DEFAULT — every source
+     * shares TRADE_ALERT_TIME, because a breakout entry decays fast and a later
+     * post means filling well above the level.
+     *
+     * The trade-off, stated plainly: at 09:20 only the forming 09:15 bar exists,
+     * so v2 posts its watchlist (live movers, sector-aligned, beating NIFTY) but
+     * no entry/stop/target — a confirmed break needs the opening range closed
+     * plus a following bar. Set this to e.g. `09:50,11:15` to ALSO get a later
+     * post carrying real levels; v1 / legacy / nse always stay on the main slot.
      */
-    TRADE_ALERT_HEATMAP2_TIMES: (process.env.TRADE_ALERT_HEATMAP2_TIMES || '09:50,11:15')
+    TRADE_ALERT_HEATMAP2_TIMES: (process.env.TRADE_ALERT_HEATMAP2_TIMES || '')
         .split(',')
         .map((s) => s.trim())
         .filter((s) => /^\d{1,2}:\d{2}$/.test(s)),

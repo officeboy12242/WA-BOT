@@ -1,19 +1,19 @@
 /**
  * Schedule daily F&O trade alerts.
  *
- * Two clocks, because the strategies do not become useful at the same moment:
+ * One clock by default: every source posts at TRADE_ALERT_TIME (09:20). A
+ * breakout entry decays quickly, so posting later means filling above the level
+ * and giving up the move — early beats complete.
  *
- *   09:20  v1 / legacy / nse — a pre-market read, which is what those sources
- *          are built on (v1 selects from the pre-open auction snapshot).
- *   09:50  heatmap2 — the earliest a breakout can be CONFIRMED. v2 needs the
- *   11:15  09:15 opening range to close plus a following bar, so at 09:20 it
- *          can only offer watches with no entry, stop or target. Both of its
- *          slots sit inside 09:45–12:00, where its measured edge lives; breaks
- *          after noon tested at 37% and negative expectancy.
+ * What that costs heatmap2: at 09:20 only the forming 09:15 bar exists, so v2
+ * contributes its SELECTION (live movers in leading sectors, beating NIFTY —
+ * still better than v1's pre-open auction snapshot) but not breakout levels,
+ * which need the opening range closed plus a confirming bar.
  *
- * A group only ever fires on the clock matching its own discovery source, so
- * nobody gets two morning posts. Same-symbol dedupe (`trade_alert_sent`) means
- * the 11:15 slot adds new names rather than repeating the 09:50 ones.
+ * Setting TRADE_ALERT_HEATMAP2_TIMES adds later slots for heatmap2 groups that
+ * do carry levels. When it is set, those groups move off the main slot so
+ * nobody gets two morning posts; same-symbol dedupe (`trade_alert_sent`) means
+ * a second slot adds new names rather than repeating the first.
  */
 
 import { logger } from './logger.js';
@@ -112,15 +112,19 @@ export function startTradeAlertScheduler({
         next();
     };
 
-    // Everyone except heatmap2 keeps the original pre-market slot.
-    scheduleSlot('default', config.TRADE_ALERT_TIME, {
-        excludeSources: [HEATMAP2],
-        slotLabel: 'pre-market',
-    });
-
     const v2Times = Array.isArray(config.TRADE_ALERT_HEATMAP2_TIMES)
         ? config.TRADE_ALERT_HEATMAP2_TIMES
         : [];
+
+    // With no extra v2 slots configured, every source shares the main clock —
+    // heatmap2 must NOT be excluded here or those groups would never fire.
+    scheduleSlot('default', config.TRADE_ALERT_TIME, {
+        excludeSources: v2Times.length ? [HEATMAP2] : null,
+        slotLabel: v2Times.length ? 'pre-market' : null,
+    });
+
+    // Only when explicitly configured: a later post for heatmap2 groups that
+    // carries confirmed breakout levels the main slot is too early to produce.
     v2Times.forEach((time, i) => {
         scheduleSlot(`heatmap2-${i + 1}`, time, {
             onlySources: [HEATMAP2],

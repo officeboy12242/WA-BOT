@@ -138,8 +138,9 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
             r += `🧠 *Mode:* ${modeLabel(mode)}\n`;
             r += `📡 *Discovery:* ${sourceLabel(discoverySource)}\n`;
             r += `🕐 *Daily time:* ${formatAlertTime(discoverySource)} IST (trading days only)\n`;
-            if (discoverySource === 'heatmap2') {
-                r += '   _v2 runs later: a breakout cannot be confirmed before ~09:45._\n';
+            if (discoverySource === 'heatmap2' && !config.TRADE_ALERT_HEATMAP2_TIMES?.length) {
+                r += '   _At this hour v2 posts live movers as a watchlist; breakout levels\n' +
+                     '   need the 09:15 range closed — use `/tradelert scan` after 09:45._\n';
             }
             r += `📊 *Symbols:* ${symbolLine}\n`;
             r += `🔔 *Posts:* CE/PE when AI ≥70% · confluence ≥40 (soft ≥25 if quiet day)\n`;
