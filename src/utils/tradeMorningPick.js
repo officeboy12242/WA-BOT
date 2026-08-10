@@ -17,6 +17,7 @@ const STRATEGIES = {
     momentum: 'Momentum continuation',
     pcrOi: 'PCR / OI confirmation',
     vwap: 'VWAP reclaim / reject',
+    preOpen: 'Pre-open auction + order imbalance',
 };
 
 function pad(s, n) {
@@ -83,6 +84,12 @@ export function pickStrategy({ discoverySource, confluence, signal, softGate } =
     // naming a strategy the trade was not chosen by.
     if (src === 'heatmap' || src === 'heatmap2') {
         return STRATEGIES.orEma;
+    }
+    // A pre-open pick was chosen by the auction clearing price and the resting
+    // order book, before any bar existed. Labelling it ORB/VWAP/momentum would
+    // name a strategy that had no data to run on at selection time.
+    if (src === 'preopen') {
+        return STRATEGIES.preOpen;
     }
     if (conf >= 55 && ai >= 78 && !softGate) {
         return STRATEGIES.momentum;
@@ -272,6 +279,8 @@ export function formatMorningPickCard(pick, meta = {}) {
     lines.push('');
     if (winner.strategy === STRATEGIES.orEma) {
         lines.push('Invalidation: 15m close back inside OR / below 8 EMA');
+    } else if (winner.strategy === STRATEGIES.preOpen) {
+        lines.push('Invalidation: opening price rejects the auction level / book flips');
     } else if (winner.strategy === STRATEGIES.momentum) {
         lines.push('Invalidation: momentum stall + loss of VWAP / prior swing');
     } else if (winner.strategy === STRATEGIES.pcrOi) {

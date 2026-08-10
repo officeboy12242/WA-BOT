@@ -17,6 +17,7 @@ import {
     parseDiscoverySource,
     isPrescriptiveSource,
 } from '../src/utils/discoverySource.js';
+import { pickStrategy } from '../src/utils/tradeMorningPick.js';
 
 let pass = 0, fail = 0;
 const ok = (cond, label) => {
@@ -174,6 +175,24 @@ ok(normalizeDiscoverySource('v2') === 'heatmap2', 'heatmap2 alias intact');
 ok(normalizeDiscoverySource('heatmap') === 'heatmap', 'heatmap intact');
 ok(normalizeDiscoverySource('legacy') === 'legacy', 'legacy intact');
 ok(normalizeDiscoverySource('') === 'legacy', 'empty falls back to legacy');
+
+// ------------------------------------------------- morning-pick strategy label
+// A preopen pick is chosen by the auction price and the resting book, before any
+// bar exists. If it falls through to the confluence heuristics it gets tagged
+// VWAP/momentum -- naming a strategy that had no data to run on. Same bug that
+// once mislabelled heatmap2, so both are pinned here.
+const strategyFor = (src, over = {}) =>
+    pickStrategy({ discoverySource: src, confluence: 60, signal: { confidence: 80 }, ...over });
+
+ok(strategyFor('preopen') === 'Pre-open auction + order imbalance', 'preopen gets its own strategy label');
+ok(strategyFor('pre') === 'Pre-open auction + order imbalance', 'preopen alias also labelled correctly');
+ok(strategyFor('preopen') !== strategyFor('legacy'), 'preopen not confused with legacy heuristics');
+ok(strategyFor('preopen', { confluence: 0, signal: {} }) === 'Pre-open auction + order imbalance',
+    'preopen label does not depend on confluence/AI score');
+// pre-existing labels must be untouched
+ok(strategyFor('heatmap2') === 'Opening Range Breakout + 8 EMA', 'heatmap2 label intact');
+ok(strategyFor('heatmap') === 'Opening Range Breakout + 8 EMA', 'heatmap label intact');
+ok(strategyFor('legacy') === 'Momentum continuation', 'legacy heuristics intact');
 
 console.log(`\ncheck-preopen: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
