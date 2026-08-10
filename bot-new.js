@@ -393,10 +393,16 @@ class WhatsAppCourseBot {
                 queue: this.jobQueue,
                 concurrency: config.JOB_WORKER_CONCURRENCY,
                 handlers: {
-                    'trade.daily_alerts': async () => {
+                    // Payload carries the slot's source filter, so a queued job
+                    // targets the same groups the scheduler intended.
+                    'trade.daily_alerts': async (payload = {}) => {
                         const sock = this.whatsappService?.getSock?.();
                         if (!sock) throw new Error('WhatsApp not ready for trade.daily_alerts');
-                        await this.tradeAlertController.postDailyAlerts(sock);
+                        await this.tradeAlertController.postDailyAlerts(sock, {
+                            onlySources: payload.onlySources || null,
+                            excludeSources: payload.excludeSources || null,
+                            slotLabel: payload.slotLabel || null,
+                        });
                     },
                     'news.scrape': async () => {
                         await this.newsController.scrapeAndQueueOnly();

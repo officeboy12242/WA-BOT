@@ -207,7 +207,27 @@ export function formatTradeScanPreview(discovery) {
 
     // Final watchlist
     lines.push('📋 *TODAY\'S WATCHLIST*');
-    lines.push(`  ${(d.symbols || []).join(' · ') || 'n/a'}`);
+    if (d.symbols?.length) {
+        lines.push(`  ${d.symbols.join(' · ')}`);
+    } else {
+        // A bare "n/a" gave no way to tell a filtered-out day from a broken
+        // scan. The reject tally answers that in one line.
+        lines.push('  _No qualifying names right now._');
+        const r = d.heatmap?.rejects;
+        if (r) {
+            const why = [
+                r.flat ? `${r.flat} moving too little` : null,
+                r.noSetup ? `${r.noSetup} with no confirmed breakout` : null,
+                r.lowScore ? `${r.lowScore} below the score floor` : null,
+                r.wrongRs ? `${r.wrongRs} lagging the index` : null,
+                r.illiquid ? `${r.illiquid} too illiquid` : null,
+                r.noData ? `${r.noData} with no price data` : null,
+            ].filter(Boolean);
+            if (why.length) {
+                lines.push(`  _Of ${d.heatmap.candidatesScanned} scanned: ${why.join(', ')}._`);
+            }
+        }
+    }
     if (d.hiddenGem) {
         lines.push(`  💎 *Gem:* ${d.hiddenGem}${d.hiddenGemReason ? ` — _${d.hiddenGemReason}_` : ''}`);
     }

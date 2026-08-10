@@ -530,13 +530,24 @@ class TradeAlertController {
                             gates: intel.gates,
                             marketMode: intel.marketMode,
                             niftyGl: intel.niftyGl || null,
+                            // `version` must survive the round-trip: the scan
+                            // card picks its layout from it, so dropping it made
+                            // a cached v2 scan render through v1's branch and
+                            // lose its targets.
                             heatmap: intel.heatmap
                                 ? {
+                                      version: intel.heatmap.version || null,
                                       sentiment: intel.heatmap.sentiment,
+                                      regime: intel.heatmap.regime || null,
+                                      preOpeningRange: intel.heatmap.preOpeningRange || false,
+                                      candidatesScanned: intel.heatmap.candidatesScanned || 0,
+                                      rejects: intel.heatmap.rejects || null,
                                       picks: (intel.heatmap.picks || []).map((p) => ({
                                           symbol: p.symbol,
                                           sector: p.sector,
+                                          sectorPct: p.sectorPct,
                                           changePct: p.changePct,
+                                          relStrength: p.relStrength ?? null,
                                           side: p.side,
                                           setup: p.setup,
                                       })),
@@ -632,7 +643,12 @@ class TradeAlertController {
         return this.discoverSymbolsForToday();
     }
 
-    async postDailyAlerts(sock = this._sock) {
+    /**
+     * @param {object} sock
+     * @param {{ onlySources?: string[], excludeSources?: string[], slotLabel?: string }} [opts]
+     */
+    async postDailyAlerts(sock = this._sock, opts = {}) {
+        const { onlySources = null, excludeSources = null, slotLabel = null } = opts;
         if (!this.enabled) {
             logger.info('Trade alert: disabled (TRADE_ALERT_ENABLED=false)');
             return;
@@ -653,15 +669,49 @@ class TradeAlertController {
             return;
         }
 
-        const groups = await this.groupManager.getTradeAlertGroups();
+        let groups = await this.groupManager.getTradeAlertGroups();
         if (!groups.length) {
             logger.info('Trade alert: no /tradelert on groups');
             return;
         }
 
+        /**
+         * Slots are per-strategy. heatmap2 cannot confirm a breakout before
+         * ~09:45, so it runs on its own later clock while v1/legacy/nse keep
+         * the 09:20 pre-market slot. Filtering here rather than in the
+         * scheduler keeps one source of truth for a group's discovery source.
+         */
+        if (onlySources?.length || excludeSources?.length) {
+            const resolved = await Promise.all(
+                groups.map(async (g) => ({
+                    group: g,
+                    source:
+                        (await this.resolveModeForGroup(g)) === 'manual'
+                            ? 'manual'
+                            : await this.resolveDiscoverySourceForGroup(g.group_id),
+                }))
+            );
+            groups = resolved
+                .filter(({ source }) => {
+                    if (onlySources?.length) return onlySources.includes(source);
+                    return !excludeSources.includes(source);
+                })
+                .map(({ group }) => group);
+
+            if (!groups.length) {
+                logger.info(
+                    `Trade alert [${slotLabel || 'slot'}]: no groups match ` +
+                        (onlySources?.length ? `sources ${onlySources.join(',')}` : `excluding ${excludeSources.join(',')}`)
+                );
+                return;
+            }
+        }
+
         const dateStr = getTodayDateStrIST();
         const dateLabel = formatNowLabelIST();
-        logger.info(`📈 Daily trade alerts for ${groups.length} group(s) — ${dateLabel}`);
+        logger.info(
+            `📈 Daily trade alerts${slotLabel ? ` [${slotLabel}]` : ''} for ${groups.length} group(s) — ${dateLabel}`
+        );
 
         /** @type {Map<string, object>} */
         const discoveriesBySource = new Map();

@@ -15,7 +15,9 @@ import {
     relativeStrength,
     sessionTurnover,
 } from '../src/utils/intradaySeries.js';
-import { computeSentimentV2, evaluateSetupV2, scaledMinMove } from '../src/services/HeatmapV2ScanService.js';
+import {
+    computeSentimentV2, evaluateSetupV2, scaledMinMove, MIN_BARS_FOR_CONFIRMED_BREAK,
+} from '../src/services/HeatmapV2ScanService.js';
 import {
     normalizeDiscoverySource,
     parseDiscoverySource,
@@ -210,9 +212,23 @@ ok(!noBreak.ok, 'flat session yields no setup');
 
 // The daily scan fires at 09:20, when only the (still forming) 09:15 bar
 // exists. Demanding a closed opening range there would post nothing, ever.
-const oneBar = evaluateSetupV2(metricsFrom(flatSession(day(21), 1, 100)), 'long');
-ok(!oneBar.ok, 'one bar cannot contain a breakout');
-eq(oneBar.reason, 'opening range not closed', 'and says so, so the caller can switch to watch mode');
+for (const bars of [1, 2]) {
+    const early = evaluateSetupV2(metricsFrom(flatSession(day(21), bars, 100)), 'long');
+    ok(!early.ok, `${bars} bar(s) cannot yield a confirmed breakout`);
+    ok(/confirm/i.test(early.reason), `and says why (${early.reason})`);
+}
+
+// Regression: the watch-mode threshold and the evaluator's minimum must agree.
+// When they did not, a session with exactly 2 bars (09:30–09:45 on 15m data)
+// was past watch mode yet could never confirm a break — so /tradelert scan
+// showed an empty watchlist and blamed every symbol for having "no setup".
+eq(MIN_BARS_FOR_CONFIRMED_BREAK, 3, 'a confirmed break needs OR + break + follow-through');
+const justBelow = evaluateSetupV2(
+    metricsFrom(breakoutSession(day(21), { breakIdx: 1, total: MIN_BARS_FOR_CONFIRMED_BREAK - 1 })), 'long');
+ok(!justBelow.ok, 'one bar below the threshold yields nothing — watch mode must cover it');
+const atThreshold = evaluateSetupV2(
+    metricsFrom(breakoutSession(day(21), { breakIdx: 1, total: MIN_BARS_FOR_CONFIRMED_BREAK })), 'long');
+ok(atThreshold.ok, 'at the threshold a setup becomes possible — no dead window between the two');
 
 // Three bars is the earliest a break can be CONFIRMED: the opening range, the
 // break, and the bar that follows through on it.
@@ -288,6 +304,23 @@ const cardWatch = formatTradeScanPreview({
 });
 ok(/watch/i.test(cardWatch), 'pre-breakout pick renders as a watch');
 ok(!/T1 /.test(cardWatch), 'pre-breakout pick shows no targets');
+
+/* ── alert slots ─────────────────────────────────────────────────────────── */
+
+// v2 gets its own clock. At the 09:20 pre-market slot only the forming 09:15
+// bar exists, so it could only ever emit level-less watches; both v2 slots must
+// therefore land after the opening range closes and before the noon cutoff,
+// where the measured edge lives.
+const { config: cfg } = await import('../src/config/config.js');
+const toMin = (s) => { const [h, m] = s.split(':').map(Number); return h * 60 + m; };
+ok(Array.isArray(cfg.TRADE_ALERT_HEATMAP2_TIMES), 'heatmap2 has its own slot list');
+ok(cfg.TRADE_ALERT_HEATMAP2_TIMES.length >= 1, 'at least one v2 slot is configured');
+for (const t of cfg.TRADE_ALERT_HEATMAP2_TIMES) {
+    ok(toMin(t) >= 9 * 60 + 45, `v2 slot ${t} is after the opening range closes`);
+    ok(toMin(t) < 12 * 60, `v2 slot ${t} is inside the pre-noon window`);
+}
+ok(toMin(cfg.TRADE_ALERT_TIME) < toMin(cfg.TRADE_ALERT_HEATMAP2_TIMES[0]),
+    'the default pre-market slot still runs before the first v2 slot');
 
 /* ── sector map integrity ────────────────────────────────────────────────── */
 

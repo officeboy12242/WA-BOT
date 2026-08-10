@@ -72,6 +72,14 @@ const LATE_ENTRY_CUTOFF_MIN = 12 * 60;
 const MAX_BARS_BACK = 6;
 
 /**
+ * Bars needed before a breakout can be confirmed: opening range, the break,
+ * and the follow-through bar. Below this the scan reports watches instead of
+ * silently finding nothing — the two thresholds MUST agree, or there is a
+ * window (09:30–09:45 on 15m bars) where neither path can produce anything.
+ */
+export const MIN_BARS_FOR_CONFIRMED_BREAK = 3;
+
+/**
  * Below this the fill you model is not the fill you get. Prorated by how much
  * of the session has elapsed — a full-day threshold applied at 09:20 would
  * reject the entire market.
@@ -165,9 +173,13 @@ export function computeSentimentV2(sectorRows = []) {
  */
 export function evaluateSetupV2(m, side) {
     const { session, sessionStart, emas, or, vwap, atr14 } = m;
-    // Two bars is the minimum that can contain a break: the opening range plus
-    // one bar after it. Demanding more would blind the scan until ~09:45.
-    if (!or || session.length < 2) return { ok: false, reason: 'opening range not closed' };
+    // Three bars is the minimum for a CONFIRMED break: the opening range, the
+    // break itself, and the bar that follows through on it. Follow-through is a
+    // hard gate, so with two bars every symbol necessarily fails — which is
+    // exactly what produced an empty watchlist at 09:44.
+    if (!or || session.length < MIN_BARS_FOR_CONFIRMED_BREAK) {
+        return { ok: false, reason: 'not enough bars to confirm a break yet' };
+    }
     if (!Number.isFinite(atr14) || atr14 <= 0) return { ok: false, reason: 'no ATR' };
 
     const orIdx = session.indexOf(or);
@@ -363,7 +375,11 @@ class HeatmapV2ScanService {
         });
         const candles = HeatmapV2ScanService.truncateToMinute(raw, asOfMinute);
         const session = todaySession(candles);
-        if (session.length < 3) return null;
+        // One bar is enough to measure today's move, VWAP and relative strength,
+        // which is all the pre-breakout watch path needs. A 3-bar floor here
+        // rejected every symbol as "no data" before 09:45 and made watch mode
+        // structurally unreachable — the setup evaluator does its own bar check.
+        if (!session.length) return null;
 
         const prevClose = previousSessionClose(candles);
         if (!Number.isFinite(prevClose) || prevClose <= 0) return null;
@@ -477,9 +493,10 @@ class HeatmapV2ScanService {
 
         const candidateList = [...candidates.values()].slice(0, o.maxCandidates);
 
-        // NIFTY's own bar count is the market clock: fewer than two bars means
-        // the 09:15 opening range has not closed yet.
-        const preOpeningRange = niftySession.length < 2;
+        // NIFTY's own bar count is the market clock. This threshold has to match
+        // what `evaluateSetupV2` can actually deliver: with fewer than three bars
+        // no break can be confirmed, so report watches rather than nothing.
+        const preOpeningRange = niftySession.length < MIN_BARS_FOR_CONFIRMED_BREAK;
 
         logger.info(
             `🔥 Heatmap v2: ${sentiment.label} (G${sentiment.green}/R${sentiment.red}) · ${regime.label} · ` +
@@ -529,10 +546,10 @@ class HeatmapV2ScanService {
                 turnover: m.turnover,
             };
 
-            // Before ~09:30 there is no closed opening range to break. Rather
-            // than post nothing every morning (the daily scan runs at 09:20),
-            // return the names actually moving with their sector and beating
-            // NIFTY, clearly marked as pre-breakout watches with no levels.
+            // Early in the session no break can be confirmed yet. Rather than
+            // post nothing (the daily scan runs at 09:20, and a confirmed break
+            // is impossible before ~09:45), return the names actually moving
+            // with their sector and beating NIFTY, marked as watches, no levels.
             if (preOpeningRange) {
                 return {
                     ...base,

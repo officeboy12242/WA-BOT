@@ -24,7 +24,15 @@ function parseSymbolList(raw) {
         .slice(0, 12);
 }
 
-function formatAlertTime() {
+/**
+ * heatmap2 runs on its own later clock, so a single hardcoded time here would
+ * tell v2 groups the wrong thing.
+ */
+function formatAlertTime(discoverySource = null) {
+    if (discoverySource === 'heatmap2') {
+        const times = config.TRADE_ALERT_HEATMAP2_TIMES;
+        if (times?.length) return times.join(' & ');
+    }
     return config.TRADE_ALERT_TIME || '09:20';
 }
 
@@ -129,7 +137,10 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
             r += `🔘 *Status:* ${currentlyOn ? '✅ ON' : '❌ OFF'}\n`;
             r += `🧠 *Mode:* ${modeLabel(mode)}\n`;
             r += `📡 *Discovery:* ${sourceLabel(discoverySource)}\n`;
-            r += `🕐 *Daily time:* ${formatAlertTime()} IST (trading days only)\n`;
+            r += `🕐 *Daily time:* ${formatAlertTime(discoverySource)} IST (trading days only)\n`;
+            if (discoverySource === 'heatmap2') {
+                r += '   _v2 runs later: a breakout cannot be confirmed before ~09:45._\n';
+            }
             r += `📊 *Symbols:* ${symbolLine}\n`;
             r += `🔔 *Posts:* CE/PE when AI ≥70% · confluence ≥40 (soft ≥25 if quiet day)\n`;
             r += `🌐 *Data:* ${

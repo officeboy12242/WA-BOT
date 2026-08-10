@@ -242,6 +242,17 @@ export const config = {
     /** Pre-market scan time IST — default 09:20 so posts land ~09:22 after fast scan. */
     TRADE_ALERT_TIME: (process.env.TRADE_ALERT_TIME || '09:20').trim(),
     TRADE_ALERT_TIMEZONE: process.env.TRADE_ALERT_TIMEZONE || 'Asia/Kolkata',
+    /**
+     * Separate clock for heatmap2 groups. v2 requires a closed opening range
+     * plus a confirming bar, so no breakout can exist before ~09:45 — at the
+     * 09:20 pre-market slot it can only offer watches with no levels. Its
+     * measured edge also dies after noon, so both slots sit inside 09:45–12:00.
+     * Groups on v1 / legacy / nse keep TRADE_ALERT_TIME.
+     */
+    TRADE_ALERT_HEATMAP2_TIMES: (process.env.TRADE_ALERT_HEATMAP2_TIMES || '09:50,11:15')
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => /^\d{1,2}:\d{2}$/.test(s)),
     /** Parallel symbol analyses during daily scan (1–3). */
     TRADE_ALERT_SCAN_CONCURRENCY: Math.max(
         1,
