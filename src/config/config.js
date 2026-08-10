@@ -257,6 +257,19 @@ export const config = {
         .split(',')
         .map((s) => s.trim())
         .filter((s) => /^\d{1,2}:\d{2}$/.test(s)),
+    /**
+     * Clock for `preopen` groups. EMPTY BY DEFAULT.
+     *
+     * The NSE pre-open auction runs 09:00–09:08, so 09:15 is the earliest post
+     * that carries same-day information and the latest that still beats the open.
+     * Only set this once a group is actually switched to the `preopen` source —
+     * setting it also moves those groups OFF the 09:20 slot so they post once.
+     *
+     * Note the pre-open ranking is not backtested (NSE publishes no history for
+     * that endpoint), so treat its output as a watchlist with risk levels until
+     * TradeOutcomeResolver has graded enough of it.
+     */
+    TRADE_ALERT_PREOPEN_TIME: (process.env.TRADE_ALERT_PREOPEN_TIME || '').trim(),
     /** Parallel symbol analyses during daily scan (1–3). */
     TRADE_ALERT_SCAN_CONCURRENCY: Math.max(
         1,

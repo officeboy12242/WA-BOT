@@ -14,6 +14,7 @@ import { createMarketDeltaService } from './MarketDeltaService.js';
 import { createTradeOutcomeService } from './TradeOutcomeService.js';
 import { heatmapBreakoutScanService } from './HeatmapBreakoutScanService.js';
 import { heatmapV2ScanService } from './HeatmapV2ScanService.js';
+import { preOpenScanService } from './PreOpenScanService.js';
 import { normalizeDiscoverySource } from '../utils/discoverySource.js';
 
 const MOMENTUM_RS_MIN = 1.5;
@@ -155,10 +156,120 @@ class TradeDiscoveryEngine {
         if (discoverySource === 'heatmap') {
             return this.runHeatmapBreakout();
         }
+        if (discoverySource === 'preopen') {
+            return this.runPreOpen();
+        }
         if (discoverySource === 'nse') {
             return this.runNseGainersLosers();
         }
         return this.runLegacy({ forceRefresh });
+    }
+
+    /**
+     * Pre-open auction selection, for a 09:15 post.
+     *
+     * Shape-compatible with `runHeatmapV2()`. The distinguishing property is that
+     * it needs no intraday data at all, so it can run before the bell — which is
+     * the whole point. See PreOpenScanService for the validation caveat.
+     */
+    async runPreOpen() {
+        const marketMode = getIndiaMarketMode();
+        const scannedAt = new Date();
+
+        const [scan, marketNewsPack, calibration] = await Promise.all([
+            preOpenScanService.scan({ maxPicks: this.heatmapMax }),
+            stockNewsService.fetchMarketHeadlines(),
+            this.outcomes.getCalibration(),
+        ]);
+
+        const headlines = String(marketNewsPack?.context || '').split('\n').filter(Boolean);
+        const picks = scan?.picks || [];
+        const symbols = picks.map((p) => p.symbol);
+
+        if (!picks.length) {
+            logger.info('📋 Pre-open discovery: no qualifying names in the auction');
+        }
+
+        const universeRows = picks.map((p) => ({
+            symbol: p.symbol,
+            changePct: Number(p.gapPct.toFixed(2)),
+            price: p.iep,
+            volume: null,
+        }));
+
+        const movers = {
+            gainers: picks
+                .filter((p) => p.side === 'long')
+                .map((p) => ({ symbol: p.symbol, changePct: Number(p.gapPct.toFixed(2)), price: p.iep })),
+            losers: picks
+                .filter((p) => p.side === 'short')
+                .map((p) => ({ symbol: p.symbol, changePct: Number(p.gapPct.toFixed(2)), price: p.iep })),
+        };
+
+        const catalystItems = catalystRadarService.scanHeadlines(headlines, new Set(symbols));
+        const catalystHighlights = catalystRadarService.formatHighlights(catalystItems);
+
+        const symbolMeta = picks.map((p) => {
+            const row = universeRows.find((r) => r.symbol === p.symbol);
+            const conf = scoreConfluence({
+                symbol: p.symbol,
+                quote: row,
+                movers,
+                macro: null,
+                catalystItems,
+                smartMoneyDeals: [],
+                sectorTag: null,
+            });
+            return {
+                symbol: p.symbol,
+                sources: [`preopen ${p.side}`, `score ${p.score}`, `book ${(p.imbalance * 100).toFixed(0)}%`],
+                confluence: conf.score,
+                confluencePass: conf.passes,
+                blocked: conf.blocked,
+                setup: p.setup,
+                sector: null,
+                changePct: Number(p.gapPct.toFixed(2)),
+                relStrength: Number(p.relGapPct.toFixed(2)),
+            };
+        });
+
+        const moversBrief = picks
+            .map((p) => `${p.symbol} ${p.gapPct >= 0 ? '+' : ''}${p.gapPct.toFixed(2)}% (${p.side} ${p.score})`)
+            .join(', ');
+
+        logger.info(`📡 Pre-open discovery: ${symbols.length} symbols from ${scan?.scanned ?? 0} auction rows`);
+
+        return {
+            symbols,
+            symbolMeta,
+            context: preOpenScanService.formatBlock(scan),
+            universeRows,
+            movers,
+            moversBrief,
+            marketNews: headlines.slice(0, 6).join('\n'),
+            macro: null,
+            hotSectors: { hot: [], cold: [], all: [] },
+            phase4Picks: [],
+            momentumAlerts: [],
+            smartMoney: { deals: [] },
+            catalystItems,
+            catalystHighlights,
+            niftyGl: null,
+            heatmap: scan,
+            delta: null,
+            marketMode: marketMode.mode,
+            marketModeLabel: marketMode.label,
+            freshness: checkQuoteFreshness(scannedAt),
+            gates: {
+                minConfluence: calibration.minConfluence || getMinConfluenceScore(this.config),
+                minConfidence: calibration.minConfidence || adjustConfidenceFloor(null, 70),
+                watchOnly: marketMode.watchOnly,
+                allowsLiveEntry: marketMode.allowsLiveEntry,
+            },
+            scannedAt,
+            calibration,
+            discoverySource: 'preopen',
+        };
     }
 
     /**

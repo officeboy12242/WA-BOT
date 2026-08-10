@@ -21,6 +21,7 @@ import { formatSlotKey, msUntilTimeInTimezone } from './newsScheduler.js';
 import { createDurableSlotStore } from './durableSlots.js';
 
 const HEATMAP2 = 'heatmap2';
+const PREOPEN = 'preopen';
 
 function parseAlertTime(timeStr) {
     const [h, m = '0'] = String(timeStr || '09:20').trim().split(':');
@@ -116,11 +117,16 @@ export function startTradeAlertScheduler({
         ? config.TRADE_ALERT_HEATMAP2_TIMES
         : [];
 
-    // With no extra v2 slots configured, every source shares the main clock —
-    // heatmap2 must NOT be excluded here or those groups would never fire.
+    // With no extra slots configured, every source shares the main clock — a
+    // source must NOT be excluded here unless it has its own clock below, or
+    // those groups would never fire at all.
+    const movedOff = [
+        ...(v2Times.length ? [HEATMAP2] : []),
+        ...(config.TRADE_ALERT_PREOPEN_TIME ? [PREOPEN] : []),
+    ];
     scheduleSlot('default', config.TRADE_ALERT_TIME, {
-        excludeSources: v2Times.length ? [HEATMAP2] : null,
-        slotLabel: v2Times.length ? 'pre-market' : null,
+        excludeSources: movedOff.length ? movedOff : null,
+        slotLabel: movedOff.length ? 'pre-market' : null,
     });
 
     // Only when explicitly configured: a later post for heatmap2 groups that
@@ -131,6 +137,18 @@ export function startTradeAlertScheduler({
             slotLabel: i === 0 ? 'v2 morning' : 'v2 midday',
         });
     });
+
+    // Pre-open groups need their own earlier clock: the NSE auction closes at
+    // 09:08, so 09:15 is the earliest post that carries same-day information and
+    // the latest that still beats the open. Empty by default — a group only lands
+    // here once it is explicitly switched to the `preopen` source.
+    const preOpenTime = config.TRADE_ALERT_PREOPEN_TIME;
+    if (preOpenTime) {
+        scheduleSlot('preopen', preOpenTime, {
+            onlySources: [PREOPEN],
+            slotLabel: 'pre-open auction',
+        });
+    }
 
     return {
         stop() {
