@@ -63,8 +63,12 @@ export async function fetchYahooDailyCandles(yahooSymbol, { range = '2y', force 
                 const low = Number(q.low?.[i]);
                 const close = Number(q.close?.[i]);
                 const volume = Number(q.volume?.[i]) || 0;
-                // Yahoo pads holidays with nulls — drop them so indicators stay aligned.
-                if (![open, high, low, close].every(Number.isFinite)) continue;
+                // Yahoo pads holidays and the not-yet-formed session with nulls, and
+                // Number(null) is 0 — which Number.isFinite accepts. An all-zero bar
+                // reads as a -100% move: it flips direction, inflates ATR, and makes
+                // the outcome resolver grade every open long as a stop-out. Require
+                // positive prices, not merely finite ones.
+                if (![open, high, low, close].every((v) => Number.isFinite(v) && v > 0)) continue;
                 candles.push({ ts: ts[i] * 1000, open, high, low, close, volume });
             }
 
