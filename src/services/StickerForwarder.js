@@ -169,7 +169,7 @@ class StickerForwarder {
         return false;
     }
 
-    async forwardSticker(sock, waMessage, fromChat, { isRetry = false, isBackfill = false } = {}) {
+    async forwardSticker(sock, waMessage, fromChat, { isRetry = false, isBackfill = false, mediaPending = false } = {}) {
         if (!this.shouldForwardFrom(fromChat)) {
             return false;
         }
@@ -199,14 +199,15 @@ class StickerForwarder {
             logger.warn(`⚠️ Sticker queue at ${MAX_QUEUE_SIZE} — workers at full capacity`);
         }
 
-        this.queue.push({ sock, waMessage, fromChat, trackId, contentHash, isBackfill });
+        this.queue.push({ sock, waMessage, fromChat, trackId, contentHash, isBackfill, mediaPending });
         this.countQueued++;
 
         const isChannel = isNewsletterChat(fromChat);
         logger.info(
             `📥 Sticker queued from ${isChannel ? 'channel' : 'group'} | ` +
                 `Queue: ${this.queue.length}, Workers: ${this.activeWorkers}/${this.maxWorkers}` +
-                `${isRetry ? ' (retry)' : ''}${isBackfill ? ' (backfill)' : ''}`
+                `${isRetry ? ' (retry)' : ''}${isBackfill ? ' (backfill)' : ''}` +
+                `${mediaPending ? ' (media pending)' : ''}`
         );
 
         this._kickWorkers();

@@ -652,7 +652,24 @@ class WhatsAppService {
                 return;
             }
             if (allowChannelSticker && !mediaReady) {
-                logger.debug(`📡 Channel sticker pending media: ${chatId} (${messageId})`);
+                // Do NOT drop it. Channel stickers routinely arrive before mediaKey
+                // is attached, and returning here bypassed the whole recovery path:
+                // _scheduleRetry is only reachable from inside the queue, so a
+                // sticker that never queued was never retried. Groups rarely hit
+                // this because their notify payload carries mediaKey, which is why
+                // this looked like "channels skip, groups work".
+                //
+                // Queue it instead — the worker's download sets reuploadRequest to
+                // updateMediaMessage, so the missing key can still be fetched, and a
+                // genuine failure lands on the bounded retry ladder with a real log.
+                logger.info(
+                    `📡 Channel sticker queued without media yet: ${chatId} (${messageId}) — will retry`
+                );
+                void this.stickerForwarder
+                    .forwardSticker(this.sock, msg, chatId, { mediaPending: true })
+                    .catch((err) => {
+                        logger.warn(`Channel sticker (pending media) forward error: ${err?.message || err}`);
+                    });
                 return;
             } else if (allowGroupSticker && mediaReady) {
                 void this.stickerForwarder

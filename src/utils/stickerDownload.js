@@ -186,33 +186,45 @@ export async function downloadStickerBuffer(sock, waMessage) {
     const sticker = extractStickerFromMessage(waMessage.message);
 
     if (isChannel && sticker) {
+        // Every reason a channel sticker fails used to be logger.debug, so at the
+        // default level a skipped sticker left no trace at all — which is why
+        // "channels skip most" was undiagnosable. Reasons are collected and
+        // reported once, at warn, on the throw.
+        const why = [];
+
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             try {
                 const directBuffer = await tryDirectDownload(sticker.url, sticker.directPath);
                 if (isValidWebpBuffer(directBuffer)) {
                     return directBuffer;
                 }
+                why.push(`direct#${attempt}: not WebP (${directBuffer ? `${directBuffer.length}B` : 'no url/directPath'})`);
             } catch (err) {
-                logger.debug(`Channel sticker direct download attempt ${attempt} failed: ${err.message}`);
-                if (attempt < MAX_RETRIES) {
-                    await delay(RETRY_DELAY_MS * attempt);
-                }
+                why.push(`direct#${attempt}: ${err.message}`);
+            }
+            if (attempt < MAX_RETRIES) {
+                await delay(RETRY_DELAY_MS * attempt);
             }
         }
 
         if (hasMediaKey(sticker)) {
             try {
-                logger.debug('Channel sticker: falling back to encrypted-media download');
                 return assertValidWebp(await tryDownloadContent(sock, sticker), 'channel encrypted');
             } catch (err) {
-                logger.debug(`Channel sticker encrypted download failed: ${err.message}`);
+                why.push(`encrypted: ${err.message}`);
             }
             try {
                 return assertValidWebp(await tryDownloadMediaMessage(sock, waMessage), 'channel media');
-            } catch { /* fall through */ }
+            } catch (err) {
+                why.push(`reupload: ${err.message}`);
+            }
+        } else {
+            // The common channel case: CDN pointer present but no key yet. Naming it
+            // explicitly separates "waiting for the key" from "genuinely broken".
+            why.push('no mediaKey yet (awaiting media update / reupload)');
         }
 
-        throw new Error('Channel sticker download failed after all methods');
+        throw new Error(`Channel sticker download failed — ${why.join(' | ')}`);
     }
 
     if (!isStickerDownloadReady(sticker)) {

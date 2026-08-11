@@ -153,6 +153,12 @@ class ChannelStickerPoller {
                     `📡 Channel ${channelJid} poll paused after ${newFails} failures ` +
                         `(resets in ≤${FAIL_COUNT_RESET_MS / 60_000}m): ${err.message}`
                 );
+            } else if (newFails === 1) {
+                // The backfill is the only safety net for stickers that arrive
+                // without media. Nineteen debug-level failures meant a channel could
+                // be silently dead for ~20 minutes before anything was logged, so the
+                // first failure is now visible at the default level.
+                logger.warn(`📡 Channel poll failing ${channelJid} (1/${MAX_CONSECUTIVE_FAILURES}): ${err.message}`);
             } else {
                 logger.debug(`📡 Channel poll error ${channelJid} (${newFails}/${MAX_CONSECUTIVE_FAILURES}): ${err.message}`);
             }
