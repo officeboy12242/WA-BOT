@@ -20,6 +20,7 @@ import {
     isPrescriptiveSource,
 } from '../src/utils/discoverySource.js';
 import { FNO_UNIVERSE } from '../src/services/MarketScanService.js';
+import { computeMovedOffSources } from '../src/utils/tradeAlertScheduler.js';
 import { pickStrategy } from '../src/utils/tradeMorningPick.js';
 import { formatTradeScanPreview } from '../src/utils/tradeScanFormatter.js';
 
@@ -201,6 +202,28 @@ ok(Array.isArray(FNO_UNIVERSE) && FNO_UNIVERSE.length > 20, 'static FNO_UNIVERSE
 ok(!FNO_UNIVERSE.includes('FINCABLES'), 'the static fallback excludes non-F&O names like FINCABLES');
 ok(UNIVERSE.includes('FINCABLES'), 'FINCABLES IS in the raw scan universe — so the gate is load-bearing');
 ok(UNIVERSE.length > FNO_UNIVERSE.length, 'raw universe is wider than the F&O fallback, as expected');
+
+// ------------------------------------------------------- scheduler slot contract
+// The dangerous direction is excluding a source from the shared slot when it has
+// no clock of its own: those groups then never post at all.
+const moved = (cfg) => computeMovedOffSources(cfg).sort();
+
+ok(moved({}).length === 0, 'nothing configured -> nothing excluded from the shared slot');
+ok(moved({ TRADE_ALERT_HEATMAP2_TIMES: [] }).length === 0, 'empty v2 times -> heatmap2 stays on the shared slot');
+ok(moved({ TRADE_ALERT_PREOPEN_TIME: '' }).length === 0, 'empty preopen time -> preopen stays on the shared slot');
+ok(moved({ TRADE_ALERT_TURNOVER_TIME: '' }).length === 0, 'empty turnover time -> turnover stays on the shared slot');
+
+ok(JSON.stringify(moved({ TRADE_ALERT_TURNOVER_TIME: '09:15' })) === '["turnover"]',
+    'turnover time set -> only turnover moves off');
+ok(JSON.stringify(moved({ TRADE_ALERT_PREOPEN_TIME: '09:15' })) === '["preopen"]',
+    'preopen time set -> only preopen moves off');
+ok(JSON.stringify(moved({ TRADE_ALERT_PREOPEN_TIME: '09:15', TRADE_ALERT_TURNOVER_TIME: '09:15' })) === '["preopen","turnover"]',
+    'both set -> both move off, and they may share the same time');
+ok(JSON.stringify(moved({ TRADE_ALERT_HEATMAP2_TIMES: ['09:50'], TRADE_ALERT_TURNOVER_TIME: '09:15' })) === '["heatmap2","turnover"]',
+    'independent clocks compose');
+// a source with its own clock must never ALSO be on the shared slot
+for (const src of ['preopen', 'turnover'])
+    ok(!moved({}).includes(src), `${src} is not excluded while it has no clock`);
 
 console.log(`\ncheck-turnover-band: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

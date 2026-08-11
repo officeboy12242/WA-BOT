@@ -283,6 +283,16 @@ export const config = {
      */
     TURNOVER_BAND_FROM: Math.max(1, parseInt(process.env.TURNOVER_BAND_FROM, 10) || 11),
     TURNOVER_BAND_TO: Math.max(2, parseInt(process.env.TURNOVER_BAND_TO, 10) || 30),
+    /**
+     * Clock for `turnover` groups. EMPTY BY DEFAULT — they share TRADE_ALERT_TIME
+     * (09:20) until this is set.
+     *
+     * This source reads only the PREVIOUS session's daily candles, so it has
+     * nothing to gain by waiting for the opening range and can post as early as
+     * you like — 09:15 puts it in front of the open. Setting it also moves those
+     * groups OFF the shared slot so they post once.
+     */
+    TRADE_ALERT_TURNOVER_TIME: (process.env.TRADE_ALERT_TURNOVER_TIME || '').trim(),
     /** Parallel symbol analyses during daily scan (1–3). */
     TRADE_ALERT_SCAN_CONCURRENCY: Math.max(
         1,

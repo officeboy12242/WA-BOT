@@ -22,6 +22,28 @@ import { createDurableSlotStore } from './durableSlots.js';
 
 const HEATMAP2 = 'heatmap2';
 const PREOPEN = 'preopen';
+const TURNOVER = 'turnover';
+
+/**
+ * Sources that have their own clock and must therefore be EXCLUDED from the
+ * shared slot, or their groups would post twice.
+ *
+ * The inverse mistake is worse: excluding a source here that has no clock of its
+ * own means those groups never fire at all. So this is derived strictly from
+ * which times are configured, and is exported so that contract is testable.
+ *
+ * @returns {string[]}
+ */
+export function computeMovedOffSources(config = {}) {
+    const v2Times = Array.isArray(config.TRADE_ALERT_HEATMAP2_TIMES)
+        ? config.TRADE_ALERT_HEATMAP2_TIMES
+        : [];
+    return [
+        ...(v2Times.length ? [HEATMAP2] : []),
+        ...(config.TRADE_ALERT_PREOPEN_TIME ? [PREOPEN] : []),
+        ...(config.TRADE_ALERT_TURNOVER_TIME ? [TURNOVER] : []),
+    ];
+}
 
 function parseAlertTime(timeStr) {
     const [h, m = '0'] = String(timeStr || '09:20').trim().split(':');
@@ -117,13 +139,8 @@ export function startTradeAlertScheduler({
         ? config.TRADE_ALERT_HEATMAP2_TIMES
         : [];
 
-    // With no extra slots configured, every source shares the main clock — a
-    // source must NOT be excluded here unless it has its own clock below, or
-    // those groups would never fire at all.
-    const movedOff = [
-        ...(v2Times.length ? [HEATMAP2] : []),
-        ...(config.TRADE_ALERT_PREOPEN_TIME ? [PREOPEN] : []),
-    ];
+    // With no extra slots configured, every source shares the main clock.
+    const movedOff = computeMovedOffSources(config);
     scheduleSlot('default', config.TRADE_ALERT_TIME, {
         excludeSources: movedOff.length ? movedOff : null,
         slotLabel: movedOff.length ? 'pre-market' : null,
@@ -147,6 +164,18 @@ export function startTradeAlertScheduler({
         scheduleSlot('preopen', preOpenTime, {
             onlySources: [PREOPEN],
             slotLabel: 'pre-open auction',
+        });
+    }
+
+    // Turnover-band groups can also post early — that source reads only the
+    // PREVIOUS session's daily data, so unlike heatmap2 it has nothing to gain by
+    // waiting for the opening range. Its own clock, empty by default, so a group
+    // stays on the shared 09:20 slot unless this is set.
+    const turnoverTime = config.TRADE_ALERT_TURNOVER_TIME;
+    if (turnoverTime) {
+        scheduleSlot('turnover', turnoverTime, {
+            onlySources: [TURNOVER],
+            slotLabel: 'turnover band',
         });
     }
 
