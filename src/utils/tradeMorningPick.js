@@ -18,6 +18,7 @@ const STRATEGIES = {
     pcrOi: 'PCR / OI confirmation',
     vwap: 'VWAP reclaim / reject',
     preOpen: 'Pre-open auction + order imbalance',
+    turnoverBand: 'Turnover band + EMA 8/21 trend',
 };
 
 function pad(s, n) {
@@ -90,6 +91,11 @@ export function pickStrategy({ discoverySource, confluence, signal, softGate } =
     // name a strategy that had no data to run on at selection time.
     if (src === 'preopen') {
         return STRATEGIES.preOpen;
+    }
+    // Chosen from a daily-timeframe EMA stack inside a turnover band. No opening
+    // range or VWAP was involved, so it must not borrow their labels either.
+    if (src === 'turnover') {
+        return STRATEGIES.turnoverBand;
     }
     if (conf >= 55 && ai >= 78 && !softGate) {
         return STRATEGIES.momentum;
@@ -281,6 +287,8 @@ export function formatMorningPickCard(pick, meta = {}) {
         lines.push('Invalidation: 15m close back inside OR / below 8 EMA');
     } else if (winner.strategy === STRATEGIES.preOpen) {
         lines.push('Invalidation: opening price rejects the auction level / book flips');
+    } else if (winner.strategy === STRATEGIES.turnoverBand) {
+        lines.push('Invalidation: daily close back through the 8 EMA against the trade');
     } else if (winner.strategy === STRATEGIES.momentum) {
         lines.push('Invalidation: momentum stall + loss of VWAP / prior swing');
     } else if (winner.strategy === STRATEGIES.pcrOi) {

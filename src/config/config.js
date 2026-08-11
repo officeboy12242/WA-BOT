@@ -270,6 +270,19 @@ export const config = {
      * TradeOutcomeResolver has graded enough of it.
      */
     TRADE_ALERT_PREOPEN_TIME: (process.env.TRADE_ALERT_PREOPEN_TIME || '').trim(),
+    /**
+     * Turnover band for the `turnover` source, 1-indexed inclusive.
+     *
+     * Defaults to ranks 11–30 on purpose: measured intraday on 5m bars with real
+     * traded prices, ranks 1–10 were NEGATIVE (-0.035R) while 11–20 (+0.038R),
+     * 21–30 (+0.141R) and 31–50 (+0.089R) were positive. The top of the list
+     * spends its move overnight, so it is already priced in by 09:20.
+     *
+     * n was 38–100 per band over 21 sessions, which is far too thin to size a
+     * decision on — see TurnoverBandScanService for the full caveat.
+     */
+    TURNOVER_BAND_FROM: Math.max(1, parseInt(process.env.TURNOVER_BAND_FROM, 10) || 11),
+    TURNOVER_BAND_TO: Math.max(2, parseInt(process.env.TURNOVER_BAND_TO, 10) || 30),
     /** Parallel symbol analyses during daily scan (1–3). */
     TRADE_ALERT_SCAN_CONCURRENCY: Math.max(
         1,

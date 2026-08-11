@@ -45,6 +45,8 @@ export function formatTradeScanPreview(discovery) {
         lines.push('📡 *Discovery:* NSE Heatmap + 15m OR / 8 EMA');
     } else if (d.discoverySource === 'preopen') {
         lines.push('📡 *Discovery:* Pre-open auction — IEP · order imbalance');
+    } else if (d.discoverySource === 'turnover') {
+        lines.push('📡 *Discovery:* Turnover band — ranks 11-30 · EMA 8/21');
     } else if (d.discoverySource === 'nse') {
         lines.push('📡 *Discovery:* NSE NIFTY50 top gainers + losers');
     }
@@ -80,6 +82,20 @@ export function formatTradeScanPreview(discovery) {
         }
         lines.push('└────────────────────────────');
         lines.push('│ _Auction consensus only — no opening range or VWAP yet._');
+        lines.push('');
+    } else if (hm?.version === 'turnover' && hm.picks?.length) {
+        lines.push('┌─ *TURNOVER BAND* ─');
+        lines.push(`│ Ranks ${hm.bandFrom}-${hm.bandTo} of ${hm.scanned} liquid names`);
+        for (const p of hm.picks) {
+            const s = p.setup;
+            lines.push(
+                `│ • *${p.symbol}* #${p.rank} · ${String(p.side).toUpperCase()} · ` +
+                `₹${p.turnoverCr}cr · trend ${p.strength} ATR · score ${p.score}`
+            );
+            if (s) lines.push(`│    E ${s.entry} · SL ${s.stop} · T1 ${s.target1} · T2 ${s.target2}`);
+        }
+        lines.push('└────────────────────────────');
+        lines.push('│ _Daily EMA trend — no intraday confirmation yet._');
         lines.push('');
     } else if (hm?.version === 2 && hm.picks?.length) {
         lines.push('┌─ *HEATMAP v2 — LIVE BREAKOUTS* ─');
@@ -259,6 +275,10 @@ export function formatTradeScanPreview(discovery) {
                 r.bookDisagrees ? `${r.bookDisagrees} where the order book disagreed` : null,
                 r.lopsided ? `${r.lopsided} with a one-sided book` : null,
                 r.noBook ? `${r.noBook} with no resting orders` : null,
+                // turnover-band reject reasons
+                r.emaFlat ? `${r.emaFlat} with EMAs disagreeing` : null,
+                r.outsideBand ? `${r.outsideBand} outside the turnover band` : null,
+                r.noAtr ? `${r.noAtr} with no ATR` : null,
             ].filter(Boolean);
             if (why.length) {
                 const scanned = d.heatmap.candidatesScanned ?? d.heatmap.scanned ?? '?';

@@ -15,6 +15,7 @@ import { createTradeOutcomeService } from './TradeOutcomeService.js';
 import { heatmapBreakoutScanService } from './HeatmapBreakoutScanService.js';
 import { heatmapV2ScanService } from './HeatmapV2ScanService.js';
 import { preOpenScanService } from './PreOpenScanService.js';
+import { turnoverBandScanService } from './TurnoverBandScanService.js';
 import { normalizeDiscoverySource } from '../utils/discoverySource.js';
 
 const MOMENTUM_RS_MIN = 1.5;
@@ -158,6 +159,9 @@ class TradeDiscoveryEngine {
         }
         if (discoverySource === 'preopen') {
             return this.runPreOpen();
+        }
+        if (discoverySource === 'turnover') {
+            return this.runTurnoverBand();
         }
         if (discoverySource === 'nse') {
             return this.runNseGainersLosers();
@@ -396,6 +400,106 @@ class TradeDiscoveryEngine {
             scannedAt,
             calibration,
             discoverySource: 'heatmap2',
+        };
+    }
+
+    /**
+     * Turnover-band selection for a next-day intraday post.
+     *
+     * Shape-compatible with `runHeatmapV2()`. Needs no intraday data, so it can
+     * run pre-market. See TurnoverBandScanService for why the band sits BELOW the
+     * top of the turnover list, and for how thin the supporting sample is.
+     */
+    async runTurnoverBand() {
+        const marketMode = getIndiaMarketMode();
+        const scannedAt = new Date();
+
+        const [scan, marketNewsPack, calibration] = await Promise.all([
+            turnoverBandScanService.scan({
+                maxPicks: this.heatmapMax,
+                bandFrom: this.config.TURNOVER_BAND_FROM,
+                bandTo: this.config.TURNOVER_BAND_TO,
+            }),
+            stockNewsService.fetchMarketHeadlines(),
+            this.outcomes.getCalibration(),
+        ]);
+
+        const headlines = String(marketNewsPack?.context || '').split('\n').filter(Boolean);
+        const picks = scan?.picks || [];
+        const symbols = picks.map((p) => p.symbol);
+
+        if (!picks.length) logger.info('📊 Turnover-band discovery: no qualifying names');
+
+        const universeRows = picks.map((p) => ({
+            symbol: p.symbol,
+            changePct: p.changePct,
+            price: p.close,
+            volume: null,
+        }));
+        const movers = {
+            gainers: picks.filter((p) => p.side === 'long').map((p) => ({ symbol: p.symbol, changePct: p.changePct, price: p.close })),
+            losers: picks.filter((p) => p.side === 'short').map((p) => ({ symbol: p.symbol, changePct: p.changePct, price: p.close })),
+        };
+
+        const catalystItems = catalystRadarService.scanHeadlines(headlines, new Set(symbols));
+        const catalystHighlights = catalystRadarService.formatHighlights(catalystItems);
+
+        const symbolMeta = picks.map((p) => {
+            const row = universeRows.find((r) => r.symbol === p.symbol);
+            const conf = scoreConfluence({
+                symbol: p.symbol,
+                quote: row,
+                movers,
+                macro: null,
+                catalystItems,
+                smartMoneyDeals: [],
+                sectorTag: null,
+            });
+            return {
+                symbol: p.symbol,
+                sources: [`turnover ${p.side}`, `rank #${p.rank}`, `trend ${p.strength} ATR`],
+                confluence: conf.score,
+                confluencePass: conf.passes,
+                blocked: conf.blocked,
+                setup: p.setup,
+                sector: null,
+                changePct: p.changePct,
+                relStrength: null,
+            };
+        });
+
+        logger.info(`📡 Turnover-band discovery: ${symbols.length} symbols from ranks ${scan?.bandFrom}-${scan?.bandTo}`);
+
+        return {
+            symbols,
+            symbolMeta,
+            context: turnoverBandScanService.formatBlock(scan),
+            universeRows,
+            movers,
+            moversBrief: picks.map((p) => `${p.symbol} #${p.rank} (${p.side} ${p.score})`).join(', '),
+            marketNews: headlines.slice(0, 6).join('\n'),
+            macro: null,
+            hotSectors: { hot: [], cold: [], all: [] },
+            phase4Picks: [],
+            momentumAlerts: [],
+            smartMoney: { deals: [] },
+            catalystItems,
+            catalystHighlights,
+            niftyGl: null,
+            heatmap: scan,
+            delta: null,
+            marketMode: marketMode.mode,
+            marketModeLabel: marketMode.label,
+            freshness: checkQuoteFreshness(scannedAt),
+            gates: {
+                minConfluence: calibration.minConfluence || getMinConfluenceScore(this.config),
+                minConfidence: calibration.minConfidence || adjustConfidenceFloor(null, 70),
+                watchOnly: marketMode.watchOnly,
+                allowsLiveEntry: marketMode.allowsLiveEntry,
+            },
+            scannedAt,
+            calibration,
+            discoverySource: 'turnover',
         };
     }
 

@@ -288,6 +288,7 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
                         '`/tradelert source heatmap2` — live intraday % + VWAP + RS + ATR stops\n' +
                         '`/tradelert source heatmap` — v1: NSE heatmap ±2% + 15m OR / 8 EMA\n' +
                         '`/tradelert source preopen` — 09:15 post from the NSE pre-open auction\n' +
+                        '`/tradelert source turnover` — turnover band (ranks 11-30) + EMA 8/21\n' +
                         '`/tradelert source nse` — NIFTY50 top 5 gainers + 5 losers\n' +
                         '`/tradelert source legacy` — sectors / movers / smart money\n\n' +
                         `Current: *${sourceLabel(discoverySource)}*`,
@@ -321,6 +322,16 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
                     '_⚠️ Not backtested — NSE publishes no history for the pre-open feed, so ' +
                     'there is no win rate to quote. Treat it as a watchlist with risk levels ' +
                     'until `/tradelert stats` has graded enough of it._\n',
+                turnover:
+                    'Ranks the F&O universe by *previous-session turnover*, then takes ranks ' +
+                    '*11–30* — deliberately BELOW the top. Direction comes from daily *EMA 8/21* ' +
+                    'stacking; names where price and both EMAs disagree are dropped.\n\n' +
+                    '_Why not the top 10: measured intraday on real traded prices, ranks 1–10 ' +
+                    'came out *negative* (−0.035R) while 11–30 were positive. The top of the ' +
+                    'list spends its move overnight, so it is already priced in by 09:20._\n\n' +
+                    '_⚠️ Thin evidence — 38–100 trades per band over 21 sessions. The ordering ' +
+                    'is consistent but no single band is distinguishable from noise at that ' +
+                    'sample. Check `/tradelert stats` before trusting it._\n',
                 nse: `Daily auto scan uses NSE NIFTY50 top *${nseEach} gainers + ${nseEach} losers*, then CE/PE trades.\n`,
                 legacy: 'Daily auto scan uses the legacy multi-signal watchlist.\n',
             };
