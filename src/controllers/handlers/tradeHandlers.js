@@ -287,6 +287,7 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
                         '❌ Usage:\n' +
                         '`/tradelert source heatmap2` — live intraday % + VWAP + RS + ATR stops\n' +
                         '`/tradelert source heatmap` — v1: NSE heatmap ±2% + 15m OR / 8 EMA\n' +
+                        '`/tradelert source preopen` — 09:15 post from the NSE pre-open auction\n' +
                         '`/tradelert source nse` — NIFTY50 top 5 gainers + 5 losers\n' +
                         '`/tradelert source legacy` — sectors / movers / smart money\n\n' +
                         `Current: *${sourceLabel(discoverySource)}*`,
@@ -299,23 +300,34 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
                 next,
                 senderPhone
             );
+            // Keyed, not a ternary chain: the old chain ended in the legacy blurb,
+            // so any source added later silently described itself as legacy.
+            // `preopen` did exactly that. An unmapped source now says so instead.
+            const SOURCE_BLURBS = {
+                heatmap2:
+                    'Ranks sectors on the *live* index move, then takes constituents ' +
+                    'actually moving today (not their pre-open gap). Each must break the ' +
+                    '15m opening range on the right side of *VWAP*, be *outperforming ' +
+                    'NIFTY*, have a stop inside *0.6–2×ATR*, break *before noon*, and be ' +
+                    '*confirmed by the next candle*. Targets 1R / 2R.\n',
+                heatmap:
+                    'Daily auto scan uses *heatmap bias* → stocks ±2% in hot sectors → ranks ' +
+                    '*15m opening-range breakouts* with *8 EMA* filters, then CE/PE trades.\n',
+                preopen:
+                    'Posts at *09:15*, from the NSE pre-open auction (09:00–09:08). Takes names ' +
+                    'whose *IEP* — the real auction clearing price — is away from the board ' +
+                    'median, where the resting *order book agrees* with that direction, on a ' +
+                    'liquid enough auction. Stops are ATR-bounded.\n\n' +
+                    '_⚠️ Not backtested — NSE publishes no history for the pre-open feed, so ' +
+                    'there is no win rate to quote. Treat it as a watchlist with risk levels ' +
+                    'until `/tradelert stats` has graded enough of it._\n',
+                nse: `Daily auto scan uses NSE NIFTY50 top *${nseEach} gainers + ${nseEach} losers*, then CE/PE trades.\n`,
+                legacy: 'Daily auto scan uses the legacy multi-signal watchlist.\n',
+            };
             await sock.sendMessage(chatId, {
                 text:
                     `✅ *Discovery source:* ${sourceLabel(saved)}\n\n` +
-                    (saved === 'heatmap2'
-                        ? 'Ranks sectors on the *live* index move, then takes constituents ' +
-                          'actually moving today (not their pre-open gap). Each must break the ' +
-                          '15m opening range on the right side of *VWAP*, be *outperforming ' +
-                          'NIFTY*, have a stop inside *0.6–2×ATR*, break *before noon*, and be ' +
-                          '*confirmed by the next candle*. Targets 1R / 2R.\n\n' +
-                          '_Backtested over 22 sessions × 230 symbols: *66% to T1*, +0.22R per ' +
-                          'trade (64.8% on the held-out half). Gross of costs, and measured on ' +
-                          'the stock — the CE/PE leg will not track it 1:1._\n'
-                        : saved === 'heatmap'
-                          ? 'Daily auto scan uses *heatmap bias* → stocks ±2% in hot sectors → ranks *15m opening-range breakouts* with *8 EMA* filters, then CE/PE trades.\n'
-                          : saved === 'nse'
-                            ? `Daily auto scan uses NSE NIFTY50 top *${nseEach} gainers + ${nseEach} losers*, then CE/PE trades.\n`
-                            : 'Daily auto scan uses the legacy multi-signal watchlist.\n') +
+                    (SOURCE_BLURBS[saved] || `Source set to \`${saved}\`.\n`) +
                     '_Preview with `/tradelert scan` · compare with `/tradelert stats`._',
             });
             return;
