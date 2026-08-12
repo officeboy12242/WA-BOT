@@ -18,6 +18,7 @@ import { computeEntryState, ENTRY_STATES } from '../utils/tradeEntryState.js';
 import {
     formatDailyScanIntro,
     formatAlertMetaFooter,
+    withSentStamp,
 } from '../utils/tradeScanFormatter.js';
 import { parsePremium, parseTargets } from '../utils/tradePlanFormatter.js';
 import {
@@ -175,6 +176,13 @@ class TradeAlertController {
                 entryState,
                 confluence: null,
                 freshness: intel.quote?.price != null ? 'live quote' : null,
+                timings: {
+                    scannedAt: startedAt,
+                    // NSE's own clock for these premiums — the number that says how
+                    // stale the entry price is by the time the card is read.
+                    chainTimestamp: intel.optionChainSnapshot?.chainTimestamp || null,
+                    pricedAt: intel.optionChainSnapshot?.fetchedAt || null,
+                },
             },
         });
         return { text, body, signal, symbol: intel.symbol, entryState };
@@ -942,7 +950,8 @@ class TradeAlertController {
 
             for (const item of toPost) {
                 try {
-                    await sock.sendMessage(group.group_id, { text: item.text });
+                    // Stamp the send moment, so a delayed delivery is visible.
+                    await sock.sendMessage(group.group_id, { text: withSentStamp(item.text) });
                     item.resultEntry.posted = true;
                     item.resultEntry.softGate = Boolean(item.softGate);
                     item.resultEntry.isActionable = true;

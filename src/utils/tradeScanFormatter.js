@@ -356,3 +356,104 @@ export function formatAlertMetaFooter(meta = {}) {
     if (!parts.length) return '';
     return `\n📋 _${parts.join(' · ')}_`;
 }
+
+/** Premium quotes older than this get an explicit staleness warning. */
+export const STALE_PREMIUM_MIN = 10;
+
+/** HH:MM:SS in IST. Seconds matter here — delivery lag is measured in seconds. */
+export function istClock(ms = Date.now()) {
+    const d = new Date(ms + 5.5 * 3600e3);
+    const p = (n) => String(n).padStart(2, '0');
+    return `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
+}
+
+/**
+ * Timing block for a trade alert.
+ *
+ * Three different clocks, because they answer different questions:
+ *   scanned  — when the setup was found
+ *   priced   — NSE's own timestamp for the CE/PE premiums on this card
+ *   sent     — when the bot handed the message to WhatsApp
+ *
+ * The gap between `sent` and the time the message actually appears in the group
+ * is delivery lag, which is exactly what was impossible to see before: a card
+ * showing an entry premium gave no clue whether that price was 5 seconds or 5
+ * minutes old by the time it was read.
+ *
+ * @param {{ scannedAt?: Date|string|number, chainTimestamp?: string, pricedAt?: Date|string|number, sentAt?: Date|string|number }} t
+ */
+export function formatAlertTimings(timings = {}) {
+    // A default parameter only fires for undefined, so an explicit null still
+    // reaches the body — and `meta?.timings` yields null readily enough.
+    const t = timings || {};
+    const toMs = (v) => {
+        if (v == null) return null;
+        const ms = v instanceof Date ? v.getTime() : typeof v === 'number' ? v : Date.parse(v);
+        return Number.isFinite(ms) ? ms : null;
+    };
+    const rows = [];
+    const scanned = toMs(t.scannedAt);
+    if (scanned) rows.push(`🔍 Scanned ${istClock(scanned)}`);
+
+    // NSE ships its timestamp as a display string ("12-Aug-2026 15:29:59"); keep its
+    // own clock rather than reformatting a value we cannot reliably parse.
+    if (t.chainTimestamp) {
+        const clock = String(t.chainTimestamp).match(/(\d{1,2}:\d{2}(?::\d{2})?)/)?.[1];
+        rows.push(`💰 Priced ${clock || t.chainTimestamp}`);
+    } else {
+        const priced = toMs(t.pricedAt);
+        if (priced) rows.push(`💰 Priced ${istClock(priced)}`);
+    }
+
+    const sent = toMs(t.sentAt);
+    if (sent) rows.push(`📤 Sent ${istClock(sent)}`);
+
+    if (!rows.length) return '';
+    let out = `\n🕐 _${rows.join('  ·  ')} IST_`;
+
+    // Say it plainly when the quote is old. Discovering a 5-hour-old premium by
+    // mentally subtracting two timestamps is exactly the work this should remove.
+    const ageMin = premiumAgeMinutes(t.chainTimestamp, t.nowMs ?? Date.now());
+    if (ageMin != null && ageMin >= STALE_PREMIUM_MIN) {
+        const label = ageMin >= 120 ? `${Math.floor(ageMin / 60)}h ${ageMin % 60}m` : `${ageMin}m`;
+        out += `\n⚠️ _Premiums are ${label} old — re-check the chain before entering._`;
+    }
+    return out;
+}
+
+/**
+ * Stamp the send time onto a finished alert, at the moment of sending.
+ *
+ * Appending at send time rather than substituting a placeholder is deliberate: a
+ * caller that forgets this leaves the line off, instead of leaking a raw
+ * `{{SENT_AT}}` token into a subscriber's chat.
+ */
+export function withSentStamp(text, sentAt = Date.now()) {
+    const body = String(text ?? '');
+    if (!body.trim()) return body;
+    // Deliberately does NOT claim the premiums were live at this moment. When the
+    // market is shut, NSE returns the previous session's clock, so a card sent at
+    // 20:51 can be quoting 15:40 prices — asserting freshness here would be false
+    // in exactly the case this stamp exists to expose. The Priced clock above says
+    // when the premiums were real; this one only says when the card left.
+    return `${body}\n🕐 _Sent ${istClock(sentAt)} IST_`;
+}
+
+/** NSE ships "12-Aug-2026 15:40:00". Returns epoch ms in IST, or null. */
+export function parseNseTimestamp(raw) {
+    const m = String(raw || '').match(/(\d{1,2})-([A-Za-z]{3})-(\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+    if (!m) return null;
+    const months = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+    const mon = months[m[2].toLowerCase()];
+    if (mon === undefined) return null;
+    // The string is IST wall-clock, so build it as UTC then subtract the offset.
+    const utc = Date.UTC(Number(m[3]), mon, Number(m[1]), Number(m[4]), Number(m[5]), Number(m[6] || 0));
+    return utc - 5.5 * 3600e3;
+}
+
+/** Minutes between the quote and now, or null when unknown. */
+export function premiumAgeMinutes(chainTimestamp, nowMs = Date.now()) {
+    const ms = parseNseTimestamp(chainTimestamp);
+    if (ms == null) return null;
+    return Math.round((nowMs - ms) / 60_000);
+}

@@ -4,7 +4,7 @@
  */
 
 import { formatNowLabelIST } from '../utils/dateIST.js';
-import { formatAlertMetaFooter } from '../utils/tradeScanFormatter.js';
+import { formatAlertMetaFooter, formatAlertTimings } from '../utils/tradeScanFormatter.js';
 
 export const TRADE_ANALYSIS_SYSTEM_PROMPT = `You are an expert options trader for the Indian stock market (NSE/BSE) specializing in FUTURES & OPTIONS.
 
@@ -189,6 +189,12 @@ export function wrapTradeAlertMessage(symbol, body, { isDaily = false, isHiddenG
     }
     text += body.trim();
     text += '\n\n─────────────────────────────\n';
+    // Scan and pricing clocks belong here, above the disclaimer; the send clock is
+    // appended later by withSentStamp, since it is not known until the send.
+    const timings = formatAlertTimings(meta?.timings || {});
+    if (timings) {
+        text += `${timings.replace(/^\n/, '')}\n`;
+    }
     text += '⚠️ _Not financial advice. For education only. Trade at your own risk._';
     return text;
 }

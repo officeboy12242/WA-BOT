@@ -208,6 +208,15 @@ class NseOptionChainService {
                 atmStrike: atm?.strikePrice ?? null,
                 atmCe,
                 atmPe,
+                /**
+                 * NSE's own "as of" for these prices, and when we read them.
+                 *
+                 * The premiums on a card are only valid as of chainTimestamp — an
+                 * alert that lands in the group minutes later is quoting a stale
+                 * price, and without these two there is no way to tell how stale.
+                 */
+                chainTimestamp: records.timestamp || null,
+                fetchedAt: new Date().toISOString(),
             },
         };
     }
