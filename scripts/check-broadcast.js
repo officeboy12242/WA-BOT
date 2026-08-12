@@ -123,6 +123,43 @@ const hard = await svc._sendOnce(broken, 'x@s.whatsapp.net', 'hi');
 eq(hard.ok, false, 'a non-recoverable error fails');
 eq(hardAttempts, 1, 'a non-recoverable error is NOT retried');
 
+// A send the SERVER drops (463 privacy-token error arrives async, AFTER
+// sendMessage resolved) must be retried. sendMessage resolving does not mean
+// the recipient got it — the old code counted these as sent and never retried.
+let droppedSends = 0;
+const droppedByServer = {
+    sendMessage: async () => { droppedSends += 1; return { key: { id: `m${droppedSends}` } }; },
+};
+// First send dropped; token issued; the retry is accepted.
+const dropped = await svc._sendOnce(
+    droppedByServer, 'x@s.whatsapp.net', 'hi',
+    async (msgId) => (msgId === 'm1' ? 'ERROR' : 'OK')
+);
+eq(dropped.ok, true, 'an async server drop is retried and counts as ok');
+eq(dropped.retried, true, 'the async retry is reported');
+eq(droppedSends, 2, 'an async server drop triggers exactly one retry');
+
+// A recipient who STILL drops after the token must be reported as unreachable,
+// never as "sent" — and must not be retried again (spam-report risk).
+let blockedSends = 0;
+const blocksDms = {
+    sendMessage: async () => { blockedSends += 1; return { key: { id: `b${blockedSends}` } }; },
+};
+const blocked = await svc._sendOnce(blocksDms, 'x@s.whatsapp.net', 'hi', async () => 'ERROR');
+eq(blocked.ok, false, 'a recipient who blocks DMs is counted as not sent');
+eq(blocked.permanent, true, 'a persistent drop is flagged permanent/unreachable');
+eq(blockedSends, 2, 'a persistent drop is attempted exactly twice, never more');
+
+// A send the server accepts (ack observed) must NOT be resent.
+let ackSends = 0;
+const acked = {
+    sendMessage: async () => { ackSends += 1; return { key: { id: 'm2' } }; },
+};
+const goodAck = await svc._sendOnce(acked, 'x@s.whatsapp.net', 'hi', async () => 'OK');
+eq(goodAck.ok, true, 'an acked send succeeds');
+eq(goodAck.retried, false, 'an acked send is not retried');
+eq(ackSends, 1, 'an acked send happens exactly once');
+
 /* ── pacing config ───────────────────────────────────────────────────────── */
 
 ok(svc.opts.minGapMs >= 3000, 'the minimum gap is never sub-second');

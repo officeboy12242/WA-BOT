@@ -113,7 +113,7 @@ function humanDuration(ms) {
  * Live progress card. Pacing is deliberately slow, so a run spans hours or
  * days — without this the owner has no idea whether it is working or stuck.
  */
-function formatBroadcastProgress({ label, sent, failed, skippedOptOut, cursor, total, avgGapMs, capLeft, status }) {
+function formatBroadcastProgress({ label, sent, failed, skippedOptOut, skippedUnreachable = 0, cursor, total, avgGapMs, capLeft, status }) {
     const remaining = Math.max(0, total - cursor);
     const eta = avgGapMs ? humanDuration(remaining * avgGapMs) : null;
     const lines = [
@@ -121,7 +121,7 @@ function formatBroadcastProgress({ label, sent, failed, skippedOptOut, cursor, t
         '',
         progressBar(cursor, total),
         '',
-        `✅ Sent *${sent}*${failed ? ` · ❌ ${failed}` : ''}${skippedOptOut ? ` · 🚫 ${skippedOptOut} opted out` : ''}`,
+        `✅ Sent *${sent}*${failed ? ` · ❌ ${failed}` : ''}${skippedOptOut ? ` · 🚫 ${skippedOptOut} opted out` : ''}${skippedUnreachable ? ` · 🚷 ${skippedUnreachable} blocks DMs` : ''}`,
         `⏳ *${remaining}* remaining${eta ? ` · ~${eta} left` : ''}`,
     ];
     if (capLeft != null) lines.push(`📅 ${capLeft} left in today's cap`);
@@ -542,7 +542,11 @@ async function startBroadcastJob(broadcastService, getSock, chatId, jobId, label
     try {
         const job = await broadcastService.getJob(jobId);
         await render(
-            { sent: job?.sent || 0, failed: job?.failed || 0, skippedOptOut: job?.skipped_opt_out || 0, cursor: job?.cursor || 0, total: job?.targets?.length || 0 },
+            {
+                sent: job?.sent || 0, failed: job?.failed || 0, skippedOptOut: job?.skipped_opt_out || 0,
+                skippedUnreachable: job?.skipped_unreachable || 0,
+                cursor: job?.cursor || 0, total: job?.targets?.length || 0,
+            },
             'Broadcasting…'
         );
 
@@ -562,6 +566,7 @@ async function startBroadcastJob(broadcastService, getSock, chatId, jobId, label
                 sent: final.sent,
                 failed: final.failed,
                 skippedOptOut: final.skipped_opt_out || 0,
+                skippedUnreachable: final.skipped_unreachable || 0,
                 cursor: final.cursor,
                 total: final.targets?.length || 0,
             },
