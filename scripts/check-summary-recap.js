@@ -7,6 +7,7 @@ import AssistLlmRouter, { isQuotaExhaustedError, isAssistLlmFallbackError } from
 import { SUMMARY_SYSTEM_PROMPT } from '../src/services/NvidiaDeepSeekService.js';
 import { config } from '../src/config/config.js';
 import { formatRecapMessage } from '../src/controllers/GroupSummaryController.js';
+import { RECAP_STYLES, RECAP_STYLE_KEYS, pickRecapStyle, parseRecapStyle } from '../src/prompts/recapStyles.js';
 
 let pass = 0, fail = 0;
 const ok = (c, label) => { if (c) pass++; else { fail++; console.log(`  FAIL: ${label}`); } };
@@ -119,6 +120,64 @@ ok(!blank.includes('My two cents'), 'whitespace-only verdict is skipped');
 
 ok(formatRecapMessage({ groupName: 'G', dateLabel: 'D', timeLabel: 'T', stats, summary: null }).length > 0,
     'null summary does not throw');
+
+// ------------------------------------------------------------- recap styles
+ok(RECAP_STYLE_KEYS.length === 4, 'four styles registered');
+for (const key of RECAP_STYLE_KEYS) {
+    const s = RECAP_STYLES[key];
+    ok(Boolean(s.banner && s.persona), `${key} has a banner and a persona`);
+    ok(Boolean(s.headings?.topics && s.headings?.notable && s.headings?.wrapUp && s.headings?.verdict),
+        `${key} defines all four headings`);
+    ok(Array.isArray(s.topicMarks) && s.topicMarks.length > 0, `${key} has topic marks`);
+    ok(/never|not|do not/i.test(s.persona), `${key} persona carries a restraint instruction`);
+}
+// headings must actually differ, or "four styles" is cosmetic
+const topicHeadings = new Set(RECAP_STYLE_KEYS.map((k) => RECAP_STYLES[k].headings.topics));
+ok(topicHeadings.size === 4, 'all four styles use a DIFFERENT topics heading');
+const banners = new Set(RECAP_STYLE_KEYS.map((k) => RECAP_STYLES[k].banner));
+ok(banners.size === 4, 'all four banners differ');
+
+// ----------------------------------------------------- deterministic rotation
+// A recap can be retried or self-healed. A random pick would give the same group
+// two personalities for one date.
+const a1 = pickRecapStyle('g1@g.us', '2026-08-12', 'rotate').key;
+const a2 = pickRecapStyle('g1@g.us', '2026-08-12', 'rotate').key;
+ok(a1 === a2, 'same group + same day always yields the same style');
+const days = ['2026-08-12', '2026-08-13', '2026-08-14', '2026-08-15'];
+const overDays = new Set(days.map((d) => pickRecapStyle('g1@g.us', d, 'rotate').key));
+ok(overDays.size >= 3, 'style actually rotates across consecutive days');
+const overGroups = new Set(['a@g.us', 'b@g.us', 'c@g.us', 'd@g.us'].map((g) => pickRecapStyle(g, '2026-08-12', 'rotate').key));
+ok(overGroups.size >= 3, 'different groups usually get different styles on one day');
+ok(pickRecapStyle('', '', 'rotate')?.key, 'empty ids still resolve to a style');
+
+// pinning
+ok(pickRecapStyle('g@g.us', '2026-08-12', 'tabloid').key === 'tabloid', 'a pinned style overrides rotation');
+ok(pickRecapStyle('g@g.us', '2026-08-12', 'nonsense').key !== undefined, 'an unknown pin falls back to rotation, not undefined');
+ok(pickRecapStyle('g@g.us', '2026-08-12', '').key !== undefined, 'empty pin rotates');
+
+// aliases people will actually type
+ok(parseRecapStyle('nature') === 'documentary', 'alias nature -> documentary');
+ok(parseRecapStyle('gossip') === 'tabloid', 'alias gossip -> tabloid');
+ok(parseRecapStyle('cricket') === 'sports', 'alias cricket -> sports');
+ok(parseRecapStyle('trophy') === 'awards', 'alias trophy -> awards');
+ok(parseRecapStyle('rotate') === 'rotate', 'rotate is accepted');
+ok(parseRecapStyle('AWARDS') === 'awards', 'case-insensitive');
+ok(parseRecapStyle('banana') === null, 'unknown style name returns null');
+ok(parseRecapStyle('') === null, 'empty returns null');
+
+// the card must reflect the chosen style, not the default
+for (const key of RECAP_STYLE_KEYS) {
+    const styled = formatRecapMessage({
+        groupName: 'G', dateLabel: 'D', timeLabel: 'T', stats, summary: fullSummary, style: RECAP_STYLES[key],
+    });
+    ok(styled.includes(RECAP_STYLES[key].banner), `${key} banner appears on the card`);
+    ok(styled.includes(RECAP_STYLES[key].headings.topics), `${key} topics heading appears`);
+    ok(styled.includes(RECAP_STYLES[key].headings.verdict), `${key} verdict heading appears`);
+}
+// no style passed -> still renders (older callers, self-heal paths)
+ok(formatRecapMessage({ groupName: 'G', dateLabel: 'D', timeLabel: 'T', stats, summary: fullSummary }).length > 0,
+    'omitting style falls back to the default without throwing');
+ok(config.GROUP_SUMMARY_STYLE !== undefined, 'GROUP_SUMMARY_STYLE config exists');
 
 console.log(`\ncheck-summary-recap: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

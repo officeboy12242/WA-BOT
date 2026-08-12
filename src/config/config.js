@@ -92,6 +92,11 @@ export const config = {
     GROUP_SUMMARY_TIME: (process.env.GROUP_SUMMARY_TIME || '00:00').trim(),
     GROUP_SUMMARY_TIMEZONE: process.env.GROUP_SUMMARY_TIMEZONE || 'Asia/Kolkata',
     /** Produce a chat-based narrative recap (who said what / themes / decisions) instead of only listing events. */
+    /**
+     * Recap personality: 'rotate' (default) cycles awards / sports / documentary /
+     * tabloid deterministically per group per day, or pin one by key.
+     */
+    GROUP_SUMMARY_STYLE: (process.env.GROUP_SUMMARY_STYLE || 'rotate').trim().toLowerCase(),
     GROUP_SUMMARY_NARRATIVE: process.env.GROUP_SUMMARY_NARRATIVE !== 'false',
     /** Min member messages that day before a full recap; below this = short quiet note or skip. */
     GROUP_SUMMARY_MIN_MESSAGES: parseInt(process.env.GROUP_SUMMARY_MIN_MESSAGES, 10) || 3,

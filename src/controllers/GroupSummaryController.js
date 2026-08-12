@@ -7,6 +7,7 @@ import { formatDateLabelIST, getRecapDateStrIST } from '../utils/dateIST.js';
 import NvidiaDeepSeekService, { SUMMARY_SYSTEM_PROMPT } from '../services/NvidiaDeepSeekService.js';
 import OpenRouterLlmService from '../services/OpenRouterLlmService.js';
 import SummarySelfHealService from '../services/SummarySelfHealService.js';
+import { RECAP_STYLES, DEFAULT_RECAP_STYLE, pickRecapStyle } from '../prompts/recapStyles.js';
 
 /** Extra nudge for free/fallback models that otherwise emit vague "general chat" JSON. */
 const SUMMARY_FALLBACK_SYSTEM_PROMPT = [
@@ -59,10 +60,12 @@ function currentIstHour() {
     return hour;
 }
 
-export function formatRecapMessage({ groupName, dateLabel, stats, summary, timeLabel }) {
+export function formatRecapMessage({ groupName, dateLabel, stats, summary, timeLabel, style = null }) {
+    const st = style || RECAP_STYLES[DEFAULT_RECAP_STYLE];
+    const h = st.headings;
     let text = '';
     text += '┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n';
-    text += '┃  🗓️ *GROUP DAY RECAP* 🗓️  ┃\n';
+    text += `  ${st.banner}\n`;
     text += '┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n';
     text += `📅 *${dateLabel}*\n`;
     text += `📢 *${groupName}*\n`;
@@ -88,9 +91,10 @@ export function formatRecapMessage({ groupName, dateLabel, stats, summary, timeL
 
     const topics = Array.isArray(summary?.topics) ? summary.topics : [];
     if (topics.length) {
-        text += '🧵 *Topics discussed*\n\n';
+        text += `${h.topics}\n\n`;
         topics.slice(0, 6).forEach((topic, i) => {
-            const emoji = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣'][i] || `${i + 1}.`;
+            const marks = st.topicMarks?.length ? st.topicMarks : ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣'];
+            const emoji = marks[i % marks.length];
             const title = topic?.title || 'Discussion';
             const detail = topic?.detail || '';
             text += `${emoji} *${title}*\n`;
@@ -104,7 +108,7 @@ export function formatRecapMessage({ groupName, dateLabel, stats, summary, timeL
 
     const notable = Array.isArray(summary?.notable) ? summary.notable.filter(Boolean) : [];
     if (notable.length) {
-        text += '⭐ *Notable moments*\n';
+        text += `${h.notable}\n`;
         for (const line of notable.slice(0, 4)) {
             text += `• ${line}\n`;
         }
@@ -118,7 +122,7 @@ export function formatRecapMessage({ groupName, dateLabel, stats, summary, timeL
 
     const wrapUp = summary?.wrap_up?.trim();
     if (wrapUp) {
-        text += '📝 *In short*\n';
+        text += `${h.wrapUp}\n`;
         text += `${wrapUp}\n\n`;
         text += '─────────────────────────────\n\n';
     }
@@ -126,7 +130,7 @@ export function formatRecapMessage({ groupName, dateLabel, stats, summary, timeL
     // The closing take. Last thing read, so it is what the group remembers.
     const verdict = String(summary?.verdict || '').trim();
     if (verdict) {
-        text += "🎤 *My two cents*\n";
+        text += `${h.verdict}\n`;
         text += `_${verdict}_\n\n`;
         text += '─────────────────────────────\n';
     }
@@ -135,10 +139,11 @@ export function formatRecapMessage({ groupName, dateLabel, stats, summary, timeL
     return text;
 }
 
-function formatQuietDay(groupName, dateLabel, count, timeLabel) {
+function formatQuietDay(groupName, dateLabel, count, timeLabel, style = null) {
+    const st = style || RECAP_STYLES[DEFAULT_RECAP_STYLE];
     let text = '';
     text += '┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n';
-    text += '┃  🗓️ *GROUP DAY RECAP* 🗓️  ┃\n';
+    text += `  ${st.banner}\n`;
     text += '┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n';
     text += `📅 *${dateLabel}*\n`;
     text += `📢 *${groupName}*\n`;
@@ -315,7 +320,12 @@ class GroupSummaryController {
         };
 
         if (useChunks) {
-            const chunkPrompts = this.chatLog.buildChunkPrompts(messages, groupName, dateLabel);
+            const rawChunks = this.chatLog.buildChunkPrompts(messages, groupName, dateLabel);
+            // Long chats go down this path — without the persona here, big groups
+            // would get styled headings wrapped around a flat, default voice.
+            const chunkPrompts = style?.persona
+                ? rawChunks.map((c) => `${c}\n\n${style.persona}`)
+                : rawChunks;
             logger.info(
                 `Group summary: ${groupName} — ${messages.length} msgs, ` +
                     `${chunkPrompts.length} chunk(s) for map-reduce`
@@ -332,9 +342,14 @@ class GroupSummaryController {
             return this._summarizeChunksViaOpenRouter(chunkPrompts, chunkMeta);
         }
 
-        const prompt = this.chatLog.buildPrompt(messages, groupName, dateLabel);
+        const basePrompt = this.chatLog.buildPrompt(messages, groupName, dateLabel);
+        // The persona goes in the USER prompt, not the system one, so it survives
+        // every provider path below — each has its own system prompt and would
+        // otherwise silently drop the style, changing headings but not the voice.
+        const prompt = style?.persona ? `${basePrompt}\n\n${style.persona}` : basePrompt;
         logger.info(
-            `Group summary: ${groupName} — ${messages.length} msgs, prompt ${prompt.length} chars`
+            `Group summary: ${groupName} — ${messages.length} msgs, prompt ${prompt.length} chars` +
+                (style ? `, style ${style.key}` : '')
         );
         if (this.nvidia.isConfigured()) {
             try {
@@ -533,6 +548,9 @@ class GroupSummaryController {
         const groupId = group.group_id;
         const groupName = group.group_name || groupId;
         const messages = await this.chatLog.getMessagesForDay(groupId, dateStr);
+        // Quiet days get the personality too, and must agree with the style a full
+        // recap for the same group+date would have used.
+        const quietStyle = pickRecapStyle(groupId, dateStr, this.config.GROUP_SUMMARY_STYLE);
 
         if (messages.length === 0) {
             logger.warn(
@@ -541,7 +559,7 @@ class GroupSummaryController {
             );
             if (force) {
                 await sock.sendMessage(groupId, {
-                    text: formatQuietDay(groupName, dateLabel, 0, timeLabel),
+                    text: formatQuietDay(groupName, dateLabel, 0, timeLabel, quietStyle),
                 });
                 return true;
             }
@@ -551,7 +569,7 @@ class GroupSummaryController {
         if (messages.length < this.minMessages) {
             logger.info(`Group summary: ${groupName} only ${messages.length} msg(s) on ${dateStr} (min ${this.minMessages})`);
             await sock.sendMessage(groupId, {
-                text: formatQuietDay(groupName, dateLabel, messages.length, timeLabel),
+                text: formatQuietDay(groupName, dateLabel, messages.length, timeLabel, quietStyle),
             });
             await this.chatLog.purgeDay(groupId, dateStr);
             return true;
@@ -561,9 +579,13 @@ class GroupSummaryController {
         const startedAt = Date.now();
         const heuristic = this.chatLog.buildHeuristicSummary(messages, stats);
 
+        // Deterministic per group per day, so a retry or a self-heal re-run cannot
+        // hand the same group a second personality for the same date.
+        const style = quietStyle;
+
         let summary;
         try {
-            summary = await this._summarizeDay(messages, groupName, dateLabel);
+            summary = await this._summarizeDay(messages, groupName, dateLabel, style);
             logger.info(`Group summary: ${groupName} LLM done in ${Date.now() - startedAt}ms`);
         } catch (err) {
             logger.error(`Recap LLM failed for ${groupName}: ${err.message}`);
@@ -595,6 +617,7 @@ class GroupSummaryController {
             stats,
             summary,
             timeLabel,
+            style,
         });
 
         await sock.sendMessage(groupId, { text });
