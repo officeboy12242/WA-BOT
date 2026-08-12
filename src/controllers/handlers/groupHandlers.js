@@ -4,6 +4,7 @@
 
 import { jidNormalizedUser } from 'baileys';
 import { logger } from '../../utils/logger.js';
+import { sendTextWithLinkPreview } from '../../utils/linkPreview.js';
 import { extractPhoneNumber } from '../../utils/permissions.js';
 import { scheduleAutoDelete, AUTO_DELETE_2_MIN } from '../../utils/autoDelete.js';
 import {
@@ -918,7 +919,7 @@ export async function handleGroupLink(sock, chatId, senderJid, { groupManager, o
             ? '_Saved for members — `/revokelink` regenerates it._'
             : '_Saved by an admin. Admins can refresh it with `/link`._';
 
-        await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
+        await sendTextWithLinkPreview(sock, chatId, r, link, { quoted: originalMsg });
         logger.info(`🔗 Group link served: ${groupName} (${chatId}) by ${senderPhone} (${isAdmin ? 'admin' : 'member'})`);
     } catch (error) {
         logger.error(`Error fetching group link for ${chatId}: ${error.message}`);
@@ -965,7 +966,7 @@ export async function handleRevokeLink(sock, chatId, senderJid, { groupManager, 
         r += `${link}\n\n`;
         r += '_Saved for members — they get this new link with `/link`._';
 
-        await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
+        await sendTextWithLinkPreview(sock, chatId, r, link, { quoted: originalMsg });
         logger.info(`🔄 Invite link revoked: ${groupName} (${chatId}) by ${senderPhone}`);
     } catch (error) {
         logger.error(`Error revoking group link for ${chatId}: ${error.message}`);

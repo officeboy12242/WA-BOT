@@ -37,8 +37,9 @@ export async function buildLinkPreview(url) {
  * @param {string} chatId
  * @param {string} text
  * @param {string} url
+ * @param {object} [sendOpts] extra sendMessage options (e.g. { quoted })
  */
-export async function sendTextWithLinkPreview(sock, chatId, text, url) {
+export async function sendTextWithLinkPreview(sock, chatId, text, url, sendOpts = {}) {
     const linkPreview = await buildLinkPreview(url);
-    await sock.sendMessage(chatId, linkPreview ? { text, linkPreview } : { text });
+    await sock.sendMessage(chatId, linkPreview ? { text, linkPreview } : { text }, sendOpts);
 }
