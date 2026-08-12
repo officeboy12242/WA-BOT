@@ -746,21 +746,33 @@ export async function plainSendMessage(sock, chatId, content, key = null) {
 }
 
 /**
- * Queued group/DM send without quotes.
+ * Queued group/DM send. Pass a full WA message to tag the reply to it (quote);
+ * pass only a key (or nothing) to send without a quote. Falls back to an
+ * unquoted send if quoting fails (e.g. the original message was deleted).
+ * @param {import('baileys').proto.IWebMessageInfo | import('baileys').proto.IMessageKey | null} [waMessage]
  * @param {number} [priority=0] lower = sooner (0 = jump ahead of normal group cmds)
  */
-export async function fastSendMessage(sock, chatId, content, key = null, priority = 0) {
+export async function fastSendMessage(sock, chatId, content, waMessage = null, priority = 0) {
     if (!sock?.sendMessage || !chatId) return null;
+    // Accept either a full WA message (preferred) or just a key (JID resolution only)
+    const key = waMessage?.key || waMessage;
     const conversationJid = chatId || resolveConversationChatId(key);
     const jid = resolveOutboundJid(key, conversationJid);
     if (!jid) return null;
 
+    const primaryOpts = getSafeSendOptions(waMessage?.key ? waMessage : null, { linkPreview: false }, content);
+    const bareOpts = { linkPreview: false };
+
     return messageQueue.enqueue(conversationJid || jid, async () => {
-        try {
-            return await sendWithTimeout(sock, jid, content, { linkPreview: false });
-        } catch (err) {
-            logger.warn(`fastSendMessage failed for ${jid}: ${err?.message || err}`);
-            return null;
+        let lastErr;
+        for (const opts of [primaryOpts, bareOpts]) {
+            try {
+                return await sendWithTimeout(sock, jid, content, opts);
+            } catch (err) {
+                lastErr = err;
+                logger.warn(`fastSendMessage failed for ${jid}: ${err?.message || err}`);
+            }
         }
+        return null;
     }, priority);
 }
