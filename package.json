@@ -3,8 +3,8 @@
   "version": "1.0.0",
   "description": "WhatsApp bot that posts free courses from real.discount API",
   "main": "bot.js",
-  "type": "module",
-  "scripts": {
+  "type": "module",    "scripts": {
+    "test": "node scripts/run-all-checks.js",
     "start": "node --max-old-space-size=450 bot-new.js",
     "worker": "node --max-old-space-size=300 worker.js",
     "dev": "node --watch bot-new.js",

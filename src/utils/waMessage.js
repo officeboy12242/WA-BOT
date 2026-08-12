@@ -2,7 +2,7 @@
  * WA incoming message helpers (aligned with Baileys unwrap rules).
  */
 
-import { normalizeMessageContent, jidNormalizedUser } from 'baileys';
+import { normalizeMessageContent, jidNormalizedUser, WAMessageStatus } from 'baileys';
 import { extractPhoneNumber, isDirectMessage, normalizePhoneNumber } from './permissions.js';
 import { resolveReplyChatJid } from './lid.js';
 import { messageQueue } from './messageQueue.js';
@@ -570,8 +570,10 @@ export function collectDirectMessageSendTargets(key, chatId) {
 function shouldQuoteReply(waMessage, content) {
     if (!waMessage?.key?.id || !waMessage?.message) return false;
     const text = typeof content?.text === 'string' ? content.text : '';
-    const urlCount = (text.match(/https?:\/\//gi) || []).length;
-    if (urlCount > 2) return false;
+    // Keep the quote under WhatsApp's practical message limit. (A former
+    // "no quoting when >2 URLs" rule was dropped: link previews are forced
+    // off on these sends, so URLs are harmless, and callers that need it can
+    // forceQuote past the policy anyway.)
     if (text.length > 3500) return false;
     return true;
 }
@@ -747,6 +749,105 @@ export async function plainSendMessage(sock, chatId, content, key = null) {
 }
 
 /**
+ * Watch async delivery verdicts for sent messages. sendMessage resolves on
+ * socket write; failures (e.g. 463 privacy-token drops) arrive later as
+ * messages.update with status ERROR keyed by the sent message id.
+ * Attach ONE verifier per run, reuse it across sends, detach when done.
+ */
+export function createDeliveryVerifier(sock) {
+    const statusByMsgId = new Map();
+    const onMsgUpdate = (updates) => {
+        for (const u of updates) {
+            if (!u.key?.fromMe || !u.key?.id) continue;
+            statusByMsgId.set(u.key.id, u.update?.status);
+            if (statusByMsgId.size > 1000) {
+                const oldest = statusByMsgId.keys().next().value;
+                if (oldest !== undefined) statusByMsgId.delete(oldest);
+            }
+        }
+    };
+    if (sock?.ev?.on) sock.ev.on('messages.update', onMsgUpdate);
+
+    return {
+        /** 'ERROR' if the server rejects the sent message id within timeoutMs, else 'OK'. */
+        wait: (msgId, timeoutMs) =>
+            new Promise((resolve) => {
+                const isError = (s) => s === WAMessageStatus.ERROR;
+                const isGood = (s) => (
+                    s === WAMessageStatus.SERVER_ACK ||
+                    s === WAMessageStatus.DELIVERY_ACK ||
+                    s === WAMessageStatus.READ
+                );
+                const started = Date.now();
+                const tick = () => {
+                    const cur = statusByMsgId.get(msgId);
+                    if (isError(cur)) return resolve('ERROR');
+                    if (isGood(cur)) return resolve('OK');
+                    if (Date.now() - started >= timeoutMs) return resolve('OK'); // no news — assume delivered
+                    setTimeout(tick, 150);
+                };
+                tick();
+            }),
+        detach: () => {
+            if (sock?.ev?.off) sock.ev.off('messages.update', onMsgUpdate);
+        },
+    };
+}
+
+/**
+ * One message through the shared outbound pipeline: per-chat serialization,
+ * send timeout, quoting policy, and OPTIONAL async delivery verification.
+ * This is the single path every queued send should flow through.
+ *
+ * @param {import('baileys').WASocket} sock
+ * @param {string} chatId
+ * @param {object} content sendMessage content ({ text, image, ... })
+ * @param {object} [opts]
+ * @param {import('baileys').proto.IWebMessageInfo | import('baileys').proto.IMessageKey} [opts.waMessage] quote the original message
+ * @param {number} [opts.priority=0] messageQueue priority (lower = sooner)
+ * @param {boolean} [opts.forceQuote] quote even long/multi-URL replies
+ * @param {{ wait: Function }} [opts.verifier] from createDeliveryVerifier — verify the async outcome
+ * @param {number} [opts.verifyWaitMs=4000] how long to await the server verdict
+ * @returns {Promise<{ sent: object|null, outcome?: 'OK'|'ERROR' }>} rejects if the send fails entirely
+ */
+export async function deliverMessage(sock, chatId, content, opts = {}) {
+    const { waMessage = null, priority = 0, forceQuote = false, verifier = null, verifyWaitMs = 4000 } = opts;
+    if (!sock?.sendMessage || !chatId) return { sent: null };
+
+    // Accept either a full WA message (preferred) or just a key (JID resolution only)
+    const key = waMessage?.key || waMessage;
+    const conversationJid = chatId || resolveConversationChatId(key);
+    const jid = resolveOutboundJid(key, conversationJid);
+    if (!jid) return { sent: null };
+
+    const primaryOpts = getSafeSendOptions(waMessage?.key ? waMessage : null, { linkPreview: false }, content, { forceQuote });
+    const bareOpts = { linkPreview: false };
+    // Only retry unquoted when the first attempt carried a quote — otherwise the
+    // retry is an identical duplicate send (a wasted attempt on failure).
+    const attempts = primaryOpts.quoted ? [primaryOpts, bareOpts] : [primaryOpts];
+
+    const doSend = async () => {
+        let lastErr;
+        for (const sendOpts of attempts) {
+            try {
+                const sent = await sendWithTimeout(sock, jid, content, sendOpts);
+                if (verifier && sent?.key?.id) {
+                    const outcome = await verifier.wait(sent.key.id, verifyWaitMs);
+                    return { sent, outcome };
+                }
+                return { sent };
+            } catch (err) {
+                lastErr = err;
+                logger.warn(`deliverMessage failed for ${jid}: ${err?.message || err}`);
+            }
+        }
+        throw lastErr || new Error(`deliverMessage failed for ${jid}`);
+    };
+
+    return messageQueue.enqueue(conversationJid || jid, doSend, priority);
+}
+
+/**
  * Queued group/DM send. Pass a full WA message to tag the reply to it (quote);
  * pass only a key (or nothing) to send without a quote. Falls back to an
  * unquoted send if quoting fails (e.g. the original message was deleted).
@@ -755,26 +856,11 @@ export async function plainSendMessage(sock, chatId, content, key = null) {
  * @param {{ forceQuote?: boolean }} [opts] forceQuote=true tags even long/multi-URL replies
  */
 export async function fastSendMessage(sock, chatId, content, waMessage = null, priority = 0, opts = {}) {
-    if (!sock?.sendMessage || !chatId) return null;
-    // Accept either a full WA message (preferred) or just a key (JID resolution only)
-    const key = waMessage?.key || waMessage;
-    const conversationJid = chatId || resolveConversationChatId(key);
-    const jid = resolveOutboundJid(key, conversationJid);
-    if (!jid) return null;
-
-    const primaryOpts = getSafeSendOptions(waMessage?.key ? waMessage : null, { linkPreview: false }, content, opts);
-    const bareOpts = { linkPreview: false };
-
-    return messageQueue.enqueue(conversationJid || jid, async () => {
-        let lastErr;
-        for (const opts of [primaryOpts, bareOpts]) {
-            try {
-                return await sendWithTimeout(sock, jid, content, opts);
-            } catch (err) {
-                lastErr = err;
-                logger.warn(`fastSendMessage failed for ${jid}: ${err?.message || err}`);
-            }
-        }
+    try {
+        const { sent } = await deliverMessage(sock, chatId, content, { waMessage, priority, ...opts });
+        return sent ?? null;
+    } catch (err) {
+        logger.warn(`fastSendMessage failed for ${chatId}: ${err?.message || err}`);
         return null;
-    }, priority);
+    }
 }

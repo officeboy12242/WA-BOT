@@ -130,11 +130,9 @@ let droppedSends = 0;
 const droppedByServer = {
     sendMessage: async () => { droppedSends += 1; return { key: { id: `m${droppedSends}` } }; },
 };
+const dropOnce = { wait: async (msgId) => (msgId === 'm1' ? 'ERROR' : 'OK') };
 // First send dropped; token issued; the retry is accepted.
-const dropped = await svc._sendOnce(
-    droppedByServer, 'x@s.whatsapp.net', 'hi',
-    async (msgId) => (msgId === 'm1' ? 'ERROR' : 'OK')
-);
+const dropped = await svc._sendOnce(droppedByServer, 'x@s.whatsapp.net', 'hi', dropOnce);
 eq(dropped.ok, true, 'an async server drop is retried and counts as ok');
 eq(dropped.retried, true, 'the async retry is reported');
 eq(droppedSends, 2, 'an async server drop triggers exactly one retry');
@@ -145,7 +143,7 @@ let blockedSends = 0;
 const blocksDms = {
     sendMessage: async () => { blockedSends += 1; return { key: { id: `b${blockedSends}` } }; },
 };
-const blocked = await svc._sendOnce(blocksDms, 'x@s.whatsapp.net', 'hi', async () => 'ERROR');
+const blocked = await svc._sendOnce(blocksDms, 'x@s.whatsapp.net', 'hi', { wait: async () => 'ERROR' });
 eq(blocked.ok, false, 'a recipient who blocks DMs is counted as not sent');
 eq(blocked.permanent, true, 'a persistent drop is flagged permanent/unreachable');
 eq(blockedSends, 2, 'a persistent drop is attempted exactly twice, never more');
@@ -155,10 +153,40 @@ let ackSends = 0;
 const acked = {
     sendMessage: async () => { ackSends += 1; return { key: { id: 'm2' } }; },
 };
-const goodAck = await svc._sendOnce(acked, 'x@s.whatsapp.net', 'hi', async () => 'OK');
+const goodAck = await svc._sendOnce(acked, 'x@s.whatsapp.net', 'hi', { wait: async () => 'OK' });
 eq(goodAck.ok, true, 'an acked send succeeds');
 eq(goodAck.retried, false, 'an acked send is not retried');
 eq(ackSends, 1, 'an acked send happens exactly once');
+
+// ── pre-flight readiness sampling ────────────────────────────────────────────
+
+const readinessSock = {
+    signalRepository: {
+        lidMapping: { getLIDForPN: async () => '999@lid' },
+    },
+    authState: {
+        keys: {
+            get: async (ns, jids) => {
+                // Token cached only for 'a@...' (present) — the shared LID must
+                // NOT make every target look token-ready.
+                const out = {};
+                for (const j of jids) {
+                    if (j === 'a@s.whatsapp.net') out[j] = { token: Buffer.from('tok') };
+                }
+                return out;
+            },
+        },
+    },
+};
+const readiness = await svc.sampleDmReadiness(
+    readinessSock,
+    ['a@s.whatsapp.net', 'b@s.whatsapp.net', 'c@s.whatsapp.net'],
+    10
+);
+eq(readiness.sampled, 3, 'readiness sample covers the requested targets');
+eq(readiness.withToken, 1, 'targets with a cached token are counted');
+eq(readiness.noToken, 2, 'targets without a token are counted as needing issuance');
+eq(readiness.unreadable, 0, 'no unreadable targets when the store responds');
 
 /* ── pacing config ───────────────────────────────────────────────────────── */
 
@@ -212,3 +240,8 @@ eq(clearedAll.removed, 3, 'clearAllGroups deletes every member');
 eq(clearedAll.groups, 2, 'clearAllGroups deletes the scrape records too');
 
 console.log(`OK broadcast — ${checks} checks passed`);
+
+// Importing BroadcastService pulls in the shared message queue, whose 5-minute
+// cleanup interval keeps the event loop alive — exit explicitly so this check
+// script terminates under the test runner.
+process.exit(0);

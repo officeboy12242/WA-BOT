@@ -124,6 +124,209 @@ import {
     handleInterviewQOff,
 } from '../interviewQuestion/interviewQuestion.commands.js';
 
+/**
+ * Data-driven dispatch table — command key (from the registry) -> handler.
+ *
+ * Every handler receives one params object:
+ *   { sock, chatId, senderJid, args, originalMsg, pushName, ctx, fullCommand }
+ * and returns a promise (or void). A registered key with NO entry here fails
+ * loudly at dispatch time instead of silently no-oping — adding a command now
+ * means adding one registry entry + one table entry, nothing else.
+ */
+export const COMMAND_HANDLERS = {
+    /* ── Core ── */
+    ping: ({ sock, chatId, ctx }) => handlePing(sock, chatId, ctx),
+    posted: ({ sock, chatId, ctx }) => handlePosted(sock, chatId, ctx),
+    clear: ({ sock, chatId, ctx }) => handleClear(sock, chatId, ctx),
+    confirm: ({ sock, chatId, ctx }) => handleConfirm(sock, chatId, ctx),
+    cancel: ({ sock, chatId, senderJid, ctx }) => handleCancel(sock, chatId, senderJid, ctx),
+    pause: ({ sock, chatId, ctx }) => handlePause(sock, chatId, ctx),
+    resumecourses: ({ sock, chatId, ctx }) => handleResume(sock, chatId, ctx),
+    status: ({ sock, chatId, ctx }) => handleStatus(sock, chatId, ctx),
+    facts: ({ sock, chatId, ctx }) => handleFacts(sock, chatId, ctx),
+    help: ({ sock, chatId, senderJid, ctx }) => handleHelp(sock, chatId, senderJid, ctx),
+
+    /* ── Group management ── */
+    activate: ({ sock, chatId, senderJid, ctx }) => handleActivate(sock, chatId, senderJid, ctx),
+    deactivate: ({ sock, chatId, senderJid, ctx }) => handleDeactivate(sock, chatId, senderJid, ctx),
+    instaon: ({ sock, chatId, senderJid, ctx }) => handleInstaOn(sock, chatId, senderJid, ctx),
+    instaoff: ({ sock, chatId, senderJid, ctx }) => handleInstaOff(sock, chatId, senderJid, ctx),
+    stickeron: ({ sock, chatId, senderJid, ctx }) => handleStickerOn(sock, chatId, senderJid, ctx),
+    stickeroff: ({ sock, chatId, senderJid, ctx }) => handleStickerOff(sock, chatId, senderJid, ctx),
+    newson: ({ sock, chatId, senderJid, ctx }) => handleNewsOn(sock, chatId, senderJid, ctx),
+    newsoff: ({ sock, chatId, senderJid, ctx }) => handleNewsOff(sock, chatId, senderJid, ctx),
+    courson: ({ sock, chatId, senderJid, ctx }) => handleCoursesOn(sock, chatId, senderJid, ctx),
+    coursesoff: ({ sock, chatId, senderJid, ctx }) => handleCoursesOff(sock, chatId, senderJid, ctx),
+    githubon: ({ sock, chatId, senderJid, ctx }) => handleGithubOn(sock, chatId, senderJid, ctx),
+    githuboff: ({ sock, chatId, senderJid, ctx }) => handleGithubOff(sock, chatId, senderJid, ctx),
+    awesomeon: ({ sock, chatId, senderJid, ctx }) => handleAwesomeOn(sock, chatId, senderJid, ctx),
+    awesomeoff: ({ sock, chatId, senderJid, ctx }) => handleAwesomeOff(sock, chatId, senderJid, ctx),
+    interviewqon: ({ sock, chatId, senderJid, ctx }) => handleInterviewQOn(sock, chatId, senderJid, ctx),
+    interviewqoff: ({ sock, chatId, senderJid, ctx }) => handleInterviewQOff(sock, chatId, senderJid, ctx),
+    interviewq: ({ sock, chatId, senderJid, args, ctx }) => handleInterviewQ(sock, chatId, senderJid, args, ctx),
+    groups: ({ sock, chatId, senderJid, ctx }) => handleGroups(sock, chatId, senderJid, ctx),
+    setwc: ({ sock, chatId, senderJid, fullCommand, ctx }) => handleSetWelcome(sock, chatId, senderJid, fullCommand, ctx),
+    link: ({ sock, chatId, senderJid, ctx }) => handleGroupLink(sock, chatId, senderJid, ctx),
+    revokelink: ({ sock, chatId, senderJid, ctx }) => handleRevokeLink(sock, chatId, senderJid, ctx),
+    warn: ({ sock, chatId, senderJid, args, originalMsg, ctx }) => handleWarn(sock, chatId, senderJid, args, originalMsg, ctx),
+    mywarns: ({ sock, chatId, senderJid, ctx }) => handleMyWarns(sock, chatId, senderJid, ctx),
+    warns: ({ sock, chatId, senderJid, args, originalMsg, ctx }) => handleWarns(sock, chatId, senderJid, args, originalMsg, ctx),
+    clearwarns: ({ sock, chatId, senderJid, args, originalMsg, ctx }) => handleClearWarns(sock, chatId, senderJid, args, originalMsg, ctx),
+    dellast: ({ sock, chatId, args, originalMsg, ctx }) => handleDelLast(sock, chatId, args, originalMsg, ctx),
+    delall: ({ sock, chatId, args, originalMsg, ctx }) => handleDelLast(sock, chatId, args, originalMsg, ctx),
+    movieon: ({ sock, chatId, senderJid, ctx }) => handleMovieOn(sock, chatId, senderJid, ctx),
+    movieoff: ({ sock, chatId, senderJid, ctx }) => handleMovieOff(sock, chatId, senderJid, ctx),
+    summaryon: ({ sock, chatId, senderJid, ctx }) => handleSummaryOn(sock, chatId, senderJid, ctx),
+    summaryoff: ({ sock, chatId, senderJid, ctx }) => handleSummaryOff(sock, chatId, senderJid, ctx),
+    summarynow: ({ sock, chatId, senderJid, ctx }) => handleSummaryNow(sock, chatId, senderJid, ctx),
+    fix: ({ sock, chatId, senderJid, args, ctx }) => handleFix(sock, chatId, senderJid, args, ctx),
+    heal: ({ sock, chatId, senderJid, args, ctx }) => handleHeal(sock, chatId, senderJid, args, ctx),
+    assist: ({ sock, chatId, senderJid, args, ctx }) => handleAssist(sock, chatId, senderJid, args, ctx),
+    resume: ({ sock, chatId, senderJid, args, ctx }) => handleCv(sock, chatId, senderJid, args, ctx),
+    tailor: ({ sock, chatId, senderJid, args, ctx }) => handleTailor(sock, chatId, senderJid, args, ctx),
+    cover: ({ sock, chatId, senderJid, args, ctx }) => handleCover(sock, chatId, senderJid, args, ctx),
+    trending: ({ sock, chatId, senderJid, args, ctx }) => handleTrending(sock, chatId, senderJid, args, ctx),
+    tradelert: ({ sock, chatId, senderJid, args, ctx }) => handleTradelert(sock, chatId, senderJid, args, ctx),
+    tradenow: ({ sock, chatId, senderJid, args, ctx }) => handleTradenow(sock, chatId, senderJid, args, ctx),
+    index: ({ sock, chatId, senderJid, args, ctx }) => handleIndex(sock, chatId, senderJid, args, ctx),
+    swing: ({ sock, chatId, senderJid, args, ctx }) => handleSwing(sock, chatId, senderJid, args, ctx),
+    expiry: ({ sock, chatId, senderJid, args, ctx }) => handleExpiry(sock, chatId, senderJid, args, ctx),
+
+    /* ── Admin management ── */
+    addadmin: ({ sock, chatId, senderJid, args, originalMsg, ctx }) => handleAddAdmin(sock, chatId, senderJid, args, originalMsg, ctx),
+    removeadmin: ({ sock, chatId, senderJid, args, originalMsg, ctx }) => handleRemoveAdmin(sock, chatId, senderJid, args, originalMsg, ctx),
+    admins: ({ sock, chatId, senderJid, ctx }) => handleAdmins(sock, chatId, senderJid, ctx),
+    increaselimit: ({ sock, chatId, senderJid, args, originalMsg, ctx }) => handleIncreaseLimit(sock, chatId, senderJid, args, originalMsg, ctx),
+    checklimit: ({ sock, chatId, senderJid, args, originalMsg, pushName, ctx }) => handleCheckLimit(sock, chatId, senderJid, args, originalMsg, pushName, ctx),
+
+    /* ── Owner: premium / mod / channels ── */
+    addpremium: ({ sock, chatId, senderJid, args, ctx }) => handleAddPremium(sock, chatId, senderJid, args, ctx),
+    removepremium: ({ sock, chatId, senderJid, args, ctx }) => handleRemovePremium(sock, chatId, senderJid, args, ctx),
+    premium: ({ sock, chatId, senderJid, ctx }) => handleListPremium(sock, chatId, senderJid, ctx),
+    addmod: ({ sock, chatId, senderJid, args, ctx }) => handleAddMod(sock, chatId, senderJid, args, ctx),
+    removemod: ({ sock, chatId, senderJid, args, ctx }) => handleRemoveMod(sock, chatId, senderJid, args, ctx),
+    addchannel: ({ sock, chatId, args, senderJid, ctx }) => handleAddChannel(sock, chatId, args, senderJid, ctx),
+    removechannel: ({ sock, chatId, args, senderJid, ctx }) => handleRemoveChannel(sock, chatId, args, senderJid, ctx),
+    channels: ({ sock, chatId, senderJid, ctx }) => handleChannels(sock, chatId, senderJid, ctx),
+    scrap: ({ sock, chatId, senderJid, args, ctx }) => handleScrap(sock, chatId, senderJid, args, ctx),
+    scrapmembers: ({ sock, chatId, senderJid, ctx }) => handleScrapMembers(sock, chatId, senderJid, ctx),
+    scrapclear: ({ sock, chatId, senderJid, args, ctx }) => handleScrapClear(sock, chatId, senderJid, args, ctx),
+    broadcast: ({ sock, chatId, senderJid, args, ctx }) => {
+        void handleBroadcast(sock, chatId, senderJid, args, ctx).catch((err) => {
+            logger.error(`Broadcast handler error: ${err?.message || err?.output?.payload?.message || String(err)}`);
+        });
+    },
+    grouppost: ({ sock, chatId, senderJid, args, ctx }) => handleGroupPost(sock, chatId, senderJid, args, ctx),
+    driveurl: ({ sock, chatId, senderJid, args, ctx }) => handleDriveUrl(sock, chatId, senderJid, args, ctx),
+    viewonce: ({ sock, chatId, senderJid, originalMsg }) => handleViewOnce(sock, chatId, senderJid, originalMsg),
+    deploy: ({ sock, chatId, senderJid, originalMsg }) => handleDeploy(sock, chatId, senderJid, originalMsg),
+
+    /* ── Instagram / News / Movie ── */
+    insta: ({ sock, chatId, args, originalMsg }) => _handleInsta(sock, chatId, args, originalMsg),
+    news: ({ sock, chatId, senderJid, ctx }) => handleNews(sock, chatId, senderJid, ctx),
+    github: ({ sock, chatId, senderJid, ctx }) => handleGithub(sock, chatId, senderJid, ctx),
+    awesome: ({ sock, chatId, senderJid, ctx }) => handleAwesome(sock, chatId, senderJid, ctx),
+    horo: async ({ sock, chatId, senderJid, args, originalMsg, ctx }) => {
+        try {
+            const sign = args[0];
+            if (!sign) {
+                const listMsg = horoscopeService.getSignsList();
+                await safeSendMessage(sock, chatId, { text: listMsg }, originalMsg);
+            } else {
+                const data = await horoscopeService.fetchHoroscope(sign);
+                if (data.error === 'api_error') {
+                    ctx.groupSummaryController?.selfHeal?.triggerFromHoroscopeFailure({
+                        sign,
+                        errorMessage: 'All horoscope API sources failed',
+                        chatId,
+                        diagnostics: data.diagnostics,
+                    });
+                }
+                const msg = horoscopeService.formatMessage(data);
+                await safeSendMessage(sock, chatId, { text: msg }, originalMsg);
+            }
+        } catch (err) {
+            logger.error('Horoscope command error:', err);
+            ctx.groupSummaryController?.selfHeal?.triggerFromHoroscopeFailure({
+                sign: args[0],
+                errorMessage: err.message,
+                chatId,
+            });
+            await safeSendMessage(sock, chatId, { text: '⚠️ Failed to fetch horoscope. Please try again.' }, originalMsg);
+        }
+    },
+    advice: async ({ sock, chatId, originalMsg }) => {
+        try {
+            const slip = await adviceService.fetchAdvice();
+            await safeSendMessage(sock, chatId, { text: adviceService.formatMessage(slip) }, originalMsg);
+        } catch (err) {
+            logger.error('Advice command error:', err);
+            await safeSendMessage(sock, chatId, { text: adviceService.formatError() }, originalMsg);
+        }
+    },
+    movie: ({ sock, chatId, senderJid, args, pushName, originalMsg, ctx }) => {
+        if (!ctx.movieController) {
+            return safeSendMessage(sock, chatId, { text: '⚠️ Movie search is not available.' }, originalMsg);
+        }
+        void ctx.movieController.handleMovieSearch(sock, chatId, senderJid, args, pushName, originalMsg)
+            .catch((err) => {
+                logger.error(`Movie search handler error: ${err?.message || err}`);
+            });
+    },
+    upcoming: ({ sock, chatId, senderJid, originalMsg, ctx }) => {
+        if (!ctx.movieController) {
+            return safeSendMessage(sock, chatId, { text: '⚠️ Movie features not available.' }, originalMsg);
+        }
+        void ctx.movieController.handleUpcoming(sock, chatId, senderJid, originalMsg)
+            .catch((err) => logger.error(`Upcoming handler error: ${err?.message || err}`));
+    },
+    genre: ({ sock, chatId, senderJid, args, originalMsg, ctx }) => {
+        if (!ctx.movieController) {
+            return safeSendMessage(sock, chatId, { text: '⚠️ Movie features not available.' }, originalMsg);
+        }
+        void ctx.movieController.handleGenre(sock, chatId, senderJid, args, originalMsg)
+            .catch((err) => logger.error(`Genre handler error: ${err?.message || err}`));
+    },
+
+    /* ── Sticker Commands (non-blocking — FFmpeg runs in background queue) ── */
+    sticker: ({ sock, chatId, args, originalMsg, fullCommand, ctx }) => {
+        if (!ctx.stickerController) {
+            return safeSendMessage(sock, chatId, { text: '⚠️ Sticker functionality is not available.' }, originalMsg);
+        }
+        void ctx.stickerController.handleSticker(sock, chatId, originalMsg, args, fullCommand).catch((err) => {
+            logger.error('Sticker command error:', err);
+            void safeSendMessage(sock, chatId, { text: '⚠️ Failed to process sticker command.' }, originalMsg);
+        });
+    },
+    steal: ({ sock, chatId, args, originalMsg, fullCommand, ctx }) => {
+        if (!ctx.stickerController) {
+            return safeSendMessage(sock, chatId, { text: '⚠️ Sticker functionality is not available.' }, originalMsg);
+        }
+        void ctx.stickerController.handleSteal(sock, chatId, originalMsg, args, fullCommand).catch((err) => {
+            logger.error('Steal command error:', err);
+            void safeSendMessage(sock, chatId, { text: '⚠️ Failed to process steal command.' }, originalMsg);
+        });
+    },
+    toimg: ({ sock, chatId, originalMsg, ctx }) => {
+        if (!ctx.stickerController) {
+            return safeSendMessage(sock, chatId, { text: '⚠️ Sticker functionality is not available.' }, originalMsg);
+        }
+        void ctx.stickerController.handleToImage(sock, chatId, originalMsg).catch((err) => {
+            logger.error('ToImage command error:', err);
+            void safeSendMessage(sock, chatId, { text: '⚠️ Failed to convert sticker to image.' }, originalMsg);
+        });
+    },
+    rgb: ({ sock, chatId, args, originalMsg, ctx }) => {
+        if (!ctx.stickerController) {
+            return safeSendMessage(sock, chatId, { text: '⚠️ Sticker functionality is not available.' }, originalMsg);
+        }
+        void ctx.stickerController.handleRgbSticker(sock, chatId, args, originalMsg).catch((err) => {
+            logger.error('RGB sticker error:', err);
+            void safeSendMessage(sock, chatId, { text: '⚠️ Failed to generate RGB sticker.' }, originalMsg);
+        });
+    },
+};
+
 class CommandController {
     constructor(database, botState, groupManager, newsController = null, movieController = null, userManager = null, stickerController = null, botSettings = null, githubTrendingController = null, memberScrapeController = null, warnDatabase = null, authDatabase = null, courseAPI = null, awesomeListsController = null) {
         this.database = database;
@@ -374,211 +577,18 @@ class CommandController {
         const ctx = { ...this._ctx(), originalMsg, replyOpts: getSafeSendOptions(originalMsg), fullCommand: command.trim() };
         const t0 = Date.now();
 
-        try {
-        switch (def.key) {
-            /* ── Core ── */
-            case 'ping':     await handlePing(sock, chatId, ctx); break;
-            case 'posted':   await handlePosted(sock, chatId, ctx); break;
-            case 'clear':    await handleClear(sock, chatId, ctx); break;
-            case 'confirm':  await handleConfirm(sock, chatId, ctx); break;
-            case 'cancel':  await handleCancel(sock, chatId, senderJid, ctx); break;
-            case 'pause':    await handlePause(sock, chatId, ctx); break;
-            case 'resumecourses': await handleResume(sock, chatId, ctx); break;
-            case 'status':   await handleStatus(sock, chatId, ctx); break;
-            case 'facts':    await handleFacts(sock, chatId, ctx); break;
-            case 'help':     await handleHelp(sock, chatId, senderJid, ctx); break;
-
-            /* ── Group management ── */
-            case 'activate':   await handleActivate(sock, chatId, senderJid, ctx); break;
-            case 'deactivate': await handleDeactivate(sock, chatId, senderJid, ctx); break;
-            case 'instaon':    await handleInstaOn(sock, chatId, senderJid, ctx); break;
-            case 'instaoff':   await handleInstaOff(sock, chatId, senderJid, ctx); break;
-            case 'stickeron':  await handleStickerOn(sock, chatId, senderJid, ctx); break;
-            case 'stickeroff': await handleStickerOff(sock, chatId, senderJid, ctx); break;
-            case 'newson':     await handleNewsOn(sock, chatId, senderJid, ctx); break;
-            case 'newsoff':    await handleNewsOff(sock, chatId, senderJid, ctx); break;
-            case 'courson':
-            case 'courseson':  await handleCoursesOn(sock, chatId, senderJid, ctx); break;
-            case 'coursesoff':
-            case 'courseoff':  await handleCoursesOff(sock, chatId, senderJid, ctx); break;
-            case 'githubon':   await handleGithubOn(sock, chatId, senderJid, ctx); break;
-            case 'githuboff':  await handleGithubOff(sock, chatId, senderJid, ctx); break;
-            case 'awesomeon':  await handleAwesomeOn(sock, chatId, senderJid, ctx); break;
-            case 'awesomeoff': await handleAwesomeOff(sock, chatId, senderJid, ctx); break;
-            case 'interviewqon':  await handleInterviewQOn(sock, chatId, senderJid, ctx); break;
-            case 'interviewqoff': await handleInterviewQOff(sock, chatId, senderJid, ctx); break;
-            case 'interviewq': await handleInterviewQ(sock, chatId, senderJid, args, ctx); break;
-            case 'groups':     await handleGroups(sock, chatId, senderJid, ctx); break;
-            case 'setwc':      await handleSetWelcome(sock, chatId, senderJid, command.trim(), ctx); break;
-            case 'link':       await handleGroupLink(sock, chatId, senderJid, ctx); break;
-            case 'revokelink': await handleRevokeLink(sock, chatId, senderJid, ctx); break;
-            case 'warn':       await handleWarn(sock, chatId, senderJid, args, originalMsg, ctx); break;
-            case 'mywarns':    await handleMyWarns(sock, chatId, senderJid, ctx); break;
-            case 'warns':      await handleWarns(sock, chatId, senderJid, args, originalMsg, ctx); break;
-            case 'clearwarns': await handleClearWarns(sock, chatId, senderJid, args, originalMsg, ctx); break;
-            case 'dellast':
-            case 'delall':
-                await handleDelLast(sock, chatId, args, originalMsg, ctx);
-                break;
-            case 'movieon':    await handleMovieOn(sock, chatId, senderJid, ctx); break;
-            case 'movieoff':   await handleMovieOff(sock, chatId, senderJid, ctx); break;
-            case 'summaryon':  await handleSummaryOn(sock, chatId, senderJid, ctx); break;
-            case 'summaryoff': await handleSummaryOff(sock, chatId, senderJid, ctx); break;
-            case 'summarynow': await handleSummaryNow(sock, chatId, senderJid, ctx); break;
-            case 'fix':        await handleFix(sock, chatId, senderJid, args, ctx); break;
-            case 'heal':       await handleHeal(sock, chatId, senderJid, args, ctx); break;
-            case 'assist':     await handleAssist(sock, chatId, senderJid, args, ctx); break;
-            case 'resume':     await handleCv(sock, chatId, senderJid, args, ctx); break;
-            case 'tailor':     await handleTailor(sock, chatId, senderJid, args, ctx); break;
-            case 'cover':      await handleCover(sock, chatId, senderJid, args, ctx); break;
-            case 'trending':   await handleTrending(sock, chatId, senderJid, args, ctx); break;
-            case 'tradelert':  await handleTradelert(sock, chatId, senderJid, args, ctx); break;
-            case 'tradenow':   await handleTradenow(sock, chatId, senderJid, args, ctx); break;
-            case 'index':      await handleIndex(sock, chatId, senderJid, args, ctx); break;
-            case 'swing':      await handleSwing(sock, chatId, senderJid, args, ctx); break;
-            case 'expiry':     await handleExpiry(sock, chatId, senderJid, args, ctx); break;
-
-            /* ── Admin management ── */
-            case 'addadmin':    await handleAddAdmin(sock, chatId, senderJid, args, originalMsg, ctx); break;
-            case 'removeadmin': await handleRemoveAdmin(sock, chatId, senderJid, args, originalMsg, ctx); break;
-            case 'admins':      await handleAdmins(sock, chatId, senderJid, ctx); break;
-            case 'increaselimit': await handleIncreaseLimit(sock, chatId, senderJid, args, originalMsg, ctx); break;
-            case 'checklimit': await handleCheckLimit(sock, chatId, senderJid, args, originalMsg, pushName, ctx); break;
-
-            /* ── Owner: premium / mod / channels ── */
-            case 'addpremium':    await handleAddPremium(sock, chatId, senderJid, args, ctx); break;
-            case 'removepremium': await handleRemovePremium(sock, chatId, senderJid, args, ctx); break;
-            case 'premium':       await handleListPremium(sock, chatId, senderJid, ctx); break;
-            case 'addmod':        await handleAddMod(sock, chatId, senderJid, args, ctx); break;
-            case 'removemod':     await handleRemoveMod(sock, chatId, senderJid, args, ctx); break;
-            case 'addchannel':    await handleAddChannel(sock, chatId, args, senderJid, ctx); break;
-            case 'removechannel': await handleRemoveChannel(sock, chatId, args, senderJid, ctx); break;
-            case 'channels':      await handleChannels(sock, chatId, senderJid, ctx); break;
-            case 'scrap':         await handleScrap(sock, chatId, senderJid, args, ctx); break;
-            case 'scrapmembers':  await handleScrapMembers(sock, chatId, senderJid, ctx); break;
-            case 'scrapclear':    await handleScrapClear(sock, chatId, senderJid, args, ctx); break;
-            case 'broadcast':     void handleBroadcast(sock, chatId, senderJid, args, ctx).catch((err) => {
-                logger.error(`Broadcast handler error: ${err?.message || err?.output?.payload?.message || String(err)}`);
-            }); break;
-            case 'grouppost':     await handleGroupPost(sock, chatId, senderJid, args, ctx); break;
-            case 'driveurl':      await handleDriveUrl(sock, chatId, senderJid, args, ctx); break;
-            case 'viewonce':      await handleViewOnce(sock, chatId, senderJid, originalMsg); break;
-            case 'deploy':        await handleDeploy(sock, chatId, senderJid, originalMsg); break;
-
-            /* ── Instagram / News / Movie ── */
-            case 'insta': await _handleInsta(sock, chatId, args, originalMsg); break;
-            case 'news':  await handleNews(sock, chatId, senderJid, ctx); break;
-            case 'github': await handleGithub(sock, chatId, senderJid, ctx); break;
-            case 'awesome': await handleAwesome(sock, chatId, senderJid, ctx); break;
-            case 'horo':
-                try {
-                    const sign = args[0];
-                    if (!sign) {
-                        const listMsg = horoscopeService.getSignsList();
-                        await safeSendMessage(sock, chatId, { text: listMsg }, originalMsg);
-                    } else {
-                        const data = await horoscopeService.fetchHoroscope(sign);
-                        if (data.error === 'api_error') {
-                            ctx.groupSummaryController?.selfHeal?.triggerFromHoroscopeFailure({
-                                sign,
-                                errorMessage: 'All horoscope API sources failed',
-                                chatId,
-                                diagnostics: data.diagnostics,
-                            });
-                        }
-                        const msg = horoscopeService.formatMessage(data);
-                        await safeSendMessage(sock, chatId, { text: msg }, originalMsg);
-                    }
-                } catch (err) {
-                    logger.error('Horoscope command error:', err);
-                    ctx.groupSummaryController?.selfHeal?.triggerFromHoroscopeFailure({
-                        sign: args[0],
-                        errorMessage: err.message,
-                        chatId,
-                    });
-                    await safeSendMessage(sock, chatId, { text: '⚠️ Failed to fetch horoscope. Please try again.' }, originalMsg);
-                }
-                break;
-            case 'advice':
-                try {
-                    const slip = await adviceService.fetchAdvice();
-                    await safeSendMessage(sock, chatId, { text: adviceService.formatMessage(slip) }, originalMsg);
-                } catch (err) {
-                    logger.error('Advice command error:', err);
-                    await safeSendMessage(sock, chatId, { text: adviceService.formatError() }, originalMsg);
-                }
-                break;
-            case 'movie':
-                if (!this.movieController) {
-                    await safeSendMessage(sock, chatId, { text: '⚠️ Movie search is not available.' }, originalMsg);
-                } else {
-                    void this.movieController.handleMovieSearch(sock, chatId, senderJid, args, pushName, originalMsg)
-                        .catch((err) => {
-                            logger.error(`Movie search handler error: ${err?.message || err}`);
-                        });
-                }
-                break;
-            case 'upcoming':
-                if (!this.movieController) {
-                    await safeSendMessage(sock, chatId, { text: '⚠️ Movie features not available.' }, originalMsg);
-                } else {
-                    void this.movieController.handleUpcoming(sock, chatId, senderJid, originalMsg)
-                        .catch((err) => logger.error(`Upcoming handler error: ${err?.message || err}`));
-                }
-                break;
-            case 'genre':
-                if (!this.movieController) {
-                    await safeSendMessage(sock, chatId, { text: '⚠️ Movie features not available.' }, originalMsg);
-                } else {
-                    void this.movieController.handleGenre(sock, chatId, senderJid, args, originalMsg)
-                        .catch((err) => logger.error(`Genre handler error: ${err?.message || err}`));
-                }
-                break;
-
-            /* ── Sticker Commands (non-blocking — FFmpeg runs in background queue) ── */
-            case 'sticker':
-                if (!this.stickerController) {
-                    await safeSendMessage(sock, chatId, { text: '⚠️ Sticker functionality is not available.' }, originalMsg);
-                } else {
-                    void this.stickerController.handleSticker(sock, chatId, originalMsg, args, command).catch((err) => {
-                        logger.error('Sticker command error:', err);
-                        void safeSendMessage(sock, chatId, { text: '⚠️ Failed to process sticker command.' }, originalMsg);
-                    });
-                }
-                break;
-            case 'steal':
-                if (!this.stickerController) {
-                    await safeSendMessage(sock, chatId, { text: '⚠️ Sticker functionality is not available.' }, originalMsg);
-                } else {
-                    void this.stickerController.handleSteal(sock, chatId, originalMsg, args, command).catch((err) => {
-                        logger.error('Steal command error:', err);
-                        void safeSendMessage(sock, chatId, { text: '⚠️ Failed to process steal command.' }, originalMsg);
-                    });
-                }
-                break;
-            case 'toimg':
-                if (!this.stickerController) {
-                    await safeSendMessage(sock, chatId, { text: '⚠️ Sticker functionality is not available.' }, originalMsg);
-                } else {
-                    void this.stickerController.handleToImage(sock, chatId, originalMsg).catch((err) => {
-                        logger.error('ToImage command error:', err);
-                        void safeSendMessage(sock, chatId, { text: '⚠️ Failed to convert sticker to image.' }, originalMsg);
-                    });
-                }
-                break;
-            case 'rgb':
-                if (!this.stickerController) {
-                    await safeSendMessage(sock, chatId, { text: '⚠️ Sticker functionality is not available.' }, originalMsg);
-                } else {
-                    void this.stickerController.handleRgbSticker(sock, chatId, args, originalMsg).catch((err) => {
-                        logger.error('RGB sticker error:', err);
-                        void safeSendMessage(sock, chatId, { text: '⚠️ Failed to generate RGB sticker.' }, originalMsg);
-                    });
-                }
-                break;
-
-            default: break;
+        const handler = COMMAND_HANDLERS[def.key];
+        if (!handler) {
+            // Registered but not wired — fail loudly instead of silently no-oping.
+            logger.error(`No handler registered for command key '${def.key}'`);
+            await plainSendMessage(sock, chatId, {
+                text: `⚠️ \`${cmd}\` is registered but not wired up yet — please tell the owner.`,
+            }, originalMsg?.key);
+            return;
         }
+
+        try {
+            await handler({ sock, chatId, senderJid, args, originalMsg, pushName, ctx, fullCommand: command.trim() });
             botTelemetry.track('command', {
                 cmd: def.key,
                 chatId,

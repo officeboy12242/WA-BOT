@@ -16,7 +16,7 @@
  * people who have not opted out, at a pace a person could plausibly type at.
  */
 
-import { WAMessageStatus } from 'baileys';
+import { deliverMessage, createDeliveryVerifier } from '../utils/waMessage.js';
 import { logger } from '../utils/logger.js';
 import { getTodayDateStrIST } from '../utils/dateIST.js';
 
@@ -49,8 +49,6 @@ export const BROADCAST_STATUS = {
 const SEND_VERIFY_MS = 4_000;
 /** Give Baileys time to issue the recipient's privacy token after a 463 drop. */
 const TOKEN_ISSUE_WAIT_MS = 6_000;
-/** A single stuck send must never stall the whole broadcast run. */
-const SEND_TIMEOUT_MS = 20_000;
 
 function jitter(min, max) {
     return Math.floor(min + Math.random() * Math.max(0, max - min));
@@ -157,21 +155,6 @@ class BroadcastService {
         await this.jobs.updateOne({ _id: id }, { $set: { ...patch, updated_at: new Date() } });
     }
 
-    /** sendMessage resolves on socket write, not delivery — guard it so one stuck send can't hang the run. */
-    async _sendWithTimeout(sock, jid, message) {
-        let timer;
-        try {
-            return await Promise.race([
-                sock.sendMessage(jid, { text: message }),
-                new Promise((_, reject) => {
-                    timer = setTimeout(() => reject(new Error('send timeout')), SEND_TIMEOUT_MS);
-                }),
-            ]);
-        } finally {
-            clearTimeout(timer);
-        }
-    }
-
     /**
      * 'present' | 'absent' | null (null = auth store unreadable).
      * The privacy token (tctoken) is cached under the recipient's LID (or
@@ -188,6 +171,25 @@ class BroadcastService {
         } catch {
             return null;
         }
+    }
+
+    /**
+     * Pre-flight sample: how many of these JIDs already carry a cached privacy
+     * token (tctoken). Recipients without one are still deliverable — the
+     * token is issued on the first attempt — but knowing the split up front
+     * turns "will they get it?" into a number before the daily cap is spent.
+     * @returns {Promise<{ sampled: number, withToken: number, noToken: number, unreadable: number }>}
+     */
+    async sampleDmReadiness(sock, jids = [], limit = 10) {
+        const sample = (jids || []).slice(0, limit);
+        const out = { sampled: sample.length, withToken: 0, noToken: 0, unreadable: 0 };
+        for (const jid of sample) {
+            const state = await this._privacyTokenState(sock, jid);
+            if (state === 'present') out.withToken += 1;
+            else if (state === 'absent') out.noToken += 1;
+            else out.unreadable += 1;
+        }
+        return out;
     }
 
     /**
@@ -219,38 +221,42 @@ class BroadcastService {
      * bot are often dropped by the server with error 463 (missing privacy
      * token), which arrives ASYNC as a messages.update status ERROR after the
      * promise already resolved — so the old code counted those as sent and its
-     * catch-block retry never fired. `waitForOutcome` bridges that gap:
+     * catch-block retry never fired. `verifier` (from createDeliveryVerifier)
+     * bridges that gap:
      *
      *  - server reports ERROR on the first send → wait for the token to be
      *    issued, retry ONCE, and verify the retry too;
      *  - retry also dropped → { ok: false, permanent: true } — the recipient
      *    blocks DMs entirely; counted separately, never as "sent".
+     *
+     * Sends flow through the shared deliverMessage pipeline (queue, timeout,
+     * quote policy).
      */
-    async _sendOnce(sock, jid, message, waitForOutcome = null) {
+    async _sendOnce(sock, jid, message, verifier = null) {
         try {
-            const sent = await this._sendWithTimeout(sock, jid, message);
-            if (waitForOutcome && sent?.key?.id) {
-                const outcome = await waitForOutcome(sent.key.id, SEND_VERIFY_MS);
-                if (outcome === 'ERROR') {
-                    logger.info(`Broadcast: ${jid} dropped by server (missing privacy token) — waiting for token, retrying`);
-                    await this._waitForPrivacyToken(sock, jid);
-                    try {
-                        const resent = await this._sendWithTimeout(sock, jid, message);
-                        if (waitForOutcome && resent?.key?.id) {
-                            const retryOutcome = await waitForOutcome(resent.key.id, SEND_VERIFY_MS);
-                            if (retryOutcome === 'ERROR') {
-                                return {
-                                    ok: false,
-                                    retried: true,
-                                    permanent: true,
-                                    error: 'still dropped after privacy token — recipient blocks DMs',
-                                };
-                            }
-                        }
-                        return { ok: true, retried: true };
-                    } catch (err2) {
-                        return { ok: false, retried: true, error: String(err2?.message || err2) };
+            const { outcome } = await deliverMessage(sock, jid, { text: message }, {
+                verifier,
+                verifyWaitMs: SEND_VERIFY_MS,
+            });
+            if (verifier && outcome === 'ERROR') {
+                logger.info(`Broadcast: ${jid} dropped by server (missing privacy token) — waiting for token, retrying`);
+                await this._waitForPrivacyToken(sock, jid);
+                try {
+                    const retry = await deliverMessage(sock, jid, { text: message }, {
+                        verifier,
+                        verifyWaitMs: SEND_VERIFY_MS,
+                    });
+                    if (retry.outcome === 'ERROR') {
+                        return {
+                            ok: false,
+                            retried: true,
+                            permanent: true,
+                            error: 'still dropped after privacy token — recipient blocks DMs',
+                        };
                     }
+                    return { ok: true, retried: true };
+                } catch (err2) {
+                    return { ok: false, retried: true, error: String(err2?.message || err2) };
                 }
             }
             return { ok: true, retried: false };
@@ -262,7 +268,10 @@ class BroadcastService {
 
             await sleep(TOKEN_ISSUE_WAIT_MS);
             try {
-                await this._sendWithTimeout(sock, jid, message);
+                await deliverMessage(sock, jid, { text: message }, {
+                    verifier,
+                    verifyWaitMs: SEND_VERIFY_MS,
+                });
                 return { ok: true, retried: true };
             } catch (err2) {
                 return { ok: false, retried: true, error: String(err2?.message || err2) };
@@ -291,53 +300,12 @@ class BroadcastService {
         let consecutiveFailures = 0;
         let attempted = 0;
 
-        // Async delivery verdicts for messages we sent. sendMessage resolves on
-        // socket write; a 463 privacy-token drop surfaces later as a
-        // messages.update with status ERROR keyed by the sent message id.
-        const statusByMsgId = new Map();
-        let attachedSock = null;
-        const onMsgUpdate = (updates) => {
-            // Record every outbound message status — the sent id isn't known until
-            // sendMessage resolves, so gate on nothing and keep a bounded map.
-            for (const u of updates) {
-                if (!u.key?.fromMe || !u.key?.id) continue;
-                statusByMsgId.set(u.key.id, u.update?.status);
-                if (statusByMsgId.size > 1000) {
-                    const oldest = statusByMsgId.keys().next().value;
-                    if (oldest !== undefined) statusByMsgId.delete(oldest);
-                }
-            }
-        };
-        const attachStatus = (sock) => {
-            if (attachedSock || !sock?.ev?.on) return;
-            sock.ev.on('messages.update', onMsgUpdate);
-            attachedSock = sock;
-        };
-        const detachStatus = () => {
-            if (attachedSock?.ev?.off) attachedSock.ev.off('messages.update', onMsgUpdate);
-            attachedSock = null;
-        };
-        /** Resolve 'ERROR' if the server rejects the sent message id, else 'OK'. */
-        const waitForOutcome = (msgId, timeoutMs) => new Promise((resolve) => {
-            const isError = (s) => s === WAMessageStatus.ERROR;
-            const isGood = (s) => (
-                s === WAMessageStatus.SERVER_ACK ||
-                s === WAMessageStatus.DELIVERY_ACK ||
-                s === WAMessageStatus.READ
-            );
-            const started = Date.now();
-            const tick = () => {
-                const cur = statusByMsgId.get(msgId);
-                if (isError(cur)) return resolve('ERROR');
-                if (isGood(cur)) return resolve('OK');
-                if (Date.now() - started >= timeoutMs) return resolve('OK'); // no news — assume delivered
-                setTimeout(tick, 150);
-            };
-            tick();
-        });
+        // Async delivery verdicts for messages we sent — shared pipeline verifier
+        // (one listener for the whole run, reused across every send).
+        let verifier = null;
 
         const finish = async (status, note = null) => {
-            detachStatus();
+            verifier?.detach?.();
             this._aborting.delete(jobId);
             await this._patch(jobId, {
                 status, cursor, sent, failed,
@@ -361,7 +329,7 @@ class BroadcastService {
 
             const sock = getSock?.();
             if (!sock) return finish(BROADCAST_STATUS.PAUSED_CAP, 'WhatsApp disconnected — will resume');
-            attachStatus(sock);
+            verifier = verifier || createDeliveryVerifier(sock);
 
             const jid = targets[cursor];
 
@@ -372,7 +340,7 @@ class BroadcastService {
                 continue;
             }
 
-            const res = await this._sendOnce(sock, jid, message, waitForOutcome);
+            const res = await this._sendOnce(sock, jid, message, verifier);
             if (res.ok) {
                 sent += 1;
                 daily.count += 1;

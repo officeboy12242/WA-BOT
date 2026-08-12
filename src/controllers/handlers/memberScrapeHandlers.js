@@ -475,6 +475,16 @@ async function launchBroadcast({
     const pauses = Math.floor(targets.length / o.batchSize) * ((o.batchPauseMinMs + o.batchPauseMaxMs) / 2);
     const days = Math.ceil(targets.length / Math.max(1, o.dailyCap));
 
+    // Pre-flight: sample targets for cached privacy tokens so the owner sees
+    // how many are DM-ready right now vs. how many need a first-attempt token
+    // issuance (still deliverable) before the daily cap is spent.
+    const readiness = await broadcastService.sampleDmReadiness(sock, targets, 10).catch(() => null);
+    const readinessLine = readiness?.sampled
+        ? `📡 DM readiness: *${readiness.withToken}/${readiness.sampled}* sampled have tokens cached` +
+            (readiness.unreadable ? ' (a few unreadable)' : '') +
+            ' — the rest get issued on first attempt'
+        : null;
+
     const plan = [
         `📋 *Broadcast plan* — ${label}`,
         '',
@@ -482,6 +492,7 @@ async function launchBroadcast({
         lidResolved ? `🔓 LIDs resolved to numbers: *${lidResolved}*` : null,
         unreachable ? `🚫 Unreachable (number hidden): *${unreachable}*` : null,
         suppressed ? `🔕 Skipped (opted out): *${suppressed}*` : null,
+        readinessLine,
         '',
         `⏱ Pace: ${Math.round(o.minGapMs / 1000)}–${Math.round(o.maxGapMs / 1000)}s apart, ` +
             `pausing after every ${o.batchSize}`,
