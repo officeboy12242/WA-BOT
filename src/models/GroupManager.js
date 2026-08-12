@@ -1098,6 +1098,34 @@ class GroupManager {
         );
     }
 
+    // ─── Group invite links ───────────────────────────────────────────────────
+
+    /** Save the current group invite code (called when an admin fetches/revokes it). */
+    async setGroupInviteCode(groupId, inviteCode, setBy) {
+        await this.groups.updateOne(
+            { group_id: groupId },
+            {
+                $set: {
+                    invite_code: inviteCode || '',
+                    invite_code_by: setBy || '',
+                    invite_code_at: new Date(),
+                },
+                $setOnInsert: { group_id: groupId, is_active: false },
+            },
+            { upsert: true }
+        );
+        logger.info(`🔗 Invite code saved for ${groupId} by ${setBy || 'unknown'}`);
+    }
+
+    /** Last saved group invite code ('' if never saved). */
+    async getGroupInviteCode(groupId) {
+        const row = await this.groups.findOne(
+            { group_id: groupId },
+            { projection: { invite_code: 1 } }
+        );
+        return row?.invite_code || '';
+    }
+
     async getGroupCount() {
         const [active, total] = await Promise.all([
             this.groups.countDocuments({ is_active: true }),

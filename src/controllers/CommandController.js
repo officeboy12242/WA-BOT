@@ -50,6 +50,8 @@ import {
     handleSummaryOff,
     handleSummaryNow,
     handleTrending,
+    handleGroupLink,
+    handleRevokeLink,
 } from './handlers/groupHandlers.js';
 
 import { handleTradelert, handleTradenow, handleSwing, handleExpiry, handleIndex } from './handlers/tradeHandlers.js';
@@ -408,6 +410,8 @@ class CommandController {
             case 'interviewq': await handleInterviewQ(sock, chatId, senderJid, args, ctx); break;
             case 'groups':     await handleGroups(sock, chatId, senderJid, ctx); break;
             case 'setwc':      await handleSetWelcome(sock, chatId, senderJid, command.trim(), ctx); break;
+            case 'link':       await handleGroupLink(sock, chatId, senderJid, ctx); break;
+            case 'revokelink': await handleRevokeLink(sock, chatId, senderJid, ctx); break;
             case 'warn':       await handleWarn(sock, chatId, senderJid, args, originalMsg, ctx); break;
             case 'mywarns':    await handleMyWarns(sock, chatId, senderJid, ctx); break;
             case 'warns':      await handleWarns(sock, chatId, senderJid, args, originalMsg, ctx); break;

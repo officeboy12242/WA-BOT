@@ -847,6 +847,138 @@ export async function handleSetWelcome(sock, chatId, senderJid, fullCommand, { g
     }
 }
 
+const INVITE_LINK_BASE = 'https://chat.whatsapp.com/';
+
+async function fetchLiveInviteCode(sock, chatId) {
+    try {
+        return (await sock.groupInviteCode(chatId)) || '';
+    } catch (err) {
+        logger.warn(`Group link: live fetch failed for ${chatId}: ${err.message}`);
+        return '';
+    }
+}
+
+async function groupDisplayName(sock, chatId, groupManager) {
+    try {
+        const meta = await getGroupMeta(sock, chatId, groupManager);
+        return meta.subject || 'this group';
+    } catch (err) {
+        logger.debug(`Group link: could not fetch group name for ${chatId}: ${err.message}`);
+        return 'this group';
+    }
+}
+
+/**
+ * `/link` — admins fetch a fresh invite code (and save it for members);
+ * anyone in the group can then request the saved link.
+ */
+export async function handleGroupLink(sock, chatId, senderJid, { groupManager, originalMsg }) {
+    try {
+        const senderPhone = extractPhoneNumber(senderJid);
+        const groupName = await groupDisplayName(sock, chatId, groupManager);
+        const isAdmin = await groupManager.isPrivilegedAsync(sock, chatId, senderJid);
+
+        let inviteCode = '';
+
+        // Admins/staff refresh the live invite code and save it for everyone
+        if (isAdmin) {
+            inviteCode = await fetchLiveInviteCode(sock, chatId);
+            if (inviteCode) {
+                await groupManager.setGroupInviteCode(chatId, inviteCode, senderPhone);
+            }
+        }
+
+        // Members (and admin fallback) use the last saved invite code
+        if (!inviteCode) {
+            inviteCode = await groupManager.getGroupInviteCode(chatId);
+        }
+
+        if (!inviteCode) {
+            await sock.sendMessage(chatId, {
+                text:
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
+                    '🔒 *NO SAVED LINK YET* 🔒\n' +
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                    'There is no saved invite link for this group yet.\n\n' +
+                    (isAdmin
+                        ? '_Make sure the bot is a group admin, then try again._'
+                        : '_Ask a group admin to run `/link` to save it — then anyone here can get it._'),
+            }, { quoted: originalMsg });
+            return;
+        }
+
+        const link = `${INVITE_LINK_BASE}${inviteCode}`;
+
+        let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        r += '🔗 *GROUP INVITE LINK* 🔗\n';
+        r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+        r += `📢 *Group:* ${groupName}\n\n`;
+        r += `${link}\n\n`;
+        r += isAdmin
+            ? '_Saved for members — `/revokelink` regenerates it._'
+            : '_Saved by an admin. Admins can refresh it with `/link`._';
+
+        await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
+        logger.info(`🔗 Group link served: ${groupName} (${chatId}) by ${senderPhone} (${isAdmin ? 'admin' : 'member'})`);
+    } catch (error) {
+        logger.error(`Error fetching group link for ${chatId}: ${error.message}`);
+        await sock.sendMessage(chatId, {
+            text:
+                '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
+                '❌ *FAILED* ❌\n' +
+                '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                'Could not get the group link. Make sure the bot is a group admin.',
+        }, { quoted: originalMsg });
+    }
+}
+
+/**
+ * `/revokelink` — admins regenerate the group invite link, killing the old one.
+ */
+export async function handleRevokeLink(sock, chatId, senderJid, { groupManager, originalMsg }) {
+    try {
+        const senderPhone = extractPhoneNumber(senderJid);
+        const groupName = await groupDisplayName(sock, chatId, groupManager);
+
+        const inviteCode = await sock.groupRevokeInvite(chatId);
+        if (!inviteCode) {
+            await sock.sendMessage(chatId, {
+                text:
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
+                    '❌ *REVOKE FAILED* ❌\n' +
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                    'Could not revoke the invite link.\n' +
+                    '_Make sure the bot is a group admin._',
+            }, { quoted: originalMsg });
+            return;
+        }
+
+        await groupManager.setGroupInviteCode(chatId, inviteCode, senderPhone);
+
+        const link = `${INVITE_LINK_BASE}${inviteCode}`;
+
+        let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        r += '🔄 *LINK REVOKED* 🔄\n';
+        r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+        r += `📢 *Group:* ${groupName}\n\n`;
+        r += 'The old invite link is dead. New link:\n\n';
+        r += `${link}\n\n`;
+        r += '_Saved for members — they get this new link with `/link`._';
+
+        await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
+        logger.info(`🔄 Invite link revoked: ${groupName} (${chatId}) by ${senderPhone}`);
+    } catch (error) {
+        logger.error(`Error revoking group link for ${chatId}: ${error.message}`);
+        await sock.sendMessage(chatId, {
+            text:
+                '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
+                '❌ *REVOKE FAILED* ❌\n' +
+                '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                'Could not revoke the invite link. Make sure the bot is a group admin.',
+        }, { quoted: originalMsg });
+    }
+}
+
 export async function handleGroupParticipantsUpdate(sock, update, { groupManager }) {
     try {
         const groupId = update?.id || update?.jid || update?.groupId;

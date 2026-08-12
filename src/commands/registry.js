@@ -284,6 +284,20 @@ export const COMMAND_REGISTRY = [
         help: 'Set welcome extra line; auto-deletes after 2 min — `/setwc on` to enable',
     },
     {
+        names: ['/link', '/gclink', '/getlink'],
+        key: 'link',
+        scope: 'group_only',
+        role: 'anyone',
+        help: 'Get this group\'s invite link — admins refresh it, members get the saved link',
+    },
+    {
+        names: ['/revokelink', '/revoke'],
+        key: 'revokelink',
+        scope: 'group_only',
+        role: 'admins',
+        help: 'Revoke & regenerate this group\'s invite link (admins only)',
+    },
+    {
         names: ['/warn'],
         key: 'warn',
         scope: 'group_only',
@@ -776,6 +790,7 @@ export const HELP_CATEGORY = {
     resume: 'resume', tailor: 'resume', cover: 'resume',
 
     // Group setup & feature toggles
+    link: 'group', revokelink: 'group',
     activate: 'group', deactivate: 'group', newson: 'group', newsoff: 'group',
     courson: 'group', coursesoff: 'group', githubon: 'group', githuboff: 'group',
     awesomeon: 'group', awesomeoff: 'group', instaon: 'group', instaoff: 'group',
