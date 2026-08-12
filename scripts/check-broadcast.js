@@ -7,7 +7,8 @@ import assert from 'assert';
 import { dmTargetForMember, resolveLidToPhoneJid } from '../src/controllers/MemberScrapeController.js';
 import MemberScrapeController from '../src/controllers/MemberScrapeController.js';
 import { classifyOptMessage, optOutKey } from '../src/models/BroadcastOptOutStore.js';
-import BroadcastService, { withOptOutFooter, BROADCAST_STATUS } from '../src/services/BroadcastService.js';
+import BroadcastService, { withOptOutFooter, BROADCAST_STATUS, resolveAccountJid } from '../src/services/BroadcastService.js';
+import { SendPacingService, resolvePacingConfig } from '../src/services/SendPacingService.js';
 
 let checks = 0;
 const ok = (c, m) => { assert.ok(c, m); checks += 1; };
@@ -238,6 +239,126 @@ eq(cleared.removed, 3, 'clearGroup deletes that group\'s members');
 const clearedAll = await gdb.clearAllGroups();
 eq(clearedAll.removed, 3, 'clearAllGroups deletes every member');
 eq(clearedAll.groups, 2, 'clearAllGroups deletes the scrape records too');
+
+/* ── send-pacing governor (OpenWA-style warm-up + cold cap + breaker) ──── */
+
+// Config parsing — pure and offline.
+const defCfg = resolvePacingConfig({});
+eq(defCfg.warmupSchedule[0], 20, 'default warm-up starts at 20/day');
+eq(defCfg.coldSchedule[0], 5, 'default cold cap starts at 5/day');
+const customCfg = resolvePacingConfig({
+    PACING_WARMUP_SCHEDULE: '10,50',
+    PACING_COLD_DAILY_CAP: '2,4',
+    PACING_BREAKER_THRESHOLD: '3',
+    PACING_BREAKER_COOLDOWN_MS: '60000',
+});
+eq(customCfg.warmupSchedule, [10, 50], 'custom warm-up schedule parses');
+eq(customCfg.coldSchedule, [2, 4], 'custom cold schedule parses');
+eq(customCfg.breakerThreshold, 3, 'custom breaker threshold parses');
+eq(customCfg.breakerCooldownMs, 60000, 'custom breaker cooldown parses');
+const badCfg = resolvePacingConfig({ PACING_WARMUP_SCHEDULE: 'abc,10' });
+eq(badCfg.warmupSchedule, defCfg.warmupSchedule, 'a malformed schedule falls back to defaults');
+ok(resolvePacingConfig({ PACING_ENABLED: false }).enabled === false, 'pacing can be switched off');
+
+// In-memory Mongo stand-in: enough of findOne/insertOne/updateOne for the
+// governor's persistence paths.
+function fakeMongoDb() {
+    const collections = new Map();
+    const coll = (name) => {
+        if (!collections.has(name)) collections.set(name, new Map());
+        const map = collections.get(name);
+        return {
+            findOne: async (q = {}) => {
+                for (const doc of map.values()) {
+                    if (Object.entries(q).every(([k, v]) => doc[k] === v)) return doc;
+                }
+                return null;
+            },
+            insertOne: async (doc) => { map.set(JSON.stringify({ _id: doc._id ?? doc.account }), { ...doc }); return {}; },
+            updateOne: async (q = {}, update = {}) => {
+                const key = JSON.stringify(q);
+                let doc = null;
+                for (const d of map.values()) {
+                    if (Object.entries(q).every(([k, v]) => d[k] === v)) { doc = d; break; }
+                }
+                if (!doc) { doc = { account: q.account }; map.set(key, doc); }
+                if (update.$set) Object.assign(doc, update.$set);
+                if (update.$setOnInsert) {
+                    for (const [k, v] of Object.entries(update.$setOnInsert)) {
+                        if (doc[k] === undefined) doc[k] = v;
+                    }
+                }
+                for (const [k, v] of Object.entries(update.$inc || {})) {
+                    const parts = k.split('.');
+                    let cur = doc;
+                    for (let i = 0; i < parts.length - 1; i += 1) {
+                        cur[parts[i]] = cur[parts[i]] || {};
+                        cur = cur[parts[i]];
+                    }
+                    cur[parts[parts.length - 1]] = (cur[parts[parts.length - 1]] || 0) + v;
+                }
+                return {};
+            },
+            createIndex: async () => {},
+        };
+    };
+    return { collection: coll };
+}
+
+const pacing = new SendPacingService(fakeMongoDb(), {});
+const ACC = 'account1';
+eq(await pacing.accountAgeDays(ACC), 0, 'a fresh account is day 0');
+const day0 = await pacing.accountDayInfo(ACC);
+eq(day0.warmupAllowance, 20, 'day-0 warm-up allowance is 20');
+eq(day0.coldAllowance, 5, 'day-0 cold allowance is 5');
+ok(await pacing.isCold(ACC, 'x@s.whatsapp.net'), 'a never-messaged recipient is cold');
+
+let gate = await pacing.check(ACC, 'x@s.whatsapp.net', { sentToday: 20 });
+eq(gate.allowed, false, 'the warm-up cap refuses once today\'s sends hit the allowance');
+ok(gate.reason.includes('warm-up'), 'the refusal names the warm-up ramp');
+gate = await pacing.check(ACC, 'x@s.whatsapp.net', { sentToday: 10 });
+eq(gate.allowed, true, 'sends under the allowance are allowed');
+
+// Cold budget: five strangers, then the sixth is refused — even though the
+// warm-up allowance (20) has plenty of room left.
+for (const r of ['a@s.whatsapp.net', 'b@s.whatsapp.net', 'c@s.whatsapp.net', 'd@s.whatsapp.net', 'e@s.whatsapp.net']) {
+    await pacing.recordSend(ACC, r, true);
+}
+gate = await pacing.check(ACC, 'f@s.whatsapp.net', { sentToday: 5 });
+eq(gate.allowed, false, 'the cold cap refuses once today\'s new-people budget is spent');
+ok(gate.reason.includes('cold'), 'the refusal names the cold-reachout budget');
+ok(!(await pacing.isCold(ACC, 'a@s.whatsapp.net')), 'a messaged recipient is no longer cold');
+gate = await pacing.check(ACC, 'a@s.whatsapp.net', { sentToday: 6 });
+eq(gate.allowed, true, 'a known recipient ignores the cold budget');
+
+// Breaker: N consecutive failures pause everything, a success reopens it.
+for (let i = 0; i < 5; i += 1) pacing.recordFailure(ACC);
+ok(pacing.breakerRemainingMs(ACC) > 0, '5 consecutive failures open the breaker');
+gate = await pacing.check(ACC, 'a@s.whatsapp.net', { sentToday: 0 });
+eq(gate.allowed, false, 'an open breaker refuses all sends');
+ok(gate.reason.includes('cooling down'), 'the refusal names the cooldown');
+pacing.recordSuccess(ACC);
+eq(pacing.breakerRemainingMs(ACC), 0, 'a success closes the breaker');
+
+// Custom threshold trips earlier.
+const tight = new SendPacingService(fakeMongoDb(), { PACING_BREAKER_THRESHOLD: '2' });
+tight.recordFailure(ACC);
+eq(tight.breakerRemainingMs(ACC), 0, 'below the custom threshold the breaker stays closed');
+tight.recordFailure(ACC);
+ok(tight.breakerRemainingMs(ACC) > 0, 'the custom threshold trips the breaker');
+
+// No database = inert, so an unpersisted governor can never block sends.
+const inert = new SendPacingService(null, {});
+eq(inert.enabled, false, 'pacing without persistence is inert');
+eq((await inert.check(ACC, 'x@s.whatsapp.net')).allowed, true, 'inert pacing always allows');
+
+/* ── account key resolution ──────────────────────────────────────────────── */
+
+eq(resolveAccountJid({ user: { id: '917887499710:7@s.whatsapp.net' } }),
+    '917887499710', 'the account key drops the device suffix');
+eq(resolveAccountJid({ authState: { creds: { me: { id: '919999888877:3@s.whatsapp.net' } } } }),
+    '919999888877', 'the account key falls back to auth creds');
+eq(resolveAccountJid({}), 'default', 'no identity yields the default key');
 
 console.log(`OK broadcast — ${checks} checks passed`);
 

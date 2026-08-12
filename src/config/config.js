@@ -377,6 +377,23 @@ export const config = {
     BROADCAST_BATCH_SIZE: Math.max(1, parseInt(process.env.BROADCAST_BATCH_SIZE, 10) || 20),
     BROADCAST_DAILY_CAP: Math.max(1, parseInt(process.env.BROADCAST_DAILY_CAP, 10) || 150),
 
+    /* ── OpenWA-style send pacing governor (warm-up + cold cap + breaker) ──
+     * The flat BROADCAST_DAILY_CAP above is a hard ceiling; these ramp the
+     * EFFECTIVE daily allowance up with the account's age and split out a
+     * separate, much smaller budget for first messages to strangers (the
+     * #1 restriction trigger). Empty values fall back to the defaults below.
+     */
+    /** Master switch — default ON so a fresh number never blasts on day one. */
+    PACING_ENABLED: process.env.PACING_ENABLED !== 'false',
+    /** Daily send allowance by account age in days: "20,40,80,160,320,640,1000". */
+    PACING_WARMUP_SCHEDULE: (process.env.PACING_WARMUP_SCHEDULE || '').trim(),
+    /** Daily allowance for FIRST messages to strangers: "5,10,20,40,60,80,100". */
+    PACING_COLD_DAILY_CAP: (process.env.PACING_COLD_DAILY_CAP || '').trim(),
+    /** Consecutive send failures that pause all sends (circuit breaker). */
+    PACING_BREAKER_THRESHOLD: (process.env.PACING_BREAKER_THRESHOLD || '').trim(),
+    /** How long the breaker stays open after tripping (ms). */
+    PACING_BREAKER_COOLDOWN_MS: (process.env.PACING_BREAKER_COOLDOWN_MS || '').trim(),
+
     /* ── Outcome resolution ─────────────────────────────────────────────── */
     /** Grade posted alerts against what price actually did. */
     TRADE_OUTCOME_RESOLVER_ENABLED: process.env.TRADE_OUTCOME_RESOLVER_ENABLED !== 'false',

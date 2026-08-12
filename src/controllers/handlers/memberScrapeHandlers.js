@@ -6,7 +6,7 @@ import { jidNormalizedUser } from 'baileys';
 import { logger } from '../../utils/logger.js';
 import { extractPhoneNumber } from '../../utils/permissions.js';
 import { resolvePostMessage, editMessageText } from '../../utils/waMessage.js';
-import { withOptOutFooter } from '../../services/BroadcastService.js';
+import { withOptOutFooter, resolveAccountJid } from '../../services/BroadcastService.js';
 
 const BROADCAST_CMDS = ['broadcast'];
 const GROUPPOST_CMDS = ['grouppost', 'groupmsg'];
@@ -320,7 +320,7 @@ export async function handleBroadcast(sock, chatId, senderJid, args, ctx) {
 
         if (firstArg === 'status') {
             const jobs = await broadcastService.findResumable();
-            const remaining = await broadcastService.remainingToday();
+            const remaining = await broadcastService.remainingToday(resolveAccountJid(sock));
             let text = `📊 *Broadcast status*\n\n📅 Left in today's cap: *${remaining}*\n🚫 Opted out: *${broadcastOptOutStore?.size ?? 0}*\n\n`;
             text += jobs.length
                 ? jobs.map((j) => broadcastService.formatJobSummary(j, { label: j.label })).join('\n\n')
@@ -469,11 +469,16 @@ async function launchBroadcast({
     sock, chatId, originalMsg, getSock, broadcastService, broadcastOptOutStore,
     label, message, targets, suppressed = 0, unreachable = 0, lidResolved = 0, dryRun = false,
 }) {
-    const capLeft = await broadcastService.remainingToday();
+    const accountJid = resolveAccountJid(sock);
+    const capLeft = await broadcastService.remainingToday(accountJid);
     const o = broadcastService.opts;
     const avgGap = (o.minGapMs + o.maxGapMs) / 2;
     const pauses = Math.floor(targets.length / o.batchSize) * ((o.batchPauseMinMs + o.batchPauseMaxMs) / 2);
-    const days = Math.ceil(targets.length / Math.max(1, o.dailyCap));
+    const dayInfo = broadcastService.pacing?.enabled
+        ? await broadcastService.pacing.accountDayInfo(accountJid).catch(() => null)
+        : null;
+    const effectiveCap = dayInfo ? Math.min(o.dailyCap, dayInfo.warmupAllowance) : o.dailyCap;
+    const days = Math.ceil(targets.length / Math.max(1, effectiveCap));
 
     // Pre-flight: sample targets for cached privacy tokens so the owner sees
     // how many are DM-ready right now vs. how many need a first-attempt token
@@ -496,7 +501,10 @@ async function launchBroadcast({
         '',
         `⏱ Pace: ${Math.round(o.minGapMs / 1000)}–${Math.round(o.maxGapMs / 1000)}s apart, ` +
             `pausing after every ${o.batchSize}`,
-        `📅 Daily cap ${o.dailyCap} · *${capLeft}* left today` + (days > 1 ? ` · spans ~${days} day(s)` : ''),
+        dayInfo
+            ? `📈 Account day *${dayInfo.ageDays}* · 📅 allowance *${effectiveCap}* (≤ *${dayInfo.coldAllowance}* new people) · *${capLeft}* left today` +
+                (days > 1 ? ` · spans ~${days} day(s)` : '')
+            : `📅 Daily cap ${o.dailyCap} · *${capLeft}* left today` + (days > 1 ? ` · spans ~${days} day(s)` : ''),
         `⌛ Estimated: ~${humanDuration(targets.length * avgGap + pauses)} of sending`,
     ].filter(Boolean).join('\n');
 

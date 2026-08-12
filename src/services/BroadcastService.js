@@ -19,6 +19,7 @@
 import { deliverMessage, createDeliveryVerifier } from '../utils/waMessage.js';
 import { logger } from '../utils/logger.js';
 import { getTodayDateStrIST } from '../utils/dateIST.js';
+import SendPacingService from './SendPacingService.js';
 
 /** Conservative defaults — roughly 150 DMs/day. */
 export const BROADCAST_DEFAULTS = {
@@ -58,6 +59,17 @@ function sleep(ms) {
     return new Promise((r) => setTimeout(r, ms));
 }
 
+/**
+ * Stable per-number key for pacing state. The bot's own JID (e.g.
+ * 917887499710:7@s.whatsapp.net) becomes 917887499710; swapping the number
+ * yields a new key, which is exactly what a fresh warm-up ramp needs.
+ */
+export function resolveAccountJid(sock) {
+    const id = sock?.user?.id || sock?.authState?.creds?.me?.id;
+    if (!id) return 'default';
+    return String(id).split(':')[0];
+}
+
 /** Appended so every recipient has a one-tap way out. */
 export function withOptOutFooter(message, footer = '_Reply STOP to never receive these._') {
     const body = String(message || '').trimEnd();
@@ -71,9 +83,10 @@ class BroadcastService {
      * @param {import('../models/BroadcastOptOutStore.js').default|null} optOutStore
      * @param {object} config
      */
-    constructor(mongoDb = null, optOutStore = null, config = {}) {
+    constructor(mongoDb = null, optOutStore = null, config = {}, pacing = null) {
         this.jobs = mongoDb ? mongoDb.collection('broadcast_jobs') : null;
         this.optOut = optOutStore;
+        this.pacing = pacing;
         this.opts = {
             ...BROADCAST_DEFAULTS,
             minGapMs: Number(config.BROADCAST_MIN_GAP_MS) || BROADCAST_DEFAULTS.minGapMs,
@@ -88,6 +101,7 @@ class BroadcastService {
         if (!this.jobs) return;
         await this.jobs.createIndex({ status: 1 }, { name: 'broadcast_jobs_status' });
         await this.jobs.createIndex({ created_at: -1 }, { name: 'broadcast_jobs_created' });
+        await this.pacing?.init?.();
     }
 
     /** DMs already sent today, across every job. The cap is per account, not per job. */
@@ -99,8 +113,21 @@ class BroadcastService {
         return rows.reduce((sum, r) => sum + (r.daily?.count || 0), 0);
     }
 
-    async remainingToday() {
-        return Math.max(0, this.opts.dailyCap - (await this.sentToday()));
+    /**
+     * Sends left today — the smaller of the hard BROADCAST_DAILY_CAP and the
+     * warm-up ramp's allowance for the account's age. Pass the account JID to
+     * include the ramp; without it only the hard cap applies.
+     */
+    async remainingToday(accountJid = null) {
+        const sent = await this.sentToday();
+        const hardLeft = Math.max(0, this.opts.dailyCap - sent);
+        if (!this.pacing?.enabled || !accountJid) return hardLeft;
+        try {
+            const info = await this.pacing.accountDayInfo(accountJid);
+            return Math.max(0, Math.min(hardLeft, info.warmupAllowance - sent));
+        } catch {
+            return hardLeft;
+        }
     }
 
     /**
@@ -322,16 +349,29 @@ class BroadcastService {
 
             // Account-wide daily ceiling — resume tomorrow rather than push through.
             if (daily.date !== getTodayDateStrIST()) daily = { date: getTodayDateStrIST(), count: 0 };
-            const alreadyToday = await this.sentToday();
-            if (alreadyToday >= this.opts.dailyCap) {
-                return finish(BROADCAST_STATUS.PAUSED_CAP, `daily cap ${this.opts.dailyCap} reached`);
-            }
 
             const sock = getSock?.();
             if (!sock) return finish(BROADCAST_STATUS.PAUSED_CAP, 'WhatsApp disconnected — will resume');
             verifier = verifier || createDeliveryVerifier(sock);
 
             const jid = targets[cursor];
+            const accountJid = resolveAccountJid(sock);
+            const alreadyToday = await this.sentToday();
+
+            // Send-pacing governor: warm-up ramp, cold-reachout budget, breaker.
+            if (this.pacing?.enabled) {
+                const gate = await this.pacing.check(accountJid, jid, { sentToday: alreadyToday });
+                if (!gate.allowed) {
+                    return finish(
+                        BROADCAST_STATUS.PAUSED_CAP,
+                        `${gate.reason} — ${gate.retryLabel}; run /broadcast resume after that`
+                    );
+                }
+            }
+            // Hard ceiling — the absolute cap, independent of the warm-up ramp.
+            if (alreadyToday >= this.opts.dailyCap) {
+                return finish(BROADCAST_STATUS.PAUSED_CAP, `daily cap ${this.opts.dailyCap} reached`);
+            }
 
             if (this.optOut?.isOptedOut(jid)) {
                 skippedOptOut += 1;
@@ -340,24 +380,30 @@ class BroadcastService {
                 continue;
             }
 
+            const wasCold = this.pacing?.enabled ? await this.pacing.isCold(accountJid, jid) : false;
+
             const res = await this._sendOnce(sock, jid, message, verifier);
             if (res.ok) {
                 sent += 1;
                 daily.count += 1;
                 consecutiveFailures = 0;
                 attempted += 1;
+                this.pacing?.enabled && this.pacing.recordSuccess(accountJid);
             } else if (res.permanent) {
                 // Recipient blocks DMs outright — not a throttling signal, and
                 // re-sending would just collect reports. Skip and continue.
                 skippedUnreachable += 1;
                 consecutiveFailures = 0;
+                this.pacing?.enabled && this.pacing.recordSuccess(accountJid);
                 logger.info(`Broadcast ${jobId}: ${jid} unreachable (still dropped after token) — skipped`);
             } else {
                 failed += 1;
                 consecutiveFailures += 1;
                 attempted += 1;
+                this.pacing?.enabled && this.pacing.recordFailure(accountJid);
                 logger.warn(`Broadcast ${jobId} failed for ${jid}: ${res.error}`);
             }
+            if (this.pacing?.enabled) await this.pacing.recordSend(accountJid, jid, wasCold);
 
             cursor += 1;
             await this._patch(jobId, { cursor, sent, failed, skipped_opt_out: skippedOptOut, skipped_unreachable: skippedUnreachable, daily });
@@ -374,8 +420,16 @@ class BroadcastService {
                     `stopped: ${Math.round((failed / attempted) * 100)}% of sends failing — likely rate limited`
                 );
             }
-            if (consecutiveFailures >= 5) {
-                return finish(BROADCAST_STATUS.FAILED, '5 consecutive failures — stopped');
+            const breakerThreshold = this.pacing?.enabled ? this.pacing.breakerThreshold : 5;
+            if (consecutiveFailures >= breakerThreshold) {
+                if (this.pacing?.enabled) {
+                    const mins = Math.max(1, Math.round(this.pacing.cfg.breakerCooldownMs / 60000));
+                    return finish(
+                        BROADCAST_STATUS.PAUSED_CAP,
+                        `${breakerThreshold} consecutive failures — cooling down ~${mins} min; run /broadcast resume after`
+                    );
+                }
+                return finish(BROADCAST_STATUS.FAILED, `${breakerThreshold} consecutive failures — stopped`);
             }
 
             if (cursor >= targets.length) break;
@@ -415,7 +469,7 @@ class BroadcastService {
 }
 
 export function createBroadcastService(mongoDb, optOutStore, config) {
-    return new BroadcastService(mongoDb, optOutStore, config);
+    return new BroadcastService(mongoDb, optOutStore, config, new SendPacingService(mongoDb, config));
 }
 
 export default BroadcastService;
