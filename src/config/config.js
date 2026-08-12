@@ -293,6 +293,15 @@ export const config = {
      * groups OFF the shared slot so they post once.
      */
     TRADE_ALERT_TURNOVER_TIME: (process.env.TRADE_ALERT_TURNOVER_TIME || '').trim(),
+    /**
+     * /index position sizing. The measured index-fade edge is at 1:1, so target
+     * and risk are the same size — one lot at a 1R move lands inside this band for
+     * all four indices (NIFTY Rs608, BANKNIFTY Rs874, FINNIFTY Rs912, MIDCPNIFTY
+     * Rs853). Raising the band sizes UP, which raises the loss by the same amount.
+     */
+    INDEX_TRADE_CAPITAL: Math.max(1000, parseInt(process.env.INDEX_TRADE_CAPITAL, 10) || 30_000),
+    INDEX_TRADE_MIN_PROFIT: Math.max(100, parseInt(process.env.INDEX_TRADE_MIN_PROFIT, 10) || 600),
+    INDEX_TRADE_MAX_PROFIT: Math.max(200, parseInt(process.env.INDEX_TRADE_MAX_PROFIT, 10) || 1_200),
     /** Parallel symbol analyses during daily scan (1–3). */
     TRADE_ALERT_SCAN_CONCURRENCY: Math.max(
         1,

@@ -10,7 +10,11 @@ import {
     isIndexSymbol,
     unsupportedIndexReason,
 } from '../src/data/indexUniverse.js';
-import { rangePosition, oiWalls, pcrLabel, indexAnalysisService } from '../src/services/IndexAnalysisService.js';
+import {
+    rangePosition, oiWalls, pcrLabel, indexAnalysisService,
+    sessionVwap, barAtr, evaluateIndexSignal, sizeIndexTrade,
+    istMinuteOfDay, todaySessionBars, SIGNAL_WINDOW, STRETCH_ATR,
+} from '../src/services/IndexAnalysisService.js';
 import { normalizeYahooSymbol } from '../src/services/IndianStockQuoteService.js';
 import { EXPIRY_INDICES } from '../src/services/ExpiryTradeService.js';
 import { COMMAND_REGISTRY } from '../src/commands/registry.js';
@@ -133,9 +137,124 @@ ok(card.includes('Day range'), 'card renders the day range when high/low are pre
 ok(card.includes('40% of range'), 'card renders the range position');
 ok(card.includes('Max pain'), 'card shows max pain');
 ok(card.includes('Call wall above'), 'card shows the call wall');
-ok(card.includes('No direction called'), 'card states it calls no direction');
-ok(card.includes('36.7%'), 'card carries the measured index-ORB number, not a claim');
-ok(!/BUY CE|BUY PE|Verdict/i.test(card), 'card contains no buy verdict');
+// This fixture carries no signal, so it must NOT produce a call. The card only
+// says BUY when evaluateIndexSignal actually fires — asserted below.
+ok(card.includes('NO ENTRY'), 'a card with no signal says NO ENTRY');
+ok(!/BUY CE|BUY PE/i.test(card), 'a card with no signal contains no buy instruction');
+ok(card.includes('66.7%'), 'card carries the measured fade win rate');
+
+// --------------------------------------------------------------- VWAP / ATR
+// Indices often report ZERO volume on Yahoo. If zero-volume bars were dropped or
+// weighted zero, VWAP would be null on exactly the instruments this serves.
+const zeroVol = Array.from({ length: 10 }, (_, i) => ({ high: 101 + i, low: 99 + i, close: 100 + i, volume: 0 }));
+ok(sessionVwap(zeroVol) !== null, 'VWAP survives all-zero volume (indices report none)');
+ok(sessionVwap([]) === null, 'VWAP of empty is null');
+ok(sessionVwap([{ high: NaN, low: 1, close: 1, volume: 1 }]) === null, 'VWAP ignores non-finite bars');
+const flatBars = Array.from({ length: 10 }, () => ({ high: 102, low: 98, close: 100, volume: 1 }));
+ok(near(sessionVwap(flatBars), 100, 1e-6), 'VWAP of a symmetric flat series is the midpoint');
+ok(near(barAtr(flatBars), 4), 'bar ATR of a constant 4-wide range is 4');
+ok(barAtr([{ high: 1, low: 1, close: 1 }]) === null, 'ATR needs enough bars');
+
+// ------------------------------------------------------------------ signal rules
+const mkBar = (min, close) => ({ min, close, high: close + 2, low: close - 2, volume: 100 });
+const flatSess = Array.from({ length: 15 }, (_, i) => mkBar(9 * 60 + 15 + i * 5, 100));
+const flatSig = evaluateIndexSignal(flatSess, 10 * 60 + 30);
+ok(flatSig.side === null, 'flat session yields no entry');
+ok(/no setup/.test(flatSig.reason), 'flat session explains why');
+
+const upSess = [
+    ...Array.from({ length: 12 }, (_, i) => mkBar(9 * 60 + 15 + i * 5, 100)),
+    ...Array.from({ length: 4 }, (_, i) => mkBar(10 * 60 + 20 + i * 5, 130 + i)),
+];
+const upSig = evaluateIndexSignal(upSess, 10 * 60 + 35);
+ok(upSig.side === 'short', 'stretch ABOVE VWAP fades SHORT, not long');
+ok(upSig.kind === 'vwap-stretch', 'labelled vwap-stretch');
+
+const dnSess = [
+    ...Array.from({ length: 12 }, (_, i) => mkBar(9 * 60 + 15 + i * 5, 100)),
+    ...Array.from({ length: 4 }, (_, i) => mkBar(10 * 60 + 20 + i * 5, 70 - i)),
+];
+ok(evaluateIndexSignal(dnSess, 10 * 60 + 35).side === 'long', 'stretch BELOW VWAP fades LONG');
+
+// the measured time window is load-bearing, not cosmetic
+ok(evaluateIndexSignal(upSess, 9 * 60 + 45).side === null, 'before the window -> no entry');
+ok(/too early/.test(evaluateIndexSignal(upSess, 9 * 60 + 45).reason), 'says too early');
+ok(evaluateIndexSignal(upSess, 14 * 60).side === null, 'after the dead time -> no entry');
+ok(/NEGATIVE/.test(evaluateIndexSignal(upSess, 14 * 60).reason), 'says the rule measured negative late');
+const degradedSig = evaluateIndexSignal(upSess, 12 * 60);
+ok(degradedSig.side === 'short' && degradedSig.degraded === true, 'late-but-alive is flagged degraded');
+ok(evaluateIndexSignal([mkBar(600, 100)], 10 * 60 + 30).side === null, 'too few bars -> no entry');
+ok(evaluateIndexSignal(null, 10 * 60 + 30).side === null, 'null bars safe');
+ok(SIGNAL_WINDOW.deadMin > SIGNAL_WINDOW.closeMin, 'dead time is after the window close');
+ok(STRETCH_ATR === 1.0, 'threshold is the untuned 1xATR, not the best-looking 1.5');
+
+// ----------------------------------------------------------------------- sizing
+const sz = sizeIndexTrade({ premium: 121, lot: 75, indexAtr: 16.2, capital: 30000, minProfit: 600, maxProfit: 1200 });
+ok(sz.lots === 1, 'NIFTY at ATR 16.2 needs exactly 1 lot to reach Rs600');
+ok(sz.t1Rs >= 600 && sz.t1Rs <= 1200, 'T1 profit lands inside the requested band');
+ok(Math.abs(sz.t1Rs - sz.riskRs) <= 2, 'target and risk are the same size — 1:1, the measured ratio');
+ok(sz.premT1 > sz.premEntry && sz.premStop < sz.premEntry, 'exit above entry, stop below');
+ok(sz.capitalUsed <= 30000, 'capital respected');
+ok(sz.t2Rs > sz.t1Rs, 'runner target is further than T1');
+const bigCap = sizeIndexTrade({ premium: 121, lot: 75, indexAtr: 16.2, capital: 300000, minProfit: 600, maxProfit: 1200 });
+ok(bigCap.t1Rs <= 1200, 'more capital does not push profit past maxProfit');
+const poor = sizeIndexTrade({ premium: 600, lot: 75, indexAtr: 16.2, capital: 10000, minProfit: 600, maxProfit: 1200 });
+ok(poor.lots === 0 && typeof poor.blocked === 'string', 'unaffordable lot blocked with a reason, not a silent zero');
+ok(sizeIndexTrade({ premium: 0, lot: 75, indexAtr: 16, capital: 30000, minProfit: 600, maxProfit: 1200 }) === null, 'zero premium -> null');
+ok(sizeIndexTrade({ premium: 121, lot: 75, indexAtr: 0, capital: 30000, minProfit: 600, maxProfit: 1200 }) === null, 'zero ATR -> null');
+const cheap = sizeIndexTrade({ premium: 3, lot: 75, indexAtr: 40, capital: 30000, minProfit: 600, maxProfit: 1200 });
+ok(cheap === null || cheap.premStop > 0, 'stop premium never goes negative on a cheap option');
+
+// -------------------------------------------------------------- session slicing
+const twoDays = [
+    { ts: Date.parse('2026-08-11T04:00:00Z'), high: 2, low: 1, close: 1.5, volume: 5 },
+    { ts: Date.parse('2026-08-12T04:00:00Z'), high: 3, low: 2, close: 2.5, volume: 5 },
+    { ts: Date.parse('2026-08-12T04:05:00Z'), high: 4, low: 3, close: 3.5, volume: 5 },
+];
+ok(todaySessionBars(twoDays).length === 2, 'only the latest session is kept');
+ok(todaySessionBars([]).length === 0, 'empty candles safe');
+ok(todaySessionBars(null).length === 0, 'null candles safe');
+const withPlaceholder = [
+    { ts: Date.parse('2026-08-12T03:45:00Z'), high: 5, low: 5, close: 5, volume: 0 },
+    ...twoDays.slice(1),
+];
+ok(
+    todaySessionBars(withPlaceholder).every((b) => !(b.volume === 0 && b.high === b.low)),
+    'the 09:15 zero-volume pre-open placeholder is dropped'
+);
+ok(istMinuteOfDay(Date.parse('2026-08-12T04:00:00Z')) === 9 * 60 + 30, 'IST minute conversion gives 09:30');
+
+// ------------------------------------------------------ card when a setup fires
+const entryCard = indexAnalysisService.format({
+    key: 'NIFTY', label: 'NIFTY 50', lot: 75, spot: 24435, changePct: -0.8, capital: 30000,
+    expiry: '18-Aug-2026', atmStrike: 24450, atmCe: { ltp: 121, iv: 8.6 }, atmPe: { ltp: 124, iv: 11 },
+    ceCapital: 9075, peCapital: 9300, pcr: 0.75, pcrLabel: pcrLabel(0.75),
+    walls: { resistance: null, support: null }, maxPain: 24500, topCe: [], topPe: [],
+    legName: 'PE', leg: { ltp: 124 },
+    signal: {
+        side: 'short', kind: 'vwap-stretch', vwap: 24400, atr: 16.2, stretch: 1.2,
+        reason: '1.20xATR above VWAP - stretched, fade toward VWAP',
+    },
+    plan: sizeIndexTrade({ premium: 124, lot: 75, indexAtr: 16.2, capital: 30000, minProfit: 600, maxProfit: 1200 }),
+});
+ok(entryCard.includes('ENTER'), 'firing card says ENTER');
+ok(entryCard.includes('BUY PE'), 'a short fade buys the PE');
+ok(entryCard.includes('EXIT AT'), 'card gives an explicit exit price');
+ok(entryCard.includes('STOP'), 'card gives a stop');
+ok(entryCard.includes('66.7%'), 'card carries the measured win rate');
+ok(entryCard.includes('n=51'), 'card carries the sample size beside the win rate');
+ok(entryCard.includes('theta'), 'card warns the premium lags the index move');
+
+const quietCard = indexAnalysisService.format({
+    key: 'NIFTY', label: 'NIFTY 50', lot: 75, spot: 24435, capital: 30000, expiry: '18-Aug-2026',
+    atmStrike: 24450, atmCe: { ltp: 121 }, atmPe: { ltp: 124 }, pcr: 0.75,
+    walls: {}, topCe: [], topPe: [],
+    signal: { side: null, reason: 'no setup - 0.30xATR from VWAP', vwap: 24400, stretch: 0.3 },
+    plan: null,
+});
+ok(quietCard.includes('NO ENTRY'), 'quiet card says NO ENTRY');
+ok(quietCard.includes('no setup'), 'quiet card gives the reason');
+ok(!quietCard.includes('EXIT AT'), 'quiet card offers no exit price');
 
 console.log(`\ncheck-index: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
