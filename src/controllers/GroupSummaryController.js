@@ -311,7 +311,7 @@ class GroupSummaryController {
         }
     }
 
-    async _summarizeDay(messages, groupName, dateLabel) {
+    async _summarizeDay(messages, groupName, dateLabel, style = null) {
         const useChunks = this.chatLog.shouldUseChunkedSummary(messages);
         const chunkMeta = {
             groupName,
@@ -590,7 +590,13 @@ class GroupSummaryController {
         } catch (err) {
             logger.error(`Recap LLM failed for ${groupName}: ${err.message}`);
             summary = null;
-            this.selfHeal.triggerFromSummaryFailure(groupName, dateStr, err.message);
+            this.selfHeal.triggerFromSummaryFailure({
+                groupName,
+                dateStr,
+                errorMessage: err.message,
+                messageCount: messages.length,
+                useChunks: this.chatLog.shouldUseChunkedSummary(messages),
+            });
         }
 
         // Always show topics — fill gaps from chat activity if LLM timed out or returned empty
