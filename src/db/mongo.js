@@ -46,10 +46,6 @@ async function ensureIndexes(db) {
             { hash: 1 },
             { unique: true, name: 'news_queue_hash' }
         ),
-        db.collection('morning_messages_sent').createIndex(
-            { hash: 1 },
-            { unique: true, name: 'morning_message_hash' }
-        ),
         db.collection('posted_github_repos').createIndex(
             { hash: 1, group_id: 1 },
             { unique: true, name: 'posted_github_repo_per_group' }

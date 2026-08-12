@@ -123,8 +123,8 @@ ${JSON_SHAPE}
 
 QUALITY RULES (mandatory):
 1. Prefer CONFIG / feature flags over deleting logic.
-   - Example: disable good-morning → set MORNING_MESSAGES_ENABLED default/check to false in src/config/config.js
-     and keep sendDailyMorning implementation intact so it can be re-enabled.
+   - Example: disable a scheduled post → flip its *_ENABLED flag in src/config/config.js
+     and leave the implementation intact so it can be re-enabled.
    - NEVER gut a method to only \`return;\` when a flag already exists.
 2. Touch ALL related entry points for the feature (controller + scheduler + config + bot wiring if present).
 3. Keep changes reversible: owner should turn the feature back on via env/config without rewriting code.
@@ -160,7 +160,7 @@ REJECT these incomplete patterns:
 • Deleting implementation that should stay for re-enable via config
 
 PREFER:
-• config.js flag defaults (e.g. MORNING_MESSAGES_ENABLED === 'true' so default is off)
+• config.js flag defaults (e.g. GITHUB_TRENDING_ENABLED === 'true' so default is off)
 • Early-return guards that check the flag
 • Stopping schedulers when the flag is false (scheduler already no-ops if flag false — ensure flag is false by default)
 
@@ -224,16 +224,6 @@ const NEW_COMMAND_WIRING_FILES = [
 
 /** Keyword → files that must be considered for a complete fix */
 const FEATURE_FILE_MAP = [
-    {
-        re: /morning|good\s*morning|romantic\s*morning/i,
-        files: [
-            'src/config/config.js',
-            'src/controllers/MorningMessageController.js',
-            'src/utils/morningScheduler.js',
-            'src/services/MorningMessageScraper.js',
-            'src/models/MorningMessageDatabase.js',
-        ],
-    },
     {
         re: /summary|recap|group\s*chat\s*log/i,
         files: [
