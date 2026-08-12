@@ -98,10 +98,10 @@ export const config = {
     GROUP_SUMMARY_MAX_MESSAGES: parseInt(process.env.GROUP_SUMMARY_MAX_MESSAGES, 10) || 400,
     NVIDIA_API_KEY: process.env.NVIDIA_API_KEY?.trim() || '',
     /** Group summary / recap model */
-    NVIDIA_MODEL: process.env.NVIDIA_MODEL?.trim() || 'deepseek-ai/deepseek-r1',
+    NVIDIA_MODEL: process.env.NVIDIA_MODEL?.trim() || 'nvidia/nemotron-3-super-120b-a12b',
     /** Trade discovery, research, CE/PE analysis — Gemini (not GLM) */
     GEMINI_TRADE_MODEL: process.env.GEMINI_TRADE_MODEL?.trim() || 'gemini-2.5-flash',
-    GEMINI_TRADE_MODELS: process.env.GEMINI_TRADE_MODELS?.trim() || 'gemini-2.5-flash,gemini-2.5-pro,gemini-2.0-flash',
+    GEMINI_TRADE_MODELS: process.env.GEMINI_TRADE_MODELS?.trim() || 'gemini-2.5-flash,gemini-flash-latest,gemini-flash-lite-latest,gemini-2.5-pro',
     /** Groq fallback for trade alerts (/tradenow when Gemini rate-limited) */
     GROQ_API_KEY: process.env.GROQ_API_KEY?.trim() || '',
     GROQ_TRADE_MODEL: process.env.GROQ_TRADE_MODEL?.trim() || 'llama-3.3-70b-versatile',
@@ -182,7 +182,7 @@ export const config = {
     /** Lot sizes change at SEBI revisions: "NIFTY:75,BANKNIFTY:30". */
     EXPIRY_LOT_SIZES: (process.env.EXPIRY_LOT_SIZES || '').trim(),
     /** @deprecated Trade alerts use Gemini; kept for group summaries only */
-    NVIDIA_TRADE_MODEL: process.env.NVIDIA_TRADE_MODEL?.trim() || 'z-ai/glm-5.2',
+    NVIDIA_TRADE_MODEL: process.env.NVIDIA_TRADE_MODEL?.trim() || 'nvidia/nemotron-3-super-120b-a12b',
     /** Summary self-heal model (code fix proposals) */
     NVIDIA_HEAL_MODEL: process.env.NVIDIA_HEAL_MODEL?.trim() || 'nvidia/nemotron-3-ultra-550b-a55b',
     /** Try Nemotron first (often 503); default false = GLM → DeepSeek → Nemotron */
@@ -191,16 +191,26 @@ export const config = {
     GEMINI_API_KEY: process.env.GEMINI_API_KEY?.trim() || '',
     /** Primary Gemini model for heal (comma-separated chain in GEMINI_HEAL_MODELS) */
     GEMINI_HEAL_MODEL: process.env.GEMINI_HEAL_MODEL?.trim() || 'gemini-2.5-flash',
-    GEMINI_HEAL_MODELS: process.env.GEMINI_HEAL_MODELS?.trim() || 'gemini-2.5-flash,gemini-2.5-pro,gemini-2.0-flash',
+    GEMINI_HEAL_MODELS: process.env.GEMINI_HEAL_MODELS?.trim() || 'gemini-2.5-flash,gemini-flash-latest,gemini-flash-lite-latest,gemini-2.5-pro',
     /** Owner DM assistant — replies as ASSIST_OWNER_NAME in personal chats when /assist on */
     ASSIST_OWNER_NAME: process.env.ASSIST_OWNER_NAME?.trim() || 'Jacky',
     /** Short bio the AI shares when people ask about the owner (optional override) */
     ASSIST_OWNER_ABOUT: process.env.ASSIST_OWNER_ABOUT?.trim() || '',
     ASSIST_GEMINI_MODEL: process.env.ASSIST_GEMINI_MODEL?.trim() || 'gemini-2.5-flash',
-    ASSIST_GEMINI_MODELS: process.env.ASSIST_GEMINI_MODELS?.trim() || 'gemini-2.5-flash,gemini-2.0-flash,gemini-2.5-pro',
+    ASSIST_GEMINI_MODELS: process.env.ASSIST_GEMINI_MODELS?.trim() || 'gemini-2.5-flash,gemini-flash-latest,gemini-flash-lite-latest,gemini-2.5-pro',
     /** Assist fallback — Groq / NVIDIA (same keys as trade) */
     ASSIST_GROQ_MODEL: process.env.ASSIST_GROQ_MODEL?.trim() || 'llama-3.1-8b-instant',
     ASSIST_GROQ_MODELS: process.env.ASSIST_GROQ_MODELS?.trim() || 'llama-3.1-8b-instant,llama-3.3-70b-versatile',
+    /**
+     * How long an assist provider is skipped after a QUOTA error (not a burst 429).
+     * A daily quota does not recover in seconds, and re-walking a dead provider's
+     * model list cost ~90s per call before this existed.
+     */
+    ASSIST_LLM_COOLDOWN_MS: (() => {
+        const n = parseInt(process.env.ASSIST_LLM_COOLDOWN_MS, 10);
+        if (!Number.isFinite(n) || n <= 0) return 15 * 60_000;
+        return Math.min(60 * 60_000, Math.max(60_000, n));
+    })(),
     ASSIST_NVIDIA_MODEL: process.env.ASSIST_NVIDIA_MODEL?.trim() || '',
     ASSIST_NVIDIA_MODELS: process.env.ASSIST_NVIDIA_MODELS?.trim() || '',
     /** Provider order for /assist DMs: gemini,groq,nvidia */
@@ -396,7 +406,7 @@ export const config = {
     TRADE_ALERT_FORCE_TRADING_DAYS: (process.env.TRADE_ALERT_FORCE_TRADING_DAYS || '').trim(),
     /** OpenRouter — LLM fallback when Gemini/Groq/NVIDIA fail (summary, trade, assist). */
     OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY?.trim() || '',
-    OPENROUTER_MODEL: process.env.OPENROUTER_MODEL?.trim() || 'meta-llama/llama-3.3-70b-instruct:free',
+    OPENROUTER_MODEL: process.env.OPENROUTER_MODEL?.trim() || 'google/gemma-4-26b-a4b-it:free',
     OPENROUTER_FALLBACK_MODELS: (process.env.OPENROUTER_FALLBACK_MODELS || '')
         .split(',')
         .map((s) => s.trim())

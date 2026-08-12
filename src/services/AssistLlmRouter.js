@@ -30,6 +30,27 @@ function sleep(ms) {
     return new Promise((r) => setTimeout(r, ms));
 }
 
+/**
+ * A quota/limit that will NOT clear on a short retry, so the provider should be
+ * cooled and skipped rather than re-walked model by model.
+ *
+ * Distinguished from a transient 429: a burst limit recovers in seconds, a daily
+ * quota does not. Google says "exceeded your current quota ... check your plan",
+ * which is the daily one.
+ */
+export function isQuotaExhaustedError(err) {
+    const msg = String(err?.message || err);
+    const detail = String(
+        err?.response?.data?.error?.message || err?.response?.data?.error || ''
+    );
+    const both = `${msg} ${detail}`;
+    if (/RESOURCE_EXHAUSTED|exceeded your current quota|check your plan|insufficient_quota|billing/i.test(both)) {
+        return true;
+    }
+    // A plain 429 with no burst hint is treated as a limit worth cooling for.
+    return err?.response?.status === 429 && !/retry|temporar|burst|per minute|slow down/i.test(both);
+}
+
 export function isAssistLlmFallbackError(err) {
     const msg = String(err?.message || err);
     const status = err?.response?.status;
@@ -61,9 +82,14 @@ export default class AssistLlmRouter {
         this.nvidiaKey = (cfg.NVIDIA_API_KEY || '').trim();
         this.geminiModels = parseList(cfg.ASSIST_GEMINI_MODELS || cfg.ASSIST_GEMINI_MODEL, DEFAULT_GEMINI);
         this.groqModels = parseList(cfg.ASSIST_GROQ_MODELS || cfg.ASSIST_GROQ_MODEL || cfg.GROQ_TRADE_MODEL, DEFAULT_GROQ);
+        // deepseek-v4-flash was the old default here AND the .env value, and it is
+        // not on the NVIDIA endpoint any more (404). With Groq unkeyed, Gemini out
+        // of quota and OpenRouter's free llama slug withdrawn, that made every
+        // provider in this chain dead at once — which is what silently stopped the
+        // Interview Q scheduler on 2026-08-08. Default to a verified model.
         this.nvidiaModels = parseList(
             cfg.ASSIST_NVIDIA_MODELS || cfg.ASSIST_NVIDIA_MODEL || cfg.NVIDIA_MODEL,
-            ['deepseek-ai/deepseek-v4-flash']
+            ['nvidia/nemotron-3-super-120b-a12b']
         );
         this.openrouter = new OpenRouterLlmService(cfg);
         this.providerOrder = this._normalizeProviderOrder(
@@ -71,6 +97,42 @@ export default class AssistLlmRouter {
         );
         this.timeoutMs = Math.min(60_000, Math.max(15_000, Number(cfg.ASSIST_TIMEOUT_MS) || 45_000));
         this.nvidia = new NvidiaDeepSeekService(cfg);
+        /**
+         * provider -> epoch ms until which it is skipped.
+         *
+         * Without this, a provider whose DAILY quota is exhausted was retried from
+         * scratch on every call: 4 Gemini models x 2 attempts before reaching a
+         * working provider, which is why one Interview Q generation took 163s. A
+         * 1.5s retry cannot fix a daily quota, so cool the provider and move on.
+         * @type {Map<string, number>}
+         */
+        this._cooledUntil = new Map();
+        this.cooldownMs = Math.min(
+            60 * 60_000,
+            Math.max(60_000, Number(cfg.ASSIST_LLM_COOLDOWN_MS) || 15 * 60_000)
+        );
+    }
+
+    /** True when this provider is currently cooled off. */
+    isCooled(provider, nowMs = Date.now()) {
+        const until = this._cooledUntil.get(provider);
+        return Boolean(until && until > nowMs);
+    }
+
+    _coolProvider(provider, reason) {
+        this._cooledUntil.set(provider, Date.now() + this.cooldownMs);
+        logger.warn(
+            `Assist provider ${provider} cooled ${Math.round(this.cooldownMs / 60_000)}m — ${reason}`
+        );
+    }
+
+    /** Live providers first, cooled ones last rather than dropped — a cooled
+     *  provider still beats failing outright when everything else is down. */
+    _orderedProviders() {
+        const all = this._availableProviders();
+        const live = all.filter((p) => !this.isCooled(p));
+        const cooled = all.filter((p) => this.isCooled(p));
+        return [...live, ...cooled];
     }
 
     /** Always keep OpenRouter as last-resort when an API key exists. */
@@ -114,7 +176,7 @@ export default class AssistLlmRouter {
 
     async completeChat({ systemPrompt, history, userBlock, maxTokens = 512, temperature = 0.75, maxChars = 2000 }) {
         const outLimit = Math.min(50_000, Math.max(200, Number(maxChars) || 2000));
-        const providers = this._availableProviders();
+        const providers = this._orderedProviders();
 
         if (!providers.length) {
             throw new Error('No assist LLM configured (GEMINI, GROQ, NVIDIA, or OPENROUTER API key)');
@@ -132,7 +194,9 @@ export default class AssistLlmRouter {
                         ? ['openrouter']
                         : this.nvidiaModels;
 
+            let providerCooled = false;
             for (const model of models) {
+                if (providerCooled) break;      // quota is per-provider, not per-model
                 for (let rateTry = 0; rateTry < 2; rateTry++) {
                     try {
                         let text;
@@ -173,6 +237,14 @@ export default class AssistLlmRouter {
                         return { text: text.trim().slice(0, outLimit), provider, model: usedModel };
                     } catch (err) {
                         lastErr = err;
+                        // A daily quota will not recover in 1.5s. Cool the whole
+                        // provider and jump to the next one instead of walking its
+                        // remaining models.
+                        if (isQuotaExhaustedError(err)) {
+                            this._coolProvider(provider, err.message.slice(0, 80));
+                            providerCooled = true;
+                            break;
+                        }
                         if (isAssistLlmFallbackError(err) && rateTry < 1) {
                             await sleep(1500);
                             continue;
@@ -210,7 +282,16 @@ export default class AssistLlmRouter {
             {
                 contents,
                 systemInstruction: { parts: [{ text: systemPrompt }] },
-                generationConfig: { temperature, maxOutputTokens: maxTokens },
+                generationConfig: {
+                    temperature,
+                    maxOutputTokens: maxTokens,
+                    // Gemini 2.5+ spends "thinking" tokens out of maxOutputTokens, so a
+                    // JSON reply gets truncated mid-object and the caller sees "No JSON
+                    // object in AI response". Measured: 1200 tokens returned 56 chars.
+                    // These callers want structured output, not reasoning — spend the
+                    // whole budget on the answer.
+                    thinkingConfig: { thinkingBudget: 0 },
+                },
             },
             {
                 timeout: this.timeoutMs,

@@ -59,13 +59,24 @@ function currentIstHour() {
     return hour;
 }
 
-function formatRecapMessage({ groupName, dateLabel, stats, summary, timeLabel }) {
+export function formatRecapMessage({ groupName, dateLabel, stats, summary, timeLabel }) {
     let text = '';
     text += '┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n';
     text += '┃  🗓️ *GROUP DAY RECAP* 🗓️  ┃\n';
     text += '┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n\n';
     text += `📅 *${dateLabel}*\n`;
     text += `📢 *${groupName}*\n`;
+
+    // What the group is FOR, inferred from the chat rather than its name — this is
+    // what makes the recap read like it knows the room.
+    const about = String(summary?.about || '').trim();
+    if (about) {
+        text += `\n🧭 _${about}_\n`;
+    }
+    const vibe = String(summary?.vibe || '').trim();
+    if (vibe) {
+        text += `🎭 *Today's vibe:* ${vibe}\n`;
+    }
     text += '─────────────────────────────\n\n';
 
     text += '📊 *Day at a glance*\n';
@@ -109,6 +120,14 @@ function formatRecapMessage({ groupName, dateLabel, stats, summary, timeLabel })
     if (wrapUp) {
         text += '📝 *In short*\n';
         text += `${wrapUp}\n\n`;
+        text += '─────────────────────────────\n\n';
+    }
+
+    // The closing take. Last thing read, so it is what the group remembers.
+    const verdict = String(summary?.verdict || '').trim();
+    if (verdict) {
+        text += "🎤 *My two cents*\n";
+        text += `_${verdict}_\n\n`;
         text += '─────────────────────────────\n';
     }
 
@@ -253,6 +272,9 @@ class GroupSummaryController {
             meta.totalMessages ? `Total messages that day: ${meta.totalMessages}` : '',
             'Combine overlapping topics, keep 3-5 topics total, 0-3 notable items, one wrap_up.',
             'Keep concrete details (names, subjects) — drop vague fillers.',
+            'Also produce ONE about / vibe / verdict for the whole day, not per part:',
+            'about = what this group is for, judged across every part;',
+            'vibe = a 3-6 word mood tag; verdict = 2-4 sentences of your own opinion on the day, in character.',
             '',
             ...partials.map((part, idx) => `Part ${idx + 1}:\n${JSON.stringify(part)}`),
         ]
@@ -262,8 +284,11 @@ class GroupSummaryController {
         const mergeSystem = [
             'You merge partial group chat recap JSON objects into one final recap.',
             'Reply with ONLY valid JSON (no markdown fences) in this shape:',
-            '{"topics":[{"title":"short title","detail":"1-2 sentences"}],"notable":["bullet strings"],"wrap_up":"2-4 sentence paragraph"}',
+            '{"about":"one line on what this group is for","vibe":"3-6 word mood tag",',
+            '"topics":[{"title":"short title","detail":"1-2 sentences"}],"notable":["bullet strings"],',
+            '"wrap_up":"2-4 sentence paragraph","verdict":"2-4 sentences of your own opinion, in character"}',
             'Deduplicate topics; preserve the most important concrete details from each part.',
+            'about/vibe/verdict describe the WHOLE day — write them fresh, do not concatenate the parts.',
         ].join(' ');
 
         try {
@@ -549,7 +574,10 @@ class GroupSummaryController {
         // Always show topics — fill gaps from chat activity if LLM timed out or returned empty
         if (!summary?.topics?.length) {
             logger.warn(`Group summary: using heuristic topics for ${groupName}`);
+            // Spread first: rebuilding the object from scratch here silently dropped
+            // about / vibe / verdict even when the model had produced them.
             summary = {
+                ...(summary || {}),
                 topics: heuristic.topics,
                 notable: summary?.notable?.length ? summary.notable : heuristic.notable,
                 wrap_up: summary?.wrap_up?.trim() || heuristic.wrap_up,
