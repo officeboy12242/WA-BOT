@@ -602,14 +602,15 @@ async function pauseDmTyping(sock, jid) {
  * @param {import('baileys').proto.IWebMessageInfo | null | undefined} waMessage
  * @param {object} [extra]
  * @param {object} [content]
+ * @param {{ forceQuote?: boolean }} [opts] forceQuote=true tags even long/multi-URL replies
  * @returns {object}
  */
-export function getSafeSendOptions(waMessage, extra = {}, content = null) {
-    const opts = { linkPreview: false, ...extra };
-    if (waMessage && shouldQuoteReply(waMessage, content || {})) {
-        opts.quoted = waMessage;
+export function getSafeSendOptions(waMessage, extra = {}, content = null, opts = {}) {
+    const sendOpts = { linkPreview: false, ...extra };
+    if (waMessage && (opts.forceQuote || shouldQuoteReply(waMessage, content || {}))) {
+        sendOpts.quoted = waMessage;
     }
-    return opts;
+    return sendOpts;
 }
 
 async function sendWithTimeout(sock, jid, content, opts) {
@@ -632,7 +633,7 @@ export async function safeSendMessage(sock, chatId, content, waMessage = null, e
         throw new Error('WhatsApp socket not ready');
     }
 
-    const { queuePriority, ...sendExtra } = extraOpts || {};
+    const { queuePriority, forceQuote, ...sendExtra } = extraOpts || {};
     const key = waMessage?.key;
     const conversationJid = chatId || resolveConversationChatId(key);
     const primaryJid = resolveOutboundJid(key, conversationJid);
@@ -658,7 +659,7 @@ export async function safeSendMessage(sock, chatId, content, waMessage = null, e
             throw new Error(`Send returned empty for ${dmJid}`);
         }
 
-        const primaryOpts = getSafeSendOptions(waMessage, sendExtra, content);
+        const primaryOpts = getSafeSendOptions(waMessage, sendExtra, content, { forceQuote });
         const bareOpts = { linkPreview: false };
         let lastErr;
         for (const opts of [primaryOpts, bareOpts]) {
@@ -751,8 +752,9 @@ export async function plainSendMessage(sock, chatId, content, key = null) {
  * unquoted send if quoting fails (e.g. the original message was deleted).
  * @param {import('baileys').proto.IWebMessageInfo | import('baileys').proto.IMessageKey | null} [waMessage]
  * @param {number} [priority=0] lower = sooner (0 = jump ahead of normal group cmds)
+ * @param {{ forceQuote?: boolean }} [opts] forceQuote=true tags even long/multi-URL replies
  */
-export async function fastSendMessage(sock, chatId, content, waMessage = null, priority = 0) {
+export async function fastSendMessage(sock, chatId, content, waMessage = null, priority = 0, opts = {}) {
     if (!sock?.sendMessage || !chatId) return null;
     // Accept either a full WA message (preferred) or just a key (JID resolution only)
     const key = waMessage?.key || waMessage;
@@ -760,7 +762,7 @@ export async function fastSendMessage(sock, chatId, content, waMessage = null, p
     const jid = resolveOutboundJid(key, conversationJid);
     if (!jid) return null;
 
-    const primaryOpts = getSafeSendOptions(waMessage?.key ? waMessage : null, { linkPreview: false }, content);
+    const primaryOpts = getSafeSendOptions(waMessage?.key ? waMessage : null, { linkPreview: false }, content, opts);
     const bareOpts = { linkPreview: false };
 
     return messageQueue.enqueue(conversationJid || jid, async () => {

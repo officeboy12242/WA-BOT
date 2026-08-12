@@ -558,23 +558,23 @@ function rankMovieResults(results, query) {
     return [...results].sort((a, b) => score(b) - score(a));
 }
 
+const MOVIE_SEND_OPTS = { forceQuote: true };
+
 function movieQuickSend(sock, chatId, content, originalMsg = null, priority = MOVIE_PROGRESS_PRIORITY) {
     if (isGroupMessage(chatId)) {
-        return fastSendMessage(sock, chatId, content, originalMsg, priority);
+        return fastSendMessage(sock, chatId, content, originalMsg, priority, MOVIE_SEND_OPTS);
     }
-    return safeSendMessage(sock, chatId, content, originalMsg, { queuePriority: priority });
+    return safeSendMessage(sock, chatId, content, originalMsg, { queuePriority: priority, forceQuote: true });
 }
 
 async function movieResultSend(sock, chatId, content, originalMsg = null) {
     if (isGroupMessage(chatId)) {
-        return fastSendMessage(sock, chatId, content, originalMsg, MOVIE_RESULT_PRIORITY);
+        return fastSendMessage(sock, chatId, content, originalMsg, MOVIE_RESULT_PRIORITY, MOVIE_SEND_OPTS);
     }
-    return safeSendMessage(sock, chatId, content, originalMsg, { queuePriority: MOVIE_RESULT_PRIORITY });
+    return safeSendMessage(sock, chatId, content, originalMsg, { queuePriority: MOVIE_RESULT_PRIORITY, forceQuote: true });
 }
 
-// Keep result chunks under the 3500-char quote gate (shouldQuoteReply in
-// waMessage.js) so every result part can be tagged to the search message.
-const QUOTE_SAFE_MAX_LENGTH = 3400;
+const WHATSAPP_MAX_LENGTH = 4096;
 const SEARCH_COUNT_FOOTER_RESERVE = 120;
 
 function parseLinkSizeLabel(sizeLabel) {
@@ -669,7 +669,7 @@ function formatMovieResults(query, results, pushName = '', sources = [], { cache
     const footer = formatMovieResultsFooter();
     const blocks = results.map((item, idx) => formatMovieResultBlock(item, idx + 1));
     const totalResults = results.length;
-    const maxLen = QUOTE_SAFE_MAX_LENGTH - SEARCH_COUNT_FOOTER_RESERVE;
+    const maxLen = WHATSAPP_MAX_LENGTH - SEARCH_COUNT_FOOTER_RESERVE;
     const messages = [];
     let chunkStart = 0;
 
