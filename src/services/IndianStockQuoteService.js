@@ -5,6 +5,7 @@
 import { logger } from '../utils/logger.js';
 import { fetchYahooChartMeta } from '../utils/yahooChartFetch.js';
 import { stockSymbolResolverService } from './StockSymbolResolverService.js';
+import { getIndexSpec } from '../data/indexUniverse.js';
 
 /**
  * @param {object} meta Yahoo chart meta
@@ -68,8 +69,11 @@ export function normalizeYahooSymbol(raw) {
     if (!s) return '';
     // Already a Yahoo index ticker (^NSEI, ^NSEBANK) — appending .NS breaks it.
     if (s.startsWith('^')) return s;
-    if (s === 'NIFTY' || s === 'NIFTY50') return '^NSEI';
-    if (s === 'BANKNIFTY') return '^NSEBANK';
+    // Index tickers come from the shared map. This used to know only NIFTY and
+    // BANKNIFTY, so MIDCPNIFTY became MIDCPNIFTY.NS — a nonexistent ticker that
+    // hung for minutes instead of failing.
+    const spec = getIndexSpec(s);
+    if (spec) return spec.yahoo;
     if (s.endsWith('.NS') || s.endsWith('.BO')) return s;
     return `${s}.NS`;
 }

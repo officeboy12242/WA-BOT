@@ -22,6 +22,7 @@
 
 import { logger } from '../utils/logger.js';
 import { config as defaultConfig } from '../config/config.js';
+import { F_AND_O_INDICES } from '../data/indexUniverse.js';
 import { nseGet, getNseCookie } from '../utils/nseClient.js';
 import { fetchYahooIntradayCandles, findOpeningRangeCandle } from '../utils/yahooIntradayCandles.js';
 import { delta, probabilityItm, breakevenMove, maxPain } from '../utils/blackScholes.js';
@@ -38,12 +39,15 @@ import {
  * NOT Midcap 100 (~63k) — an easy and completely silent mistake to make.
  * Lot sizes move at SEBI revisions; override via config when they change.
  */
-export const EXPIRY_INDICES = {
-    NIFTY: { yahoo: '^NSEI', lot: 75, label: 'NIFTY 50' },
-    BANKNIFTY: { yahoo: '^NSEBANK', lot: 30, label: 'BANK NIFTY' },
-    FINNIFTY: { yahoo: 'NIFTY_FIN_SERVICE.NS', lot: 65, label: 'FIN NIFTY' },
-    MIDCPNIFTY: { yahoo: 'NIFTY_MID_SELECT.NS', lot: 120, label: 'MIDCAP SELECT' },
-};
+/**
+ * Aliased from the shared map. This used to be a second, independent copy — the
+ * correct one — while IndianStockQuoteService carried a shorter one that was
+ * missing MIDCPNIFTY and FINNIFTY. One definition now, so they cannot disagree.
+ *
+ * Imported and re-exported rather than `export { X } from` because this file uses
+ * the binding internally; a pure re-export creates no local name.
+ */
+export const EXPIRY_INDICES = F_AND_O_INDICES;
 
 /** Reject Yahoo intraday data whose last price disagrees with the chain spot. */
 const SPOT_TOLERANCE_PCT = 1;

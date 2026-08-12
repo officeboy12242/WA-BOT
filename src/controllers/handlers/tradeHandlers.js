@@ -3,6 +3,7 @@
  */
 
 import { logger } from '../../utils/logger.js';
+import { indexAnalysisService } from '../../services/IndexAnalysisService.js';
 import { extractPhoneNumber } from '../../utils/permissions.js';
 import { config } from '../../config/config.js';
 import { editMessageText } from '../../utils/waMessage.js';
@@ -716,5 +717,31 @@ export async function handleExpiry(sock, chatId, senderJid, args, { tradeAlertCo
     } catch (error) {
         logger.error(`Error in expiry handler: ${error.message}`);
         await sock.sendMessage(chatId, { text: `❌ ${error.message}` }).catch(() => {});
+    }
+}
+
+/**
+ * `/index nifty` — index F&O read. No directional call by design; see
+ * IndexAnalysisService for the measurements that decided that.
+ */
+export async function handleIndex(sock, chatId, senderJid, args) {
+    const raw = (args[0] || 'NIFTY').trim();
+    const loading = await sock.sendMessage(chatId, {
+        text: `📐 _Reading ${raw.toUpperCase()} option chain…_`,
+    });
+    try {
+        const analysis = await indexAnalysisService.analyze(raw);
+        const text = indexAnalysisService.format(analysis);
+        await sock.sendMessage(chatId, { text });
+        logger.info(`📐 Index read ${analysis.key} in ${chatId}`);
+    } catch (error) {
+        await sock.sendMessage(chatId, {
+            text: `❌ ${error.message}`,
+        });
+        logger.warn(`Index read failed for ${raw}: ${error.message}`);
+    } finally {
+        if (loading?.key) {
+            await sock.sendMessage(chatId, { delete: loading.key }).catch(() => {});
+        }
     }
 }

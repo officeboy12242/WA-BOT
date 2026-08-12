@@ -476,6 +476,14 @@ export const COMMAND_REGISTRY = [
         category: 'trade',
     },
     {
+        names: ['/index'],
+        key: 'index',
+        scope: 'group_only',
+        role: 'admins',
+        help: 'Index F&O read — `/index nifty`, `/index banknifty` (OI walls · PCR · max pain · ATM)',
+        category: 'trade',
+    },
+    {
         names: ['/expiry'],
         key: 'expiry',
         scope: 'group_only',
@@ -755,7 +763,7 @@ export const HELP_CATEGORY = {
     sticker: 'sticker', steal: 'sticker', rgb: 'sticker',
 
     // Markets
-    tradenow: 'trade', swing: 'trade', expiry: 'trade', tradelert: 'trade',
+    tradenow: 'trade', swing: 'trade', expiry: 'trade', tradelert: 'trade', index: 'trade',
 
     // Scheduled feeds
     news: 'daily', github: 'daily', awesome: 'daily', interviewq: 'daily',
