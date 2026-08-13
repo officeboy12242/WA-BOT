@@ -198,6 +198,118 @@ function hhmm(min) {
 }
 
 /**
+ * Confidence in the fade signal, as a percentage — derived from the measured
+ * edge and NEVER above it, so the number cannot over-claim the study.
+ *
+ * Base is the holdout-measured win rate per rule: 66.7% for a vwap-stretch
+ * (n=51), 65.6% for a failed range break (n=32). Two adjustments, both bounded:
+ *   - degraded window (past 11:30) — −15pts; the same rule measured weaker
+ *     there and NEGATIVE after 12:30, so a late signal should never read as
+ *     strong as a fresh one.
+ *   - stretch magnitude (vwap-stretch only) — up to +6pts for how far past the
+ *     1.0xATR threshold price sits, which only ever offsets part of the
+ *     degraded penalty. A fresh stretch is exactly the measured rate.
+ *
+ * @param {object|null} signal from evaluateIndexSignal
+ * @returns {{pct:number, label:string}|null} null when there is no side
+ */
+export function signalConfidence(signal) {
+    if (!signal?.side || !signal?.kind) return null;
+    const base = signal.kind === 'failed-break' ? 0.656 : 0.667;
+    let pts = base * 100;
+    if (signal.degraded) pts -= 15;
+    if (signal.kind === 'vwap-stretch' && Number.isFinite(signal.stretch)) {
+        const extra = Math.min(6, Math.max(0, (Math.abs(signal.stretch) - STRETCH_ATR) * 4));
+        pts += extra;
+    }
+    // Cap at the measured rate: confidence can fall with a late window, never rise.
+    pts = Math.min(Math.round(base * 100), Math.max(40, Math.round(pts)));
+    const label = pts >= 65 ? 'high' : pts >= 56 ? 'moderate' : 'low';
+    return { pct: pts, label };
+}
+
+/**
+ * A soft directional read from the option chain, for times when the measured
+ * fade rule is not live (before 10:00, after 12:30, or a flat session).
+ *
+ * DELIBERATELY NOT a signal: none of this is backtested. It is conventional
+ * options-market reasoning, presented as a lean so the card is not a dead end
+ * — and labeled unmeasured so it is never mistaken for the 66.7% fade edge.
+ *
+ * Factors (each ±1, summed):
+ *   1. PCR contrarian — a crowded put side (high PCR) reads as bearish
+ *      sentiment, so the lean is UP; a crowded call side reads bullish → DOWN.
+ *   2. Max pain drift — price tends to drift toward max pain: above it → DOWN,
+ *      below it → UP. Neutral within a small band around max pain.
+ *   3. OI walls — the nearest big wall acts as a magnet: support closer below
+ *      → UP, resistance closer above → DOWN.
+ *
+ * @returns {{factors: {score:number, detail:string}[], net:number, netLabel:string}|null}
+ */
+export function chainLean({ pcr, maxPain, spot, walls } = {}) {
+    const s = Number(spot);
+    if (!Number.isFinite(s)) return null;
+
+    const factors = [];
+
+    // 1. PCR — contrarian to the crowd. Symmetric around 1.0 so a mildly
+    //    call-heavy read (e.g. 0.75) leans DOWN exactly like the pcrLabel words it.
+    if (pcr != null && Number.isFinite(Number(pcr))) {
+        const v = Number(pcr);
+        if (v >= 1.15) factors.push({ score: 1, detail: `PCR ${fmt(v)} → put-heavy crowd → lean UP` });
+        else if (v <= 0.85) factors.push({ score: -1, detail: `PCR ${fmt(v)} → call-heavy crowd → lean DOWN` });
+        else factors.push({ score: 0, detail: `PCR ${fmt(v)} → balanced crowd → no lean` });
+    }
+
+    // 2. Max pain drift (neutral within ~0.2% of spot, min 10 pts)
+    if (maxPain != null && Number.isFinite(Number(maxPain))) {
+        const gap = s - Number(maxPain);
+        const neutral = Math.max(s * 0.002, 10);
+        if (Math.abs(gap) <= neutral) {
+            factors.push({ score: 0, detail: `max pain ${fmt(maxPain)} → spot is right on it → no drift` });
+        } else if (gap > 0) {
+            factors.push({ score: -1, detail: `max pain ${fmt(maxPain)} → spot ${fmt(gap)} ABOVE → drift DOWN` });
+        } else {
+            factors.push({ score: 1, detail: `max pain ${fmt(maxPain)} → spot ${fmt(-gap)} BELOW → drift UP` });
+        }
+    }
+
+    // 3. OI walls — the nearest wall wins
+    const res = walls?.resistance, sup = walls?.support;
+    if (res || sup) {
+        const dRes = res?.strike != null ? Math.abs(s - Number(res.strike)) : null;
+        const dSup = sup?.strike != null ? Math.abs(s - Number(sup.strike)) : null;
+        if (dRes != null && dSup != null) {
+            if (dSup < dRes) {
+                factors.push({ score: 1, detail: `nearest wall: support ${fmt(dSup)} below vs resistance ${fmt(dRes)} above → lean UP` });
+            } else if (dRes < dSup) {
+                factors.push({ score: -1, detail: `nearest wall: resistance ${fmt(dRes)} above vs support ${fmt(dSup)} below → lean DOWN` });
+            } else {
+                factors.push({ score: 0, detail: `walls equidistant (${fmt(dSup)}) → no lean` });
+            }
+        } else if (dSup != null) {
+            factors.push({ score: 1, detail: `nearest wall: support ${fmt(dSup)} below → lean UP` });
+        } else if (dRes != null) {
+            factors.push({ score: -1, detail: `nearest wall: resistance ${fmt(dRes)} above → lean DOWN` });
+        }
+    }
+
+    if (!factors.length) return null;
+
+    const net = factors.reduce((sum, f) => sum + f.score, 0);
+    const bull = factors.filter((f) => f.score > 0).length;
+    const bear = factors.filter((f) => f.score < 0).length;
+    let netLabel;
+    if (net >= 2) netLabel = `${bull} of ${factors.length} lean BULLISH — weak conviction`;
+    else if (net === 1) netLabel = 'mildly BULLISH — weak conviction';
+    else if (net === 0) netLabel = 'balanced — no clear lean';
+    else if (net === -1) netLabel = 'mildly BEARISH — weak conviction';
+    else netLabel = `${bear} of ${factors.length} lean BEARISH — weak conviction`;
+
+    return { factors, net, netLabel };
+}
+
+/**
  * Size the trade so ONE R of index movement lands inside the caller's rupee band.
  *
  * The measured edge is at 1:1, so target and risk are the same size — sizing up to
@@ -349,6 +461,8 @@ class IndexAnalysisService {
               })
             : null;
 
+        const confidence = signalConfidence(signal);
+
         logger.info(`📐 Index read ${spec.nse}: spot ${fmt(spot)} ATM ${snap.atmStrike} exp ${snap.expiry}`);
 
         return {
@@ -378,6 +492,7 @@ class IndexAnalysisService {
             capital: this.capital,
             nowMin,
             signal,
+            confidence,
             legName,
             leg,
             plan,
@@ -439,16 +554,36 @@ class IndexAnalysisService {
             L.push('┌─ *🚫 NO ENTRY* ─');
             L.push(`│ ${s.reason || 'no setup'}`);
             if (s.vwap != null) L.push(`│ VWAP ${fmt(s.vwap)} · spot is ${fmt(Math.abs(s.stretch ?? 0), 2)}×ATR away`);
+            // /too (early|late)|NEGATIVE/ = the measured rule window is closed,
+            // not that the market is flat — label it as such so the read is honest.
+            const windowClosed = /too (early|late)|NEGATIVE/.test(s.reason || '');
+            L.push(`│ 📊 Confidence: *0%* — ${windowClosed ? 'rule window closed (10:00–12:30 IST)' : 'no setup fired'}`);
             L.push('└────────────────────────────');
+
+            // When the measured fade rule is not live, give the chain-based lean
+            // so the card is not a dead end. Clearly NOT the tested edge.
+            const lean = chainLean(a);
+            if (lean) {
+                L.push('');
+                L.push('┌─ *📊 CHAIN LEAN* ─');
+                L.push('│ _Unmeasured — conventional options reasoning, not the tested edge_');
+                for (const f of lean.factors) L.push(`│ ${f.detail}`);
+                L.push(`│ NET: *${lean.netLabel}*`);
+                L.push('└────────────────────────────');
+            }
         } else if (p?.blocked) {
+            const conf = signalConfidence(s);
             L.push('┌─ *🚫 NO ENTRY (size)* ─');
             L.push(`│ Setup present (${s.kind}) but ${p.blocked}`);
+            if (conf) L.push(`│ 📊 Confidence: *${conf.pct}%* — ${conf.label}`);
             L.push('└────────────────────────────');
         } else if (p) {
             const dirWord = s.side === 'long' ? 'BUY CE' : 'BUY PE';
+            const conf = signalConfidence(s);
             L.push(`┌─ *✅ ENTER — ${dirWord}* ─`);
             L.push(`│ Why: ${s.reason}`);
             if (s.degraded) L.push(`│ ⚠️ past ${hhmm(SIGNAL_WINDOW.closeMin)} — weaker than the tested window`);
+            if (conf) L.push(`│ 📊 Confidence: *${conf.pct}%* — ${conf.label}`);
             L.push('│');
             L.push(`│ *${a.atmStrike} ${a.legName}* · ${a.expiry}`);
             L.push(`│ Lots: *${p.lots}* (${p.qty} qty) · capital used *${inr(p.capitalUsed)}* of ${inr(a.capital)}`);

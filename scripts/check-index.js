@@ -12,7 +12,7 @@ import {
 } from '../src/data/indexUniverse.js';
 import {
     rangePosition, oiWalls, pcrLabel, indexAnalysisService,
-    sessionVwap, barAtr, evaluateIndexSignal, sizeIndexTrade,
+    sessionVwap, barAtr, evaluateIndexSignal, sizeIndexTrade, signalConfidence, chainLean,
     istMinuteOfDay, todaySessionBars, SIGNAL_WINDOW, STRETCH_ATR,
 } from '../src/services/IndexAnalysisService.js';
 import { normalizeYahooSymbol } from '../src/services/IndianStockQuoteService.js';
@@ -183,6 +183,53 @@ ok(evaluateIndexSignal(upSess, 14 * 60).side === null, 'after the dead time -> n
 ok(/NEGATIVE/.test(evaluateIndexSignal(upSess, 14 * 60).reason), 'says the rule measured negative late');
 const degradedSig = evaluateIndexSignal(upSess, 12 * 60);
 ok(degradedSig.side === 'short' && degradedSig.degraded === true, 'late-but-alive is flagged degraded');
+
+// ---------------------------------------------------------- confidence score
+ok(signalConfidence(null) === null, 'no signal -> no confidence');
+ok(signalConfidence({ side: null, kind: null }) === null, 'no side -> no confidence');
+const confStretch = signalConfidence({ side: 'short', kind: 'vwap-stretch', stretch: 1.2 });
+ok(confStretch?.pct === 67 && confStretch.label === 'high', 'fresh vwap-stretch confidence = measured 66.7% (67)');
+const confBreak = signalConfidence({ side: 'long', kind: 'failed-break', stretch: 0.3 });
+ok(confBreak?.pct === 66 && confBreak.label === 'high', 'fresh failed-break confidence = measured 65.6% (66)');
+const confDegraded = signalConfidence({ side: 'short', kind: 'vwap-stretch', stretch: 1.2, degraded: true });
+ok(confDegraded?.pct === 53 && confDegraded.label === 'low', 'degraded window drops confidence 67 -> 53 (low)');
+ok(confDegraded.pct < confStretch.pct, 'degraded is never stronger than fresh');
+const confBigStretch = signalConfidence({ side: 'short', kind: 'vwap-stretch', stretch: 3.0 });
+ok(confBigStretch?.pct === 67, 'stretch bonus never pushes past the measured base');
+const confDegradedBig = signalConfidence({ side: 'short', kind: 'vwap-stretch', stretch: 3.0, degraded: true });
+ok(confDegradedBig?.pct === 58, 'a big stretch recovers part of the degraded penalty (52+6=58)');
+ok(confDegradedBig.pct < 67, 'even a big stretch stays under the measured base when degraded');
+
+// ----------------------------------------------------------- chain lean (unmeasured)
+// Outside the fade window the card must not dead-end — it shows a soft lean
+// from the chain. This is conventional reasoning, NOT the tested edge.
+ok(chainLean({ spot: null }) === null, 'no spot -> no lean');
+ok(chainLean({}) === null, 'no chain data -> no lean');
+const leanBull = chainLean({
+    spot: 24409, pcr: 0.75, maxPain: 24500,
+    walls: { resistance: { strike: 24600 }, support: { strike: 24300 } },
+});
+ok(leanBull?.net === 1, 'call-heavy crowd + spot below max pain + support closer -> mild bullish');
+ok(/mildly BULLISH/.test(leanBull.netLabel), 'net +1 reads mildly BULLISH');
+ok(leanBull.factors.length === 3, 'all three factors contribute');
+const leanBear = chainLean({
+    spot: 24800, pcr: 1.5, maxPain: 24400,
+    walls: { resistance: { strike: 24900 }, support: { strike: 24000 } },
+});
+ok(leanBear?.net === -1, 'put-heavy crowd + spot above max pain + resistance closer -> mild bearish');
+ok(/mildly BEARISH/.test(leanBear.netLabel), 'net -1 reads mildly BEARISH');
+const leanBalanced = chainLean({
+    spot: 24400, pcr: 1.0, maxPain: 24400,
+    walls: { resistance: { strike: 24600 }, support: { strike: 24200 } },
+});
+ok(leanBalanced?.net === 0, 'balanced inputs -> no lean');
+ok(/balanced/.test(leanBalanced.netLabel), 'net 0 reads balanced');
+const leanBigBull = chainLean({
+    spot: 24000, pcr: 1.6, maxPain: 24500,
+    walls: { resistance: { strike: 24500 }, support: { strike: 23500 } },
+});
+ok(leanBigBull?.net === 2, 'two factors agree -> 2 of 3 lean BULLISH');
+ok(/2 of 3 lean BULLISH/.test(leanBigBull.netLabel), 'stronger bull lean labeled with the count');
 ok(evaluateIndexSignal([mkBar(600, 100)], 10 * 60 + 30).side === null, 'too few bars -> no entry');
 ok(evaluateIndexSignal(null, 10 * 60 + 30).side === null, 'null bars safe');
 ok(SIGNAL_WINDOW.deadMin > SIGNAL_WINDOW.closeMin, 'dead time is after the window close');
@@ -244,6 +291,8 @@ ok(entryCard.includes('STOP'), 'card gives a stop');
 ok(entryCard.includes('66.7%'), 'card carries the measured win rate');
 ok(entryCard.includes('n=51'), 'card carries the sample size beside the win rate');
 ok(entryCard.includes('theta'), 'card warns the premium lags the index move');
+ok(entryCard.includes('Confidence: *67%*'), 'entry card shows the confidence percentage');
+ok(entryCard.includes('high'), 'entry card grades the confidence');
 
 const quietCard = indexAnalysisService.format({
     key: 'NIFTY', label: 'NIFTY 50', lot: 75, spot: 24435, capital: 30000, expiry: '18-Aug-2026',
@@ -254,7 +303,21 @@ const quietCard = indexAnalysisService.format({
 });
 ok(quietCard.includes('NO ENTRY'), 'quiet card says NO ENTRY');
 ok(quietCard.includes('no setup'), 'quiet card gives the reason');
+ok(quietCard.includes('Confidence: *0%*'), 'no-setup card still shows a 0% confidence read');
 ok(!quietCard.includes('EXIT AT'), 'quiet card offers no exit price');
+// The measured rule only lives 10:00-12:30 IST — outside it the card must say
+// the window is closed, not pretend the market is simply flat.
+const earlyCard = indexAnalysisService.format({
+    key: 'NIFTY', label: 'NIFTY 50', lot: 75, spot: 24435, capital: 30000, expiry: '18-Aug-2026',
+    atmStrike: 24450, atmCe: { ltp: 121 }, atmPe: { ltp: 124 }, pcr: 0.75,
+    walls: {}, topCe: [], topPe: [],
+    signal: { side: null, reason: 'too early — the rule was measured from 10:00, VWAP is not established before that' },
+    plan: null,
+});
+ok(earlyCard.includes('window closed'), 'out-of-window card says the window is closed, not just flat');
+ok(earlyCard.includes('CHAIN LEAN'), 'out-of-window card shows the chain lean instead of dead-ending');
+ok(earlyCard.includes('Unmeasured'), 'chain lean is labeled unmeasured');
+ok(!/lean BULLISH|lean BEARISH/.test(entryCard), 'a card WITH a live fade signal shows no chain lean');
 
 console.log(`\ncheck-index: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
