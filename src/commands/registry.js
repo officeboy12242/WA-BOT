@@ -57,6 +57,13 @@ export const COMMAND_REGISTRY = [
         help: 'Download Instagram post/reel; auto in DMs & groups with `/instaon`',
     },
     {
+        names: ['/tw', '/twitter'],
+        key: 'tw',
+        scope: 'any',
+        role: 'anyone',
+        help: 'Download Twitter/X video — `/tw <link>`',
+    },
+    {
         names: ['/movie', '/m', '/search', '/s'],
         key: 'movie',
         scope: 'any',
@@ -743,7 +750,7 @@ export const HELP_CATEGORY = {
     movie: 'movie', upcoming: 'movie', genre: 'movie',
 
     // Media download / convert
-    insta: 'media', toimg: 'media',
+    insta: 'media', tw: 'media', toimg: 'media',
 
     // Stickers
     sticker: 'sticker', steal: 'sticker', rgb: 'sticker',
@@ -796,7 +803,7 @@ export const HELP_CATEGORIES = [
         blurb: 'Search and download',
         footer: '📊 *Free:* 5 searches/day · ⭐ *Premium:* unlimited\n💡 `/movie Pushpa 2` · `/genre horror`',
     },
-    { key: 'media', emoji: '📥', title: 'MEDIA DOWNLOAD', blurb: 'Instagram & conversions' },
+    { key: 'media', emoji: '📥', title: 'MEDIA DOWNLOAD', blurb: 'Instagram, Twitter & conversions' },
     { key: 'sticker', emoji: '🎭', title: 'STICKERS', blurb: 'Create, steal, animate' },
     { key: 'trade', emoji: '📈', title: 'TRADING & MARKETS', blurb: 'NSE stocks, options & swing setups' },
     { key: 'daily', emoji: '📰', title: 'DAILY FEEDS', blurb: 'News, repos & interview prep' },

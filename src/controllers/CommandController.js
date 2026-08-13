@@ -78,6 +78,7 @@ import {
 
 import {
     handleInsta as _handleInsta,
+    handleTwitter,
     handleNews,
     handleGithub,
     handlePendingGithubConfirmation,
@@ -206,6 +207,7 @@ export const COMMAND_HANDLERS = {
 
     /* ── Instagram / News / Movie ── */
     insta: ({ sock, chatId, args, originalMsg }) => _handleInsta(sock, chatId, args, originalMsg),
+    tw: ({ sock, chatId, args, originalMsg }) => handleTwitter(sock, chatId, args, originalMsg),
     news: ({ sock, chatId, senderJid, ctx }) => handleNews(sock, chatId, senderJid, ctx),
     github: ({ sock, chatId, senderJid, ctx }) => handleGithub(sock, chatId, senderJid, ctx),
     awesome: ({ sock, chatId, senderJid, ctx }) => handleAwesome(sock, chatId, senderJid, ctx),

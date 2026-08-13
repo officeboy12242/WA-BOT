@@ -7,6 +7,7 @@ import { snapsave } from 'snapsave-media-downloader';
 import { logger } from '../../utils/logger.js';
 import { downloadMediaBuffer } from '../../utils/downloadMediaBuffer.js';
 import { extractInstagramUrl, isSupportedInstagramUrl } from '../../utils/instagramUrl.js';
+import { extractTwitterUrl, isSupportedTwitterUrl } from '../../utils/twitterUrl.js';
 import { safeSendMessage } from '../../utils/waMessage.js';
 
 function formatInstaDownloadStatus(mediaList) {
@@ -49,7 +50,7 @@ async function classifyMediaBuffer(buffer) {
     return { kind, mime, ext: type.ext };
 }
 
-async function sendDownloadedMedia(sock, chatId, buffer, waMessage, index) {
+async function sendDownloadedMedia(sock, chatId, buffer, waMessage, index, fileNamePrefix = 'instagram') {
     const detected = await classifyMediaBuffer(buffer);
     if (detected.kind === 'video') {
         await safeSendMessage(sock, chatId, { video: buffer, mimetype: detected.mime }, waMessage);
@@ -62,46 +63,38 @@ async function sendDownloadedMedia(sock, chatId, buffer, waMessage, index) {
     await safeSendMessage(
         sock,
         chatId,
-        { document: buffer, mimetype: detected.mime, fileName: `instagram_${index + 1}.${detected.ext || 'bin'}` },
+        { document: buffer, mimetype: detected.mime, fileName: `${fileNamePrefix}_${index + 1}.${detected.ext || 'bin'}` },
         waMessage,
     );
     return true;
 }
 
-export async function handleInsta(sock, chatId, args, quotedMessage, options = {}) {
-    const { requireCommandArgs = true } = options;
+async function handleMediaDownload(sock, chatId, args, quotedMessage, opts) {
+    const {
+        requireCommandArgs = true,
+        usage,
+        unsupported,
+        statusText,
+        extractUrl,
+        isSupported,
+        fileNamePrefix,
+        logLabel,
+    } = opts;
 
     if (requireCommandArgs && !args.length) {
-        await safeSendMessage(
-            sock,
-            chatId,
-            {
-                text:
-                    'Usage: `/insta <instagram-url>` (alias `/i`)\n' +
-                    'Example: `/insta https://www.instagram.com/p/xxxxx/`\n\n' +
-                    'In a private chat you can also paste an Instagram link without a command.',
-            },
-            quotedMessage,
-        );
+        await safeSendMessage(sock, chatId, { text: usage }, quotedMessage);
         return;
     }
 
-    let url = extractInstagramUrl(args.join(' ').trim()) || (args[0] || '').trim();
-    if (!isSupportedInstagramUrl(url)) {
-        await safeSendMessage(
-            sock,
-            chatId,
-            { text: 'Only Instagram post/reel/TV/share links from instagram.com are supported.' },
-            quotedMessage,
-        );
+    let url = extractUrl(args.join(' ').trim()) || (args[0] || '').trim();
+    if (!isSupported(url)) {
+        await safeSendMessage(sock, chatId, { text: unsupported }, quotedMessage);
         return;
     }
 
     let statusMsg = null;
     try {
-        statusMsg = await safeSendMessage(sock, chatId, {
-            text: '⏳ Fetching Instagram media…\n_This may take a few seconds._',
-        }, quotedMessage);
+        statusMsg = await safeSendMessage(sock, chatId, { text: statusText }, quotedMessage);
 
         const result = await snapsave(url, { retry: 2, retryDelay: 800 });
 
@@ -143,11 +136,11 @@ export async function handleInsta(sock, chatId, args, quotedMessage, options = {
         for (let i = 0; i < total; i++) {
             try {
                 const buffer = await downloadMediaBuffer(mediaList[i].url);
-                await sendDownloadedMedia(sock, chatId, buffer, null, i);
+                await sendDownloadedMedia(sock, chatId, buffer, null, i, fileNamePrefix);
                 sentCount++;
             } catch (err) {
                 failedCount++;
-                logger.warn(`Insta item ${i + 1}/${total} failed: ${err.message}`);
+                logger.warn(`${logLabel} item ${i + 1}/${total} failed: ${err.message}`);
             }
             await new Promise((r) => setTimeout(r, 1000));
         }
@@ -171,9 +164,9 @@ export async function handleInsta(sock, chatId, args, quotedMessage, options = {
             { text: formatInstaSuccessText(sentCount, total, failedCount) },
             quotedMessage,
         );
-        logger.info(`Insta: sent ${sentCount}/${total} item(s) for ${chatId}`);
+        logger.info(`${logLabel}: sent ${sentCount}/${total} item(s) for ${chatId}`);
     } catch (err) {
-        logger.error(`Insta command error: ${err.message}`);
+        logger.error(`${logLabel} command error: ${err.message}`);
         await safeSendMessage(
             sock,
             chatId,
@@ -185,6 +178,37 @@ export async function handleInsta(sock, chatId, args, quotedMessage, options = {
             await safeDeleteChatMessage(sock, chatId, statusMsg);
         }
     }
+}
+
+export async function handleInsta(sock, chatId, args, quotedMessage, options = {}) {
+    await handleMediaDownload(sock, chatId, args, quotedMessage, {
+        ...options,
+        usage:
+            'Usage: `/insta <instagram-url>` (alias `/i`)\n' +
+            'Example: `/insta https://www.instagram.com/p/xxxxx/`\n\n' +
+            'In a private chat you can also paste an Instagram link without a command.',
+        unsupported: 'Only Instagram post/reel/TV/share links from instagram.com are supported.',
+        statusText: '⏳ Fetching Instagram media…\n_This may take a few seconds._',
+        extractUrl: extractInstagramUrl,
+        isSupported: isSupportedInstagramUrl,
+        fileNamePrefix: 'instagram',
+        logLabel: 'Insta',
+    });
+}
+
+export async function handleTwitter(sock, chatId, args, quotedMessage, options = {}) {
+    await handleMediaDownload(sock, chatId, args, quotedMessage, {
+        ...options,
+        usage:
+            'Usage: `/tw <twitter-url>` (alias `/twitter`)\n' +
+            'Example: `/tw https://x.com/user/status/123456789`',
+        unsupported: 'Only Twitter/X post links from twitter.com / x.com (with a status ID) are supported.',
+        statusText: '⏳ Fetching Twitter/X media…\n_This may take a few seconds._',
+        extractUrl: extractTwitterUrl,
+        isSupported: isSupportedTwitterUrl,
+        fileNamePrefix: 'twitter',
+        logLabel: 'Twitter',
+    });
 }
 
 export async function handleNews(sock, chatId, senderJid, { newsController, groupManager }) {
