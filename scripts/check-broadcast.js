@@ -415,6 +415,55 @@ eq(skipFinal.skipped_messaged, 1, 'a recipient already messaged is skipped, not 
 eq(skipFinal.sent, 2, 'the other two targets still get the message');
 eq(skipSent.length, 2, 'exactly two DMs went out');
 
+// A FAILED send must NOT record dm_history — the recipient never got the
+// message, so marking them "already messaged" would skip them in later runs.
+const failDb = fakeMongoDb();
+const failPacing = new SendPacingService(failDb, {});
+const failSvc = new BroadcastService(failDb, null, {}, failPacing);
+await failSvc.init();
+const failJobId = await failSvc.createJob({
+    label: 'fail test', message: 'hi', chatId: 'c',
+    targets: ['drop@s.whatsapp.net'],
+});
+const failAccount = resolveAccountJid({ user: { id: '999:s@w' } });
+await failSvc.run({
+    getSock: () => ({
+        user: { id: '999:s@w' },
+        sendMessage: async () => { throw new Error('server: not-on-whatsapp'); },
+    }),
+    jobId: failJobId,
+});
+eq(await failPacing.lastMessagedAt(failAccount, 'drop@s.whatsapp.net'), null, 'a failed send is NOT recorded as messaged');
+
+// The default skip window is 7 days: only recipients messaged within the last
+// week are skipped, so re-running a campaign on the same group still works.
+const winDb = fakeMongoDb();
+const winPacing = new SendPacingService(winDb, {});
+const winSvc = new BroadcastService(winDb, null, {}, winPacing);
+await winSvc.init();
+const winJobId = await winSvc.createJob({
+    label: 'window test', message: 'hi', chatId: 'c',
+    targets: ['old@s.whatsapp.net', 'recent@s.whatsapp.net'],
+});
+// old was messaged 8 days ago (outside the 7-day window), recent 2 days ago.
+await winPacing.history.insertOne({
+    account: failAccount, jid: 'old@s.whatsapp.net',
+    first_dm: new Date(Date.now() - 8 * 86400_000), last_dm: new Date(Date.now() - 8 * 86400_000),
+});
+await winPacing.history.insertOne({
+    account: failAccount, jid: 'recent@s.whatsapp.net',
+    first_dm: new Date(Date.now() - 2 * 86400_000), last_dm: new Date(Date.now() - 2 * 86400_000),
+});
+const winSent = [];
+const winFinal = await winSvc.run({
+    getSock: () => ({ user: { id: '999:s@w' }, sendMessage: async (jid) => { winSent.push(jid); return { key: { id: 'k' } }; } }),
+    jobId: winJobId,
+});
+eq(winFinal.skipped_messaged, 1, 'only the recipient messaged within the 7-day window is skipped');
+eq(winFinal.sent, 1, 'a recipient messaged 8 days ago is messaged again');
+ok(winSent.includes('old@s.whatsapp.net'), 'the old-history recipient got the message');
+ok(!winSent.includes('recent@s.whatsapp.net'), 'the recent recipient did not');
+
 // Personalization: known first name is prefixed, unknown stays plain.
 const pSvc = new BroadcastService(null, null, {});
 eq(pSvc.personalizeFor('Sale today!', 'Ravi Kumar'), 'Hi Ravi,\n\nSale today!', 'a known name personalizes the opener');

@@ -34,7 +34,7 @@ export const BROADCAST_DEFAULTS = {
     failureSampleMin: 12,
     /** Skip recipients this account already DM'd (0 = ever, else within N days). */
     skipMessaged: true,
-    remessageDays: 0,
+    remessageDays: 7,
     /** Prefix broadcasts with the recipient's first name when we know it. */
     personalize: true,
     /** Delivery-rate soft-ban guard: pause when deliveries fall below this over a window. */
@@ -467,6 +467,10 @@ class BroadcastService {
                 attempted += 1;
                 deliveryOutcomes.push(1);
                 this.pacing?.enabled && this.pacing.recordSuccess(accountJid);
+                // Only a REAL delivery records dm_history — a dropped/failed send
+                // must not mark the recipient as "already messaged" (they never
+                // got it; recording them would skip them forever in a later run).
+                if (this.pacing?.enabled) await this.pacing.recordSend(accountJid, jid, wasCold);
             } else if (res.permanent) {
                 // Recipient blocks DMs outright — not a throttling signal, and
                 // re-sending would just collect reports. Skip and continue.
@@ -483,7 +487,6 @@ class BroadcastService {
                 this.pacing?.enabled && this.pacing.recordFailure(accountJid);
                 logger.warn(`Broadcast ${jobId} failed for ${jid}: ${res.error}`);
             }
-            if (this.pacing?.enabled) await this.pacing.recordSend(accountJid, jid, wasCold);
 
             // Soft-ban guard: a sustained run of non-deliveries (drops, blocks,
             // hard failures) usually means the server is restricting us. Pause

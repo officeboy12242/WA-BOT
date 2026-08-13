@@ -402,8 +402,11 @@ export const config = {
      */
     /** Skip recipients already DM'd by this account. */
     BROADCAST_SKIP_MESSAGED: process.env.BROADCAST_SKIP_MESSAGED !== 'false',
-    /** 0 = skip anyone ever messaged; N = skip anyone messaged within N days. */
-    BROADCAST_REMESSAGE_DAYS: parseInt(process.env.BROADCAST_REMESSAGE_DAYS, 10) || 0,
+    /** 0 = skip anyone ever messaged; N = skip anyone messaged within N days. Default 7. */
+    BROADCAST_REMESSAGE_DAYS:
+        process.env.BROADCAST_REMESSAGE_DAYS === undefined || process.env.BROADCAST_REMESSAGE_DAYS === ''
+            ? 7
+            : Math.max(0, parseInt(process.env.BROADCAST_REMESSAGE_DAYS, 10) || 0),
     /** Prefix broadcasts with the recipient's first name when known. */
     BROADCAST_PERSONALIZE: process.env.BROADCAST_PERSONALIZE !== 'false',
     /** Pause when delivery rate over the window falls below this (0–1). */
