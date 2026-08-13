@@ -90,25 +90,6 @@ class UserManager {
         return null;
     }
 
-    /**
-     * Batch push-name lookup — one query instead of one per broadcast target.
-     * @param {string[]} jids
-     * @returns {Promise<Map<string, string>>} jid -> pushName (only known names)
-     */
-    async getUserNames(jids) {
-        const out = new Map();
-        const clean = [...new Set((jids || []).filter(Boolean))];
-        if (!clean.length || !this.collection?.find) return out;
-        try {
-            const rows = await this.collection.find({ _id: { $in: clean } }, { projection: { pushName: 1 } }).toArray();
-            for (const row of rows || []) {
-                if (row?._id && row.pushName) out.set(row._id, row.pushName);
-            }
-        } catch (err) {
-            logger.error('Failed to batch-get user names:', err.message);
-        }
-        return out;
-    }
 }
 
 export default UserManager;

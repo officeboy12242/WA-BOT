@@ -365,62 +365,6 @@ export const config = {
     /** v2: parallel candle fetches. */
     HEATMAP_V2_CONCURRENCY: Math.max(1, Math.min(12, parseInt(process.env.HEATMAP_V2_CONCURRENCY, 10) || 6)),
 
-    /* ── Member broadcast pacing ─────────────────────────────────────────
-     * WhatsApp limits accounts that send lots of cold DMs. These defaults are
-     * deliberately slow (~150/day, randomised gaps): a uniform cadence is a
-     * machine signature, and volume is what draws reports in the first place.
-     * Raising them raises ban risk — the account is the thing you cannot
-     * restore from a backup.
-     */
-    BROADCAST_MIN_GAP_MS: Math.max(3_000, parseInt(process.env.BROADCAST_MIN_GAP_MS, 10) || 8_000),
-    BROADCAST_MAX_GAP_MS: Math.max(5_000, parseInt(process.env.BROADCAST_MAX_GAP_MS, 10) || 25_000),
-    BROADCAST_BATCH_SIZE: Math.max(1, parseInt(process.env.BROADCAST_BATCH_SIZE, 10) || 20),
-    BROADCAST_DAILY_CAP: Math.max(1, parseInt(process.env.BROADCAST_DAILY_CAP, 10) || 150),
-
-    /* ── OpenWA-style send pacing governor (warm-up + cold cap + breaker) ──
-     * The flat BROADCAST_DAILY_CAP above is a hard ceiling; these ramp the
-     * EFFECTIVE daily allowance up with the account's age and split out a
-     * separate, much smaller budget for first messages to strangers (the
-     * #1 restriction trigger). Empty values fall back to the defaults below.
-     */
-    /** Master switch — default ON so a fresh number never blasts on day one. */
-    PACING_ENABLED: process.env.PACING_ENABLED !== 'false',
-    /** Daily send allowance by account age in days: "20,40,80,160,320,640,1000". */
-    PACING_WARMUP_SCHEDULE: (process.env.PACING_WARMUP_SCHEDULE || '').trim(),
-    /** Pretend the account is already N days old — for established numbers that
-     *  were never tracked by the governor (0 = assume brand-new, ramp from day 0). */
-    PACING_ACCOUNT_AGE_START_DAYS: Math.max(0, parseInt(process.env.PACING_ACCOUNT_AGE_START_DAYS, 10) || 0),
-    /** Daily allowance for FIRST messages to strangers: "5,10,20,40,60,80,100". */
-    PACING_COLD_DAILY_CAP: (process.env.PACING_COLD_DAILY_CAP || '').trim(),
-    /** Consecutive send failures that pause all sends (circuit breaker). */
-    PACING_BREAKER_THRESHOLD: (process.env.PACING_BREAKER_THRESHOLD || '').trim(),
-    /** How long the breaker stays open after tripping (ms). */
-    PACING_BREAKER_COOLDOWN_MS: (process.env.PACING_BREAKER_COOLDOWN_MS || '').trim(),
-
-    /* ── Broadcast anti-restriction extras ────────────────────────────────
-     * Skip people this account already messaged (the #1 report generator is
-     * re-DMing the same people), personalize with their first name (identical
-     * blasts are a machine fingerprint and raise block rate), and pause when
-     * the server's delivery rate collapses (a soft-ban signal).
-     */
-    /** Skip recipients already DM'd by this account. */
-    BROADCAST_SKIP_MESSAGED: process.env.BROADCAST_SKIP_MESSAGED !== 'false',
-    /** 0 = skip anyone ever messaged; N = skip anyone messaged within N days. Default 7. */
-    BROADCAST_REMESSAGE_DAYS:
-        process.env.BROADCAST_REMESSAGE_DAYS === undefined || process.env.BROADCAST_REMESSAGE_DAYS === ''
-            ? 7
-            : Math.max(0, parseInt(process.env.BROADCAST_REMESSAGE_DAYS, 10) || 0),
-    /** Prefix broadcasts with the recipient's first name when known. */
-    BROADCAST_PERSONALIZE: process.env.BROADCAST_PERSONALIZE !== 'false',
-    /** Pause when delivery rate over the window falls below this (0–1). */
-    BROADCAST_DELIVERY_FLOOR: parseFloat(process.env.BROADCAST_DELIVERY_FLOOR) || 0.6,
-    /** Rolling window of sends the delivery rate is measured over. */
-    BROADCAST_DELIVERY_WINDOW: Math.max(5, parseInt(process.env.BROADCAST_DELIVERY_WINDOW, 10) || 20),
-    /** Cooldown after a delivery-rate trip (ms). */
-    BROADCAST_DELIVERY_COOLDOWN_MS: Math.max(60_000, parseInt(process.env.BROADCAST_DELIVERY_COOLDOWN_MS, 10) || 900_000),
-    /** WhatsApp Business-style footer byline shown on every broadcast DM. */
-    BROADCAST_BYLINE: (process.env.BROADCAST_BYLINE || '').trim() || 'Sassy Bot',
-
     /* ── Outcome resolution ─────────────────────────────────────────────── */
     /** Grade posted alerts against what price actually did. */
     TRADE_OUTCOME_RESOLVER_ENABLED: process.env.TRADE_OUTCOME_RESOLVER_ENABLED !== 'false',

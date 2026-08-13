@@ -589,34 +589,6 @@ export const COMMAND_REGISTRY = [
         help: 'List sticker source channels (owner only)',
     },
     {
-        names: ['/scrap'],
-        key: 'scrap',
-        scope: 'any',
-        role: 'owner',
-        help: 'Pick a group by number and scrape all members to database (owner only)',
-    },
-    {
-        names: ['/scrapmembers', '/scraped'],
-        key: 'scrapmembers',
-        scope: 'any',
-        role: 'owner',
-        help: 'List scraped groups and member counts (owner only)',
-    },
-    {
-        names: ['/scrapclear'],
-        key: 'scrapclear',
-        scope: 'any',
-        role: 'owner',
-        help: 'Delete saved members — `/scrapclear <#>`, `all`, or `stale [days]` (owner only)',
-    },
-    {
-        names: ['/broadcast'],
-        key: 'broadcast',
-        scope: 'any',
-        role: 'owner',
-        help: 'DM scraped members, paced + resumable — `/broadcast <#|all> <msg>`, add `dry` to preview · `status` · `stop` · `resume` (owner only)',
-    },
-    {
         names: ['/grouppost', '/groupmsg'],
         key: 'grouppost',
         scope: 'any',
@@ -810,8 +782,7 @@ export const HELP_CATEGORY = {
     fix: 'owner', heal: 'owner', assist: 'owner', deploy: 'owner',
     addpremium: 'owner', removepremium: 'owner', premium: 'owner',
     addmod: 'owner', removemod: 'owner', addchannel: 'owner',
-    removechannel: 'owner', channels: 'owner', scrap: 'owner',
-    scrapmembers: 'owner', scrapclear: 'owner', broadcast: 'owner', grouppost: 'owner',
+    removechannel: 'owner', channels: 'owner', grouppost: 'owner',
     driveurl: 'owner',
 };
 
@@ -834,7 +805,7 @@ export const HELP_CATEGORIES = [
     { key: 'group', emoji: '⚙️', title: 'GROUP SETUP', blurb: 'Staff — enable features per group' },
     { key: 'moderation', emoji: '🛡️', title: 'MODERATION', blurb: 'Warnings & message cleanup' },
     { key: 'admin', emoji: '🔧', title: 'BOT ADMIN', blurb: 'Manage the bot & its admins' },
-    { key: 'owner', emoji: '👑', title: 'OWNER TOOLS', blurb: 'Premium, broadcast, deploy, self-heal' },
+    { key: 'owner', emoji: '👑', title: 'OWNER TOOLS', blurb: 'Premium, deploy, self-heal' },
 ];
 
 /** Display bucket for a command, defaulting to Essentials. */

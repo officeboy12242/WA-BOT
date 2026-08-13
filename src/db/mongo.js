@@ -50,14 +50,6 @@ async function ensureIndexes(db) {
             { hash: 1, group_id: 1 },
             { unique: true, name: 'posted_github_repo_per_group' }
         ),
-        db.collection('group_members').createIndex(
-            { group_id: 1, member_key: 1 },
-            { unique: true, name: 'group_member_unique' }
-        ),
-        db.collection('group_member_scrapes').createIndex(
-            { group_id: 1 },
-            { unique: true, name: 'group_scrape_meta' }
-        ),
     ]);
 }
 
