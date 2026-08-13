@@ -32,6 +32,15 @@ export const BROADCAST_DEFAULTS = {
     /** Abort if this share of a meaningful sample fails — usually means throttling. */
     failureRateAbort: 0.15,
     failureSampleMin: 12,
+    /** Skip recipients this account already DM'd (0 = ever, else within N days). */
+    skipMessaged: true,
+    remessageDays: 0,
+    /** Prefix broadcasts with the recipient's first name when we know it. */
+    personalize: true,
+    /** Delivery-rate soft-ban guard: pause when deliveries fall below this over a window. */
+    deliveryFloor: 0.6,
+    deliveryWindow: 20,
+    deliveryCooldownMs: 15 * 60 * 1000,
 };
 
 export const BROADCAST_STATUS = {
@@ -93,6 +102,12 @@ class BroadcastService {
             maxGapMs: Number(config.BROADCAST_MAX_GAP_MS) || BROADCAST_DEFAULTS.maxGapMs,
             batchSize: Number(config.BROADCAST_BATCH_SIZE) || BROADCAST_DEFAULTS.batchSize,
             dailyCap: Number(config.BROADCAST_DAILY_CAP) || BROADCAST_DEFAULTS.dailyCap,
+            skipMessaged: config.BROADCAST_SKIP_MESSAGED !== false && String(config.BROADCAST_SKIP_MESSAGED ?? 'true') !== 'false',
+            remessageDays: Math.max(0, parseInt(config.BROADCAST_REMESSAGE_DAYS, 10) || 0),
+            personalize: config.BROADCAST_PERSONALIZE !== false && String(config.BROADCAST_PERSONALIZE ?? 'true') !== 'false',
+            deliveryFloor: Math.max(0, Math.min(1, Number(config.BROADCAST_DELIVERY_FLOOR) || BROADCAST_DEFAULTS.deliveryFloor)),
+            deliveryWindow: Math.max(5, parseInt(config.BROADCAST_DELIVERY_WINDOW, 10) || BROADCAST_DEFAULTS.deliveryWindow),
+            deliveryCooldownMs: Math.max(60_000, parseInt(config.BROADCAST_DELIVERY_COOLDOWN_MS, 10) || BROADCAST_DEFAULTS.deliveryCooldownMs),
         };
         this._aborting = new Set();
     }
@@ -132,9 +147,11 @@ class BroadcastService {
 
     /**
      * Persist a job so a restart resumes instead of re-sending from the top.
+     * @param {object} o
+     * @param {object|null} [o.names] jid -> first name for personalization
      * @returns {Promise<string>} job id
      */
-    async createJob({ label, message, targets, chatId }) {
+    async createJob({ label, message, targets, chatId, names = null }) {
         const id = `bc_${Date.now().toString(36)}`;
         if (this.jobs) {
             await this.jobs.insertOne({
@@ -143,11 +160,14 @@ class BroadcastService {
                 message,
                 chat_id: chatId,
                 targets,
+                names,
                 cursor: 0,
                 sent: 0,
                 failed: 0,
                 skipped_opt_out: 0,
                 skipped_unreachable: 0,
+                skipped_messaged: 0,
+                delivery_paused_until: null,
                 status: BROADCAST_STATUS.RUNNING,
                 daily: { date: getTodayDateStrIST(), count: 0 },
                 created_at: new Date(),
@@ -241,6 +261,16 @@ class BroadcastService {
     }
 
     /**
+     * Personalize a broadcast message with the recipient's first name, keeping
+     * the opt-out footer last. Unknown/short names send the plain message.
+     */
+    personalizeFor(message, name = null) {
+        const first = String(name || '').trim().split(/\s+/)[0];
+        if (!this.opts.personalize || !first || first.length < 2 || /^\d+$/.test(first)) return message;
+        return `Hi ${first},\n\n${message}`;
+    }
+
+    /**
      * Send one DM. Retries ONLY on a real failure.
      *
      * sendMessage resolves once the stanza is written to the socket — it does
@@ -264,6 +294,7 @@ class BroadcastService {
             const { outcome } = await deliverMessage(sock, jid, { text: message }, {
                 verifier,
                 verifyWaitMs: SEND_VERIFY_MS,
+                typing: true,
             });
             if (verifier && outcome === 'ERROR') {
                 logger.info(`Broadcast: ${jid} dropped by server (missing privacy token) — waiting for token, retrying`);
@@ -272,6 +303,7 @@ class BroadcastService {
                     const retry = await deliverMessage(sock, jid, { text: message }, {
                         verifier,
                         verifyWaitMs: SEND_VERIFY_MS,
+                        typing: true,
                     });
                     if (retry.outcome === 'ERROR') {
                         return {
@@ -298,6 +330,7 @@ class BroadcastService {
                 await deliverMessage(sock, jid, { text: message }, {
                     verifier,
                     verifyWaitMs: SEND_VERIFY_MS,
+                    typing: true,
                 });
                 return { ok: true, retried: true };
             } catch (err2) {
@@ -313,36 +346,51 @@ class BroadcastService {
      * @param {() => object|null} o.getSock
      * @param {string} o.jobId
      * @param {(update: object) => void} [o.onProgress]
+     * @param {{ wait: Function, detach?: Function }} [o.verifier] inject a delivery
+     *   verifier (default: one built from the sock) — mainly for tests
      * @returns {Promise<object>} final job state
      */
-    async run({ getSock, jobId, onProgress = null }) {
+    async run({ getSock, jobId, onProgress = null, verifier: injectedVerifier = null }) {
         const job = await this.getJob(jobId);
         if (!job) throw new Error(`Broadcast job ${jobId} not found`);
 
         const { targets, message } = job;
+        const names = job.names || null;
         let { cursor, sent, failed } = job;
         let skippedOptOut = job.skipped_opt_out || 0;
         let skippedUnreachable = job.skipped_unreachable || 0;
+        let skippedMessaged = job.skipped_messaged || 0;
         let daily = job.daily?.date === getTodayDateStrIST() ? job.daily : { date: getTodayDateStrIST(), count: 0 };
         let consecutiveFailures = 0;
         let attempted = 0;
+        // Rolling delivery outcomes (1 = delivered, 0 = failed) for the soft-ban
+        // guard: a sustained low delivery rate means the server is throttling us.
+        const deliveryOutcomes = [];
+        const deliveryPausedUntil = job.delivery_paused_until ? new Date(job.delivery_paused_until).getTime() : 0;
 
         // Async delivery verdicts for messages we sent — shared pipeline verifier
         // (one listener for the whole run, reused across every send).
         let verifier = null;
 
-        const finish = async (status, note = null) => {
+        const finish = async (status, note = null, extra = {}) => {
             verifier?.detach?.();
             this._aborting.delete(jobId);
             await this._patch(jobId, {
                 status, cursor, sent, failed,
-                skipped_opt_out: skippedOptOut, skipped_unreachable: skippedUnreachable, daily, note,
+                skipped_opt_out: skippedOptOut, skipped_unreachable: skippedUnreachable,
+                skipped_messaged: skippedMessaged, daily, note, ...extra,
             });
             logger.info(
-                `📤 Broadcast ${jobId} ${status}: sent=${sent} failed=${failed} optOut=${skippedOptOut} unreachable=${skippedUnreachable} of ${targets.length}`
+                `📤 Broadcast ${jobId} ${status}: sent=${sent} failed=${failed} optOut=${skippedOptOut} ` +
+                    `unreachable=${skippedUnreachable} messaged=${skippedMessaged} of ${targets.length}`
             );
-            return { ...job, status, cursor, sent, failed, skipped_opt_out: skippedOptOut, skipped_unreachable: skippedUnreachable, note };
+            return { ...job, status, cursor, sent, failed, skipped_opt_out: skippedOptOut, skipped_unreachable: skippedUnreachable, skipped_messaged: skippedMessaged, note };
         };
+
+        if (deliveryPausedUntil > Date.now()) {
+            const mins = Math.max(1, Math.round((deliveryPausedUntil - Date.now()) / 60000));
+            return finish(BROADCAST_STATUS.PAUSED_CAP, `delivery-rate cooldown — try again in ~${mins} min`);
+        }
 
         while (cursor < targets.length) {
             if (this.isAborting(jobId)) return finish(BROADCAST_STATUS.ABORTED, 'stopped by owner');
@@ -352,11 +400,26 @@ class BroadcastService {
 
             const sock = getSock?.();
             if (!sock) return finish(BROADCAST_STATUS.PAUSED_CAP, 'WhatsApp disconnected — will resume');
-            verifier = verifier || createDeliveryVerifier(sock);
+            verifier = verifier || injectedVerifier || createDeliveryVerifier(sock);
 
             const jid = targets[cursor];
             const accountJid = resolveAccountJid(sock);
             const alreadyToday = await this.sentToday();
+
+            // Skip people this account already messaged — re-DMing them is how
+            // a broadcast becomes a report generator, not a campaign.
+            if (this.opts.skipMessaged && this.pacing?.enabled) {
+                const last = await this.pacing.lastMessagedAt(accountJid, jid).catch(() => null);
+                const withinWindow =
+                    last != null &&
+                    (this.opts.remessageDays === 0 || Date.now() - last.getTime() < this.opts.remessageDays * 86400_000);
+                if (withinWindow) {
+                    skippedMessaged += 1;
+                    cursor += 1;
+                    await this._patch(jobId, { cursor, skipped_messaged: skippedMessaged });
+                    continue;
+                }
+            }
 
             // Send-pacing governor: warm-up ramp, cold-reachout budget, breaker.
             if (this.pacing?.enabled) {
@@ -382,28 +445,49 @@ class BroadcastService {
 
             const wasCold = this.pacing?.enabled ? await this.pacing.isCold(accountJid, jid) : false;
 
-            const res = await this._sendOnce(sock, jid, message, verifier);
+            const personalMessage = this.personalizeFor(message, names?.[jid] || null);
+
+            const res = await this._sendOnce(sock, jid, personalMessage, verifier);
             if (res.ok) {
                 sent += 1;
                 daily.count += 1;
                 consecutiveFailures = 0;
                 attempted += 1;
+                deliveryOutcomes.push(1);
                 this.pacing?.enabled && this.pacing.recordSuccess(accountJid);
             } else if (res.permanent) {
                 // Recipient blocks DMs outright — not a throttling signal, and
                 // re-sending would just collect reports. Skip and continue.
                 skippedUnreachable += 1;
                 consecutiveFailures = 0;
+                deliveryOutcomes.push(0); // still a non-delivery for the soft-ban guard
                 this.pacing?.enabled && this.pacing.recordSuccess(accountJid);
                 logger.info(`Broadcast ${jobId}: ${jid} unreachable (still dropped after token) — skipped`);
             } else {
                 failed += 1;
                 consecutiveFailures += 1;
                 attempted += 1;
+                deliveryOutcomes.push(0);
                 this.pacing?.enabled && this.pacing.recordFailure(accountJid);
                 logger.warn(`Broadcast ${jobId} failed for ${jid}: ${res.error}`);
             }
             if (this.pacing?.enabled) await this.pacing.recordSend(accountJid, jid, wasCold);
+
+            // Soft-ban guard: a sustained run of non-deliveries (drops, blocks,
+            // hard failures) usually means the server is restricting us. Pause
+            // with a cooldown instead of burning the rest of the cap.
+            if (deliveryOutcomes.length >= this.opts.deliveryWindow) {
+                const kept = deliveryOutcomes.slice(-this.opts.deliveryWindow);
+                const rate = kept.reduce((s, v) => s + v, 0) / kept.length;
+                if (rate < this.opts.deliveryFloor) {
+                    const pausedUntil = Date.now() + this.opts.deliveryCooldownMs;
+                    return finish(
+                        BROADCAST_STATUS.PAUSED_CAP,
+                        `delivery rate ${Math.round(rate * 100)}% over last ${kept.length} — cooling down ~${Math.round(this.opts.deliveryCooldownMs / 60000)} min`,
+                        { delivery_paused_until: new Date(pausedUntil) }
+                    );
+                }
+            }
 
             cursor += 1;
             await this._patch(jobId, { cursor, sent, failed, skipped_opt_out: skippedOptOut, skipped_unreachable: skippedUnreachable, daily });
@@ -458,6 +542,7 @@ class BroadcastService {
         ];
         if (job.skipped_opt_out) lines.push(`🚫 Skipped (opted out): *${job.skipped_opt_out}*`);
         if (job.skipped_unreachable) lines.push(`🚷 Skipped (blocks DMs): *${job.skipped_unreachable}*`);
+        if (job.skipped_messaged) lines.push(`♻️ Skipped (already messaged): *${job.skipped_messaged}*`);
         const left = total - (job.cursor ?? 0);
         if (left > 0) lines.push(`⏳ Remaining: *${left}*`);
         if (job.note) lines.push('', `_${job.note}_`);

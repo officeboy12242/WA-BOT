@@ -150,6 +150,20 @@ export class SendPacingService {
         return !row;
     }
 
+    /**
+     * When this account last messaged the recipient, or null if never.
+     * The basis for "skip people I have already messaged" — every DM a
+     * broadcast sends is recorded here by recordSend().
+     */
+    async lastMessagedAt(account, recipient) {
+        if (!this.history) return null;
+        const row = await this.history.findOne(
+            { account, jid: recipient },
+            { projection: { last_dm: 1 } }
+        );
+        return row?.last_dm ? new Date(row.last_dm) : null;
+    }
+
     async coldToday(account) {
         const date = getTodayDateStrIST();
         const doc = await this.db.findOne({ account }, { projection: { [`cold.${date}`]: 1 } });

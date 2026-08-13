@@ -5,7 +5,7 @@
 import { jidNormalizedUser } from 'baileys';
 import { logger } from '../../utils/logger.js';
 import { extractPhoneNumber } from '../../utils/permissions.js';
-import { resolvePostMessage, editMessageText } from '../../utils/waMessage.js';
+import { resolvePostMessage, getQuotedMessageText, editMessageText } from '../../utils/waMessage.js';
 import { withOptOutFooter, resolveAccountJid } from '../../services/BroadcastService.js';
 
 const BROADCAST_CMDS = ['broadcast'];
@@ -113,7 +113,7 @@ function humanDuration(ms) {
  * Live progress card. Pacing is deliberately slow, so a run spans hours or
  * days — without this the owner has no idea whether it is working or stuck.
  */
-function formatBroadcastProgress({ label, sent, failed, skippedOptOut, skippedUnreachable = 0, cursor, total, avgGapMs, capLeft, status }) {
+function formatBroadcastProgress({ label, sent, failed, skippedOptOut, skippedUnreachable = 0, skippedMessaged = 0, cursor, total, avgGapMs, capLeft, status }) {
     const remaining = Math.max(0, total - cursor);
     const eta = avgGapMs ? humanDuration(remaining * avgGapMs) : null;
     const lines = [
@@ -121,7 +121,7 @@ function formatBroadcastProgress({ label, sent, failed, skippedOptOut, skippedUn
         '',
         progressBar(cursor, total),
         '',
-        `✅ Sent *${sent}*${failed ? ` · ❌ ${failed}` : ''}${skippedOptOut ? ` · 🚫 ${skippedOptOut} opted out` : ''}${skippedUnreachable ? ` · 🚷 ${skippedUnreachable} blocks DMs` : ''}`,
+        `✅ Sent *${sent}*${failed ? ` · ❌ ${failed}` : ''}${skippedOptOut ? ` · 🚫 ${skippedOptOut} opted out` : ''}${skippedUnreachable ? ` · 🚷 ${skippedUnreachable} blocks DMs` : ''}${skippedMessaged ? ` · ♻️ ${skippedMessaged} already messaged` : ''}`,
         `⏳ *${remaining}* remaining${eta ? ` · ~${eta} left` : ''}`,
     ];
     if (capLeft != null) lines.push(`📅 ${capLeft} left in today's cap`);
@@ -347,6 +347,13 @@ export async function handleBroadcast(sock, chatId, senderJid, args, ctx) {
         // `dry` anywhere in the args previews the audience without sending.
         const isDryRun = args.some((a) => /^(dry|dryrun|preview|test)$/i.test(String(a || '')));
         const isAll = firstArg === 'all';
+        // Optional member limit: `/broadcast 2 50 <msg>` or `/broadcast all 50 <msg>`
+        // DM only the first N targets of that group (or across all groups).
+        let memberLimit = null;
+        const countToken = args[1];
+        if (/^\d{1,6}$/.test(String(countToken || '')) && Number(countToken) >= 1) {
+            memberLimit = Number(countToken);
+        }
         let message = resolvePostMessage(
             fullCommand || '',
             BROADCAST_CMDS,
@@ -356,14 +363,23 @@ export async function handleBroadcast(sock, chatId, senderJid, args, ctx) {
         if (isDryRun) {
             message = message.replace(/^\s*(dry|dryrun|preview|test)\b\s*/i, '').trim() || '(preview)';
         }
+        // The count token is part of the inline body as far as
+        // resolvePostMessage is concerned — strip it when it was used as a limit.
+        if (memberLimit != null) {
+            const stripped = message.replace(/^\s*\d{1,6}\s*/, '').trim();
+            // `/broadcast 2 50` replying to a message: the quoted text is the
+            // body, not the stripped-away count token.
+            message = stripped || getQuotedMessageText(originalMsg).trim();
+        }
 
         if (isAll) {
             if (!message) {
                 await sock.sendMessage(chatId, {
                     text:
-                        '❌ Usage: `/broadcast all <message>`\n\n' +
+                        '❌ Usage: `/broadcast all <message>` or `/broadcast all 50 <message>`\n\n' +
                         'DMs every unique member from *all* scraped groups (one message per person).\n' +
-                        'Multiline messages are preserved. Or *reply* to a message with `/broadcast all`.\n' +
+                        'The optional number limits how many members get it. Multiline messages are\n' +
+                        'preserved. Or *reply* to a message with `/broadcast all`.\n' +
                         'Run `/scrap` on each group first, then `/scrapmembers` to verify.',
                 }, { quoted: originalMsg });
                 return;
@@ -384,15 +400,19 @@ export async function handleBroadcast(sock, chatId, senderJid, args, ctx) {
                 }, { quoted: originalMsg });
                 return;
             }
+            const limited = memberLimit != null ? sendable.slice(0, memberLimit) : sendable;
+            const names = await memberScrapeController.resolveTargetNames(limited).catch(() => ({}));
 
             await launchBroadcast({
                 sock, chatId, originalMsg, getSock, broadcastService, broadcastOptOutStore,
                 label: `all groups (${groups.length})`,
                 message,
-                targets: sendable,
+                targets: limited,
                 suppressed: targets.length - sendable.length,
                 unreachable,
                 dryRun: isDryRun,
+                memberLimit,
+                names,
             });
             return;
         }
@@ -404,6 +424,7 @@ export async function handleBroadcast(sock, chatId, senderJid, args, ctx) {
                 text:
                     '❌ Usage:\n' +
                     '• `/broadcast <group#> <message>`\n' +
+                    '• `/broadcast <group#> 50 <message>` (limit to 50 members)\n' +
                     '• `/broadcast all <message>`\n\n' +
                     'Multiline format is kept. Or *reply* to a message with `/broadcast <#>`.\n' +
                     'Use `/scrapmembers` to see group numbers from scraped data.',
@@ -437,16 +458,20 @@ export async function handleBroadcast(sock, chatId, senderJid, args, ctx) {
             }, { quoted: originalMsg });
             return;
         }
+        const limited = memberLimit != null ? sendable.slice(0, memberLimit) : sendable;
+        const names = await memberScrapeController.resolveTargetNames(limited).catch(() => ({}));
 
         await launchBroadcast({
             sock, chatId, originalMsg, getSock, broadcastService, broadcastOptOutStore,
             label: selected.group_name,
             message,
-            targets: sendable,
+            targets: limited,
             suppressed: reachable.length - sendable.length,
             unreachable: resolved.unreachable,
             lidResolved: resolved.lidResolved,
             dryRun: isDryRun,
+            memberLimit,
+            names,
         });
     } catch (err) {
         logger.error(`Broadcast command failed: ${formatError(err)}`);
@@ -468,6 +493,7 @@ const PROGRESS_EDIT_MS = 25_000;
 async function launchBroadcast({
     sock, chatId, originalMsg, getSock, broadcastService, broadcastOptOutStore,
     label, message, targets, suppressed = 0, unreachable = 0, lidResolved = 0, dryRun = false,
+    memberLimit = null, names = null,
 }) {
     const accountJid = resolveAccountJid(sock);
     const capLeft = await broadcastService.remainingToday(accountJid);
@@ -490,13 +516,16 @@ async function launchBroadcast({
             ' — the rest get issued on first attempt'
         : null;
 
+    const named = names ? Object.keys(names).length : 0;
     const plan = [
         `📋 *Broadcast plan* — ${label}`,
         '',
         `👥 Will DM: *${targets.length}*`,
+        memberLimit != null ? `🎯 Limited to first *${Math.min(memberLimit, targets.length)}* of the reachable list` : null,
         lidResolved ? `🔓 LIDs resolved to numbers: *${lidResolved}*` : null,
         unreachable ? `🚫 Unreachable (number hidden): *${unreachable}*` : null,
         suppressed ? `🔕 Skipped (opted out): *${suppressed}*` : null,
+        named ? `✍️ Personalized for *${named}* recipient(s)` : null,
         readinessLine,
         '',
         `⏱ Pace: ${Math.round(o.minGapMs / 1000)}–${Math.round(o.maxGapMs / 1000)}s apart, ` +
@@ -519,6 +548,7 @@ async function launchBroadcast({
         label,
         message: withOptOutFooter(message),
         targets,
+        names,
         chatId,
     });
 
@@ -563,7 +593,7 @@ async function startBroadcastJob(broadcastService, getSock, chatId, jobId, label
         await render(
             {
                 sent: job?.sent || 0, failed: job?.failed || 0, skippedOptOut: job?.skipped_opt_out || 0,
-                skippedUnreachable: job?.skipped_unreachable || 0,
+                skippedUnreachable: job?.skipped_unreachable || 0, skippedMessaged: job?.skipped_messaged || 0,
                 cursor: job?.cursor || 0, total: job?.targets?.length || 0,
             },
             'Broadcasting…'
@@ -586,6 +616,7 @@ async function startBroadcastJob(broadcastService, getSock, chatId, jobId, label
                 failed: final.failed,
                 skippedOptOut: final.skipped_opt_out || 0,
                 skippedUnreachable: final.skipped_unreachable || 0,
+                skippedMessaged: final.skipped_messaged || 0,
                 cursor: final.cursor,
                 total: final.targets?.length || 0,
             },

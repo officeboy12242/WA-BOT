@@ -253,6 +253,24 @@ class MemberScrapeController {
         return targets;
     }
 
+    /**
+     * First names for a set of broadcast targets, from the cached push-name
+     * store. Personalization lowers the "identical blast" fingerprint and the
+     * block rate that follows it.
+     * @param {string[]} jids
+     * @returns {Promise<Record<string, string>>} jid -> first name
+     */
+    async resolveTargetNames(jids) {
+        if (!this.userManager || !Array.isArray(jids) || !jids.length) return {};
+        const names = await this.userManager.getUserNames(jids);
+        const out = {};
+        for (const [jid, pushName] of names) {
+            const first = String(pushName).trim().split(/\s+/)[0];
+            if (first && first.length >= 2 && !/^\d+$/.test(first)) out[jid] = first;
+        }
+        return out;
+    }
+
     /** Unique DM targets across every scraped group (one message per person). */
     async getAllDedupedDmTargets(sock) {
         const groups = await this.getStoredGroupsWithCounts(sock);

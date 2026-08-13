@@ -394,6 +394,25 @@ export const config = {
     /** How long the breaker stays open after tripping (ms). */
     PACING_BREAKER_COOLDOWN_MS: (process.env.PACING_BREAKER_COOLDOWN_MS || '').trim(),
 
+    /* ── Broadcast anti-restriction extras ────────────────────────────────
+     * Skip people this account already messaged (the #1 report generator is
+     * re-DMing the same people), personalize with their first name (identical
+     * blasts are a machine fingerprint and raise block rate), and pause when
+     * the server's delivery rate collapses (a soft-ban signal).
+     */
+    /** Skip recipients already DM'd by this account. */
+    BROADCAST_SKIP_MESSAGED: process.env.BROADCAST_SKIP_MESSAGED !== 'false',
+    /** 0 = skip anyone ever messaged; N = skip anyone messaged within N days. */
+    BROADCAST_REMESSAGE_DAYS: parseInt(process.env.BROADCAST_REMESSAGE_DAYS, 10) || 0,
+    /** Prefix broadcasts with the recipient's first name when known. */
+    BROADCAST_PERSONALIZE: process.env.BROADCAST_PERSONALIZE !== 'false',
+    /** Pause when delivery rate over the window falls below this (0–1). */
+    BROADCAST_DELIVERY_FLOOR: parseFloat(process.env.BROADCAST_DELIVERY_FLOOR) || 0.6,
+    /** Rolling window of sends the delivery rate is measured over. */
+    BROADCAST_DELIVERY_WINDOW: Math.max(5, parseInt(process.env.BROADCAST_DELIVERY_WINDOW, 10) || 20),
+    /** Cooldown after a delivery-rate trip (ms). */
+    BROADCAST_DELIVERY_COOLDOWN_MS: Math.max(60_000, parseInt(process.env.BROADCAST_DELIVERY_COOLDOWN_MS, 10) || 900_000),
+
     /* ── Outcome resolution ─────────────────────────────────────────────── */
     /** Grade posted alerts against what price actually did. */
     TRADE_OUTCOME_RESOLVER_ENABLED: process.env.TRADE_OUTCOME_RESOLVER_ENABLED !== 'false',

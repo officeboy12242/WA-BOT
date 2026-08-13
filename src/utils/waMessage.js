@@ -808,10 +808,11 @@ export function createDeliveryVerifier(sock) {
  * @param {boolean} [opts.forceQuote] quote even long/multi-URL replies
  * @param {{ wait: Function }} [opts.verifier] from createDeliveryVerifier — verify the async outcome
  * @param {number} [opts.verifyWaitMs=4000] how long to await the server verdict
+ * @param {boolean} [opts.typing=false] send a brief composing indicator before a DM (human-like)
  * @returns {Promise<{ sent: object|null, outcome?: 'OK'|'ERROR' }>} rejects if the send fails entirely
  */
 export async function deliverMessage(sock, chatId, content, opts = {}) {
-    const { waMessage = null, priority = 0, forceQuote = false, verifier = null, verifyWaitMs = 4000 } = opts;
+    const { waMessage = null, priority = 0, forceQuote = false, verifier = null, verifyWaitMs = 4000, typing = false } = opts;
     if (!sock?.sendMessage || !chatId) return { sent: null };
 
     // Accept either a full WA message (preferred) or just a key (JID resolution only)
@@ -828,9 +829,12 @@ export async function deliverMessage(sock, chatId, content, opts = {}) {
 
     const doSend = async () => {
         let lastErr;
+        const isDm = jid.endsWith('@s.whatsapp.net') || jid.endsWith('@lid');
+        if (typing && isDm) await simulateDmTyping(sock, jid);
         for (const sendOpts of attempts) {
             try {
                 const sent = await sendWithTimeout(sock, jid, content, sendOpts);
+                if (typing && isDm) await pauseDmTyping(sock, jid);
                 if (verifier && sent?.key?.id) {
                     const outcome = await verifier.wait(sent.key.id, verifyWaitMs);
                     return { sent, outcome };

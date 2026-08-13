@@ -262,6 +262,15 @@ ok(resolvePacingConfig({ PACING_ENABLED: false }).enabled === false, 'pacing can
 
 // In-memory Mongo stand-in: enough of findOne/insertOne/updateOne for the
 // governor's persistence paths.
+function pickProjection(doc, projection) {
+    if (!projection || typeof projection !== 'object') return { ...doc };
+    const out = {};
+    for (const key of Object.keys(projection)) {
+        if (projection[key] === 1 && doc[key] !== undefined) out[key] = doc[key];
+    }
+    return out;
+}
+
 function fakeMongoDb() {
     const collections = new Map();
     const coll = (name) => {
@@ -273,6 +282,25 @@ function fakeMongoDb() {
                     if (Object.entries(q).every(([k, v]) => doc[k] === v)) return doc;
                 }
                 return null;
+            },
+            find: (q = {}, proj = {}) => ({
+                toArray: async () => {
+                    const out = [];
+                    for (const doc of map.values()) {
+                        if (Object.entries(q).every(([k, v]) => doc[k] === v)) {
+                            out.push(proj && proj.projection ? pickProjection(doc, proj.projection) : { ...doc });
+                        }
+                    }
+                    return out;
+                },
+                sort: () => ({ toArray: async () => [] }),
+            }),
+            countDocuments: async (q = {}) => {
+                let n = 0;
+                for (const doc of map.values()) {
+                    if (Object.entries(q).every(([k, v]) => doc[k] === v)) n += 1;
+                }
+                return n;
             },
             insertOne: async (doc) => { map.set(JSON.stringify({ _id: doc._id ?? doc.account }), { ...doc }); return {}; },
             updateOne: async (q = {}, update = {}) => {
@@ -351,6 +379,75 @@ ok(tight.breakerRemainingMs(ACC) > 0, 'the custom threshold trips the breaker');
 const inert = new SendPacingService(null, {});
 eq(inert.enabled, false, 'pacing without persistence is inert');
 eq((await inert.check(ACC, 'x@s.whatsapp.net')).allowed, true, 'inert pacing always allows');
+
+// lastMessagedAt — the basis for "skip people I already messaged".
+eq(await pacing.lastMessagedAt(ACC, 'fresh@s.whatsapp.net'), null, 'a never-messaged recipient has no last_dm');
+const known2 = new SendPacingService(fakeMongoDb(), {});
+await known2.recordSend(ACC, 'z@s.whatsapp.net', true);
+ok((await known2.lastMessagedAt(ACC, 'z@s.whatsapp.net')) instanceof Date, 'a messaged recipient has a last_dm timestamp');
+eq(await known2.lastMessagedAt(ACC, 'nope@s.whatsapp.net'), null, 'an unknown recipient stays null');
+
+/* ── skip-already-messaged + personalization + delivery-rate guard ───────── */
+
+// The run() loop skips recipients this account already DM'd (re-DMing the same
+// people is how a broadcast becomes a report generator).
+const skipDb = fakeMongoDb();
+const skipPacing = new SendPacingService(skipDb, {});
+const skipSvc = new BroadcastService(skipDb, null, {}, skipPacing);
+await skipSvc.init();
+const skipJobId = await skipSvc.createJob({
+    label: 'skip test', message: 'hello', chatId: 'c',
+    targets: ['m1@s.whatsapp.net', 'm2@s.whatsapp.net', 'm3@s.whatsapp.net'],
+});
+// m2 was already messaged by this account — must be skipped, not re-DM'd.
+await skipPacing.recordSend(resolveAccountJid({ user: { id: '999:s@w' } }), 'm2@s.whatsapp.net', true);
+const skipSent = [];
+const skipFinal = await skipSvc.run({
+    getSock: () => ({ user: { id: '999:s@w' }, sendMessage: async () => { skipSent.push('x'); return { key: { id: 'k' } }; } }),
+    jobId: skipJobId,
+});
+eq(skipFinal.skipped_messaged, 1, 'a recipient already messaged is skipped, not re-DM\'d');
+eq(skipFinal.sent, 2, 'the other two targets still get the message');
+eq(skipSent.length, 2, 'exactly two DMs went out');
+
+// Personalization: known first name is prefixed, unknown stays plain.
+const pSvc = new BroadcastService(null, null, {});
+eq(pSvc.personalizeFor('Sale today!', 'Ravi Kumar'), 'Hi Ravi,\n\nSale today!', 'a known name personalizes the opener');
+eq(pSvc.personalizeFor('Sale today!', '  '), 'Sale today!', 'a blank name sends the plain message');
+eq(pSvc.personalizeFor('Sale today!', '12345'), 'Sale today!', 'a numeric name is not used');
+const pOff = new BroadcastService(null, null, { BROADCAST_PERSONALIZE: false });
+eq(pOff.personalizeFor('Sale today!', 'Ravi'), 'Sale today!', 'personalization can be switched off');
+
+// Delivery-rate soft-ban guard: a sustained run of drops pauses the job with a
+// cooldown instead of burning the rest of the daily cap. Failures are hard
+// (immediate throws) so the test is fast and deterministic.
+const guardDb = fakeMongoDb();
+const guardSvc = new BroadcastService(guardDb, null, {
+    BROADCAST_DELIVERY_FLOOR: 0.5,
+    BROADCAST_DELIVERY_WINDOW: 4,
+    BROADCAST_MIN_GAP_MS: 1,
+    BROADCAST_MAX_GAP_MS: 1,
+    BROADCAST_SKIP_MESSAGED: false,
+}, new SendPacingService(guardDb, {}));
+await guardSvc.init();
+const guardJobId = await guardSvc.createJob({
+    label: 'guard test', message: 'hi', chatId: 'c',
+    targets: ['a1@s.whatsapp.net', 'a2@s.whatsapp.net', 'a3@s.whatsapp.net', 'a4@s.whatsapp.net', 'a5@s.whatsapp.net'],
+});
+const guardSock = {
+    user: { id: '999:s@w' },
+    sendMessage: async () => { throw new Error('server: not-on-whatsapp'); },
+};
+const guardFinal = await guardSvc.run({ getSock: () => guardSock, jobId: guardJobId });
+eq(guardFinal.status, BROADCAST_STATUS.PAUSED_CAP, 'a collapsed delivery rate pauses the run');
+ok(/delivery rate/.test(guardFinal.note || ''), 'the pause names the delivery-rate guard');
+ok(guardFinal.sent === 0, 'nothing counts as sent when every send fails');
+const guardJob = await guardSvc.getJob(guardJobId);
+ok(guardJob.delivery_paused_until instanceof Date, 'the cooldown is persisted on the job');
+// While the cooldown is active, resuming must not re-fire sends.
+const resumeFinal = await guardSvc.run({ getSock: () => guardSock, jobId: guardJobId });
+eq(resumeFinal.status, BROADCAST_STATUS.PAUSED_CAP, 'resume during the cooldown stays paused');
+ok(/cooldown/.test(resumeFinal.note || ''), 'the resume pause names the cooldown');
 
 /* ── account key resolution ──────────────────────────────────────────────── */
 
