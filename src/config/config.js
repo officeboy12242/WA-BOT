@@ -387,6 +387,9 @@ export const config = {
     PACING_ENABLED: process.env.PACING_ENABLED !== 'false',
     /** Daily send allowance by account age in days: "20,40,80,160,320,640,1000". */
     PACING_WARMUP_SCHEDULE: (process.env.PACING_WARMUP_SCHEDULE || '').trim(),
+    /** Pretend the account is already N days old — for established numbers that
+     *  were never tracked by the governor (0 = assume brand-new, ramp from day 0). */
+    PACING_ACCOUNT_AGE_START_DAYS: Math.max(0, parseInt(process.env.PACING_ACCOUNT_AGE_START_DAYS, 10) || 0),
     /** Daily allowance for FIRST messages to strangers: "5,10,20,40,60,80,100". */
     PACING_COLD_DAILY_CAP: (process.env.PACING_COLD_DAILY_CAP || '').trim(),
     /** Consecutive send failures that pause all sends (circuit breaker). */

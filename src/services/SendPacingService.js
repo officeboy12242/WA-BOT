@@ -35,6 +35,8 @@ export const PACING_DEFAULTS = {
     coldSchedule: [5, 10, 20, 40, 60, 80, 100],
     breakerThreshold: 5,
     breakerCooldownMs: 15 * 60 * 1000,
+    /** Pretend the account is this many days old already (established numbers). */
+    accountAgeStartDays: 0,
 };
 
 function parseSchedule(raw, fallback) {
@@ -73,6 +75,12 @@ export function resolvePacingConfig(config = {}) {
             PACING_DEFAULTS.breakerCooldownMs,
             60_000,
             24 * 60 * 60 * 1000
+        ),
+        accountAgeStartDays: clampInt(
+            config.PACING_ACCOUNT_AGE_START_DAYS,
+            PACING_DEFAULTS.accountAgeStartDays,
+            0,
+            10_000
         ),
     };
 }
@@ -125,8 +133,11 @@ export class SendPacingService {
 
     async accountAgeDays(account) {
         const doc = await this._state(account);
-        if (!doc) return 0;
-        return Math.max(0, Math.floor((Date.now() - new Date(doc.account_since).getTime()) / DAY_MS));
+        if (!doc) return this.cfg.accountAgeStartDays;
+        return (
+            this.cfg.accountAgeStartDays +
+            Math.max(0, Math.floor((Date.now() - new Date(doc.account_since).getTime()) / DAY_MS))
+        );
     }
 
     allowanceForAge(schedule, ageDays) {
@@ -171,6 +182,17 @@ export class SendPacingService {
     }
 
     /**
+     * How many sends the governor itself has allowed today. This is the ONLY
+     * number the warm-up ramp compares against — a broadcast that ran before
+     * the governor existed must not retroactively consume today's budget.
+     */
+    async sentToday(account) {
+        const date = getTodayDateStrIST();
+        const doc = await this.db.findOne({ account }, { projection: { [`sent.${date}`]: 1 } });
+        return doc?.sent?.[date] || 0;
+    }
+
+    /**
      * Record that a recipient was processed: they become "known" so future
      * sends are not cold, and a cold send counts against today's cold budget.
      */
@@ -183,10 +205,16 @@ export class SendPacingService {
                 { upsert: true }
             );
         }
-        if (this.db && wasCold) {
+        if (this.db) {
             await this.db.updateOne(
                 { account },
-                { $inc: { [`cold.${getTodayDateStrIST()}`]: 1 }, $set: { updated_at: now } }
+                {
+                    $inc: {
+                        [`sent.${getTodayDateStrIST()}`]: 1,
+                        ...(wasCold ? { [`cold.${getTodayDateStrIST()}`]: 1 } : {}),
+                    },
+                    $set: { updated_at: now },
+                }
             );
         }
     }
@@ -224,7 +252,7 @@ export class SendPacingService {
      * May this account send to `recipient` right now?
      * @returns {{ allowed: true } | { allowed: false, reason: string, retryLabel: string }}
      */
-    async check(account, recipient, { sentToday = 0 } = {}) {
+    async check(account, recipient, { sentToday = null } = {}) {
         if (!this.enabled) return { allowed: true };
 
         const cooldown = this.breakerRemainingMs(account);
@@ -235,6 +263,10 @@ export class SendPacingService {
                 retryLabel: `in ~${Math.max(1, Math.round(cooldown / 60000))} min`,
             };
         }
+
+        // Prefer the governor's own counter when the caller did not pass one,
+        // so legacy/pre-governor sends never eat today's warm-up budget.
+        if (sentToday === null) sentToday = await this.sentToday(account);
 
         const ageDays = await this.accountAgeDays(account);
         const warmupAllowance = this.allowanceForAge(this.cfg.warmupSchedule, ageDays);

@@ -151,7 +151,10 @@ class BroadcastService {
         if (!this.pacing?.enabled || !accountJid) return hardLeft;
         try {
             const info = await this.pacing.accountDayInfo(accountJid);
-            return Math.max(0, Math.min(hardLeft, info.warmupAllowance - sent));
+            // The warm-up portion counts only what the governor itself has
+            // allowed today — pre-governor sends must not eat the budget.
+            const pacingSent = await this.pacing.sentToday(accountJid);
+            return Math.max(0, Math.min(hardLeft, info.warmupAllowance - pacingSent));
         } catch {
             return hardLeft;
         }
@@ -417,6 +420,10 @@ class BroadcastService {
             const jid = targets[cursor];
             const accountJid = resolveAccountJid(sock);
             const alreadyToday = await this.sentToday();
+            // The warm-up ramp compares against the governor's OWN counter
+            // (sends it has allowed since it started enforcing), so a broadcast
+            // that ran before the governor existed can't burn today's budget.
+            const pacingToday = this.pacing?.enabled ? await this.pacing.sentToday(accountJid) : alreadyToday;
 
             // Skip people this account already messaged — re-DMing them is how
             // a broadcast becomes a report generator, not a campaign.
@@ -435,7 +442,7 @@ class BroadcastService {
 
             // Send-pacing governor: warm-up ramp, cold-reachout budget, breaker.
             if (this.pacing?.enabled) {
-                const gate = await this.pacing.check(accountJid, jid, { sentToday: alreadyToday });
+                const gate = await this.pacing.check(accountJid, jid, { sentToday: pacingToday });
                 if (!gate.allowed) {
                     return finish(
                         BROADCAST_STATUS.PAUSED_CAP,

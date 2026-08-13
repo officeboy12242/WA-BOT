@@ -9,6 +9,7 @@ import MemberScrapeController from '../src/controllers/MemberScrapeController.js
 import { classifyOptMessage, optOutKey } from '../src/models/BroadcastOptOutStore.js';
 import BroadcastService, { withOptOutFooter, BROADCAST_STATUS, resolveAccountJid } from '../src/services/BroadcastService.js';
 import { SendPacingService, resolvePacingConfig } from '../src/services/SendPacingService.js';
+import { getTodayDateStrIST } from '../src/utils/dateIST.js';
 
 let checks = 0;
 const ok = (c, m) => { assert.ok(c, m); checks += 1; };
@@ -384,6 +385,36 @@ ok(tight.breakerRemainingMs(ACC) > 0, 'the custom threshold trips the breaker');
 const inert = new SendPacingService(null, {});
 eq(inert.enabled, false, 'pacing without persistence is inert');
 eq((await inert.check(ACC, 'x@s.whatsapp.net')).allowed, true, 'inert pacing always allows');
+
+// The warm-up ramp compares against the governor's OWN counter — a broadcast
+// that ran before the governor existed must not burn today's budget.
+const own = new SendPacingService(fakeMongoDb(), {});
+eq(await own.sentToday(ACC), 0, 'the governor starts the day at 0 sends of its own');
+await own.recordSend(ACC, 'q1@s.whatsapp.net', false);
+eq(await own.sentToday(ACC), 1, 'recordSend bumps the governor\'s own counter');
+eq(await own.coldToday(ACC), 0, 'a known (non-cold) send does not touch the cold budget');
+
+// PACING_ACCOUNT_AGE_START_DAYS: an established number jumps straight to its
+// age tier instead of ramping from day 0.
+const grown = new SendPacingService(fakeMongoDb(), { PACING_ACCOUNT_AGE_START_DAYS: '30' });
+const grownInfo = await grown.accountDayInfo(ACC);
+eq(grownInfo.ageDays, 30, 'the start-days knob ages the account immediately');
+eq(grownInfo.warmupAllowance, 1000, 'a 30-day-old account sits at the top warm-up tier');
+eq(grownInfo.coldAllowance, 100, 'and the top cold tier');
+ok((await grown.check(ACC, 'x@s.whatsapp.net')).allowed, 'a grown account is not held back by day-0 caps');
+
+// remainingToday must ignore pre-governor sends: a job from before the
+// governor (daily.count 21 today) must not leave "0 left today".
+const remDb = fakeMongoDb();
+const remPacing = new SendPacingService(remDb, {});
+const remSvc = new BroadcastService(remDb, null, {}, remPacing);
+await remSvc.init();
+await remDb.collection('broadcast_jobs').insertOne({
+    _id: 'bc_legacy', status: 'DONE',
+    daily: { date: getTodayDateStrIST(), count: 21 }, created_at: new Date(),
+});
+const remAccount = resolveAccountJid({ user: { id: '999:s@w' } });
+eq(await remSvc.remainingToday(remAccount), 20, 'a pre-governor job\'s 21 sends do not eat the day-0 budget of 20');
 
 // lastMessagedAt — the basis for "skip people I already messaged".
 eq(await pacing.lastMessagedAt(ACC, 'fresh@s.whatsapp.net'), null, 'a never-messaged recipient has no last_dm');
