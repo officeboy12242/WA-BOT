@@ -615,13 +615,13 @@ export function getSafeSendOptions(waMessage, extra = {}, content = null, opts =
     return sendOpts;
 }
 
-async function sendWithTimeout(sock, jid, content, opts) {
+async function sendWithTimeout(sock, jid, content, opts, timeoutMs = SEND_TIMEOUT_MS) {
     const payload = withLinkPreviewDisabled(content);
     const sendOpts = { linkPreview: false, ...opts };
     return Promise.race([
         sock.sendMessage(jid, payload, sendOpts),
         new Promise((_, reject) => {
-            setTimeout(() => reject(new Error(`send timeout (${jid})`)), SEND_TIMEOUT_MS);
+            setTimeout(() => reject(new Error(`send timeout (${jid})`)), timeoutMs);
         }),
     ]);
 }
@@ -635,7 +635,7 @@ export async function safeSendMessage(sock, chatId, content, waMessage = null, e
         throw new Error('WhatsApp socket not ready');
     }
 
-    const { queuePriority, forceQuote, ...sendExtra } = extraOpts || {};
+    const { queuePriority, forceQuote, sendTimeoutMs, ...sendExtra } = extraOpts || {};
     const key = waMessage?.key;
     const conversationJid = chatId || resolveConversationChatId(key);
     const primaryJid = resolveOutboundJid(key, conversationJid);
@@ -666,7 +666,7 @@ export async function safeSendMessage(sock, chatId, content, waMessage = null, e
         let lastErr;
         for (const opts of [primaryOpts, bareOpts]) {
             try {
-                const sent = await sendWithTimeout(sock, primaryJid, content, opts);
+                const sent = await sendWithTimeout(sock, primaryJid, content, opts, sendTimeoutMs);
                 if (!sent) {
                     throw new Error('sendMessage returned empty result');
                 }

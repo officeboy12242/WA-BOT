@@ -2,13 +2,20 @@
  * Instagram download handler
  */
 
-import { fileTypeFromBuffer } from 'file-type';
+import { fileTypeFromBuffer, fileTypeFromFile } from 'file-type';
 import { snapsave } from 'snapsave-media-downloader';
 import { logger } from '../../utils/logger.js';
-import { downloadMediaBuffer } from '../../utils/downloadMediaBuffer.js';
+import { downloadMediaToFile, createMediaTempFile } from '../../utils/downloadMediaToFile.js';
+import { createReadStream, promises as fsp } from 'fs';
 import { extractInstagramUrl, isSupportedInstagramUrl } from '../../utils/instagramUrl.js';
 import { extractTwitterUrl, isSupportedTwitterUrl } from '../../utils/twitterUrl.js';
 import { safeSendMessage } from '../../utils/waMessage.js';
+
+// Media caps: WhatsApp plays videos as media up to ~64 MB; anything bigger is
+// sent as a document (WhatsApp allows up to 2 GB). MEDIA_MAX_BYTES is the
+// download cap — tune it down on small-RAM Render instances.
+const MAX_MEDIA_BYTES = parseInt(process.env.MEDIA_MAX_BYTES || String(300 * 1024 * 1024), 10) || (300 * 1024 * 1024);
+const MEDIA_AS_VIDEO_BYTES = 60 * 1024 * 1024;
 
 function formatInstaDownloadStatus(mediaList) {
     const images = mediaList.filter((m) => m.type === 'image').length;
@@ -48,6 +55,31 @@ async function classifyMediaBuffer(buffer) {
     const mime = type.mime;
     const kind = mime.startsWith('image/') ? 'image' : mime.startsWith('video/') ? 'video' : 'other';
     return { kind, mime, ext: type.ext };
+}
+
+async function sendLargeMediaAsDocument(sock, chatId, filePath, waMessage, fileNameBase) {
+    let detected = null;
+    try {
+        detected = await fileTypeFromFile(filePath);
+    } catch {
+        detected = null;
+    }
+    const mime = detected?.mime || 'video/mp4';
+    const ext = detected?.ext || 'mp4';
+    return safeSendMessage(
+        sock,
+        chatId,
+        {
+            document: {
+                stream: createReadStream(filePath),
+                mimetype: mime,
+                fileName: `${fileNameBase}.${ext}`,
+                caption: '📹 Large media (sent as document — WhatsApp media cap is ~64 MB)',
+            },
+        },
+        waMessage,
+        { sendTimeoutMs: 600000 },
+    );
 }
 
 async function sendDownloadedMedia(sock, chatId, buffer, waMessage, index, fileNamePrefix = 'instagram') {
@@ -134,13 +166,22 @@ async function handleMediaDownload(sock, chatId, args, quotedMessage, opts) {
         let sentCount = 0;
         let failedCount = 0;
         for (let i = 0; i < total; i++) {
+            const tmpPath = createMediaTempFile('twdl_');
             try {
-                const buffer = await downloadMediaBuffer(mediaList[i].url);
-                await sendDownloadedMedia(sock, chatId, buffer, null, i, fileNamePrefix);
+                await downloadMediaToFile(mediaList[i].url, tmpPath, { maxBytes: MAX_MEDIA_BYTES });
+                const size = (await fsp.stat(tmpPath)).size;
+                if (size <= MEDIA_AS_VIDEO_BYTES) {
+                    const buffer = await fsp.readFile(tmpPath);
+                    await sendDownloadedMedia(sock, chatId, buffer, null, i, fileNamePrefix);
+                } else {
+                    await sendLargeMediaAsDocument(sock, chatId, tmpPath, quotedMessage, `${fileNamePrefix}_${i + 1}`);
+                }
                 sentCount++;
             } catch (err) {
                 failedCount++;
                 logger.warn(`${logLabel} item ${i + 1}/${total} failed: ${err.message}`);
+            } finally {
+                await fsp.rm(tmpPath, { force: true }).catch(() => {});
             }
             await new Promise((r) => setTimeout(r, 1000));
         }
