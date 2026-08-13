@@ -526,6 +526,9 @@ async function launchBroadcast({
         unreachable ? `🚫 Unreachable (number hidden): *${unreachable}*` : null,
         suppressed ? `🔕 Skipped (opted out): *${suppressed}*` : null,
         named ? `✍️ Personalized for *${named}* recipient(s)` : null,
+        o.byline
+            ? `📣 Signed: \"This is a broadcast message by *${o.byline}*\" + STOP opt-out`
+            : null,
         readinessLine,
         '',
         `⏱ Pace: ${Math.round(o.minGapMs / 1000)}–${Math.round(o.maxGapMs / 1000)}s apart, ` +
@@ -546,7 +549,7 @@ async function launchBroadcast({
 
     const jobId = await broadcastService.createJob({
         label,
-        message: withOptOutFooter(message),
+        message: withOptOutFooter(message, null, o.byline),
         targets,
         names,
         chatId,

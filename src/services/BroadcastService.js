@@ -41,6 +41,8 @@ export const BROADCAST_DEFAULTS = {
     deliveryFloor: 0.6,
     deliveryWindow: 20,
     deliveryCooldownMs: 15 * 60 * 1000,
+    /** WhatsApp Business-style broadcast byline shown in every DM footer. */
+    byline: 'Sassy Bot',
 };
 
 export const BROADCAST_STATUS = {
@@ -79,10 +81,19 @@ export function resolveAccountJid(sock) {
     return String(id).split(':')[0];
 }
 
-/** Appended so every recipient has a one-tap way out. */
-export function withOptOutFooter(message, footer = '_Reply STOP to never receive these._') {
+/**
+ * Appended so every recipient has a one-tap way out. The default footer is a
+ * WhatsApp Business-style broadcast byline styled like the /ping terminal card
+ * ("\> "-prefixed rows, bold value) — "This is a broadcast message by <bot>"
+ * followed by the opt-out line. Pass an explicit `footer` to override both
+ * lines entirely.
+ */
+export function withOptOutFooter(message, footer = null, byline = BROADCAST_DEFAULTS.byline) {
     const body = String(message || '').trimEnd();
     if (/\bstop\b/i.test(body.slice(-120))) return body; // already says it
+    if (footer === null) {
+        footer = `> 📣 This is a broadcast message by *${byline}*\n> 🚫 Reply STOP to never receive these`;
+    }
     return `${body}\n\n${footer}`;
 }
 
@@ -108,6 +119,7 @@ class BroadcastService {
             deliveryFloor: Math.max(0, Math.min(1, Number(config.BROADCAST_DELIVERY_FLOOR) || BROADCAST_DEFAULTS.deliveryFloor)),
             deliveryWindow: Math.max(5, parseInt(config.BROADCAST_DELIVERY_WINDOW, 10) || BROADCAST_DEFAULTS.deliveryWindow),
             deliveryCooldownMs: Math.max(60_000, parseInt(config.BROADCAST_DELIVERY_COOLDOWN_MS, 10) || BROADCAST_DEFAULTS.deliveryCooldownMs),
+            byline: String(config.BROADCAST_BYLINE || '').trim() || BROADCAST_DEFAULTS.byline,
         };
         this._aborting = new Set();
     }

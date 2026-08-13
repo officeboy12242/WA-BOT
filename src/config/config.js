@@ -412,6 +412,8 @@ export const config = {
     BROADCAST_DELIVERY_WINDOW: Math.max(5, parseInt(process.env.BROADCAST_DELIVERY_WINDOW, 10) || 20),
     /** Cooldown after a delivery-rate trip (ms). */
     BROADCAST_DELIVERY_COOLDOWN_MS: Math.max(60_000, parseInt(process.env.BROADCAST_DELIVERY_COOLDOWN_MS, 10) || 900_000),
+    /** WhatsApp Business-style footer byline shown on every broadcast DM. */
+    BROADCAST_BYLINE: (process.env.BROADCAST_BYLINE || '').trim() || 'Sassy Bot',
 
     /* ── Outcome resolution ─────────────────────────────────────────────── */
     /** Grade posted alerts against what price actually did. */

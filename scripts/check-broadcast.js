@@ -92,6 +92,11 @@ eq(optOutKey('garbage'), '', 'a non-phone yields no key');
 /* ── opt-out footer ──────────────────────────────────────────────────────── */
 
 ok(/STOP/i.test(withOptOutFooter('Hello there')), 'the footer tells people how to leave');
+ok(/broadcast message by \*?Sassy Bot/i.test(withOptOutFooter('Hello there')), 'the footer names the bot — WhatsApp Business style');
+ok(/^> /m.test(withOptOutFooter('Hello there')), 'the footer uses the /ping terminal \'> \' row style');
+ok(/\*Sassy Bot\*/i.test(withOptOutFooter('Hello there')), 'the bot name is bold like /ping values');
+ok(/broadcast message by \*?TradePilot/i.test(withOptOutFooter('Hello there', null, 'TradePilot')), 'the byline honours the configured bot name');
+ok(/custom footer/i.test(withOptOutFooter('Hello there', 'custom footer')), 'an explicit footer overrides the byline entirely');
 const already = 'Sale today!\n\nReply STOP to opt out.';
 eq(withOptOutFooter(already), already, 'an existing opt-out line is not duplicated');
 
