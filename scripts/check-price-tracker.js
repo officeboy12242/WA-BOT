@@ -32,6 +32,14 @@ import {
     sanitizeFlipkartUrl,
     extractFlipkartPid,
     parseFlipkartProduct,
+    extractProductUrl,
+    queryFromProductUrl,
+    storeProductKey,
+    parseMyntraProduct,
+    parseSnapdealProduct,
+    parseTataCliqProduct,
+    decodeEntities,
+    extractJsonLd,
     PRICE_HISTORY_COLLECTION,
 } from '../src/services/PriceTrackerService.js';
 import { COMMAND_REGISTRY } from '../src/commands/registry.js';
@@ -323,8 +331,86 @@ ok(fkp.rating === 4.2, 'flipkart rating parsed from aggregateRating block');
 ok(fkp.availability === 'In Stock', 'flipkart availability parsed');
 ok(parseFlipkartProduct('<html></html>').price === null, 'empty page yields nothing');
 
+/* ─────────────────────── any-store link input (new) ─────────────────────── */
+ok(extractProductUrl('this also not working https://amzn.in/d/06toj6O8')?.site === 'Amazon',
+    'amzn.in short link detected from text');
+ok(extractProductUrl('https://amzn.in/d/06toj6O8')?.site === 'Amazon', 'bare amzn.in link detected');
+ok(extractProductUrl('https://www.amazon.in/dp/B0BSLKJPXV?th=1&psc=1')?.site === 'Amazon',
+    'full amazon.in link detected');
+ok(extractProductUrl('https://dl.flipkart.com/s/I0jAWrNNNN')?.site === 'Flipkart', 'flipkart short link detected');
+ok(extractProductUrl('https://www.myntra.com/casual-shoes/puma/puma-smashic-comfort-casual-sneakers/21767244/buy')?.site === 'Myntra',
+    'myntra product link detected');
+ok(extractProductUrl('https://www.ajio.com/puma-smashic-comfort-casual-sneakers/p/465654605_white')?.site === 'Ajio',
+    'ajio product link detected');
+ok(extractProductUrl('https://www.snapdeal.com/product/campus-navy-blue-mens-sports/5764608178794094953')?.site === 'Snapdeal',
+    'snapdeal product link detected');
+ok(extractProductUrl('https://www.tatacliq.com/smashic-unisex-sneakers/p-mp000000016283447')?.site === 'Tata CLiQ',
+    'tata cliq product link detected');
+ok(extractProductUrl('https://www.meesho.com/foo') === null, 'unsupported store yields nothing');
+ok(extractProductUrl('puma smashic sneakers') === null, 'free text has no product url');
+ok(extractAmazonAsin('https://amzn.in/dp/B0CW5BK193') === 'B0CW5BK193', 'amzn.in dp link yields the ASIN directly');
+ok(extractAmazonAsin('https://amzn.in/d/06toj6O8') === null, 'amzn.in short code needs a redirect (no visible ASIN)');
+
+/* URL-slug fallback queries (used when a store page is blocked). */
+ok(queryFromProductUrl('https://www.myntra.com/casual-shoes/puma/puma-smashic-comfort-casual-sneakers/21767244/buy', 'Myntra')
+    === 'puma smashic comfort casual sneakers', 'myntra slug query');
+ok(queryFromProductUrl('https://www.ajio.com/puma-smashic-comfort-casual-sneakers/p/465654605_white', 'Ajio')
+    === 'puma smashic comfort casual sneakers', 'ajio slug query');
+ok(queryFromProductUrl('https://www.snapdeal.com/product/campus-navy-blue-mens-sports/5764608178794094953', 'Snapdeal')
+    === 'campus navy blue mens sports', 'snapdeal slug query');
+ok(queryFromProductUrl('https://www.tatacliq.com/smashic-unisex-sneakers/p-mp000000016283447', 'Tata CLiQ')
+    === 'smashic unisex sneakers', 'tatacliq slug query');
+
+/* Stable Mongo keys per store link. */
+ok(storeProductKey('https://www.myntra.com/casual-shoes/puma/puma-smashic-comfort-casual-sneakers/21767244/buy', 'Myntra')
+    === 'myntra:21767244', 'myntra product key');
+ok(storeProductKey('https://www.ajio.com/puma-smashic-comfort-casual-sneakers/p/465654605_white', 'Ajio')
+    === 'ajio:465654605_white', 'ajio product key');
+ok(storeProductKey('https://www.snapdeal.com/product/campus-navy-blue-mens-sports/5764608178794094953', 'Snapdeal')
+    === 'snapdeal:5764608178794094953', 'snapdeal product key');
+ok(storeProductKey('https://www.tatacliq.com/smashic-unisex-sneakers/p-mp000000016283447', 'Tata CLiQ')
+    === 'tatacliq:mp000000016283447', 'tatacliq product key');
+
+/* Other-store product-page parsers (link input). */
+ok(parseMyntraProduct('<meta property="og:title" content="Buy Puma Smashic Comfort Casual Sneakers -  - Footwear for Unisex">{"brand":"Puma","mrp":4499,"discountedPrice":1574}')
+    .title === 'Puma Smashic Comfort Casual Sneakers', 'myntra product og:title cleaned');
+const myP = parseMyntraProduct('{"brand":"Puma","mrp":4499,"discountedPrice":1574}');
+ok(myP.price === 1574 && myP.mrp === 4499 && myP.brand === 'Puma', 'myntra product price/mrp/brand parsed');
+ok(parseMyntraProduct('<html></html>').price === null, 'empty myntra page yields nothing');
+
+ok(parseSnapdealProduct('<title> Buy Campus CAMP-GLACIER Dark Grey Men&#039;s Sports Running Shoes - Price ₹853 | Best Deals Online at Snapdeal </title>')
+    .title === "Campus CAMP-GLACIER Dark Grey Men's Sports Running Shoes", 'snapdeal product title parsed (leading space + hyphen in model)');
+ok(parseSnapdealProduct('<title> Buy Campus CAMP-GLACIER Dark Grey Men&#039;s Sports Running Shoes - Price ₹853 | Best Deals Online at Snapdeal </title>').price === 853,
+    'snapdeal product price parsed from the title');
+ok(parseSnapdealProduct('<title>Some Page</title>').title === 'Some Page', 'snapdeal title fallback');
+ok(parseSnapdealProduct('<html></html>').price === null, 'empty snapdeal page yields nothing');
+
+const tcLd = `<script type="application/ld+json">{"@context":"https://schema.org/","@type":"Product","name":"Smashic Unisex Sneakers","brand":{"@type":"Brand","name":"Puma"},"offers":{"@type":"Offer","priceCurrency":"INR","price":1709.62}}</script>`;
+const tcP = parseTataCliqProduct(tcLd);
+ok(tcP.title === 'Puma Smashic Unisex Sneakers', 'tatacliq product title = brand + LD name');
+ok(tcP.price === 1710, 'tatacliq product price parsed from JSON-LD');
+ok(extractJsonLd(tcLd, 'Product')?.name === 'Smashic Unisex Sneakers', 'JSON-LD extractor finds the Product block');
+ok(extractJsonLd(tcLd, 'WebSite') === null, 'JSON-LD extractor returns null for missing type');
+ok(parseTataCliqProduct('<html></html>').price === null, 'empty tatacliq page yields nothing');
+ok(decodeEntities('Men&#039;s &amp; More') === "Men's & More", 'HTML entities decoded');
+
+/* The track card treats other-store tracked products like Amazon/Flipkart. */
+const { formatHistoryCard, formatTrackCard } = await import('../src/controllers/handlers/priceHandlers.js');
+const myntraCard = formatTrackCard({
+    query: 'Puma Smashic Comfort Casual Sneakers',
+    other: { site: 'Myntra', price: 1574, mrp: 4499, title: 'Puma Smashic Comfort Casual Sneakers', url: 'm' },
+    idKey: 'myntra:21767244',
+    history: null,
+    offers: [
+        { site: 'Ajio', price: 1103, url: 'a' },
+        { site: 'Myntra', price: 1574, url: 'm' },
+    ],
+});
+ok(myntraCard.includes('below the tracked Myntra price'), 'card compares best offer against the tracked other-store price');
+ok(myntraCard.includes('_Myntra 21767244 — re-check with the same link to build history_'),
+    'card footer names the other-store product id');
+
 /* ─────────────────────────── history card (handler) ─────────────────────────── */
-const { formatHistoryCard } = await import('../src/controllers/handlers/priceHandlers.js');
 const histCard = formatHistoryCard({
     query: 'CAMPUS CAMP-GLACIER Running Shoes For Men',
     idKey: 'fk:SHOGGHWPQQECEFDH',
@@ -332,10 +418,24 @@ const histCard = formatHistoryCard({
     external: { lowest: 1089, average: 1174, highest: 1399, mrp: 1399, current: 1110, currentDate: '14/08/2026' },
 });
 ok(histCard.includes('Low ₹1,089'), 'history card shows past low from pricehistory.app');
-ok(histCard.includes('Now ₹1,110 (14/08/2026)'), 'history card shows current price + date');
+ok(histCard.includes('● Now ₹1,110 (14/08/2026)'), 'history card shows current price + date with marker');
+ok(histCard.includes('█') && histCard.includes('░'), 'history card shows the position bar');
+ok(histCard.includes('near all-time low'), 'history card shows the one-glance verdict');
 ok(histCard.includes('No saved snapshots yet'), 'history card explains empty Mongo timeline');
 const emptyHistCard = formatHistoryCard({ query: 'x', snapshots: [], external: null });
 ok(!emptyHistCard.includes('Past prices'), 'no external section when history unavailable');
+
+// History block in the TRACK card uses the same format A rendering.
+const trackHistCard = formatTrackCard({
+    query: 'x',
+    amazon: { title: 'X', price: 199 },
+    idKey: 'asin:B0CW5BK193',
+    history: { lowest: 179, average: 244, highest: 379, mrp: 249, current: 199, currentDate: '15/08/2026', url: 'u' },
+    offers: [{ site: 'Amazon', price: 199, url: 'u' }],
+});
+ok(trackHistCard.includes('📈 *Amazon price history*'), 'track card history header names the store');
+ok(trackHistCard.includes('— _near all-time low_'), 'track card history shows the verdict');
+ok(trackHistCard.includes('MRP ₹249 · save 20%'), 'track card history shows MRP savings');
 
 /* ─────────────────────────── Mongo snapshots ─────────────────────────── */
 const fakeCol = {

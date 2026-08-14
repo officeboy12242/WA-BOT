@@ -133,14 +133,31 @@ export function parseAmazonProduct(html) {
     const out = { title: null, price: null, mrp: null, image: null, rating: null, availability: null };
     if (!html) return out;
 
-    const jsonTitle = html.match(/"title"\s*:\s*"([^"]{8,160})"/);
-    const ogTitle = html.match(/<meta name="title" content="Buy ([^"]+?)(?:\s*\|| at Amazon)/);
     const h1 = html.match(/<span id="productTitle"[^>]*>\s*([^<]+?)\s*<\/span>/);
-    out.title = (jsonTitle && jsonTitle[1])
+    const jsonTitle = html.match(/"title"\s*:\s*"([^"]{8,160})"/);
+    const ogTitle = html.match(/<meta name="title" content="Buy ([^"]+?)(?:\s*\|| at Amazon)/)
+        || html.match(/<meta name="title" content="([^"]{10,160})"/);
+    out.title = (h1 && h1[1].trim())
+        || (jsonTitle && jsonTitle[1])
         || (ogTitle && ogTitle[1].trim())
-        || (h1 && h1[1].trim())
         || null;
-    if (out.title) out.title = out.title.replace(/\s+/g, ' ').trim();
+    if (!out.title) {
+        // Last resort: the <title> tag — strip the "Buy " prefix and any
+        // " at Amazon" / ": Amazon" suffix the page appends.
+        const page = html.match(/<title>\s*([^<]{10,160})\s*<\/title>/);
+        if (page) {
+            out.title = page[1]
+                .replace(/^Buy\s+/i, '')
+                .replace(/\s*(?:at|on)\s+Amazon\..*$/i, '')
+                .replace(/\s*:\s*Amazon\..*$/i, '')
+                .trim();
+        }
+    }
+    if (out.title) {
+        // A bot-wall page can sneak a junk title in — don't let it through.
+        if (/robot|captcha|sorry|denied|unavailable/i.test(out.title)) out.title = null;
+        else out.title = out.title.replace(/\s+/g, ' ').trim();
+    }
 
     // Mobile pages carry priceAmount as a JSON number (1573.00)
     const priceAmount = html.match(/"priceAmount"\s*:\s*(\d+(?:\.\d+)?)/);
@@ -376,6 +393,237 @@ export function parseFlipkartSearch(html) {
         if (results.length >= 8) break;
     }
     return results;
+}
+
+/* ─────────────────────── generic store-link handling ─────────────────────── */
+
+/** Host -> store name for every supported product-link source. */
+const STORE_HOSTS = {
+    'amazon.in': 'Amazon',
+    'amzn.in': 'Amazon',
+    'amzn.to': 'Amazon',
+    'flipkart.com': 'Flipkart',
+    'dl.flipkart.com': 'Flipkart',
+    'myntra.com': 'Myntra',
+    'ajio.com': 'Ajio',
+    'snapdeal.com': 'Snapdeal',
+    'tatacliq.com': 'Tata CLiQ',
+};
+
+/**
+ * Pull the first supported store URL out of free text (people paste links with
+ * words around them). Returns { url, site } or null when no store is matched.
+ */
+export function extractProductUrl(input) {
+    const m = String(input || '').match(/https?:\/\/[^\s"'<>]+/i);
+    if (!m) return null;
+    const raw = m[0].replace(/[),;.\]]+$/, '');
+    let host;
+    try {
+        host = new URL(raw).hostname.toLowerCase().replace(/^www\./, '');
+    } catch {
+        return null;
+    }
+    const site = STORE_HOSTS[host] || null;
+    if (!site) return null;
+    return { url: raw, site };
+}
+
+/**
+ * Resolve a short Amazon link (amzn.in/d/…, amzn.to/…) to its ASIN by
+ * following the redirect. Direct /dp/… links resolve instantly.
+ */
+export async function resolveAmazonAsin(url, { timeoutMs } = {}) {
+    const direct = extractAmazonAsin(url);
+    if (direct) return direct;
+    try {
+        const { finalUrl } = await fetchText(url, {
+            headers: { 'User-Agent': MOBILE_UA, Accept: 'text/html' },
+            timeoutMs: timeoutMs || 10_000,
+        });
+        return extractAmazonAsin(finalUrl);
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Derive a searchable product name from a store URL path — the fallback when a
+ * product page is blocked (Ajio hard-blocks product pages, for example).
+ *   myntra /casual-shoes/puma/puma-smashic-comfort-casual-sneakers/21767244/buy
+ *   ajio   /puma-smashic-comfort-casual-sneakers/p/465654605_white
+ *   snapdeal /product/campus-navy-blue-mens-sports/5764608178794094953
+ *   tatacliq /smashic-unisex-sneakers/p-mp000000016283447
+ */
+export function queryFromProductUrl(url, site) {
+    const s = String(site || '').toLowerCase();
+    try {
+        const segs = new URL(url).pathname.split('/').filter(Boolean);
+        let slug = null;
+        if (s === 'myntra') slug = segs[segs.length - 3]; // …/slug/ID/buy
+        else if (s === 'ajio') slug = segs[0]; // slug/p/ID
+        else if (s === 'snapdeal') slug = segs[segs.length - 2]; // product/slug/ID
+        else if (s === 'tata cliq') slug = segs[0]; // slug/p-mp…
+        if (slug) return slug.replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim();
+    } catch {
+        // fall through
+    }
+    return null;
+}
+
+/**
+ * Stable Mongo snapshot key for a non-Amazon/Flipkart store link, e.g.
+ * "myntra:21767244", "ajio:465654605_white", "snapdeal:576…", "tatacliq:mp…".
+ */
+export function storeProductKey(url, site) {
+    const s = String(site || '').toLowerCase();
+    try {
+        const path = new URL(url).pathname.replace(/\/+$/, '');
+        let id = null;
+        if (s === 'myntra') {
+            const m = path.match(/\/(\d+)\/buy$/);
+            id = m && m[1];
+        } else if (s === 'ajio') {
+            const m = path.match(/\/p\/([^/]+)$/);
+            id = m && m[1];
+        } else if (s === 'snapdeal') {
+            const m = path.match(/\/product\/[^/]+\/(\d+)$/);
+            id = m && m[1];
+        } else if (s === 'tata cliq') {
+            const m = path.match(/(mp\d+)$/);
+            id = m && m[1];
+        }
+        if (id) return `${s.replace(/\s+/g, '')}:${id}`;
+    } catch {
+        // fall through
+    }
+    return null;
+}
+
+/** Decode the handful of HTML entities these pages use (&#39;, &amp;, …). */
+export function decodeEntities(s) {
+    return String(s || '')
+        .replace(/&#x27;|&#39;|&#039;/g, "'")
+        .replace(/&quot;/g, '"')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)));
+}
+
+/** Pull the first JSON-LD block of a given @type out of a page. */
+export function extractJsonLd(html, type) {
+    const re = /<script type="application\/ld\+json">([\s\S]*?)<\/script>/g;
+    let m;
+    while ((m = re.exec(html)) !== null) {
+        try {
+            const data = JSON.parse(m[1]);
+            const items = Array.isArray(data) ? data : [data];
+            for (const item of items) {
+                if (item && item['@type'] === type) return item;
+            }
+        } catch {
+            // not JSON — skip
+        }
+    }
+    return null;
+}
+
+/* ──────────────── other-store product pages (link input) ──────────────── */
+
+/** Parse a Myntra product page: og:title + brand/mrp/discountedPrice JSON. */
+export function parseMyntraProduct(html) {
+    const out = { title: null, price: null, mrp: null, brand: null };
+    if (!html) return out;
+    const brand = html.match(/"brand"\s*:\s*"([^"]+)"/);
+    if (brand) out.brand = brand[1];
+    const price = html.match(/"discountedPrice"\s*:\s*(\d+)/)
+        || html.match(/"currentPrice"\s*:\s*(\d+)/)
+        || html.match(/"price"\s*:\s*(\d+)/);
+    if (price) out.price = cleanPrice(price[1]);
+    const mrp = html.match(/"mrp"\s*:\s*(\d+)/);
+    if (mrp) out.mrp = cleanPrice(mrp[1]);
+    const og = html.match(/<meta property="og:title" content="([^"]+)"/);
+    if (og) {
+        // "Buy Puma Smashic Comfort Casual Sneakers -  - Footwear for Unisex"
+        out.title = decodeEntities(og[1]).replace(/^Buy\s+/i, '').replace(/\s*-\s*.*$/, '').trim();
+    }
+    if (out.title) out.title = out.title.replace(/\s+/g, ' ').trim();
+    return out;
+}
+
+/** Parse a Snapdeal product page — the <title> carries name AND price. */
+export function parseSnapdealProduct(html) {
+    const out = { title: null, price: null, mrp: null };
+    if (!html) return out;
+    const t = html.match(/<title>([^<]+)<\/title>/);
+    if (!t) return out;
+    const raw = decodeEntities(t[1]);
+    // "Buy Campus CAMP-GLACIER Off White Men's Sports Running Shoes - Price ₹853 | …"
+    // (tolerate the leading space the mobile page adds, and use [\s\S] so
+    // hyphens inside model names like CAMP-GLACIER don't break the match)
+    const m = raw.match(/^\s*Buy\s+([\s\S]+?)\s*-\s*Price\s*₹?([\d,]+)/i);
+    if (m) {
+        out.title = m[1].trim();
+        out.price = cleanPrice(m[2]);
+    } else {
+        out.title = raw.replace(/^(Buy\s+)?/i, '').replace(/\s*\|.*$/, '').trim();
+        const p = raw.match(/₹\s*([\d,]+)/);
+        if (p) out.price = cleanPrice(p[1]);
+    }
+    return out;
+}
+
+/** Parse a Tata CLiQ product page — schema.org Product JSON-LD. */
+export function parseTataCliqProduct(html) {
+    const out = { title: null, price: null, mrp: null, brand: null };
+    if (!html) return out;
+    const ld = extractJsonLd(html, 'Product');
+    if (ld) {
+        if (ld.brand && ld.brand.name) out.brand = ld.brand.name;
+        const offers = Array.isArray(ld.offers) ? ld.offers[0] : ld.offers;
+        if (offers && offers.price) out.price = cleanPrice(offers.price);
+        if (offers && offers.highPrice) out.mrp = cleanPrice(offers.highPrice);
+        if (ld.name) out.title = ld.name;
+    }
+    if (out.title && out.brand && !out.title.toLowerCase().includes(out.brand.toLowerCase())) {
+        out.title = `${out.brand} ${out.title}`;
+    }
+    if (!out.title) {
+        const og = html.match(/<meta property="og:title" content="([^"]+)"/);
+        if (og) {
+            out.title = decodeEntities(og[1]).replace(/^Buy\s+/i, '').replace(/\s+at Best Price.*$/i, '').trim();
+        }
+    }
+    if (out.title) out.title = out.title.replace(/\s+/g, ' ').trim();
+    return out;
+}
+
+/**
+ * Fetch a non-Amazon/Flipkart product page and parse it. Best-effort: returns
+ * null when the store blocks the page (Ajio always does; others occasionally).
+ * The caller falls back to the URL-slug query in that case.
+ */
+export async function fetchStoreProduct(url, site, { timeoutMs } = {}) {
+    const s = String(site || '').toLowerCase();
+    if (s === 'ajio') return null; // product pages are hard-walled
+    const ua = s === 'myntra' ? DESKTOP_UA : MOBILE_UA;
+    let res;
+    try {
+        res = await fetchText(url, {
+            headers: { 'User-Agent': ua, 'Accept-Language': 'en-IN,en;q=0.9' },
+            timeoutMs,
+        });
+    } catch {
+        return null;
+    }
+    if (res.status !== 200) return null;
+    let parsed = null;
+    if (s === 'myntra') parsed = parseMyntraProduct(res.text);
+    else if (s === 'snapdeal') parsed = parseSnapdealProduct(res.text);
+    else if (s === 'tata cliq') parsed = parseTataCliqProduct(res.text);
+    if (!parsed || (!parsed.title && !parsed.price)) return null;
+    return { ...parsed, site, url };
 }
 
 /* ─────────────────────────── Amazon search ─────────────────────────── */
@@ -801,14 +1049,29 @@ export async function searchAll(query, { timeoutMs, siteTimeoutMs } = {}) {
 }
 
 /**
- * Core product lookup used by the handler.
+ * Core product lookup used by the handler. Accepts a link from ANY supported
+ * store (Amazon short/full, Flipkart short/full, Myntra, Ajio, Snapdeal,
+ * Tata CLiQ — with surrounding text) or a free-text product query.
  *
- * @param {string} input  Amazon link or a free-text product query
+ * @param {string} input  store link or free-text product query
  * @returns {Promise<object>} normalized result
  */
 export async function trackProduct(input, { timeoutMs } = {}) {
-    const asin = extractAmazonAsin(input);
-    const fkUrl = extractFlipkartUrl(input);
+    const urlInfo = extractProductUrl(input);
+
+    // Classify the input: Amazon (short links need a redirect to reveal the
+    // ASIN), Flipkart, or any other supported store.
+    let asin = null;
+    let fkUrl = null;
+    let other = null;
+    if (urlInfo?.site === 'Amazon') {
+        asin = extractAmazonAsin(urlInfo.url);
+        if (!asin) asin = await resolveAmazonAsin(urlInfo.url, { timeoutMs });
+    } else if (urlInfo?.site === 'Flipkart') {
+        fkUrl = extractFlipkartUrl(input) || urlInfo.url;
+    } else if (urlInfo) {
+        other = await fetchStoreProduct(urlInfo.url, urlInfo.site, { timeoutMs });
+    }
 
     // If it's a store link, fetch the product to learn its real title/price.
     let amazon = null;
@@ -843,9 +1106,18 @@ export async function trackProduct(input, { timeoutMs } = {}) {
         } catch (err) {
             logger.warn(`PriceTracker history failed: ${err.message}`);
         }
+    } else if (urlInfo) {
+        // Other stores: use the parsed page title when we got one, else derive
+        // a query from the URL slug (Ajio blocks its product pages outright).
+        query = (other?.title && searchQueryOf(other.title))
+            || queryFromProductUrl(urlInfo.url, urlInfo.site)
+            || query;
+        query = searchQueryOf(query);
     }
 
-    if (!query) return { offers: [], amazon: null, flipkart: null, history: null, query: '', idKey: null };
+    if (!query) {
+        return { offers: [], amazon: null, flipkart: null, other: null, history: null, query: '', idKey: null, urlInfo: null };
+    }
 
     const offers = await searchAll(query, { timeoutMs });
 
@@ -870,15 +1142,33 @@ export async function trackProduct(input, { timeoutMs } = {}) {
             rating: flipkart.rating,
         });
     }
+    if (other?.price) {
+        allOffers.push({
+            title: other.title ? shortTitle(other.title) : null,
+            price: other.price,
+            url: other.url,
+            site: other.site,
+            mrp: other.mrp || null,
+        });
+    }
     allOffers.push(...offers);
     const deduped = dedupeOffers(allOffers);
 
-    const idKey = asin ? `asin:${asin}` : flipkart?.pid ? `fk:${flipkart.pid}` : null;
+    const idKey = asin
+        ? `asin:${asin}`
+        : flipkart?.pid
+            ? `fk:${flipkart.pid}`
+            : urlInfo && !fkUrl
+                ? storeProductKey(urlInfo.url, urlInfo.site)
+                : null;
 
     return {
         query,
         asin,
+        amazon,
         flipkart,
+        other,
+        urlInfo,
         idKey,
         history,
         offers: rankOffers(deduped),
@@ -969,6 +1259,12 @@ export async function getPriceSnapshots(db, { input, asin, idKey, limitPerSite =
 
 export const priceTrackerService = {
     extractAmazonAsin,
+    extractProductUrl,
+    resolveAmazonAsin,
+    queryFromProductUrl,
+    storeProductKey,
+    extractFlipkartUrl,
+    sanitizeFlipkartUrl,
     parseAmazonProduct,
     parseFlipkartSearch,
     parseAmazonSearch,
@@ -976,6 +1272,9 @@ export const priceTrackerService = {
     parseAjioSearch,
     parseSnapdealSearch,
     parseTataCliqSearch,
+    parseMyntraProduct,
+    parseSnapdealProduct,
+    parseTataCliqProduct,
     parsePriceHistoryMeta,
     rankOffers,
     relevanceScore,
@@ -985,6 +1284,8 @@ export const priceTrackerService = {
     trackProduct,
     searchAll,
     fetchAmazonProduct,
+    fetchFlipkartProduct,
+    fetchStoreProduct,
     fetchPriceHistory,
     savePriceSnapshots,
     getPriceSnapshots,

@@ -11,6 +11,9 @@ import { config } from '../../config/config.js';
 import {
     trackProduct,
     extractAmazonAsin,
+    extractProductUrl,
+    resolveAmazonAsin,
+    storeProductKey,
     extractFlipkartUrl,
     sanitizeFlipkartUrl,
     resolveFlipkartPid,
@@ -34,11 +37,61 @@ function siteEmoji(site) {
     return '🛒';
 }
 
+/** Where does the current price sit between low and high? 0 = low, 1 = high. */
+function rangePosition(h) {
+    if (!h?.lowest || !h?.highest || h.current == null) return null;
+    return (h.current - h.lowest) / (h.highest - h.lowest);
+}
+
+/** One-glance verdict: is this a good time to buy? */
+function historyVerdict(h) {
+    const pos = rangePosition(h);
+    if (pos == null) return null;
+    if (pos < 0.2) return 'near all-time low';
+    if (pos > 0.8) return 'near all-time high';
+    if (pos < 0.45) return 'lower half of range';
+    if (pos > 0.65) return 'upper half of range';
+    return 'middle of range';
+}
+
+/** Filled bar showing the current price's position in the low↔high range. */
+function historyBar(h, cells = 20) {
+    const pos = rangePosition(h);
+    if (pos == null) return null;
+    const filled = Math.max(1, Math.min(cells - 1, Math.round(pos * cells)));
+    return '█'.repeat(filled) + '░'.repeat(cells - filled);
+}
+
+/**
+ * Format A history block: position bar + stats + verdict + MRP savings.
+ * Shared by the track card and the history card so both look the same.
+ */
+function formatHistoryBody(h, { urlEmoji = '📊' } = {}) {
+    const lines = [];
+    const bar = historyBar(h);
+    if (bar) lines.push(`   ${bar}`);
+    const parts = [];
+    if (h.lowest) parts.push(`Low ${inr(h.lowest)}`);
+    if (h.average) parts.push(`Avg ${inr(h.average)}`);
+    if (h.highest) parts.push(`High ${inr(h.highest)}`);
+    if (parts.length) lines.push(`   ${parts.join(' · ')}`);
+    if (h.current) {
+        const v = historyVerdict(h);
+        lines.push(`   ● Now ${inr(h.current)}${h.currentDate ? ` (${h.currentDate})` : ''}${v ? ` — _${v}_` : ''}`);
+    }
+    if (h.mrp) {
+        const save = h.current && h.mrp > h.current ? Math.round(((h.mrp - h.current) / h.mrp) * 100) : null;
+        lines.push(`   MRP ${inr(h.mrp)}${save ? ` · save ${save}%` : ''}`);
+    }
+    if (h.url) lines.push(`   ${urlEmoji} ${h.url}`);
+    return lines;
+}
+
 /** Build the main comparison card. */
 export function formatTrackCard(result) {
-    const { query, amazon, flipkart, history, offers, asin } = result;
-    const tracked = amazon || flipkart;
-    const trackedSite = amazon ? 'Amazon' : flipkart ? 'Flipkart' : null;
+    const { query, amazon, flipkart, other, history, offers, asin, idKey } = result;
+    const tracked = amazon || flipkart || other;
+    const trackedSite = amazon ? 'Amazon' : flipkart ? 'Flipkart' : other?.site || null;
     const lines = [];
 
     lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -51,7 +104,7 @@ export function formatTrackCard(result) {
 
     if (!offers.length) {
         lines.push('😕 _No prices found right now._');
-        lines.push('_Try a more specific product name, or paste an Amazon.in link._');
+        lines.push('_Try a more specific product name, or paste a link from Amazon · Flipkart · Myntra · Ajio · Snapdeal · Tata CLiQ._');
     } else {
         const maxOffers = Math.min(config?.PRICE_TRACKER_MAX_OFFERS || 8, 8);
         const best = offers[0];
@@ -84,16 +137,7 @@ export function formatTrackCard(result) {
 
     if (history) {
         lines.push(`📈 *${trackedSite || ''} price history*`.replace('  ', ' '));
-        const parts = [];
-        if (history.lowest) parts.push(`Low ${inr(history.lowest)}`);
-        if (history.average) parts.push(`Avg ${inr(history.average)}`);
-        if (history.highest) parts.push(`High ${inr(history.highest)}`);
-        if (history.current) {
-            parts.push(`Now ${inr(history.current)}${history.currentDate ? ` (${history.currentDate})` : ''}`);
-        }
-        lines.push(`   ${parts.join(' · ')}`);
-        if (history.mrp) lines.push(`   MRP ${inr(history.mrp)}`);
-        if (history.url) lines.push(`   📊 ${history.url}`);
+        lines.push(...formatHistoryBody(history));
         lines.push('');
     }
 
@@ -101,6 +145,10 @@ export function formatTrackCard(result) {
     lines.push(`_Checked ${new Date().toLocaleString('en-IN', { hour: '2-digit', minute: '2-digit' })} IST_`);
     if (asin) lines.push(`_ASIN ${asin} — re-check with the same link to build history_`);
     else if (flipkart?.pid) lines.push(`_Flipkart ${flipkart.pid} — re-check with the same link to build history_`);
+    else if (other && idKey && idKey.includes(':')) {
+        const [, id] = idKey.split(':');
+        lines.push(`_${other.site} ${id} — re-check with the same link to build history_`);
+    }
     lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     return lines.join('\n');
 }
@@ -120,16 +168,7 @@ export function formatHistoryCard(result) {
     // no need to wait for Mongo snapshots to accumulate.
     if (external && Object.keys(external).length) {
         lines.push('📊 *Past prices (pricehistory.app)*');
-        const parts = [];
-        if (external.lowest) parts.push(`Low ${inr(external.lowest)}`);
-        if (external.average) parts.push(`Avg ${inr(external.average)}`);
-        if (external.highest) parts.push(`High ${inr(external.highest)}`);
-        if (external.current) {
-            parts.push(`Now ${inr(external.current)}${external.currentDate ? ` (${external.currentDate})` : ''}`);
-        }
-        lines.push(`   ${parts.join(' · ')}`);
-        if (external.mrp) lines.push(`   MRP ${inr(external.mrp)}`);
-        if (external.url) lines.push(`   📎 ${external.url}`);
+        lines.push(...formatHistoryBody(external, { urlEmoji: '📎' }));
         lines.push('');
     }
 
@@ -169,7 +208,7 @@ export async function handlePrice(sock, chatId, senderJid, args, ctx) {
                 '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
                 'Find the cheapest price for a product across Indian stores.\n\n' +
                 '*Usage:*\n' +
-                '• `/price <amazon/flipkart link>` — scan all stores + price history\n' +
+                '• `/price <link>` — any store link (Amazon · Flipkart · Myntra · Ajio · Snapdeal · Tata CLiQ)\n' +
                 '• `/price <product name>` — e.g. `/price puma smashic sneakers`\n' +
                 '• `/price history <link or name>` — saved snapshots over time\n\n' +
                 '_Scans: Amazon · Flipkart · Myntra · Ajio · Snapdeal · Tata CLiQ_\n' +
@@ -191,13 +230,25 @@ export async function handlePrice(sock, chatId, senderJid, args, ctx) {
             text: '📈 _Fetching saved price history…_',
         });
         try {
-            const asin = extractAmazonAsin(subInput);
+            const urlInfo = extractProductUrl(subInput);
+            let asin = extractAmazonAsin(subInput);
             const fkUrl = extractFlipkartUrl(subInput);
+            // Amazon short links (amzn.in/d/…) carry no visible ASIN — follow
+            // the redirect to reveal it so history works for them too.
+            if (!asin && urlInfo?.site === 'Amazon') {
+                asin = await resolveAmazonAsin(urlInfo.url);
+            }
             const fkPid = fkUrl ? await resolveFlipkartPid(fkUrl) : null;
-            const idKey = asin ? `asin:${asin}` : fkPid ? `fk:${fkPid}` : null;
+            const idKey = asin
+                ? `asin:${asin}`
+                : fkPid
+                    ? `fk:${fkPid}`
+                    : urlInfo && !fkUrl
+                        ? storeProductKey(urlInfo.url, urlInfo.site)
+                        : null;
             const snapshots = await getPriceSnapshots(mongoDb, { input: subInput, asin, idKey });
-            // Past prices (pricehistory.app) work immediately for store links,
-            // even before Mongo snapshots accumulate.
+            // Past prices (pricehistory.app) work immediately for Amazon/Flipkart
+            // links, even before Mongo snapshots accumulate.
             let external = null;
             try {
                 if (asin) external = await fetchPriceHistory(asin);
