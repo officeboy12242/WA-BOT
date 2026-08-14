@@ -28,6 +28,10 @@ import {
     normalizeOfferUrl,
     dedupeOffers,
     searchQueryOf,
+    extractFlipkartUrl,
+    sanitizeFlipkartUrl,
+    extractFlipkartPid,
+    parseFlipkartProduct,
     PRICE_HISTORY_COLLECTION,
 } from '../src/services/PriceTrackerService.js';
 import { COMMAND_REGISTRY } from '../src/commands/registry.js';
@@ -229,6 +233,23 @@ ok(filterRelevant(
     'puma sneakers'
 ).length === 1, 'brand + generic query still passes brand-only offers');
 
+/* Hyphenated model words are the strongest signal — a different Campus model
+ * that shares only "campus"/"camp" must not win the ranking. */
+ok(distinctiveTokens('CAMPUS CAMP-GLACIER Running Shoes For Men').includes('camp-glacier'),
+    'hyphenated model kept as a compound token');
+ok(distinctiveTokens('CAMPUS CAMP-GLACIER Running Shoes For Men').includes('glacier'),
+    'hyphenated model parts also emitted');
+const glacier = filterRelevant(
+    [
+        { title: 'Campus CAMP KRIPTO Yellow Running Shoes', price: 687, site: 'Snapdeal', url: 'x' },
+        { title: 'CAMP-GLACIER Men Lace-Up Running Shoes', price: 666, site: 'Ajio', url: 'x' },
+        { title: 'Campus Men Camp-Glacier Running Shoes', price: 869, site: 'Amazon', url: 'x' },
+    ],
+    'CAMPUS CAMP-GLACIER Running Shoes For Men'
+);
+ok(glacier.length === 2 && !glacier.some((o) => o.title.includes('KRIPTO')),
+    'different hyphenated model (KRIPTO) is dropped, real CAMP-GLACIER kept');
+
 /* ─────────────────────────── ranking ─────────────────────────── */
 const ranked = rankOffers([
     { site: 'Snapdeal', price: 400 }, { site: 'Amazon', price: 1573 },
@@ -267,6 +288,54 @@ ok(searchQueryOf('Puma | Smashic Comfort Casual Sneakers') === 'Puma Smashic Com
 ok(productKey('https://www.amazon.in/dp/B0BSLKJPXV', 'B0BSLKJPXV') === 'asin:B0BSLKJPXV', 'ASIN product key');
 ok(productKey('puma smashic sneakers', null) === 'q:puma-smashic-sneakers', 'query product key is slugged');
 ok(PRICE_HISTORY_COLLECTION === 'price_history', 'collection name is stable');
+
+/* ─────────────────────────── Flipkart links ─────────────────────────── */
+ok(extractFlipkartUrl('https://dl.flipkart.com/s/I0jAWrNNNN') === 'https://dl.flipkart.com/s/I0jAWrNNNN',
+    'flipkart short link detected');
+ok(extractFlipkartUrl('see https://www.flipkart.com/campus/p/itm26cd?pid=SHOGH1234X end')
+    === 'https://www.flipkart.com/campus/p/itm26cd?pid=SHOGH1234X', 'flipkart product url detected in text');
+ok(extractFlipkartUrl('https://www.amazon.in/dp/B0BSLKJPXV') === null, 'amazon link is not flipkart');
+
+/* Share-format links (text around the URL, like WhatsApp "Take a look at this…") */
+const sharedFk = 'Take a look at this CAMP-GLACIER Running Shoes For Men on Flipkart\nhttps://dl.flipkart.com/s/I0jAWrNNNN';
+ok(extractFlipkartUrl(sharedFk) === 'https://dl.flipkart.com/s/I0jAWrNNNN', 'flipkart short link extracted from share text');
+const sharedAmz = 'Take a look at this Puma Sneaker on Amazon\nhttps://www.amazon.in/Puma-Unisex-Adult-Smashic-White-Matte-Sneaker/dp/B0BSLKJPXV/ref=sr_1_1';
+ok(extractAmazonAsin(sharedAmz) === 'B0BSLKJPXV', 'amazon asin extracted from share text');
+ok(extractAmazonAsin('no link here') === null, 'plain text yields no asin');
+ok(extractAmazonAsin('https://www.flipkart.com/campus/p/itm26cd?pid=SHOGH1234X') === null, 'flipkart link yields no asin');
+ok(sanitizeFlipkartUrl('https://www.flipkart.com/campus/p/itm26cd?pid=SHOGH1234X&fm=abc&lid=xyz&_refId=123')
+    === 'https://www.flipkart.com/campus/p/itm26cd?pid=SHOGH1234X', 'tracking params stripped, pid kept');
+ok(sanitizeFlipkartUrl('https://www.flipkart.com/campus/p/itm26cd?fm=abc') === 'https://www.flipkart.com/campus/p/itm26cd',
+    'url without pid is cleaned too');
+ok(extractFlipkartPid('https://www.flipkart.com/campus/p/itm26cd?pid=SHOGH1234X&lid=1') === 'SHOGH1234X',
+    'pid extracted');
+ok(extractFlipkartPid('https://dl.flipkart.com/s/I0jAWrNNNN') === null, 'short link has no visible pid');
+
+const fkHtml = `
+<script>window.__INITIAL_STATE__ = {"name":"CAMPUS CAMP-GLACIER Running Shoes For Men",
+"price":1110,"priceCurrency":"INR","availability":"https:\\u002f\\u002fschema.org\\u002fInStock",
+"aggregateRating":{"ratingValue":4.2,"reviewCount":1092},"finalPrice":1110,"mrp":1399}</script>`;
+const fkp = parseFlipkartProduct(fkHtml);
+ok(fkp.title === 'CAMPUS CAMP-GLACIER Running Shoes For Men', 'flipkart product title parsed');
+ok(fkp.price === 1110, 'flipkart product price parsed');
+ok(fkp.mrp === 1399, 'flipkart product mrp parsed');
+ok(fkp.rating === 4.2, 'flipkart rating parsed from aggregateRating block');
+ok(fkp.availability === 'In Stock', 'flipkart availability parsed');
+ok(parseFlipkartProduct('<html></html>').price === null, 'empty page yields nothing');
+
+/* ─────────────────────────── history card (handler) ─────────────────────────── */
+const { formatHistoryCard } = await import('../src/controllers/handlers/priceHandlers.js');
+const histCard = formatHistoryCard({
+    query: 'CAMPUS CAMP-GLACIER Running Shoes For Men',
+    idKey: 'fk:SHOGGHWPQQECEFDH',
+    snapshots: [],
+    external: { lowest: 1089, average: 1174, highest: 1399, mrp: 1399, current: 1110, currentDate: '14/08/2026' },
+});
+ok(histCard.includes('Low ₹1,089'), 'history card shows past low from pricehistory.app');
+ok(histCard.includes('Now ₹1,110 (14/08/2026)'), 'history card shows current price + date');
+ok(histCard.includes('No saved snapshots yet'), 'history card explains empty Mongo timeline');
+const emptyHistCard = formatHistoryCard({ query: 'x', snapshots: [], external: null });
+ok(!emptyHistCard.includes('Past prices'), 'no external section when history unavailable');
 
 /* ─────────────────────────── Mongo snapshots ─────────────────────────── */
 const fakeCol = {

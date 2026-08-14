@@ -37,7 +37,7 @@ async function fetchText(url, { headers = {}, timeoutMs = DEFAULT_TIMEOUT_MS, me
             body,
         });
         const text = await res.text();
-        return { status: res.status, text };
+        return { status: res.status, text, finalUrl: res.url };
     } finally {
         clearTimeout(timer);
     }
@@ -84,7 +84,7 @@ const GENERIC_WORDS = new Set([
     'men\'s', 'women', 'women\'s', 'kids', 'unisex', 'slip', 'flip', 'flops',
     'sandals', 'slippers', 'online', 'price', 'best', 'buy', 'new', 'for',
     'with', 'and', 'the', 'white', 'black', 'blue', 'green', 'grey', 'matte',
-    'silver', 'gold', 'red', 'color', 'multicolor', 'pair', 'size',
+    'silver', 'gold', 'red', 'color', 'multicolor', 'pair', 'size', 'man',
 ]);
 
 /**
@@ -92,11 +92,22 @@ const GENERIC_WORDS = new Set([
  * whether an offer is actually the same product the user asked about.
  */
 export function distinctiveTokens(query) {
-    return String(query || '')
+    const words = String(query || '')
         .toLowerCase()
-        .split(/[^a-z0-9']+/)
-        .map((w) => w.replace(/^[']+|[']+$/g, ''))
+        .split(/[^a-z0-9'-]+/)
+        .map((w) => w.replace(/^['-]+|['-]+$/g, ''))
         .filter((w) => w.length > 2 && !GENERIC_WORDS.has(w));
+    const tokens = new Set(words);
+    // Emit hyphenated compounds AND their parts: "camp-glacier" is a much
+    // stronger model signal than "camp" or "glacier" alone, but a store that
+    // writes "Camp Glacier" (space) can still match on the parts.
+    for (const w of words) {
+        if (!w.includes('-')) continue;
+        for (const part of w.split('-')) {
+            if (part.length > 2 && !GENERIC_WORDS.has(part)) tokens.add(part);
+        }
+    }
+    return [...tokens];
 }
 
 /**
@@ -186,6 +197,115 @@ export async function fetchAmazonProduct(asin, { timeoutMs } = {}) {
 
 /* ─────────────────────────── Flipkart ─────────────────────────── */
 
+/** @returns {string|null} A Flipkart product or short-link URL inside input. */
+export function extractFlipkartUrl(input) {
+    const m = String(input || '').match(/https?:\/\/(?:www\.|dl\.)?flipkart\.com\/[^\s"'<>]+/i);
+    return m ? m[0].replace(/[),;]+$/, '') : null;
+}
+
+/**
+ * Flipkart product URLs carry heavy tracking params (fm/lid/_refId/…) that
+ * break pricehistory.app's lookup. Keep only the canonical pid and path.
+ */
+export function sanitizeFlipkartUrl(url) {
+    try {
+        const u = new URL(url);
+        u.hash = '';
+        const pid = u.searchParams.get('pid');
+        if (pid) u.search = `pid=${pid}`;
+        else u.search = '';
+        return u.href;
+    } catch {
+        return String(url || '');
+    }
+}
+
+/** Flipkart product id (pid) from a product URL, if present. */
+export function extractFlipkartPid(url) {
+    if (!url) return null;
+    try {
+        return new URL(url).searchParams.get('pid');
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Resolve a Flipkart URL to its pid. Full product URLs carry the pid already;
+ * dl.flipkart.com/s/… short links need a redirect follow to reveal it.
+ */
+export async function resolveFlipkartPid(url, { timeoutMs } = {}) {
+    const direct = extractFlipkartPid(url);
+    if (direct) return direct;
+    try {
+        const { finalUrl } = await fetchText(url, {
+            headers: { 'User-Agent': MOBILE_UA, Accept: 'text/html' },
+            timeoutMs: timeoutMs || 10_000,
+        });
+        return extractFlipkartPid(sanitizeFlipkartUrl(finalUrl));
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Parse a Flipkart product page (mobile HTML). The schema.org data lives in
+ * the JS state blob with escaped \u002f slashes: name, price+currency,
+ * aggregateRating and availability, plus finalPrice/mrp in the price block.
+ */
+export function parseFlipkartProduct(html) {
+    const out = { title: null, price: null, mrp: null, rating: null, availability: null };
+    if (!html) return out;
+
+    const name = html.match(/"name"\s*:\s*"([^"]{8,160})"/);
+    if (name) out.title = name[1].replace(/\\u002f/g, '/').replace(/\s+/g, ' ').trim();
+
+    // Price sits next to the INR currency marker in the schema block.
+    const price = html.match(/"price"\s*:\s*(\d+(?:\.\d+)?)[^}]{0,80}?"priceCurrency"\s*:\s*"INR"/)
+        || html.match(/"priceCurrency"\s*:\s*"INR"[^}]{0,80}?"price"\s*:\s*(\d+(?:\.\d+)?)/);
+    out.price = cleanPrice(price && price[1]);
+
+    // MRP from the pricing state blob (finalPrice/mrp/nepPrice group).
+    const mrp = html.match(/"mrp"\s*:\s*(\d+)/);
+    out.mrp = cleanPrice(mrp && mrp[1]);
+
+    // Anchor on the aggregateRating block — bare "ratingValue":1 markers
+    // (e.g. in review data) would otherwise win.
+    const rating = html.match(/"aggregateRating"\s*:\s*\{[^}]*?"ratingValue"\s*:\s*([\d.]+)/);
+    out.rating = rating ? parseFloat(rating[1]) : null;
+
+    const avail = html.match(/"availability"\s*:\s*"([^"]+)"/);
+    const availText = avail ? avail[1].replace(/\\u002f/g, '/') : '';
+    out.availability = availText.includes('InStock') ? 'In Stock' : null;
+
+    return out;
+}
+
+/**
+ * Fetch a Flipkart product page by URL. Short links (dl.flipkart.com/s/…) are
+ * followed to the real product page; the returned URL is the clean canonical
+ * form (path + pid only) which also works for pricehistory.app.
+ */
+export async function fetchFlipkartProduct(url, { timeoutMs } = {}) {
+    const { status, text, finalUrl } = await fetchText(url, {
+        headers: {
+            'User-Agent': MOBILE_UA,
+            'Accept-Language': 'en-IN,en;q=0.9',
+            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        },
+        timeoutMs,
+    });
+    if (status !== 200) {
+        throw new Error(`Flipkart returned HTTP ${status}`);
+    }
+    const parsed = parseFlipkartProduct(text);
+    if (!parsed.title && !parsed.price) {
+        throw new Error('Flipkart page blocked or unavailable');
+    }
+    const cleanUrl = sanitizeFlipkartUrl(finalUrl || url);
+    return { ...parsed, pid: extractFlipkartPid(cleanUrl), url: cleanUrl };
+}
+
 /**
  * Parse Flipkart search results. The page embeds a JSON state blob with
  * "titles" and "pricing" objects; we harvest product id, title, price and
@@ -243,7 +363,7 @@ export function parseFlipkartSearch(html) {
         let url = realHref
             ? `https://www.flipkart.com${realHref}`
             : `https://www.flipkart.com/product/p?pid=${pid}`;
-        url = url.replace(/&(?:marketplace|q|store|srno|otracker|fm|iid|ppt|ppn|ssid|qH|ov_redirect)=[^&]*/g, '');
+        url = url.replace(/&(?:marketplace|q|store|srno|otracker|fm|iid|ppt|ppn|ssid|qH|ov_redirect|lid)=[^&]*/g, '');
 
         const rating = chunk.match(/"rating"\s*:\s*([\d.]+)/);
         results.push({
@@ -497,7 +617,8 @@ export function parsePriceHistoryMeta(html) {
     const average = text.match(/Average Price:\s*₹([\d,]+)/i);
     const highest = text.match(/Highest Price:\s*₹([\d,]+)/i);
     const mrp = text.match(/MRP:\s*₹([\d,]+)/i);
-    const current = text.match(/Amazon Price in India on ([\d/]+):\s*₹([\d,]+)/i);
+    // Store-agnostic: "Amazon Price in India on …", "Flipkart Price in India on …"
+    const current = text.match(/(?:Amazon|Flipkart|Myntra|Ajio|Snapdeal|Tata\s?CLiQ) Price in India on ([\d/]+):\s*₹([\d,]+)/i);
     if (lowest) out.lowest = cleanPrice(lowest[1]);
     if (average) out.average = cleanPrice(average[1]);
     if (highest) out.highest = cleanPrice(highest[1]);
@@ -509,7 +630,16 @@ export function parsePriceHistoryMeta(html) {
     return out;
 }
 
-export async function fetchPriceHistory(asin, { timeoutMs = 15_000 } = {}) {
+/**
+ * Past price history for a product URL (Amazon ASIN or a supported store link
+ * like Flipkart's clean product URL / dl short link) via pricehistory.app.
+ * Returns { title, lowest, average, highest, mrp, current, currentDate, url }.
+ */
+export async function fetchPriceHistory(urlOrAsin, { timeoutMs = 15_000 } = {}) {
+    // Accept an Amazon ASIN for back-compat; otherwise use the URL as-is.
+    const productUrl = /^https?:/i.test(String(urlOrAsin))
+        ? urlOrAsin
+        : `https://www.amazon.in/dp/${urlOrAsin}`;
     // Step 1: search API resolves a URL to a product code. The endpoint wants
     // browser-like headers (Origin/Referer/X-Requested-With) or it serves HTML,
     // and it is flaky — retry a couple of times before giving up.
@@ -527,7 +657,7 @@ export async function fetchPriceHistory(asin, { timeoutMs = 15_000 } = {}) {
         const search = await fetchText('https://pricehistory.app/api/search', {
             method: 'POST',
             headers: searchHeaders,
-            body: JSON.stringify({ url: `https://www.amazon.in/dp/${asin}` }),
+            body: JSON.stringify({ url: productUrl }),
             timeoutMs,
         });
         try {
@@ -626,12 +756,14 @@ export function filterRelevant(offers, query, minScore = 0.5) {
     if (!nonBrand.length) {
         return offers.filter((o) => relevanceScore(o.title, q) >= 0.3);
     }
-    // Exact-product queries (brand + model) must share a model word too, so
-    // brand-only matches (other Puma models) never win the ranking.
+    // Exact-product queries (brand + model) must match the most specific
+    // (longest) non-brand token — the model word — so lookalikes that share
+    // only the brand or a weak token never win the ranking.
+    const modelToken = nonBrand.reduce((a, b) => (b.length > a.length ? b : a));
     return offers.filter((o) => {
         const t = String(o.title || '').toLowerCase();
         const hits = q.filter((w) => t.includes(w)).length;
-        return hits / q.length >= minScore && nonBrand.some((w) => t.includes(w));
+        return hits / q.length >= minScore && t.includes(modelToken);
     });
 }
 
@@ -676,9 +808,11 @@ export async function searchAll(query, { timeoutMs, siteTimeoutMs } = {}) {
  */
 export async function trackProduct(input, { timeoutMs } = {}) {
     const asin = extractAmazonAsin(input);
+    const fkUrl = extractFlipkartUrl(input);
 
-    // If it's an Amazon link, fetch the product to learn its real title/price.
+    // If it's a store link, fetch the product to learn its real title/price.
     let amazon = null;
+    let flipkart = null;
     let history = null;
     let query = String(input || '').trim();
 
@@ -694,13 +828,28 @@ export async function trackProduct(input, { timeoutMs } = {}) {
         } catch (err) {
             logger.warn(`PriceTracker history failed: ${err.message}`);
         }
+    } else if (fkUrl) {
+        const cleanUrl = sanitizeFlipkartUrl(fkUrl);
+        try {
+            flipkart = await fetchFlipkartProduct(cleanUrl, { timeoutMs });
+            if (flipkart.title) query = searchQueryOf(flipkart.title);
+        } catch (err) {
+            logger.warn(`PriceTracker flipkart fetch failed: ${err.message}`);
+        }
+        // History needs the CLEAN url (path + pid only) or a dl short link —
+        // tracking params make pricehistory.app 404.
+        try {
+            history = await fetchPriceHistory(cleanUrl);
+        } catch (err) {
+            logger.warn(`PriceTracker history failed: ${err.message}`);
+        }
     }
 
-    if (!query) return { offers: [], amazon: null, history: null, query: '' };
+    if (!query) return { offers: [], amazon: null, flipkart: null, history: null, query: '', idKey: null };
 
     const offers = await searchAll(query, { timeoutMs });
 
-    // The Amazon product itself is an offer too.
+    // The tracked product itself is an offer too.
     const allOffers = [];
     if (amazon?.price) {
         allOffers.push({
@@ -712,13 +861,25 @@ export async function trackProduct(input, { timeoutMs } = {}) {
             rating: amazon.rating,
         });
     }
+    if (flipkart?.price) {
+        allOffers.push({
+            title: flipkart.title ? shortTitle(flipkart.title) : null,
+            price: flipkart.price,
+            url: flipkart.url,
+            site: 'Flipkart',
+            rating: flipkart.rating,
+        });
+    }
     allOffers.push(...offers);
     const deduped = dedupeOffers(allOffers);
+
+    const idKey = asin ? `asin:${asin}` : flipkart?.pid ? `fk:${flipkart.pid}` : null;
 
     return {
         query,
         asin,
-        amazon,
+        flipkart,
+        idKey,
         history,
         offers: rankOffers(deduped),
         rawOffers: deduped,
@@ -733,8 +894,12 @@ export const PRICE_HISTORY_COLLECTION = 'price_history';
  * Record today's offers for a product so past prices accumulate. The product
  * key is the ASIN when known, else a slug of the query.
  */
-export function productKey(input, asin) {
+export function productKey(input, asin, { idKey } = {}) {
+    if (idKey) return idKey;
     if (asin) return `asin:${asin}`;
+    // Flipkart links get a pid key so history survives URL changes.
+    const fkPid = extractFlipkartPid(extractFlipkartUrl(input));
+    if (fkPid) return `fk:${fkPid}`;
     return `q:${String(input || '')
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, '-')
@@ -742,10 +907,10 @@ export function productKey(input, asin) {
         .slice(0, 60)}`;
 }
 
-export async function savePriceSnapshots(db, { input, asin, query, offers }) {
+export async function savePriceSnapshots(db, { input, asin, idKey, query, offers }) {
     if (!db) return 0;
     const col = db.collection(PRICE_HISTORY_COLLECTION);
-    const key = productKey(input, asin);
+    const key = productKey(input, asin, { idKey });
     const day = new Date().toISOString().slice(0, 10);
     let saved = 0;
     for (const o of offers) {
@@ -776,10 +941,10 @@ export async function savePriceSnapshots(db, { input, asin, query, offers }) {
  * Past snapshots for a product, newest first, capped per site. Returns a flat
  * list of { day, site, price, url, title }.
  */
-export async function getPriceSnapshots(db, { input, asin, limitPerSite = 10 } = {}) {
+export async function getPriceSnapshots(db, { input, asin, idKey, limitPerSite = 10 } = {}) {
     if (!db) return [];
     const col = db.collection(PRICE_HISTORY_COLLECTION);
-    const key = productKey(input, asin);
+    const key = productKey(input, asin, { idKey });
     const rows = await col
         .find({ productKey: key })
         .sort({ checkedAt: -1 })

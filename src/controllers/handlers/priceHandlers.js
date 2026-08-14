@@ -11,7 +11,10 @@ import { config } from '../../config/config.js';
 import {
     trackProduct,
     extractAmazonAsin,
-    productKey,
+    extractFlipkartUrl,
+    sanitizeFlipkartUrl,
+    resolveFlipkartPid,
+    fetchPriceHistory,
     savePriceSnapshots,
     getPriceSnapshots,
     shortTitle,
@@ -33,7 +36,9 @@ function siteEmoji(site) {
 
 /** Build the main comparison card. */
 export function formatTrackCard(result) {
-    const { query, amazon, history, offers, asin } = result;
+    const { query, amazon, flipkart, history, offers, asin } = result;
+    const tracked = amazon || flipkart;
+    const trackedSite = amazon ? 'Amazon' : flipkart ? 'Flipkart' : null;
     const lines = [];
 
     lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -41,7 +46,7 @@ export function formatTrackCard(result) {
     lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     lines.push('');
     lines.push(`🛒 *${shortTitle(query, 80)}*`);
-    if (amazon?.rating) lines.push(`⭐ ${amazon.rating}/5 · ${amazon.availability ? `_${amazon.availability}_` : ''}`.trim());
+    if (tracked?.rating) lines.push(`⭐ ${tracked.rating}/5 · ${tracked.availability ? `_${tracked.availability}_` : ''}`.trim());
     lines.push('');
 
     if (!offers.length) {
@@ -50,18 +55,18 @@ export function formatTrackCard(result) {
     } else {
         const maxOffers = Math.min(config?.PRICE_TRACKER_MAX_OFFERS || 8, 8);
         const best = offers[0];
-        const bestIsAmazon = best.site === 'Amazon' && amazon;
+        const bestIsTracked = best.site === trackedSite && tracked;
         lines.push(`💰 *Best price: ${inr(best.price)}* — ${best.site} ${siteEmoji(best.site)}`);
         // Only compare against the tracked product when the best offer IS it —
-        // a different-brand cheap lookalike must not claim Amazon's MRP savings.
-        if (bestIsAmazon && amazon?.mrp && amazon.mrp > best.price) {
-            const save = Math.round(((amazon.mrp - best.price) / amazon.mrp) * 100);
-            lines.push(`   _MRP ${inr(amazon.mrp)} · save ${save}%_`);
-        } else if (bestIsAmazon && amazon?.price && best.price === amazon.price && amazon.mrp) {
-            lines.push(`   _MRP ${inr(amazon.mrp)}_`);
-        } else if (amazon?.price && best.price < amazon.price) {
-            const diff = Math.round(((amazon.price - best.price) / amazon.price) * 100);
-            lines.push(`   _${diff}% below the tracked Amazon price (${inr(amazon.price)})_`);
+        // a different-brand cheap lookalike must not claim the tracked MRP savings.
+        if (bestIsTracked && tracked?.mrp && tracked.mrp > best.price) {
+            const save = Math.round(((tracked.mrp - best.price) / tracked.mrp) * 100);
+            lines.push(`   _MRP ${inr(tracked.mrp)} · save ${save}%_`);
+        } else if (bestIsTracked && tracked?.price && best.price === tracked.price && tracked.mrp) {
+            lines.push(`   _MRP ${inr(tracked.mrp)}_`);
+        } else if (tracked?.price && best.price < tracked.price) {
+            const diff = Math.round(((tracked.price - best.price) / tracked.price) * 100);
+            lines.push(`   _${diff}% below the tracked ${trackedSite} price (${inr(tracked.price)})_`);
         }
         if (best.url) lines.push(`   🔗 ${best.url}`);
         lines.push('');
@@ -69,16 +74,16 @@ export function formatTrackCard(result) {
         lines.push('┌─ *ALL OFFERS (cheapest first)* ─');
         offers.slice(0, maxOffers).forEach((o, i) => {
             const tag = i === 0 ? '🔥 ' : '';
-            const priceLine = `${tag}${i + 1}. ${inr(o.price)} · *${o.site}*`;
-            lines.push(`│ ${priceLine}`);
+            lines.push(`│ ${tag}${i + 1}. ${inr(o.price)} · *${o.site}* ${siteEmoji(o.site)}`);
             if (o.url) lines.push(`│    🔗 ${o.url}`);
+            lines.push('│');
         });
         lines.push('└────────────────────────────');
         lines.push('');
     }
 
     if (history) {
-        lines.push('📈 *Amazon price history*');
+        lines.push(`📈 *${trackedSite || ''} price history*`.replace('  ', ' '));
         const parts = [];
         if (history.lowest) parts.push(`Low ${inr(history.lowest)}`);
         if (history.average) parts.push(`Avg ${inr(history.average)}`);
@@ -95,13 +100,14 @@ export function formatTrackCard(result) {
     lines.push(`_Data: Amazon · Flipkart · Myntra · Ajio · Snapdeal · Tata CLiQ · pricehistory.app_`);
     lines.push(`_Checked ${new Date().toLocaleString('en-IN', { hour: '2-digit', minute: '2-digit' })} IST_`);
     if (asin) lines.push(`_ASIN ${asin} — re-check with the same link to build history_`);
+    else if (flipkart?.pid) lines.push(`_Flipkart ${flipkart.pid} — re-check with the same link to build history_`);
     lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     return lines.join('\n');
 }
 
-/** Build the history card from stored snapshots. */
-function formatHistoryCard(result) {
-    const { query, asin } = result;
+/** Build the history card from stored snapshots + past prices (pricehistory.app). */
+export function formatHistoryCard(result) {
+    const { query, asin, idKey, external } = result;
     const lines = [];
     lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     lines.push('📈 *PRICE HISTORY* 📈');
@@ -110,15 +116,28 @@ function formatHistoryCard(result) {
     lines.push(`🛒 *${shortTitle(query, 80)}*`);
     lines.push('');
 
+    // Past prices from pricehistory.app — works immediately for any link,
+    // no need to wait for Mongo snapshots to accumulate.
+    if (external && Object.keys(external).length) {
+        lines.push('📊 *Past prices (pricehistory.app)*');
+        const parts = [];
+        if (external.lowest) parts.push(`Low ${inr(external.lowest)}`);
+        if (external.average) parts.push(`Avg ${inr(external.average)}`);
+        if (external.highest) parts.push(`High ${inr(external.highest)}`);
+        if (external.current) {
+            parts.push(`Now ${inr(external.current)}${external.currentDate ? ` (${external.currentDate})` : ''}`);
+        }
+        lines.push(`   ${parts.join(' · ')}`);
+        if (external.mrp) lines.push(`   MRP ${inr(external.mrp)}`);
+        if (external.url) lines.push(`   📎 ${external.url}`);
+        lines.push('');
+    }
+
     const snapshots = result.snapshots || [];
     if (!snapshots.length) {
-        lines.push('_No saved price history yet._');
-        lines.push('_Run `/price <link-or-name>` to start tracking — every check stores a daily snapshot._');
+        lines.push('_No saved snapshots yet._');
+        lines.push('_Run `/price <link-or-name>` regularly — every check stores a daily snapshot, so this section builds a trend over time._');
         lines.push('');
-        if (asin) {
-            lines.push('💡 For Amazon you can also see past prices on pricehistory.app:');
-            lines.push(`   📊 https://www.pricehistory.app/p/ (search the ASIN)`);
-        }
     } else {
         // Group by site, newest first, show a short timeline.
         const bySite = new Map();
@@ -127,7 +146,7 @@ function formatHistoryCard(result) {
             bySite.get(s.site).push(s);
         }
         for (const [site, rows] of bySite) {
-            lines.push(`${siteEmoji(site)} *${site}*`);
+            lines.push(`${siteEmoji(site)} *${site} — saved snapshots*`);
             for (const r of rows.slice(0, 10)) {
                 lines.push(`   • ${r.day} — ${inr(r.price)}${r.url ? ` · ${r.url}` : ''}`);
             }
@@ -150,10 +169,10 @@ export async function handlePrice(sock, chatId, senderJid, args, ctx) {
                 '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
                 'Find the cheapest price for a product across Indian stores.\n\n' +
                 '*Usage:*\n' +
-                '• `/price <amazon link>` — scan all stores + price history\n' +
+                '• `/price <amazon/flipkart link>` — scan all stores + price history\n' +
                 '• `/price <product name>` — e.g. `/price puma smashic sneakers`\n' +
                 '• `/price history <link or name>` — saved snapshots over time\n\n' +
-                '_Scans: Amazon · Flipkart · Myntra · Ajio · Snapdeal_\n' +
+                '_Scans: Amazon · Flipkart · Myntra · Ajio · Snapdeal · Tata CLiQ_\n' +
                 '━━━━━━━━━━━━━━━━━━━━━━━━━━━',
         });
         return;
@@ -164,7 +183,7 @@ export async function handlePrice(sock, chatId, senderJid, args, ctx) {
         const subInput = args.slice(1).join(' ').trim();
         if (!subInput) {
             await sock.sendMessage(chatId, {
-                text: '❌ Usage: `/price history <amazon-link-or-product-name>`',
+                text: '❌ Usage: `/price history <amazon-or-flipkart-link-or-product-name>`',
             });
             return;
         }
@@ -173,8 +192,20 @@ export async function handlePrice(sock, chatId, senderJid, args, ctx) {
         });
         try {
             const asin = extractAmazonAsin(subInput);
-            const snapshots = await getPriceSnapshots(mongoDb, { input: subInput, asin });
-            const card = formatHistoryCard({ query: subInput, asin, snapshots });
+            const fkUrl = extractFlipkartUrl(subInput);
+            const fkPid = fkUrl ? await resolveFlipkartPid(fkUrl) : null;
+            const idKey = asin ? `asin:${asin}` : fkPid ? `fk:${fkPid}` : null;
+            const snapshots = await getPriceSnapshots(mongoDb, { input: subInput, asin, idKey });
+            // Past prices (pricehistory.app) work immediately for store links,
+            // even before Mongo snapshots accumulate.
+            let external = null;
+            try {
+                if (asin) external = await fetchPriceHistory(asin);
+                else if (fkUrl) external = await fetchPriceHistory(sanitizeFlipkartUrl(fkUrl));
+            } catch (err) {
+                logger.warn(`Price history external fetch failed: ${err.message}`);
+            }
+            const card = formatHistoryCard({ query: subInput, asin, idKey, snapshots, external });
             await sock.sendMessage(chatId, { text: card });
         } catch (err) {
             logger.error(`Price history failed: ${err.message}`);
@@ -196,6 +227,7 @@ export async function handlePrice(sock, chatId, senderJid, args, ctx) {
                 await savePriceSnapshots(mongoDb, {
                     input,
                     asin: result.asin,
+                    idKey: result.idKey,
                     query: result.query,
                     offers: result.rawOffers,
                 });
