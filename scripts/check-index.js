@@ -296,6 +296,8 @@ const entryCard = indexAnalysisService.format({
     plan: sizeIndexTrade({ premium: 124, lot: 75, indexAtr: 16.2, capital: 30000, minProfit: 600, maxProfit: 1200 }),
 });
 ok(entryCard.includes('ENTER'), 'firing card says ENTER');
+ok(entryCard.includes('🧠 Strategy: *VWAP Stretch Fade*'), 'fade ENTER card names the strategy');
+ok(entryCard.includes('Why:'), 'fade ENTER card shows the basis for the read');
 ok(entryCard.includes('BUY PE'), 'a short fade buys the PE');
 ok(entryCard.includes('EXIT AT'), 'card gives an explicit exit price');
 ok(entryCard.includes('STOP'), 'card gives a stop');
@@ -345,6 +347,22 @@ const veryLateCard = indexAnalysisService.format({
 });
 ok(veryLateCard.includes('NEGATIVE'), 'a very-late ENTER card warns the window measured negative');
 ok(veryLateCard.includes('Confidence: *43%*'), 'a very-late ENTER card shows the cut confidence');
+ok(veryLateCard.includes('VWAP Stretch Fade'), 'a very-late ENTER card still names the strategy');
+
+// the failed-range-break rule must name ITS strategy on the card too
+const failedBreakCard = indexAnalysisService.format({
+    key: 'NIFTY', label: 'NIFTY 50', lot: 75, spot: 24435, changePct: 0.5, capital: 30000,
+    expiry: '18-Aug-2026', atmStrike: 24450, atmCe: { ltp: 121 }, atmPe: { ltp: 124 },
+    ceCapital: 9075, peCapital: 9300, pcr: 0.75, walls: {}, maxPain: 24500, topCe: [], topPe: [],
+    legName: 'CE', leg: { ltp: 121 },
+    signal: {
+        side: 'long', kind: 'failed-break', vwap: 24400, atr: 16.2, stretch: -0.4,
+        reason: 'broke the opening range down then closed back inside — failed break, fade it',
+    },
+    plan: sizeIndexTrade({ premium: 121, lot: 75, indexAtr: 16.2, capital: 30000, minProfit: 600, maxProfit: 1200 }),
+});
+ok(failedBreakCard.includes('Failed Range Break Fade'), 'failed-break ENTER card names its strategy');
+ok(failedBreakCard.includes('BUY CE'), 'a long fade buys the CE');
 
 // ═══════════════ tgbot2 strategy engine (ported) — indicators ═══════════════
 // RSI is tgbot2's SIMPLE (SMA) RSI — all-gains and flat windows read 100.

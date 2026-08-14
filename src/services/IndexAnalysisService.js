@@ -645,13 +645,16 @@ class IndexAnalysisService {
         } else if (p?.blocked) {
             const conf = signalConfidence(s);
             L.push('┌─ *🚫 NO ENTRY (size)* ─');
-            L.push(`│ Setup present (${s.kind}) but ${p.blocked}`);
+            L.push(`│ 🧠 Strategy: *${FADE_STRATEGY_NAMES[s.kind] || s.kind}*`);
+            L.push(`│ Setup present but ${p.blocked}`);
             if (conf) L.push(`│ 📊 Confidence: *${conf.pct}%* — ${conf.label}`);
             L.push('└────────────────────────────');
         } else if (p) {
             const dirWord = s.side === 'long' ? 'BUY CE' : 'BUY PE';
             const conf = signalConfidence(s);
+            const fadeName = FADE_STRATEGY_NAMES[s.kind] || s.kind;
             L.push(`┌─ *✅ ENTER — ${dirWord}* ─`);
+            L.push(`│ 🧠 Strategy: *${fadeName}* — the measured fade edge`);
             L.push(`│ Why: ${s.reason}`);
             if (s.veryLate) L.push(`│ ⚠️ past ${hhmm(SIGNAL_WINDOW.deadMin)} — the study measured this window NEGATIVE (late fade)`);
             else if (s.degraded) L.push(`│ ⚠️ past ${hhmm(SIGNAL_WINDOW.closeMin)} — weaker than the tested window`);
@@ -685,6 +688,12 @@ class IndexAnalysisService {
         return L.join('\n');
     }
 }
+
+/** Display names for the two measured fade rules (what /index is actually reading). */
+export const FADE_STRATEGY_NAMES = {
+    'vwap-stretch': 'VWAP Stretch Fade',
+    'failed-break': 'Failed Range Break Fade',
+};
 
 export const indexAnalysisService = new IndexAnalysisService();
 export default IndexAnalysisService;
