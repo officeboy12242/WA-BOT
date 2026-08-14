@@ -54,7 +54,6 @@ import {
 } from './handlers/groupHandlers.js';
 
 import { handleTradelert, handleTradenow, handleSwing, handleExpiry, handleIndex } from './handlers/tradeHandlers.js';
-import { handlePrice } from './handlers/priceHandlers.js';
 import { handleHeal, handleFix } from './handlers/healHandlers.js';
 import { handleAssist } from './handlers/assistHandlers.js';
 
@@ -184,7 +183,6 @@ export const COMMAND_HANDLERS = {
     index: ({ sock, chatId, senderJid, args, ctx }) => handleIndex(sock, chatId, senderJid, args, ctx),
     swing: ({ sock, chatId, senderJid, args, ctx }) => handleSwing(sock, chatId, senderJid, args, ctx),
     expiry: ({ sock, chatId, senderJid, args, ctx }) => handleExpiry(sock, chatId, senderJid, args, ctx),
-    price: ({ sock, chatId, senderJid, args, ctx }) => handlePrice(sock, chatId, senderJid, args, ctx),
 
     /* ── Admin management ── */
     addadmin: ({ sock, chatId, senderJid, args, originalMsg, ctx }) => handleAddAdmin(sock, chatId, senderJid, args, originalMsg, ctx),

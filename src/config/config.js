@@ -487,18 +487,6 @@ export const config = {
     PUBLIC_URL: (process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || '').replace(/\/$/, ''),
     RENDER_API_KEY: process.env.RENDER_API_KEY?.trim() || '',
     RENDER_SERVICE_ID: process.env.RENDER_SERVICE_ID?.trim() || '',
-    /**
-     * Price tracker (/price) — scans Amazon.in, Flipkart, Myntra, Ajio, Snapdeal
-     * plus past price history from pricehistory.app. All plain HTTP, no browser.
-     */
-    PRICE_TRACKER_ENABLED: process.env.PRICE_TRACKER_ENABLED !== 'false',
-    /** Per-site fetch timeout for the price scan (ms). */
-    PRICE_TRACKER_TIMEOUT_MS: Math.max(
-        6_000,
-        Math.min(25_000, parseInt(process.env.PRICE_TRACKER_TIMEOUT_MS, 10) || 12_000)
-    ),
-    /** Max offers shown on the /price card. */
-    PRICE_TRACKER_MAX_OFFERS: Math.max(3, Math.min(12, parseInt(process.env.PRICE_TRACKER_MAX_OFFERS, 10) || 8)),
 
     /** Optional bootstrap for drive sources: JSON array of { url, renderServiceId?, renderApiKey? } */
     DRIVE_SOURCES: (() => {
