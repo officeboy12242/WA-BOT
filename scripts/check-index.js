@@ -533,6 +533,11 @@ const ev = evaluateStrategies({
 ok(ev.evaluated === true && ev.winner?.key === 'orb', 'ORB is the winning strategy on a breakout day');
 ok(ev.winner?.side === 'CE' && ev.list.length >= 1, 'winner has a side and the list is ordered');
 ok(ev.winner.confidence >= 40 && ev.winner.confidence <= 92, 'winner confidence is bounded 40-92');
+ok(
+    ev.quiet.includes('pcr-reversal') && ev.quiet.includes('macd-mtf') && ev.quiet.includes('mean-rev'),
+    'every strategy is scanned — quiet ones are reported'
+);
+ok(!ev.quiet.includes('orb') && !ev.quiet.includes('confluence'), 'fired strategies are not in the quiet list');
 
 // flat day + neutral PCR -> every engine quiet, no dead-end reason shown
 const flatDay = mkSeries({ moveTo: 100 });
@@ -546,6 +551,7 @@ const evFlat = evaluateStrategies({
     opts: O,
 });
 ok(evFlat.list.length === 0 && evFlat.winner === null, 'flat day -> no strategy fires');
+ok(evFlat.quiet.length === 5, 'flat day -> all five engines reported quiet');
 ok(typeof evFlat.noneReason === 'string', 'quiet day explains why in noneReason');
 
 const evLate = evaluateStrategies({
@@ -583,6 +589,8 @@ ok(stratCard.includes('EXIT AT'), 'strategy card sizes an exit');
 ok(stratCard.includes('STOP'), 'strategy card gives a stop');
 ok(!stratCard.includes('NO ENTRY'), 'a fired strategy card is not NO ENTRY');
 ok(!/lean BULLISH|lean BEARISH/.test(stratCard), 'a fired strategy card shows no chain lean');
+ok(!stratCard.includes('Sizing keeps the same 1R discipline'), 'the verbose strategy footer is gone');
+ok(!stratCard.includes('ALL STRATEGIES'), 'single-winner fixture renders no ranked block');
 
 // quiet card with a strategy noneReason shows why the engines stayed quiet
 const quietStratCard = indexAnalysisService.format({
@@ -595,6 +603,34 @@ const quietStratCard = indexAnalysisService.format({
 });
 ok(quietStratCard.includes('NO ENTRY'), 'all-quiet card still says NO ENTRY');
 ok(quietStratCard.includes('🧩 Strategies:'), 'all-quiet card says why the strategies stayed quiet');
+
+// ranked-list variant: winner block + all strategies with their status
+const rankedCard = indexAnalysisService.format({
+    key: 'NIFTY', label: 'NIFTY 50', lot: 75, spot: 24435, capital: 30000, expiry: '18-Aug-2026',
+    atmStrike: 24450, atmCe: { ltp: 121 }, atmPe: { ltp: 124 }, pcr: 0.75,
+    walls: {}, topCe: [], topPe: [],
+    signal: { side: null, reason: 'no setup - 0.30xATR from VWAP' },
+    plan: null,
+    strategies: {
+        winner: {
+            key: 'orb', name: 'ORB (Opening Range Breakout)', side: 'CE', layers: 'ORB+OI',
+            strength: 'STRONG', reasons: ['ORB breakout above 24500 (+0.21%)'],
+            confidence: 64, confidenceLabel: 'medium', winRateTag: '~58-65%', atr15: 16.2,
+        },
+        list: [
+            { key: 'orb', name: 'ORB (Opening Range Breakout)', side: 'CE', score: 60, confidence: 64, confidenceLabel: 'medium' },
+            { key: 'confluence', name: 'EMA+RSI+OI+VWAP Confluence', side: 'CE', score: 57, confidence: 67, confidenceLabel: 'high' },
+        ],
+        quiet: ['pcr-reversal', 'macd-mtf', 'mean-rev'],
+    },
+});
+ok(rankedCard.includes('ALL STRATEGIES (ranked)'), 'ranked card shows the all-strategies block');
+ok(rankedCard.includes('1️⃣ ORB · BUY CE'), 'ranked card lists the winner first');
+ok(rankedCard.includes('2️⃣ Confluence · BUY CE'), 'ranked card lists the runner-up');
+ok(rankedCard.includes('➖ PCR Reversal · no setup'), 'ranked card marks quiet strategies');
+ok(rankedCard.includes('➖ MACD-MTF · no setup'), 'ranked card marks MACD-MTF quiet');
+ok(rankedCard.includes('➖ Mean Reversion · no setup'), 'ranked card marks Mean Reversion quiet');
+ok(!rankedCard.includes('Sizing keeps the same 1R discipline'), 'ranked card has no verbose footer either');
 
 console.log(`\ncheck-index: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

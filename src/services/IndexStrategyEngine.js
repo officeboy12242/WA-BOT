@@ -30,11 +30,11 @@ export const STRATEGY_KEYS = {
 };
 
 export const STRATEGY_META = {
-    [STRATEGY_KEYS.CONFLUENCE]: { name: 'EMA+RSI+OI+VWAP Confluence', baseWin: 66, rank: 30, tag: '~62-68%' },
-    [STRATEGY_KEYS.ORB]: { name: 'ORB (Opening Range Breakout)', baseWin: 62, rank: 25, tag: '~58-65%' },
-    [STRATEGY_KEYS.PCR_REVERSAL]: { name: 'PCR Extreme Reversal', baseWin: 61, rank: 20, tag: '~58-64%' },
-    [STRATEGY_KEYS.MACD_MTF]: { name: 'MACD Multi-Timeframe (1H+15m)', baseWin: 69, rank: 35, tag: '~65-72%' },
-    [STRATEGY_KEYS.MEAN_REV]: { name: 'Sideways Scalp (BB Mean Reversion)', baseWin: 58, rank: 22, tag: '~65-70%' },
+    [STRATEGY_KEYS.CONFLUENCE]: { name: 'EMA+RSI+OI+VWAP Confluence', short: 'Confluence', baseWin: 66, rank: 30, tag: '~62-68%' },
+    [STRATEGY_KEYS.ORB]: { name: 'ORB (Opening Range Breakout)', short: 'ORB', baseWin: 62, rank: 25, tag: '~58-65%' },
+    [STRATEGY_KEYS.PCR_REVERSAL]: { name: 'PCR Extreme Reversal', short: 'PCR Reversal', baseWin: 61, rank: 20, tag: '~58-64%' },
+    [STRATEGY_KEYS.MACD_MTF]: { name: 'MACD Multi-Timeframe (1H+15m)', short: 'MACD-MTF', baseWin: 69, rank: 35, tag: '~65-72%' },
+    [STRATEGY_KEYS.MEAN_REV]: { name: 'Sideways Scalp (BB Mean Reversion)', short: 'Mean Reversion', baseWin: 58, rank: 22, tag: '~65-70%' },
 };
 
 const DEFAULTS = {
@@ -508,18 +508,19 @@ export function evaluateStrategies({ chain, quote, today5m = [], full5m = [], ho
     }
 
     const checks = [
-        (t) => checkConfluence(t, chain, o),
-        (t) => checkOrb(t, chain, o, now),
-        (t) => checkPcrExtreme(t, chain, o),
-        (t) => checkMacdMtf(t, chain, o),
-        (t) => checkMeanRev(t, chain, o),
+        [STRATEGY_KEYS.CONFLUENCE, (t) => checkConfluence(t, chain, o)],
+        [STRATEGY_KEYS.ORB, (t) => checkOrb(t, chain, o, now)],
+        [STRATEGY_KEYS.PCR_REVERSAL, (t) => checkPcrExtreme(t, chain, o)],
+        [STRATEGY_KEYS.MACD_MTF, (t) => checkMacdMtf(t, chain, o)],
+        [STRATEGY_KEYS.MEAN_REV, (t) => checkMeanRev(t, chain, o)],
     ];
 
     const list = [];
-    for (const fn of checks) {
+    const quiet = [];
+    for (const [key, fn] of checks) {
         let r = null;
         try { r = fn(tech, chain, o, now); } catch { r = null; }
-        if (!r) continue;
+        if (!r) { quiet.push(key); continue; }
         const meta = STRATEGY_META[r.key] || {};
         const score = qualityScore(r, tech, chain);
         const conf = strategyConfidence(r.key, score);
@@ -539,5 +540,5 @@ export function evaluateStrategies({ chain, quote, today5m = [], full5m = [], ho
     const noneReason = list.length
         ? null
         : `no strategy fired — confluence <${o.minLayers} layers, no ORB break, PCR ${chain?.pcr != null ? Number(chain.pcr).toFixed(2) : 'n/a'} mid-band, no MACD cross, not at a Bollinger edge`;
-    return { list, winner, evaluated: true, noneReason };
+    return { list, quiet, winner, evaluated: true, noneReason };
 }

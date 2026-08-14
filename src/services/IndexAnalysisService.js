@@ -39,7 +39,7 @@ import { indianStockQuoteService } from './IndianStockQuoteService.js';
 import { getIndexSpec, INDEX_KEYS, unsupportedIndexReason } from '../data/indexUniverse.js';
 import { maxPain } from '../utils/blackScholes.js';
 import { logger } from '../utils/logger.js';
-import { evaluateStrategies } from './IndexStrategyEngine.js';
+import { evaluateStrategies, STRATEGY_META } from './IndexStrategyEngine.js';
 
 const fmt = (n, d = 2) =>
     n == null || !Number.isFinite(Number(n)) ? '—' : Number(n).toFixed(d).replace(/\.00$/, '');
@@ -615,9 +615,25 @@ class IndexAnalysisService {
                     L.push(`│ 🏃 runner ₹${fmt(sp.premT2)}  →  profit ${inr(sp.t2Rs)} _(beyond the tested target)_`);
                 }
                 L.push('└────────────────────────────');
-                L.push('');
-                L.push(`_Setup fired: ${strat.name}. The win rate is tgbot2's self-reported backtest —_`);
-                L.push('_not re-verified in this bot. Sizing keeps the same 1R discipline as the fade._');
+
+                // Prove every engine was scanned: the firing strategies ranked by
+                // quality score, and the quiet ones marked "no setup".
+                const ranked = a.strategies?.list || [];
+                const quiet = a.strategies?.quiet || [];
+                if (ranked.length || quiet.length) {
+                    L.push('');
+                    L.push('┌─ *📊 ALL STRATEGIES (ranked)* ─');
+                    const medal = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣'];
+                    ranked.forEach((r, i) => {
+                        const sideWord = r.side === 'CE' ? 'BUY CE' : r.side === 'PE' ? 'BUY PE' : '—';
+                        const short = STRATEGY_META[r.key]?.short || r.key;
+                        L.push(`│ ${medal[i] || `${i + 1}.`} ${short} · ${sideWord} · ${r.score} pts · ${r.confidence}%`);
+                    });
+                    for (const key of quiet) {
+                        L.push(`│ ➖ ${STRATEGY_META[key]?.short || key} · no setup`);
+                    }
+                    L.push('└────────────────────────────');
+                }
             } else {
                 L.push('┌─ *🚫 NO ENTRY* ─');
                 L.push(`│ ${s.reason || 'no setup'}`);
