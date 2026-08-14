@@ -364,6 +364,26 @@ const failedBreakCard = indexAnalysisService.format({
 ok(failedBreakCard.includes('Failed Range Break Fade'), 'failed-break ENTER card names its strategy');
 ok(failedBreakCard.includes('BUY CE'), 'a long fade buys the CE');
 
+// even when the fade fires, the all-strategies block must render underneath —
+// this was the bug: a live fade hid the strategy UI entirely, so /index looked
+// like the old card "again and again"
+const fadePlusScanCard = indexAnalysisService.format({
+    key: 'NIFTY', label: 'NIFTY 50', lot: 75, spot: 24435, changePct: -0.8, capital: 30000,
+    expiry: '18-Aug-2026', atmStrike: 24450, atmCe: { ltp: 121 }, atmPe: { ltp: 124 },
+    ceCapital: 9075, peCapital: 9300, pcr: 0.75, walls: {}, maxPain: 24500, topCe: [], topPe: [],
+    legName: 'PE', leg: { ltp: 124 },
+    signal: { side: 'short', kind: 'vwap-stretch', vwap: 24400, atr: 16.2, stretch: 1.2,
+        reason: '1.20xATR above VWAP - stretched, fade toward VWAP' },
+    plan: sizeIndexTrade({ premium: 124, lot: 75, indexAtr: 16.2, capital: 30000, minProfit: 600, maxProfit: 1200 }),
+    strategies: {
+        winner: null, list: [], quiet: ['confluence', 'orb', 'pcr-reversal', 'macd-mtf', 'mean-rev'],
+    },
+});
+ok(fadePlusScanCard.includes('ALL STRATEGIES (ranked)'), 'fade card also renders the scanned block');
+ok(fadePlusScanCard.includes('1️⃣ *Fade* — VWAP Stretch Fade'), 'the fade leads the scanned block');
+ok(fadePlusScanCard.includes('➖ Confluence · no setup'), 'quiet engines are listed under the fade');
+ok(fadePlusScanCard.includes('ENTER'), 'the fade headline call is still the primary read');
+
 // ═══════════════ tgbot2 strategy engine (ported) — indicators ═══════════════
 // RSI is tgbot2's SIMPLE (SMA) RSI — all-gains and flat windows read 100.
 ok(rsi([10, 11, 12, 13, 14, 15, 16, 17, 18], 7) === 100, 'all-gains RSI reads 100');

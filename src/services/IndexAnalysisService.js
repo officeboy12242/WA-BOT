@@ -615,25 +615,7 @@ class IndexAnalysisService {
                     L.push(`│ 🏃 runner ₹${fmt(sp.premT2)}  →  profit ${inr(sp.t2Rs)} _(beyond the tested target)_`);
                 }
                 L.push('└────────────────────────────');
-
-                // Prove every engine was scanned: the firing strategies ranked by
-                // quality score, and the quiet ones marked "no setup".
-                const ranked = a.strategies?.list || [];
-                const quiet = a.strategies?.quiet || [];
-                if (ranked.length || quiet.length) {
-                    L.push('');
-                    L.push('┌─ *📊 ALL STRATEGIES (ranked)* ─');
-                    const medal = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣'];
-                    ranked.forEach((r, i) => {
-                        const sideWord = r.side === 'CE' ? 'BUY CE' : r.side === 'PE' ? 'BUY PE' : '—';
-                        const short = STRATEGY_META[r.key]?.short || r.key;
-                        L.push(`│ ${medal[i] || `${i + 1}.`} ${short} · ${sideWord} · ${r.score} pts · ${r.confidence}%`);
-                    });
-                    for (const key of quiet) {
-                        L.push(`│ ➖ ${STRATEGY_META[key]?.short || key} · no setup`);
-                    }
-                    L.push('└────────────────────────────');
-                }
+                appendStrategyRanking(L, a);
             } else {
                 L.push('┌─ *🚫 NO ENTRY* ─');
                 L.push(`│ ${s.reason || 'no setup'}`);
@@ -665,6 +647,7 @@ class IndexAnalysisService {
             L.push(`│ Setup present but ${p.blocked}`);
             if (conf) L.push(`│ 📊 Confidence: *${conf.pct}%* — ${conf.label}`);
             L.push('└────────────────────────────');
+            appendStrategyRanking(L, a);
         } else if (p) {
             const dirWord = s.side === 'long' ? 'BUY CE' : 'BUY PE';
             const conf = signalConfidence(s);
@@ -689,6 +672,7 @@ class IndexAnalysisService {
             L.push(`_toward VWAP, ~half of which reaches the ATM premium. Stop and target are_`);
             L.push('_the same size (1:1) — that is the ratio the edge was measured at, so_');
             L.push('_do not widen one without the other._');
+            appendStrategyRanking(L, a);
         }
         L.push('');
         L.push('─────────────────────────────');
@@ -710,6 +694,39 @@ export const FADE_STRATEGY_NAMES = {
     'vwap-stretch': 'VWAP Stretch Fade',
     'failed-break': 'Failed Range Break Fade',
 };
+
+/**
+ * The "everything was scanned" block, rendered on EVERY verdict card — even when
+ * the measured fade fires (that is what hid the strategy UI before: NIFTY stays
+ * stretched above VWAP for long stretches, so /index kept printing the same fade
+ * card and the strategy work was invisible). The fade leads when live, then the
+ * five tgbot2 engines ranked by quality score, quiet ones marked "no setup".
+ */
+function appendStrategyRanking(L, a) {
+    const s = a.signal || {};
+    const ranked = a.strategies?.list || [];
+    const quiet = a.strategies?.quiet || [];
+    if (!ranked.length && !quiet.length) return;
+
+    L.push('');
+    L.push('┌─ *📊 ALL STRATEGIES (ranked)* ─');
+    const medal = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣'];
+    let i = 0;
+    if (s.side) {
+        const conf = signalConfidence(s);
+        const fadeShort = FADE_STRATEGY_NAMES[s.kind] || s.kind;
+        L.push(`│ ${medal[i++] || `${i}.`} *Fade* — ${fadeShort} · ${s.side === 'long' ? 'BUY CE' : 'BUY PE'} · ${conf ? conf.pct : '—'}%`);
+    }
+    for (const r of ranked) {
+        const sideWord = r.side === 'CE' ? 'BUY CE' : r.side === 'PE' ? 'BUY PE' : '—';
+        const short = STRATEGY_META[r.key]?.short || r.key;
+        L.push(`│ ${medal[i++] || `${i}.`} ${short} · ${sideWord} · ${r.score} pts · ${r.confidence}%`);
+    }
+    for (const key of quiet) {
+        L.push(`│ ➖ ${STRATEGY_META[key]?.short || key} · no setup`);
+    }
+    L.push('└────────────────────────────');
+}
 
 export const indexAnalysisService = new IndexAnalysisService();
 export default IndexAnalysisService;
