@@ -39,6 +39,7 @@ import { indianStockQuoteService } from './IndianStockQuoteService.js';
 import { getIndexSpec, INDEX_KEYS, unsupportedIndexReason } from '../data/indexUniverse.js';
 import { maxPain } from '../utils/blackScholes.js';
 import { logger } from '../utils/logger.js';
+import { evaluateStrategies } from './IndexStrategyEngine.js';
 
 const fmt = (n, d = 2) =>
     n == null || !Number.isFinite(Number(n)) ? '—' : Number(n).toFixed(d).replace(/\.00$/, '');
@@ -111,7 +112,13 @@ export function barAtr(bars, n = 6) {
     return a > 0 ? a : null;
 }
 
-/** Measured window. 10:30 was the tested time; 12:30 turned negative. */
+/**
+ * Measured window: 10:30 was the tested time; the rule measured NEGATIVE after
+ * 12:30. The clock was once a hard gate (10:00-12:30 only) — removed on request
+ * so /index gives a read ANY time the command runs. The window now survives as
+ * an honesty tier: `degraded` past 11:30 and `veryLate` past 12:30 both cut the
+ * confidence and print a warning on the card, instead of refusing to look.
+ */
 export const SIGNAL_WINDOW = { openMin: 10 * 60, bestMin: 10 * 60 + 30, closeMin: 11 * 60 + 30, deadMin: 12 * 60 + 30 };
 export const STRETCH_ATR = 1.0;   // the UNTUNED threshold that survived the holdout
 const OR_END_MIN = 9 * 60 + 30;
@@ -127,14 +134,9 @@ const OR_END_MIN = 9 * 60 + 30;
  * @param {number} nowMin current IST minute-of-day
  */
 export function evaluateIndexSignal(bars, nowMin) {
-    // Clock first, then data. At 09:45 both "too early" and "not enough bars" are
-    // true, but the clock is the reason that will not change by waiting for a feed.
-    if (nowMin < SIGNAL_WINDOW.openMin) {
-        return { side: null, reason: `too early — the rule was measured from ${hhmm(SIGNAL_WINDOW.openMin)}, VWAP is not established before that`, kind: null };
-    }
-    if (nowMin > SIGNAL_WINDOW.deadMin) {
-        return { side: null, reason: `too late — the same rule measured NEGATIVE after ${hhmm(SIGNAL_WINDOW.deadMin)}`, kind: null };
-    }
+    // No clock gate: /index must give a read any time it is run. The data gate
+    // below (need ~40 minutes of trade) is what stops a nonsense early read, and
+    // `degraded`/`veryLate` keep the measured-window honesty after 11:30/12:30.
     const session = (bars || []).filter((b) => Number.isFinite(b?.min) && b.min <= nowMin);
     if (session.length < 8) {
         return { side: null, reason: 'not enough bars yet — needs ~40 minutes of trade', kind: null };
@@ -155,6 +157,7 @@ export function evaluateIndexSignal(bars, nowMin) {
             reason: `${Math.abs(stretch).toFixed(2)}×ATR ${stretch > 0 ? 'above' : 'below'} VWAP — stretched, fade toward VWAP`,
             vwap, atr, stretch,
             degraded: nowMin > SIGNAL_WINDOW.closeMin,
+            veryLate: nowMin > SIGNAL_WINDOW.deadMin,
         };
     }
 
@@ -180,6 +183,7 @@ export function evaluateIndexSignal(bars, nowMin) {
                     reason: `broke the opening range ${broke > 0 ? 'up' : 'down'} then closed back inside — failed break, fade it`,
                     vwap, atr, stretch,
                     degraded: nowMin > SIGNAL_WINDOW.closeMin,
+                    veryLate: nowMin > SIGNAL_WINDOW.deadMin,
                 };
             }
         }
@@ -203,12 +207,12 @@ function hhmm(min) {
  *
  * Base is the holdout-measured win rate per rule: 66.7% for a vwap-stretch
  * (n=51), 65.6% for a failed range break (n=32). Two adjustments, both bounded:
- *   - degraded window (past 11:30) — −15pts; the same rule measured weaker
- *     there and NEGATIVE after 12:30, so a late signal should never read as
- *     strong as a fresh one.
+ *   - late window honesty — −15pts past 11:30 (`degraded`), −25pts past 12:30
+ *     (`veryLate`), where the same rule measured NEGATIVE. A late signal never
+ *     reads as strong as a fresh one.
  *   - stretch magnitude (vwap-stretch only) — up to +6pts for how far past the
  *     1.0xATR threshold price sits, which only ever offsets part of the
- *     degraded penalty. A fresh stretch is exactly the measured rate.
+ *     late penalty. A fresh stretch is exactly the measured rate.
  *
  * @param {object|null} signal from evaluateIndexSignal
  * @returns {{pct:number, label:string}|null} null when there is no side
@@ -217,7 +221,8 @@ export function signalConfidence(signal) {
     if (!signal?.side || !signal?.kind) return null;
     const base = signal.kind === 'failed-break' ? 0.656 : 0.667;
     let pts = base * 100;
-    if (signal.degraded) pts -= 15;
+    if (signal.veryLate) pts -= 25;
+    else if (signal.degraded) pts -= 15;
     if (signal.kind === 'vwap-stretch' && Number.isFinite(signal.stretch)) {
         const extra = Math.min(6, Math.max(0, (Math.abs(signal.stretch) - STRETCH_ATR) * 4));
         pts += extra;
@@ -392,6 +397,12 @@ class IndexAnalysisService {
         this.capital = cfg.capital ?? config.INDEX_TRADE_CAPITAL ?? 30_000;
         this.minProfit = cfg.minProfit ?? config.INDEX_TRADE_MIN_PROFIT ?? 600;
         this.maxProfit = cfg.maxProfit ?? config.INDEX_TRADE_MAX_PROFIT ?? 1_200;
+        this.strategyOpts = {
+            minLayers: cfg.strategyMinLayers ?? config.INDEX_STRATEGY_MIN_LAYERS ?? 3,
+            orbBreakPct: cfg.strategyOrbBreakPct ?? config.INDEX_STRATEGY_ORB_BREAK_PCT ?? 0.08,
+            minAdx: cfg.strategyMinAdx ?? config.INDEX_STRATEGY_MIN_ADX ?? 16,
+            lastEntryMin: cfg.strategyLastEntryMin ?? config.INDEX_STRATEGY_LAST_ENTRY_MIN ?? 15 * 60,
+        };
     }
 
     /**
@@ -410,15 +421,19 @@ class IndexAnalysisService {
             );
         }
 
-        const [chainRes, quoteRes, barsRes] = await Promise.allSettled([
+        const [chainRes, quoteRes, barsRes, hourlyRes] = await Promise.allSettled([
             nseOptionChainService.fetchOptionContext(spec.nse),
             indianStockQuoteService.fetchQuote(spec.nse),
             fetchYahooIntradayCandles(spec.yahoo, { interval: '5m', range: '5d' }),
+            fetchYahooIntradayCandles(spec.yahoo, { interval: '1h', range: '1mo' }),
         ]);
         const chain = chainRes.status === 'fulfilled' ? chainRes.value : null;
         const quote = quoteRes.status === 'fulfilled' ? quoteRes.value : null;
         const rawBars = barsRes.status === 'fulfilled'
             ? (Array.isArray(barsRes.value) ? barsRes.value : barsRes.value?.candles)
+            : null;
+        const hourly = hourlyRes.status === 'fulfilled'
+            ? (Array.isArray(hourlyRes.value) ? hourlyRes.value : hourlyRes.value?.candles)
             : null;
         const snap = chain?.snapshot || null;
 
@@ -463,6 +478,21 @@ class IndexAnalysisService {
 
         const confidence = signalConfidence(signal);
 
+        // ---- the tgbot2 strategy engines: fire almost all day so the card does
+        // not dead-end whenever the measured fade rule is quiet ----
+        const full5m = (rawBars || [])
+            .filter((c) => Number.isFinite(c?.close) && !(!(c.volume > 0) && c.high === c.low))
+            .map((c) => ({ ...c, min: istMinuteOfDay(c.ts) }));
+        const strategies = evaluateStrategies({
+            chain: { ...snap, walls },
+            quote,
+            today5m: todayBars,
+            full5m,
+            hourly,
+            nowMin,
+            opts: this.strategyOpts,
+        });
+
         logger.info(`📐 Index read ${spec.nse}: spot ${fmt(spot)} ATM ${snap.atmStrike} exp ${snap.expiry}`);
 
         return {
@@ -496,6 +526,7 @@ class IndexAnalysisService {
             legName,
             leg,
             plan,
+            strategies,
         };
     }
 
@@ -551,25 +582,65 @@ class IndexAnalysisService {
         const s = a.signal || {};
         const p = a.plan;
         if (!s.side) {
-            L.push('┌─ *🚫 NO ENTRY* ─');
-            L.push(`│ ${s.reason || 'no setup'}`);
-            if (s.vwap != null) L.push(`│ VWAP ${fmt(s.vwap)} · spot is ${fmt(Math.abs(s.stretch ?? 0), 2)}×ATR away`);
-            // /too (early|late)|NEGATIVE/ = the measured rule window is closed,
-            // not that the market is flat — label it as such so the read is honest.
-            const windowClosed = /too (early|late)|NEGATIVE/.test(s.reason || '');
-            L.push(`│ 📊 Confidence: *0%* — ${windowClosed ? 'rule window closed (10:00–12:30 IST)' : 'no setup fired'}`);
-            L.push('└────────────────────────────');
-
-            // When the measured fade rule is not live, give the chain-based lean
-            // so the card is not a dead end. Clearly NOT the tested edge.
-            const lean = chainLean(a);
-            if (lean) {
-                L.push('');
-                L.push('┌─ *📊 CHAIN LEAN* ─');
-                L.push('│ _Unmeasured — conventional options reasoning, not the tested edge_');
-                for (const f of lean.factors) L.push(`│ ${f.detail}`);
-                L.push(`│ NET: *${lean.netLabel}*`);
+            // The measured fade rule is quiet — but the tgbot2 strategy engines
+            // usually have a setup, so the card should not dead-end with NO ENTRY.
+            const strat = a.strategies?.winner;
+            if (strat) {
+                const dirWord = strat.side === 'CE' ? 'BUY CE' : 'BUY PE';
+                const leg = strat.side === 'CE' ? a.atmCe : a.atmPe;
+                const sp = strat.side && leg?.ltp != null && strat.atr15
+                    ? sizeIndexTrade({
+                          premium: leg.ltp,
+                          lot: a.lot,
+                          indexAtr: strat.atr15,
+                          capital: a.capital ?? this.capital,
+                          minProfit: this.minProfit,
+                          maxProfit: this.maxProfit,
+                      })
+                    : null;
+                L.push(`┌─ *🎯 STRATEGY — ${strat.name}* ─`);
+                L.push(`│ ${dirWord} · layers ${strat.layers} · ${strat.strength}`);
+                L.push(`│ Why: ${(strat.reasons || []).join(' · ')}`);
+                L.push(`│ 📊 Confidence: *${strat.confidence}%* — ${strat.confidenceLabel} _(tgbot2 backtest ${strat.winRateTag || '—'}, not re-verified here)_`);
+                if (sp?.blocked) {
+                    L.push(`│ ⚠️ ${sp.blocked}`);
+                } else if (sp) {
+                    L.push('│');
+                    L.push(`│ *${a.atmStrike} ${strat.side}* · ${a.expiry}`);
+                    L.push(`│ Lots: *${sp.lots}* (${sp.qty} qty) · capital used *${inr(sp.capitalUsed)}* of ${inr(a.capital ?? this.capital)}`);
+                    L.push('│');
+                    L.push(`│ 🟢 ENTRY  ₹${fmt(sp.premEntry)}`);
+                    L.push(`│ 🎯 EXIT AT ₹${fmt(sp.premT1)}  →  profit *${inr(sp.t1Rs)}*`);
+                    L.push(`│ 🛑 STOP   ₹${fmt(sp.premStop)}  →  loss *${inr(sp.riskRs)}*`);
+                    L.push(`│ 🏃 runner ₹${fmt(sp.premT2)}  →  profit ${inr(sp.t2Rs)} _(beyond the tested target)_`);
+                }
                 L.push('└────────────────────────────');
+                L.push('');
+                L.push(`_Setup fired: ${strat.name}. The win rate is tgbot2's self-reported backtest —_`);
+                L.push('_not re-verified in this bot. Sizing keeps the same 1R discipline as the fade._');
+            } else {
+                L.push('┌─ *🚫 NO ENTRY* ─');
+                L.push(`│ ${s.reason || 'no setup'}`);
+                if (s.vwap != null) L.push(`│ VWAP ${fmt(s.vwap)} · spot is ${fmt(Math.abs(s.stretch ?? 0), 2)}×ATR away`);
+                // /too (early|late)|NEGATIVE/ = the measured rule window is closed,
+                // not that the market is flat — label it as such so the read is honest.
+                const windowClosed = /too (early|late)|NEGATIVE/.test(s.reason || '');
+                L.push(`│ 📊 Confidence: *0%* — ${windowClosed ? 'rule window closed (10:00–12:30 IST)' : 'no setup fired'}`);
+                const none = a.strategies?.noneReason;
+                if (none && !windowClosed) L.push(`│ 🧩 Strategies: ${none}`);
+                L.push('└────────────────────────────');
+
+                // When the measured fade rule is not live, give the chain-based lean
+                // so the card is not a dead end. Clearly NOT the tested edge.
+                const lean = chainLean(a);
+                if (lean) {
+                    L.push('');
+                    L.push('┌─ *📊 CHAIN LEAN* ─');
+                    L.push('│ _Unmeasured — conventional options reasoning, not the tested edge_');
+                    for (const f of lean.factors) L.push(`│ ${f.detail}`);
+                    L.push(`│ NET: *${lean.netLabel}*`);
+                    L.push('└────────────────────────────');
+                }
             }
         } else if (p?.blocked) {
             const conf = signalConfidence(s);
@@ -582,7 +653,8 @@ class IndexAnalysisService {
             const conf = signalConfidence(s);
             L.push(`┌─ *✅ ENTER — ${dirWord}* ─`);
             L.push(`│ Why: ${s.reason}`);
-            if (s.degraded) L.push(`│ ⚠️ past ${hhmm(SIGNAL_WINDOW.closeMin)} — weaker than the tested window`);
+            if (s.veryLate) L.push(`│ ⚠️ past ${hhmm(SIGNAL_WINDOW.deadMin)} — the study measured this window NEGATIVE (late fade)`);
+            else if (s.degraded) L.push(`│ ⚠️ past ${hhmm(SIGNAL_WINDOW.closeMin)} — weaker than the tested window`);
             if (conf) L.push(`│ 📊 Confidence: *${conf.pct}%* — ${conf.label}`);
             L.push('│');
             L.push(`│ *${a.atmStrike} ${a.legName}* · ${a.expiry}`);

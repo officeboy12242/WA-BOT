@@ -18,6 +18,12 @@ import {
 import { normalizeYahooSymbol } from '../src/services/IndianStockQuoteService.js';
 import { EXPIRY_INDICES } from '../src/services/ExpiryTradeService.js';
 import { COMMAND_REGISTRY } from '../src/commands/registry.js';
+import {
+    STRATEGY_KEYS,
+    checkConfluence, checkOrb, checkPcrExtreme, checkMacdMtf, checkMeanRev,
+    strategyConfidence, qualityScore, evaluateStrategies, buildTech, resample15m,
+} from '../src/services/IndexStrategyEngine.js';
+import { rsi, macdState, adx, bollinger } from '../src/utils/indicators.js';
 
 let pass = 0, fail = 0;
 const ok = (c, label) => { if (c) pass++; else { fail++; console.log(`  FAIL: ${label}`); } };
@@ -176,13 +182,15 @@ const dnSess = [
 ];
 ok(evaluateIndexSignal(dnSess, 10 * 60 + 35).side === 'long', 'stretch BELOW VWAP fades LONG');
 
-// the measured time window is load-bearing, not cosmetic
-ok(evaluateIndexSignal(upSess, 9 * 60 + 45).side === null, 'before the window -> no entry');
-ok(/too early/.test(evaluateIndexSignal(upSess, 9 * 60 + 45).reason), 'says too early');
-ok(evaluateIndexSignal(upSess, 14 * 60).side === null, 'after the dead time -> no entry');
-ok(/NEGATIVE/.test(evaluateIndexSignal(upSess, 14 * 60).reason), 'says the rule measured negative late');
+// the clock gate was removed on request — /index must read any time, so the
+// only early block left is the data gate (needs ~40 minutes of trade)
+ok(evaluateIndexSignal(upSess, 9 * 60 + 45).side === null, 'no clock gate — but too few bars before 09:55 -> no entry');
+ok(/not enough bars/.test(evaluateIndexSignal(upSess, 9 * 60 + 45).reason), 'early block is the data gate, not the clock');
+const lateSig = evaluateIndexSignal(upSess, 14 * 60);
+ok(lateSig.side === 'short', 'the fade now evaluates after 12:30 (clock gates removed)');
+ok(lateSig.veryLate === true && lateSig.degraded === true, 'post-12:30 reads are flagged veryLate');
 const degradedSig = evaluateIndexSignal(upSess, 12 * 60);
-ok(degradedSig.side === 'short' && degradedSig.degraded === true, 'late-but-alive is flagged degraded');
+ok(degradedSig.side === 'short' && degradedSig.degraded === true, '12:00 read is flagged degraded (not veryLate)');
 
 // ---------------------------------------------------------- confidence score
 ok(signalConfidence(null) === null, 'no signal -> no confidence');
@@ -194,6 +202,9 @@ ok(confBreak?.pct === 66 && confBreak.label === 'high', 'fresh failed-break conf
 const confDegraded = signalConfidence({ side: 'short', kind: 'vwap-stretch', stretch: 1.2, degraded: true });
 ok(confDegraded?.pct === 53 && confDegraded.label === 'low', 'degraded window drops confidence 67 -> 53 (low)');
 ok(confDegraded.pct < confStretch.pct, 'degraded is never stronger than fresh');
+const confVeryLate = signalConfidence({ side: 'short', kind: 'vwap-stretch', stretch: 1.2, degraded: true, veryLate: true });
+ok(confVeryLate?.pct === 43 && confVeryLate.label === 'low', 'veryLate (post-12:30) drops confidence further: 67 -> 43');
+ok(confVeryLate.pct < confDegraded.pct, 'veryLate is weaker than degraded — the window measured NEGATIVE there');
 const confBigStretch = signalConfidence({ side: 'short', kind: 'vwap-stretch', stretch: 3.0 });
 ok(confBigStretch?.pct === 67, 'stretch bonus never pushes past the measured base');
 const confDegradedBig = signalConfidence({ side: 'short', kind: 'vwap-stretch', stretch: 3.0, degraded: true });
@@ -305,19 +316,267 @@ ok(quietCard.includes('NO ENTRY'), 'quiet card says NO ENTRY');
 ok(quietCard.includes('no setup'), 'quiet card gives the reason');
 ok(quietCard.includes('Confidence: *0%*'), 'no-setup card still shows a 0% confidence read');
 ok(!quietCard.includes('EXIT AT'), 'quiet card offers no exit price');
-// The measured rule only lives 10:00-12:30 IST — outside it the card must say
-// the window is closed, not pretend the market is simply flat.
-const earlyCard = indexAnalysisService.format({
+// A quiet card (no fade, no strategy, no signal) still shows the chain lean
+// instead of dead-ending — labeled unmeasured.
+const quietLeanCard = indexAnalysisService.format({
     key: 'NIFTY', label: 'NIFTY 50', lot: 75, spot: 24435, capital: 30000, expiry: '18-Aug-2026',
     atmStrike: 24450, atmCe: { ltp: 121 }, atmPe: { ltp: 124 }, pcr: 0.75,
     walls: {}, topCe: [], topPe: [],
-    signal: { side: null, reason: 'too early — the rule was measured from 10:00, VWAP is not established before that' },
+    signal: { side: null, reason: 'no setup - 0.20xATR from VWAP (needs >=1.0) and no failed range break' },
     plan: null,
 });
-ok(earlyCard.includes('window closed'), 'out-of-window card says the window is closed, not just flat');
-ok(earlyCard.includes('CHAIN LEAN'), 'out-of-window card shows the chain lean instead of dead-ending');
-ok(earlyCard.includes('Unmeasured'), 'chain lean is labeled unmeasured');
+ok(quietLeanCard.includes('CHAIN LEAN'), 'quiet card shows the chain lean instead of dead-ending');
+ok(quietLeanCard.includes('Unmeasured'), 'chain lean is labeled unmeasured');
+ok(quietLeanCard.includes('no setup fired'), 'quiet card says no setup fired (no clock-gate wording anymore)');
 ok(!/lean BULLISH|lean BEARISH/.test(entryCard), 'a card WITH a live fade signal shows no chain lean');
+
+// the fade ENTER card must warn when the read is past the measured window
+const veryLateCard = indexAnalysisService.format({
+    key: 'NIFTY', label: 'NIFTY 50', lot: 75, spot: 24435, changePct: -0.8, capital: 30000,
+    expiry: '18-Aug-2026', atmStrike: 24450, atmCe: { ltp: 121, iv: 8.6 }, atmPe: { ltp: 124, iv: 11 },
+    ceCapital: 9075, peCapital: 9300, pcr: 0.75, pcrLabel: pcrLabel(0.75),
+    walls: { resistance: null, support: null }, maxPain: 24500, topCe: [], topPe: [],
+    legName: 'PE', leg: { ltp: 124 },
+    signal: {
+        side: 'short', kind: 'vwap-stretch', vwap: 24400, atr: 16.2, stretch: 1.2,
+        reason: '1.20xATR above VWAP - stretched, fade toward VWAP', degraded: true, veryLate: true,
+    },
+    plan: sizeIndexTrade({ premium: 124, lot: 75, indexAtr: 16.2, capital: 30000, minProfit: 600, maxProfit: 1200 }),
+});
+ok(veryLateCard.includes('NEGATIVE'), 'a very-late ENTER card warns the window measured negative');
+ok(veryLateCard.includes('Confidence: *43%*'), 'a very-late ENTER card shows the cut confidence');
+
+// ═══════════════ tgbot2 strategy engine (ported) — indicators ═══════════════
+// RSI is tgbot2's SIMPLE (SMA) RSI — all-gains and flat windows read 100.
+ok(rsi([10, 11, 12, 13, 14, 15, 16, 17, 18], 7) === 100, 'all-gains RSI reads 100');
+ok(rsi([10, 10, 10, 10, 10, 10, 10, 10, 10], 7) === 100, 'flat RSI reads 100 (tgbot2 behavior)');
+ok(near(rsi([10, 12, 12, 12, 12, 12, 12, 11, 12], 7), 50, 1e-6), 'balanced gains/losses: RSI 50');
+ok(rsi([10, 9, 8, 7, 6, 5, 4, 3, 2], 7) === 0, 'all-loss RSI reads 0');
+ok(rsi([1, 2], 7) === null, 'RSI needs period+1 closes');
+
+const rising40 = Array.from({ length: 40 }, (_, i) => 100 + i * 0.5);
+ok(macdState(rising40)?.bull === true, 'rising closes -> MACD bull');
+ok(macdState(rising40)?.aboveZero === true, 'rising closes -> MACD above zero');
+const falling40 = Array.from({ length: 40 }, (_, i) => 120 - i * 0.5);
+ok(macdState(falling40)?.bear === true, 'falling closes -> MACD bear');
+ok(macdState(rising40.slice(0, 30)) === null, 'MACD needs >= 35 closes (tgbot2 guard)');
+// a late sharp spike puts the MACD cross inside the 3-bar lookback window
+const lateSpike = [...Array(35).fill(100), 100, 100, 132];
+ok(macdState(lateSpike, { crossLookback: 3 })?.crossUp === true, 'late spike -> crossUp detected in lookback');
+ok(macdState(lateSpike, { crossLookback: 3 })?.bull === true, 'late spike -> MACD bull now');
+
+const trendOhlc = {
+    high: Array.from({ length: 30 }, (_, i) => 101 + i),
+    low: Array.from({ length: 30 }, (_, i) => 99 + i),
+    close: Array.from({ length: 30 }, (_, i) => 100 + i),
+};
+ok(adx(trendOhlc) !== null && adx(trendOhlc) > 50, 'steady trend -> high ADX');
+const flatOhlc = {
+    high: Array.from({ length: 30 }, () => 102),
+    low: Array.from({ length: 30 }, () => 98),
+    close: Array.from({ length: 30 }, () => 100),
+};
+ok(adx(flatOhlc) === null, 'flat series -> ADX null (no directional movement)');
+
+const bb = bollinger(Array(20).fill(10));
+ok(bb && near(bb.upper, 10) && near(bb.lower, 10) && near(bb.middle, 10), 'flat series -> Bollinger bands collapse on the mean');
+ok(bollinger([1, 2, 3], 20) === null, 'Bollinger needs the full window');
+
+// ═══════════════ strategy checks (ported logic, crafted tech) ═══════════════
+const O = { minLayers: 3, orbBreakPct: 0.08, minAdx: 16, lastEntryMin: 15 * 60 };
+
+// Confluence — 4 layers agree -> CE
+const confBull = checkConfluence(
+    { spot: 101, vwap: 100, ema9: 100.5, ema21: 100.2, rsi: 60, momPct: 0.5, dayPct: 0.2 },
+    { pcr: 1.2, atmCe: { changeOi: 1000 }, atmPe: { changeOi: 100 }, walls: { support: { strike: 99 }, resistance: { strike: 103 } } },
+    O
+);
+ok(confBull?.side === 'CE' && confBull.layers === '4/4', 'confluence fires CE when 4 layers agree');
+const confWeak = checkConfluence(
+    { spot: 101, vwap: 100, ema9: 99.5, ema21: 99.2, rsi: 50, momPct: 0.1, dayPct: 0.1 },
+    { pcr: 1.0, atmCe: {}, atmPe: {}, walls: {} },
+    O
+);
+ok(confWeak === null, 'confluence stays quiet below the min layers');
+
+// ORB — CE above the range, before 11:00, RSI/EMA confirmed
+const orbCe = checkOrb(
+    { spot: 105, orbHigh: 103, orbLow: 99, rsi: 60, ema9: 102 },
+    { pcr: 1.1 },
+    O,
+    10 * 60 + 30
+);
+ok(orbCe?.side === 'CE' && orbCe.orbBreakPct > 0.08, 'ORB fires CE on a confirmed breakout');
+ok(checkOrb({ spot: 105, orbHigh: 103, orbLow: 99, rsi: 60, ema9: 102 }, { pcr: 1.1 }, O, 11 * 60 + 1) === null, 'ORB window closes after 11:00');
+ok(checkOrb({ spot: 105, orbHigh: 103, orbLow: 99, rsi: 50, ema9: 102 }, { pcr: 1.1 }, O, 10 * 60 + 30) === null, 'ORB CE needs RSI >= 55');
+const orbPe = checkOrb(
+    { spot: 95, orbHigh: 103, orbLow: 99, rsi: 40, ema9: 98 },
+    { pcr: 0.9 },
+    O,
+    10 * 60 + 30
+);
+ok(orbPe?.side === 'PE', 'ORB fires PE on a breakdown');
+ok(checkOrb({ spot: 101, orbHigh: 103, orbLow: 99, rsi: 60, ema9: 102 }, { pcr: 1.1 }, O, 10 * 60 + 30) === null, 'inside the range -> no ORB');
+
+// PCR extreme reversal
+const pcrCe = checkPcrExtreme(
+    { spot: 100, rsi: 40, ema9: 99, adx: 18 },
+    { pcr: 1.6, walls: { support: { strike: 98 }, resistance: { strike: 103 } } },
+    O
+);
+ok(pcrCe?.side === 'CE' && pcrCe.pcr === 1.6, 'PCR >= 1.5 with oversold RSI -> CE bounce');
+ok(checkPcrExtreme({ spot: 100, rsi: 60, ema9: 99, adx: 18 }, { pcr: 1.6, walls: {} }, O) === null, 'PCR CE needs RSI <= 50');
+ok(checkPcrExtreme({ spot: 100, rsi: 40, ema9: 99, adx: 30 }, { pcr: 1.6, walls: {} }, O) === null, 'strong ADX trend chops the reversal');
+const pcrPe = checkPcrExtreme(
+    { spot: 100, rsi: 65, ema9: 101, adx: 18 },
+    { pcr: 0.4, walls: { support: { strike: 97 }, resistance: { strike: 103 } } },
+    O
+);
+ok(pcrPe?.side === 'PE', 'PCR <= 0.5 with overbought RSI -> PE fade');
+
+// MACD multi-timeframe
+const macdBullTech = {
+    mtfMacd: { ready: true, h1: { bull: true, macd: 1, signal: 0.5, aboveZero: true }, m15: { bull: true, crossUp: true, crossDown: false } },
+    adx: 20, rsi: 60, ema9: 100, spot: 101,
+};
+ok(checkMacdMtf(macdBullTech, { pcr: 1.0 }, O)?.side === 'CE', '1H+15m bull with entry cross -> CE');
+ok(checkMacdMtf(
+    { ...macdBullTech, mtfMacd: { ready: true, h1: { bull: true }, m15: { bear: true } } },
+    { pcr: 1.0 }, O
+) === null, 'mixed timeframes -> no MACD entry');
+ok(checkMacdMtf({ ...macdBullTech, adx: 14 }, { pcr: 1.0 }, O) === null, 'MACD-MTF needs ADX >= 16');
+ok(checkMacdMtf(macdBullTech, { pcr: 0.6 }, O) === null, 'MACD CE needs PCR >= 0.75');
+ok(checkMacdMtf({ ...macdBullTech, mtfMacd: { ready: false } }, { pcr: 1.0 }, O) === null, 'MACD-MTF skips when 1H is unavailable');
+
+// Mean reversion — sideways chop at the Bollinger edge
+ok(checkMeanRev(
+    { spot: 98, adx: 12, rsi: 30, vwap: 99, bb: { upper: 110, middle: 104, lower: 98 } },
+    { pcr: 1.2 }, O
+)?.side === 'CE', 'low BB + oversold RSI in chop -> CE bounce');
+ok(checkMeanRev(
+    { spot: 98, adx: 25, rsi: 30, vwap: 99, bb: { upper: 110, middle: 104, lower: 98 } },
+    { pcr: 1.2 }, O
+) === null, 'mean reversion needs ADX < 20');
+ok(checkMeanRev(
+    { spot: 112, adx: 12, rsi: 70, vwap: 110, bb: { upper: 110, middle: 104, lower: 98 } },
+    { pcr: 0.8 }, O
+)?.side === 'PE', 'upper BB + overbought RSI -> PE fade');
+ok(checkMeanRev(
+    { spot: 104, adx: 12, rsi: 50, vwap: 104, bb: { upper: 110, middle: 104, lower: 98 } },
+    { pcr: 1.0 }, O
+) === null, 'mid-band price -> no mean reversion');
+
+// confidence + quality scoring
+ok(strategyConfidence(STRATEGY_KEYS.ORB, 55).pct === 62, 'ORB at neutral quality -> 62% (base)');
+ok(strategyConfidence(STRATEGY_KEYS.MACD_MTF, 75).pct === 77, 'MACD-MTF strong quality -> base 69 + 8');
+ok(strategyConfidence(STRATEGY_KEYS.MACD_MTF, 75).label === 'high', '>= 75 grades high');
+ok(strategyConfidence(STRATEGY_KEYS.ORB, 0).pct === 40, 'confidence never drops below 40');
+ok(qualityScore({ key: STRATEGY_KEYS.ORB, side: 'CE', orbBreakPct: 0.3 }, { adx: 28, ema9: 102, ema21: 100, spot: 105, rsi: 62 }, {}) >= 60, 'strong ORB setup scores high');
+
+// ═══════════════ integration: evaluateStrategies over real bar series ═══════════════
+function mkSeries({ days = 4, startClose = 100, flatBars = 3, moveTo = 108, nowMin = 10 * 60 + 30 } = {}) {
+    const full5m = [];
+    const dayKey = (d) => `2026-08-${String(11 + d).padStart(2, '0')}`;
+    for (let d = 0; d < days; d++) {
+        for (let min = 9 * 60 + 15; min <= 14 * 60 + 25; min += 5) {
+            full5m.push({ ts: Date.parse(dayKey(d) + 'T00:00:00Z') + min * 60e3, min, open: startClose, high: startClose + 3, low: startClose - 3, close: startClose, volume: 1000 });
+        }
+    }
+    const today = [];
+    const push = (min, close) => {
+        const bar = { ts: Date.parse(dayKey(days) + 'T00:00:00Z') + min * 60e3, min, open: close, high: close + 3, low: close - 3, close, volume: 1000 };
+        full5m.push(bar);
+        if (min <= nowMin) today.push(bar);
+    };
+    for (let i = 0; i < flatBars; i++) push(9 * 60 + 15 + i * 5, startClose);
+    const step = (moveTo - startClose) / 6;
+    for (let i = 0; i < 6; i++) push(9 * 60 + 30 + i * 5, startClose + step * (i + 1));
+    for (let min = 10 * 60; min <= nowMin; min += 5) push(min, moveTo);
+    return { full5m, today };
+}
+
+const series = mkSeries();
+const tech = buildTech({ today5m: series.today, full5m: series.full5m, hourly: null, chain: { spot: 108, pcr: 1.1 }, quote: { prevClose: 100 } });
+ok(tech.spot === 108, 'tech picks up the chain spot');
+ok(tech.orbHigh === 103 && tech.orbLow === 97, 'ORB level = first 15m candle of today');
+ok(tech.rsi !== null && tech.ema9 !== null && tech.ema21 !== null, 'rising series yields RSI/EMA');
+const resampled = resample15m(series.full5m);
+ok(resampled.length > 0 && resampled[0].min === 9 * 60 + 15, '5m resamples into 15m slots');
+
+const ev = evaluateStrategies({
+    chain: { spot: 108, pcr: 1.1, atmCe: {}, atmPe: {}, walls: {} },
+    quote: { prevClose: 100 },
+    today5m: series.today,
+    full5m: series.full5m,
+    hourly: null,
+    nowMin: 10 * 60 + 30,
+    opts: O,
+});
+ok(ev.evaluated === true && ev.winner?.key === 'orb', 'ORB is the winning strategy on a breakout day');
+ok(ev.winner?.side === 'CE' && ev.list.length >= 1, 'winner has a side and the list is ordered');
+ok(ev.winner.confidence >= 40 && ev.winner.confidence <= 92, 'winner confidence is bounded 40-92');
+
+// flat day + neutral PCR -> every engine quiet, no dead-end reason shown
+const flatDay = mkSeries({ moveTo: 100 });
+const evFlat = evaluateStrategies({
+    chain: { spot: 100, pcr: 1.0, atmCe: {}, atmPe: {}, walls: {} },
+    quote: { prevClose: 100 },
+    today5m: flatDay.today,
+    full5m: flatDay.full5m,
+    hourly: null,
+    nowMin: 10 * 60 + 30,
+    opts: O,
+});
+ok(evFlat.list.length === 0 && evFlat.winner === null, 'flat day -> no strategy fires');
+ok(typeof evFlat.noneReason === 'string', 'quiet day explains why in noneReason');
+
+const evLate = evaluateStrategies({
+    chain: { spot: 108, pcr: 1.1, atmCe: {}, atmPe: {}, walls: {} },
+    quote: { prevClose: 100 },
+    today5m: series.today,
+    full5m: series.full5m,
+    hourly: null,
+    nowMin: 16 * 60,
+    opts: O,
+});
+ok(evLate.evaluated === false && /last entry/.test(evLate.noneReason), 'after 15:00 the engines stop taking entries');
+
+// ═══════════════ card renders a STRATEGY entry when the fade is quiet ═══════════════
+const stratCard = indexAnalysisService.format({
+    key: 'NIFTY', label: 'NIFTY 50', lot: 75, spot: 24435, capital: 30000, expiry: '18-Aug-2026',
+    atmStrike: 24450, atmCe: { ltp: 121 }, atmPe: { ltp: 124 }, pcr: 0.75,
+    walls: {}, topCe: [], topPe: [],
+    signal: { side: null, reason: 'no setup - 0.30xATR from VWAP' },
+    plan: null,
+    strategies: {
+        winner: {
+            key: 'orb', name: 'ORB (Opening Range Breakout)', side: 'CE', layers: 'ORB+OI',
+            strength: 'STRONG', reasons: ['ORB breakout above 24500 (+0.21%)', 'RSI 62 confirms momentum'],
+            confidence: 62, confidenceLabel: 'medium', winRateTag: '~58-65%', atr15: 16.2,
+        },
+        list: [],
+    },
+});
+ok(stratCard.includes('STRATEGY'), 'strategy card names the engine header');
+ok(stratCard.includes('BUY CE'), 'strategy card says BUY CE');
+ok(stratCard.includes('tgbot2 backtest'), 'strategy card flags the win rate as tgbot2 backtest');
+ok(stratCard.includes('not re-verified'), 'strategy card is honest about the unverified edge');
+ok(stratCard.includes('EXIT AT'), 'strategy card sizes an exit');
+ok(stratCard.includes('STOP'), 'strategy card gives a stop');
+ok(!stratCard.includes('NO ENTRY'), 'a fired strategy card is not NO ENTRY');
+ok(!/lean BULLISH|lean BEARISH/.test(stratCard), 'a fired strategy card shows no chain lean');
+
+// quiet card with a strategy noneReason shows why the engines stayed quiet
+const quietStratCard = indexAnalysisService.format({
+    key: 'NIFTY', label: 'NIFTY 50', lot: 75, spot: 24435, capital: 30000, expiry: '18-Aug-2026',
+    atmStrike: 24450, atmCe: { ltp: 121 }, atmPe: { ltp: 124 }, pcr: 0.75,
+    walls: {}, topCe: [], topPe: [],
+    signal: { side: null, reason: 'no setup - 0.30xATR from VWAP', vwap: 24400, stretch: 0.3 },
+    plan: null,
+    strategies: { winner: null, list: [], noneReason: 'no strategy fired — PCR mid-band, no MACD cross' },
+});
+ok(quietStratCard.includes('NO ENTRY'), 'all-quiet card still says NO ENTRY');
+ok(quietStratCard.includes('🧩 Strategies:'), 'all-quiet card says why the strategies stayed quiet');
 
 console.log(`\ncheck-index: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

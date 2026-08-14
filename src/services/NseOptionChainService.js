@@ -182,6 +182,8 @@ class NseOptionChainService {
                   ltp: atm.CE.lastPrice ?? null,
                   oi: atm.CE.openInterest ?? null,
                   iv: atm.CE.impliedVolatility ?? null,
+                  /** Intraday OI change — feeds the Confluence strategy's OI layer. */
+                  changeOi: atm.CE.changeinOpenInterest ?? null,
               }
             : null;
         const atmPe = atm?.PE
@@ -190,6 +192,7 @@ class NseOptionChainService {
                   ltp: atm.PE.lastPrice ?? null,
                   oi: atm.PE.openInterest ?? null,
                   iv: atm.PE.impliedVolatility ?? null,
+                  changeOi: atm.PE.changeinOpenInterest ?? null,
               }
             : null;
 

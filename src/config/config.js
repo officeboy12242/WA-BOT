@@ -308,6 +308,23 @@ export const config = {
     INDEX_TRADE_CAPITAL: Math.max(1000, parseInt(process.env.INDEX_TRADE_CAPITAL, 10) || 30_000),
     INDEX_TRADE_MIN_PROFIT: Math.max(100, parseInt(process.env.INDEX_TRADE_MIN_PROFIT, 10) || 600),
     INDEX_TRADE_MAX_PROFIT: Math.max(200, parseInt(process.env.INDEX_TRADE_MAX_PROFIT, 10) || 1_200),
+    /**
+     * /index tgbot2 strategy engines (Confluence · ORB · PCR Reversal · MACD-MTF
+     * · Mean Reversion). These run almost all trading day so the card almost never
+     * dead-ends with NO ENTRY — the measured fade rule is only 10:00-12:30. Their
+     * win rates are tgbot2's own backtests, printed on the card as unverified.
+     */
+    INDEX_STRATEGY_MIN_LAYERS: Math.max(2, Math.min(4, parseInt(process.env.INDEX_STRATEGY_MIN_LAYERS, 10) || 3)),
+    INDEX_STRATEGY_ORB_BREAK_PCT: Math.max(
+        0.02,
+        Math.min(0.5, parseFloat(process.env.INDEX_STRATEGY_ORB_BREAK_PCT) || 0.08)
+    ),
+    INDEX_STRATEGY_MIN_ADX: Math.max(10, Math.min(30, parseInt(process.env.INDEX_STRATEGY_MIN_ADX, 10) || 16)),
+    /** IST minute-of-day after which the strategy engines stop taking entries. */
+    INDEX_STRATEGY_LAST_ENTRY_MIN: Math.max(
+        9 * 60,
+        Math.min(15 * 60 + 30, parseInt(process.env.INDEX_STRATEGY_LAST_ENTRY_MIN, 10) || 15 * 60)
+    ),
     /** Parallel symbol analyses during daily scan (1–3). */
     TRADE_ALERT_SCAN_CONCURRENCY: Math.max(
         1,
