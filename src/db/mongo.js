@@ -50,6 +50,15 @@ async function ensureIndexes(db) {
             { hash: 1, group_id: 1 },
             { unique: true, name: 'posted_github_repo_per_group' }
         ),
+        // Price tracker (/price) — one snapshot per product + site + day.
+        db.collection('price_history').createIndex(
+            { productKey: 1, site: 1, day: 1 },
+            { unique: true, name: 'price_history_key_site_day' }
+        ),
+        db.collection('price_history').createIndex(
+            { checkedAt: -1 },
+            { name: 'price_history_checked_at' }
+        ),
     ]);
 }
 

@@ -648,6 +648,13 @@ export const COMMAND_REGISTRY = [
         help: 'Cover letter from last tailored JD (or attach/paste JD)',
         category: 'resume',
     },
+    {
+        names: ['/price', '/pricetrack', '/ptrack'],
+        key: 'price',
+        scope: 'any',
+        role: 'anyone',
+        help: 'Cheapest price across Indian stores — `/price <amazon link or product>`',
+    },
 ];
 
 const nameIndex = new Map();
@@ -768,6 +775,9 @@ export const HELP_CATEGORY = {
     // Resume tools
     resume: 'resume', tailor: 'resume', cover: 'resume',
 
+    // Shopping / price
+    price: 'shopping',
+
     // Group setup & feature toggles
     link: 'group', revokelink: 'group',
     activate: 'group', deactivate: 'group', newson: 'group', newsoff: 'group',
@@ -809,6 +819,7 @@ export const HELP_CATEGORIES = [
     { key: 'daily', emoji: '📰', title: 'DAILY FEEDS', blurb: 'News, repos & interview prep' },
     { key: 'fun', emoji: '🎲', title: 'FUN', blurb: 'Horoscope, advice, facts' },
     { key: 'resume', emoji: '📄', title: 'RESUME TOOLS', blurb: 'Tailor a CV to a job description' },
+    { key: 'shopping', emoji: '🛍️', title: 'SHOPPING', blurb: 'Find the cheapest price across Indian stores' },
     { key: 'group', emoji: '⚙️', title: 'GROUP SETUP', blurb: 'Staff — enable features per group' },
     { key: 'moderation', emoji: '🛡️', title: 'MODERATION', blurb: 'Warnings & message cleanup' },
     { key: 'admin', emoji: '🔧', title: 'BOT ADMIN', blurb: 'Manage the bot & its admins' },
