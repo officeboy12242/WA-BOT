@@ -208,7 +208,7 @@ class GroupSummaryController {
                     system: opts.system || SUMMARY_FALLBACK_SYSTEM_PROMPT,
                     user: prompt,
                     temperature: 0.25,
-                    maxTokens: opts.maxTokens ?? 1200,
+                    maxTokens: opts.maxTokens ?? 1400,
                     timeoutMs: this._summaryTimeoutMs(),
                     models: [model],
                 });
@@ -255,7 +255,7 @@ class GroupSummaryController {
                     `for ${meta.groupName || 'group'}`
             );
             try {
-                partials.push(await this._summarizeViaOpenRouter(chunkPrompts[i], { maxTokens: 900 }));
+                partials.push(await this._summarizeViaOpenRouter(chunkPrompts[i], { maxTokens: 1100 }));
             } catch (err) {
                 logger.warn(
                     `Group recap OpenRouter chunk ${i + 1}/${chunkPrompts.length} failed: ${err.message}`
@@ -299,7 +299,7 @@ class GroupSummaryController {
         try {
             const merged = await this._summarizeViaOpenRouter(mergePrompt, {
                 system: mergeSystem,
-                maxTokens: 900,
+                maxTokens: 1200,
             });
             if (isUsableGroupSummary(merged) || merged.topics?.length) {
                 return merged;

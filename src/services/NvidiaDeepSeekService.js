@@ -390,22 +390,27 @@ class NvidiaDeepSeekService {
      */
     async completeWithSummaryRetry(systemPrompt, prompt, opts = {}) {
         const baseTimeout = clampTimeoutMs(opts.baseTimeoutMs ?? this.summaryTimeoutMs);
-        // Start compact — large prompts are the main timeout cause
+        // Attempt 1 must carry the WHOLE day: slicing the prompt at 5000 chars
+        // meant the model never saw the second half of the sampled conversation,
+        // so every recap covered only the first half of the chat. The day's own
+        // message sampling (GroupChatLogService) already bounds the input, so
+        // the cap here only guards against absurd overrides. Shrink only on a
+        // real timeout, and never below what a proper recap needs.
         const attempts = [
             {
-                prompt: prompt.length > 5000 ? prompt.slice(0, 5000) + '\n\n[...truncated...]' : prompt,
+                prompt: prompt.length > 14_000 ? prompt.slice(0, 14_000) + '\n\n[...truncated...]' : prompt,
                 timeoutMs: Math.min(MAX_TIMEOUT_MS, Math.max(baseTimeout, 90_000)),
-                maxTokens: opts.maxTokens ?? 700,
+                maxTokens: opts.maxTokens ?? 1400,
             },
             {
-                prompt: prompt.slice(0, 3200) + (prompt.length > 3200 ? '\n\n[...truncated...]' : ''),
+                prompt: prompt.slice(0, 9000) + (prompt.length > 9000 ? '\n\n[...truncated...]' : ''),
                 timeoutMs: MAX_TIMEOUT_MS,
-                maxTokens: 600,
+                maxTokens: 1200,
             },
             {
-                prompt: prompt.slice(0, 2000) + (prompt.length > 2000 ? '\n\n[...truncated...]' : ''),
+                prompt: prompt.slice(0, 5000) + (prompt.length > 5000 ? '\n\n[...truncated...]' : ''),
                 timeoutMs: MAX_TIMEOUT_MS,
-                maxTokens: 500,
+                maxTokens: 1000,
             },
         ];
 
@@ -500,8 +505,12 @@ class NvidiaDeepSeekService {
      * @returns {Promise<object>}
      */
     async summarizeGroupChat(prompt) {
+        // 1400 tokens: the recap JSON (about + vibe + 3-5 topics with details +
+        // notable + wrap_up + verdict) is cut off around ~700, which is exactly
+        // how recaps ended up half-written with heuristic filler topics.
         const raw = await this.completeWithSummaryRetry(SUMMARY_SYSTEM_PROMPT, prompt, {
             timeoutMs: this.summaryTimeoutMs,
+            maxTokens: 1400,
         });
         return this.parseSummaryJson(raw);
     }
@@ -548,6 +557,9 @@ class NvidiaDeepSeekService {
             meta.dateLabel ? `Date: ${meta.dateLabel}` : '',
             meta.totalMessages ? `Total messages that day: ${meta.totalMessages}` : '',
             'Combine overlapping topics, keep 3-5 topics total, 0-3 notable items, one wrap_up.',
+            'Also produce ONE about / vibe / verdict for the whole day, not per part:',
+            'about = what this group is for, judged across every part;',
+            'vibe = a 3-6 word mood tag; verdict = 2-4 sentences of your own opinion on the day, in character.',
             '',
             ...partials.map((part, idx) => `Part ${idx + 1}:\n${JSON.stringify(part)}`),
         ]
@@ -557,12 +569,15 @@ class NvidiaDeepSeekService {
         const mergeSystem = [
             'You merge partial group chat recap JSON objects into one final recap.',
             'Reply with ONLY valid JSON (no markdown fences) in this shape:',
-            '{"topics":[{"title":"short title","detail":"1-2 sentences"}],"notable":["bullet strings"],"wrap_up":"2-4 sentence paragraph"}',
-            'Deduplicate topics; preserve the most important details from each part.',
+            '{"about":"one line on what this group is for","vibe":"3-6 word mood tag",',
+            '"topics":[{"title":"short title","detail":"1-2 sentences"}],"notable":["bullet strings"],',
+            '"wrap_up":"2-4 sentence paragraph","verdict":"2-4 sentences of your own opinion, in character"}',
+            'Deduplicate topics; preserve the most important concrete details from each part.',
+            'about/vibe/verdict describe the WHOLE day — write them fresh, do not concatenate the parts.',
         ].join(' ');
 
         try {
-            const raw = await this.completeWithSummaryRetry(mergeSystem, mergePrompt, { maxTokens: 800 });
+            const raw = await this.completeWithSummaryRetry(mergeSystem, mergePrompt, { maxTokens: 1200 });
             const merged = this.parseSummaryJson(raw);
             if (merged.topics?.length) return merged;
             return this.mergePartialsLocally(partials, meta);

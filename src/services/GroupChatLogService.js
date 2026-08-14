@@ -64,7 +64,12 @@ class GroupChatLogService {
         this.mongoDb = mongoDb;
         this.groupManager = groupManager;
         this.maxPerDay = Math.max(50, Number(config.GROUP_SUMMARY_MAX_MESSAGES) || 400);
-        this.llmMaxMessages = Math.max(20, Number(config.GROUP_SUMMARY_LLM_MAX_MESSAGES) || 100);
+        // Raised from 100: the summary LLM used to get at most ~60 sampled lines
+        // for a 150-message day AND the call layer sliced the prompt at 5000
+        // chars, so the model saw less than half the conversation — recaps came
+        // out "half and not to the points". The sample now fits the ~14k-char
+        // first attempt in NvidiaDeepSeekService.completeWithSummaryRetry.
+        this.llmMaxMessages = Math.max(20, Number(config.GROUP_SUMMARY_LLM_MAX_MESSAGES) || 140);
         this.chunkThreshold = Math.max(80, Number(config.GROUP_SUMMARY_CHUNK_THRESHOLD) || 150);
         this.chunkSize = Math.max(30, Math.min(60, Number(config.GROUP_SUMMARY_CHUNK_SIZE) || 50));
         this.narrative = config.GROUP_SUMMARY_NARRATIVE !== false;
@@ -285,13 +290,13 @@ class GroupChatLogService {
             return Math.min(this.llmMaxMessages, totalMessages);
         }
         if (totalMessages <= 150) {
-            return Math.min(60, this.llmMaxMessages);
+            return Math.min(120, this.llmMaxMessages);
         }
         if (totalMessages <= 250) {
-            return Math.min(50, this.llmMaxMessages);
+            return Math.min(90, this.llmMaxMessages);
         }
         // Very busy days: one compact sample beats many sequential chunk calls
-        return Math.min(40, this.llmMaxMessages);
+        return Math.min(70, this.llmMaxMessages);
     }
 
     /** Keep conversation edges plus evenly spaced middle messages. */
