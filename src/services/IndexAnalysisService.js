@@ -530,6 +530,53 @@ class IndexAnalysisService {
         };
     }
 
+    /**
+     * The live trade this analysis card is showing, if any — the handler uses
+     * it to journal the read for grading. Same sizing path as `format()`, so
+     * what gets journaled is exactly what the card shows. Null when the card
+     * shows no entry or is size-blocked.
+     * @returns {object|null} { side, source, confidence, indexRisk, strike, expiry }
+     */
+    tradePayload(a) {
+        const s = a?.signal || {};
+        const p = a?.plan;
+        if (s.side && p && !p.blocked) {
+            return {
+                side: s.side === 'long' ? 'BUY_CE' : 'BUY_PE',
+                source: `index-fade-${s.kind || 'unknown'}`,
+                confidence: a.confidence?.pct ?? null,
+                indexRisk: p.indexRisk,
+                strike: a.atmStrike,
+                expiry: a.expiry,
+            };
+        }
+        const strat = a?.strategies?.winner;
+        if (strat) {
+            const leg = strat.side === 'CE' ? a.atmCe : a.atmPe;
+            const sp = strat.side && leg?.ltp != null && strat.atr15
+                ? sizeIndexTrade({
+                      premium: leg.ltp,
+                      lot: a.lot,
+                      indexAtr: strat.atr15,
+                      capital: a.capital ?? this.capital,
+                      minProfit: this.minProfit,
+                      maxProfit: this.maxProfit,
+                  })
+                : null;
+            if (sp && !sp.blocked) {
+                return {
+                    side: strat.side === 'CE' ? 'BUY_CE' : 'BUY_PE',
+                    source: `index-${strat.key || 'unknown'}`,
+                    confidence: strat.confidence ?? null,
+                    indexRisk: sp.indexRisk,
+                    strike: a.atmStrike,
+                    expiry: a.expiry,
+                };
+            }
+        }
+        return null;
+    }
+
     /** WhatsApp card. States what it is not, so nobody reads a call into it. */
     format(a) {
         const L = [];
@@ -702,6 +749,21 @@ export const FADE_STRATEGY_NAMES = {
  * card and the strategy work was invisible). The fade leads when live, then the
  * five tgbot2 engines ranked by quality score, quiet ones marked "no setup".
  */
+/**
+ * Measured per-strategy win rate from live journaled /index trades, once a
+ * source has enough decided rows (>=3) to mean anything. Grading is on the
+ * underlying's direction — option premiums are not retrievable historically —
+ * so the number is a direction hit-rate, not the option's P&L.
+ */
+function liveStatTag(a, source) {
+    const st = a?.liveStats?.[source];
+    if (!st) return null;
+    const decided = (st.win || 0) + (st.loss || 0);
+    if (decided >= 3) return ` · live ${st.win}W/${st.loss}L (${Math.round((st.winRate || 0) * 100)}%)`;
+    if (st.pending > 0) return ` · live ${st.pending} pending`;
+    return null;
+}
+
 function appendStrategyRanking(L, a) {
     const s = a.signal || {};
     const ranked = a.strategies?.list || [];
@@ -712,18 +774,26 @@ function appendStrategyRanking(L, a) {
     L.push('┌─ *📊 ALL STRATEGIES (ranked)* ─');
     const medal = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣'];
     let i = 0;
+    let liveShown = false;
     if (s.side) {
         const conf = signalConfidence(s);
         const fadeShort = FADE_STRATEGY_NAMES[s.kind] || s.kind;
-        L.push(`│ ${medal[i++] || `${i}.`} *Fade* — ${fadeShort} · ${s.side === 'long' ? 'BUY CE' : 'BUY PE'} · ${conf ? conf.pct : '—'}%`);
+        const tag = liveStatTag(a, `index-fade-${s.kind}`);
+        if (tag) liveShown = true;
+        L.push(`│ ${medal[i++] || `${i}.`} *Fade* — ${fadeShort} · ${s.side === 'long' ? 'BUY CE' : 'BUY PE'} · ${conf ? conf.pct : '—'}%${tag || ''}`);
     }
     for (const r of ranked) {
         const sideWord = r.side === 'CE' ? 'BUY CE' : r.side === 'PE' ? 'BUY PE' : '—';
         const short = STRATEGY_META[r.key]?.short || r.key;
-        L.push(`│ ${medal[i++] || `${i}.`} ${short} · ${sideWord} · ${r.score} pts · ${r.confidence}%`);
+        const tag = liveStatTag(a, `index-${r.key}`);
+        if (tag) liveShown = true;
+        L.push(`│ ${medal[i++] || `${i}.`} ${short} · ${sideWord} · ${r.score} pts · ${r.confidence}%${tag || ''}`);
     }
     for (const key of quiet) {
         L.push(`│ ➖ ${STRATEGY_META[key]?.short || key} · no setup`);
+    }
+    if (liveShown) {
+        L.push('│ _live = graded on the underlying\'s direction from journaled /index reads_');
     }
     L.push('└────────────────────────────');
 }

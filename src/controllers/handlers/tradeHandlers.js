@@ -721,16 +721,68 @@ export async function handleExpiry(sock, chatId, senderJid, args, { tradeAlertCo
 }
 
 /**
+ * Journal a live /index entry so the daily outcome resolver can grade it — the
+ * existing `trade_alert_outcomes` pipeline. Never throws outward: a journalling
+ * failure must not break a read that already succeeded.
+ */
+async function journalIndexTrade(a, chatId, ctx) {
+    const mongoDb = ctx?.tradeAlertController?.mongoDb;
+    if (!mongoDb) return;
+    const payload = indexAnalysisService.tradePayload(a);
+    if (!payload) return;
+    try {
+        const outcomes = createTradeOutcomeService(mongoDb, config);
+        await outcomes.logIndexTrade({
+            symbol: a.key,
+            side: payload.side,
+            spot: a.spot,
+            indexRisk: payload.indexRisk,
+            confidence: payload.confidence,
+            groupId: chatId,
+            strategySource: payload.source,
+        });
+    } catch (err) {
+        logger.debug(`Index outcome logging failed: ${err.message}`);
+    }
+}
+
+/**
+ * Attach measured per-strategy win rates (from journaled /index reads) so the
+ * card can show what has actually won, not just the borrowed tgbot2 backtests.
+ * Read-only; failures just leave the card without live numbers.
+ */
+async function attachIndexLiveStats(a, ctx) {
+    const mongoDb = ctx?.tradeAlertController?.mongoDb;
+    if (!mongoDb) return;
+    try {
+        const resolver = createTradeOutcomeResolver(mongoDb, config);
+        const stats = await resolver.stats({ lookbackDays: 30 });
+        if (!stats?.bySource) return;
+        const map = {};
+        for (const s of stats.bySource) {
+            if (s.source && String(s.source).startsWith('index-')) {
+                map[s.source] = { win: s.win, loss: s.loss, pending: s.pending, winRate: s.winRate };
+            }
+        }
+        if (Object.keys(map).length) a.liveStats = map;
+    } catch (err) {
+        logger.debug(`Index live stats failed: ${err.message}`);
+    }
+}
+
+/**
  * `/index nifty` — index F&O read. No directional call by design; see
  * IndexAnalysisService for the measurements that decided that.
  */
-export async function handleIndex(sock, chatId, senderJid, args) {
+export async function handleIndex(sock, chatId, senderJid, args, ctx) {
     const raw = (args[0] || 'NIFTY').trim();
     const loading = await sock.sendMessage(chatId, {
         text: `📐 _Reading ${raw.toUpperCase()} option chain…_`,
     });
     try {
         const analysis = await indexAnalysisService.analyze(raw);
+        await journalIndexTrade(analysis, chatId, ctx);
+        await attachIndexLiveStats(analysis, ctx);
         const text = indexAnalysisService.format(analysis);
         await sock.sendMessage(chatId, { text });
         logger.info(`📐 Index read ${analysis.key} in ${chatId}`);

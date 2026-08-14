@@ -652,5 +652,124 @@ ok(rankedCard.includes('➖ MACD-MTF · no setup'), 'ranked card marks MACD-MTF 
 ok(rankedCard.includes('➖ Mean Reversion · no setup'), 'ranked card marks Mean Reversion quiet');
 ok(!rankedCard.includes('Sizing keeps the same 1R discipline'), 'ranked card has no verbose footer either');
 
+// ------------------------------------------- live grading: journaling + stats
+import { createTradeOutcomeService } from '../src/services/TradeOutcomeService.js';
+
+// tradePayload(): the handler journals exactly what the card shows
+const fadeForJournal = {
+    key: 'NIFTY', label: 'NIFTY 50', lot: 75, spot: 24435, capital: 30000, expiry: '18-Aug-2026',
+    atmStrike: 24450, atmCe: { ltp: 121 }, atmPe: { ltp: 124 }, pcr: 0.75, walls: {}, topCe: [], topPe: [],
+    confidence: { pct: 67, label: 'high' },
+    signal: { side: 'short', kind: 'vwap-stretch', vwap: 24400, atr: 16.2, stretch: 1.2 },
+    plan: sizeIndexTrade({ premium: 124, lot: 75, indexAtr: 16.2, capital: 30000, minProfit: 600, maxProfit: 1200 }),
+};
+const fadePayload = indexAnalysisService.tradePayload(fadeForJournal);
+ok(fadePayload && fadePayload.side === 'BUY_PE', 'fade payload is BUY_PE for a short fade');
+ok(fadePayload.source === 'index-fade-vwap-stretch', 'fade payload source names the fade rule');
+ok(fadePayload.confidence === 67, 'fade payload carries the confidence');
+ok(fadePayload.indexRisk === fadeForJournal.plan.indexRisk, 'fade payload carries the 1R index move');
+ok(fadePayload.strike === 24450 && fadePayload.expiry === '18-Aug-2026', 'fade payload carries strike + expiry');
+
+const orbForJournal = {
+    key: 'NIFTY', label: 'NIFTY 50', lot: 75, spot: 24435, capital: 30000, expiry: '18-Aug-2026',
+    atmStrike: 24450, atmCe: { ltp: 121 }, atmPe: { ltp: 124 }, pcr: 0.75, walls: {}, topCe: [], topPe: [],
+    signal: { side: null, reason: 'no setup' }, plan: null,
+    strategies: {
+        winner: {
+            key: 'orb', name: 'ORB (Opening Range Breakout)', side: 'CE', atr15: 16.2,
+            confidence: 64, confidenceLabel: 'medium', layers: 'ORB+OI', strength: 'STRONG', reasons: ['x'],
+        },
+        list: [{ key: 'orb', side: 'CE', score: 60, confidence: 64 }], quiet: [],
+    },
+};
+const orbPayload = indexAnalysisService.tradePayload(orbForJournal);
+ok(orbPayload && orbPayload.side === 'BUY_CE', 'strategy payload is BUY_CE for a CE engine');
+ok(orbPayload.source === 'index-orb', 'strategy payload source is index-<key>');
+ok(orbPayload.indexRisk > 0, 'strategy payload has a sized 1R index move');
+ok(indexAnalysisService.tradePayload({ ...fadeForJournal, plan: { blocked: 'one lot costs too much' } }) === null,
+    'size-blocked fade journals nothing');
+ok(indexAnalysisService.tradePayload({ ...fadeForJournal, signal: { side: null }, plan: null }) === null,
+    'no-setup card journals nothing');
+
+// the ranked block shows MEASURED live win rates when attached
+const rankedAnalysis = {
+    key: 'NIFTY', label: 'NIFTY 50', lot: 75, spot: 24435, capital: 30000, expiry: '18-Aug-2026',
+    atmStrike: 24450, atmCe: { ltp: 121 }, atmPe: { ltp: 124 }, pcr: 0.75,
+    walls: {}, topCe: [], topPe: [],
+    signal: { side: null, reason: 'no setup - 0.30xATR from VWAP' },
+    plan: null,
+    strategies: {
+        winner: {
+            key: 'orb', name: 'ORB (Opening Range Breakout)', side: 'CE', layers: 'ORB+OI',
+            strength: 'STRONG', reasons: ['ORB breakout above 24500 (+0.21%)'],
+            confidence: 64, confidenceLabel: 'medium', winRateTag: '~58-65%', atr15: 16.2,
+        },
+        list: [
+            { key: 'orb', name: 'ORB (Opening Range Breakout)', side: 'CE', score: 60, confidence: 64, confidenceLabel: 'medium' },
+            { key: 'confluence', name: 'EMA+RSI+OI+VWAP Confluence', side: 'CE', score: 57, confidence: 67, confidenceLabel: 'high' },
+        ],
+        quiet: ['pcr-reversal', 'macd-mtf', 'mean-rev'],
+    },
+};
+const liveRankedCard = indexAnalysisService.format({
+    ...rankedAnalysis,
+    liveStats: {
+        'index-orb': { win: 4, loss: 2, pending: 0, winRate: 4 / 6 },
+        'index-confluence': { win: 0, loss: 0, pending: 2, winRate: null },
+    },
+});
+ok(liveRankedCard.includes('1️⃣ ORB · BUY CE · 60 pts · 64% · live 4W/2L (67%)'), 'ranked block shows the measured ORB win rate');
+ok(liveRankedCard.includes('2️⃣ Confluence · BUY CE · 57 pts · 67% · live 2 pending'), 'few samples show pending instead of a rate');
+ok(liveRankedCard.includes("underlying's direction"), 'live numbers are labeled as direction-graded');
+
+// a fade card with strategies attached shows the fade's live rate too
+const fadeLiveCard = indexAnalysisService.format({
+    ...fadeForJournal,
+    liveStats: { 'index-fade-vwap-stretch': { win: 3, loss: 1, pending: 0, winRate: 0.75 } },
+    strategies: { winner: null, list: [], quiet: ['orb', 'confluence', 'pcr-reversal', 'macd-mtf', 'mean-rev'] },
+});
+ok(fadeLiveCard.includes('*Fade* — VWAP Stretch Fade · BUY PE · 67% · live 3W/1L (75%)'), 'fade row shows its measured live rate');
+
+// logIndexTrade: dedupes one PENDING row per strategy+direction+day, and derives
+// the spot-based 1R levels that make the row resolvable later.
+const fakeOutcomeCol = {
+    rows: [],
+    async findOne(q) {
+        return this.rows.find((r) => Object.entries(q).every(([k, v]) => r[k] === v)) || null;
+    },
+    async insertOne(r) { this.rows.push(r); return r; },
+};
+const indexOutcomes = createTradeOutcomeService({ collection: () => fakeOutcomeCol }, {});
+let jr = await indexOutcomes.logIndexTrade({
+    symbol: 'NIFTY', side: 'BUY_CE', spot: 24400, indexRisk: 30,
+    confidence: 67, groupId: 'g1', strategySource: 'index-fade-vwap-stretch',
+});
+ok(jr.logged === true, 'first index trade journals');
+ok(fakeOutcomeCol.rows.length === 1, 'exactly one row after the first journal');
+ok(fakeOutcomeCol.rows[0].underlying_target === 24430 && fakeOutcomeCol.rows[0].underlying_stop === 24370,
+    'long fade: target = spot + 1R, stop = spot - 1R');
+ok(fakeOutcomeCol.rows[0].outcome === 'PENDING', 'journaled row starts PENDING');
+ok(fakeOutcomeCol.rows[0].strategy_source === 'index-fade-vwap-stretch', 'row carries the strategy source');
+const dup = await indexOutcomes.logIndexTrade({
+    symbol: 'NIFTY', side: 'BUY_CE', spot: 24410, indexRisk: 30,
+    confidence: 67, groupId: 'g1', strategySource: 'index-fade-vwap-stretch',
+});
+ok(dup.logged === false && fakeOutcomeCol.rows.length === 1, 're-running /index on the same setup does not double-journal');
+await indexOutcomes.logIndexTrade({
+    symbol: 'NIFTY', side: 'BUY_PE', spot: 24400, indexRisk: 30,
+    strategySource: 'index-fade-vwap-stretch',
+});
+ok(fakeOutcomeCol.rows.length === 2, 'a flipped direction journals a new row');
+ok(fakeOutcomeCol.rows[1].underlying_target === 24370 && fakeOutcomeCol.rows[1].underlying_stop === 24430,
+    'short fade: target = spot - 1R, stop = spot + 1R');
+const noRisk = await indexOutcomes.logIndexTrade({
+    symbol: 'NIFTY', side: 'BUY_CE', spot: 24400, indexRisk: 0, strategySource: 'index-orb',
+});
+ok(noRisk.logged === false && fakeOutcomeCol.rows.length === 2, 'a row without a 1R move is not journaled');
+const noDb = await createTradeOutcomeService(null, {}).logIndexTrade({
+    symbol: 'NIFTY', side: 'BUY_CE', spot: 24400, indexRisk: 30, strategySource: 'index-orb',
+});
+ok(noDb.logged === false && noDb.reason === 'no db', 'no database: journaling is a no-op, never a crash');
+
 console.log(`\ncheck-index: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

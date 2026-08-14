@@ -64,6 +64,72 @@ class TradeOutcomeService {
         });
     }
 
+    /**
+     * Journal an /index read that produced a live entry, so the existing daily
+     * outcome resolver grades it and `/tradelert stats` / the /index ranked
+     * block can show a MEASURED win rate per strategy instead of only the
+     * borrowed tgbot2 backtests.
+     *
+     * Deduped: one PENDING row per strategy per direction per day. Re-running
+     * /index on the same live setup is the same trade, and journaling it again
+     * would let one setup inflate the stats.
+     *
+     * The card's own entry/stop/target are option PREMIUMS, and historical
+     * premiums are not retrievable from any feed here — so this records the
+     * underlying and its spot, and derives the 1R target/stop as a spot ±
+     * indexRisk move. That is what makes the row resolvable, on the
+     * underlying's direction, like every other premium card.
+     *
+     * @returns {Promise<{logged: boolean, reason?: string}>}
+     */
+    async logIndexTrade({
+        symbol,
+        side,
+        spot,
+        indexRisk,
+        confidence = null,
+        groupId = null,
+        strategySource = null,
+    }) {
+        if (!this._col) return { logged: false, reason: 'no db' };
+        if (!(spot > 0) || !(indexRisk > 0)) return { logged: false, reason: 'missing levels' };
+
+        const alertDate = getTodayDateStrIST();
+        const dup = await this._col
+            .findOne({
+                alert_date: alertDate,
+                strategy_source: strategySource,
+                side,
+                outcome: 'PENDING',
+            })
+            .catch(() => null);
+        if (dup) return { logged: false, reason: 'duplicate' };
+
+        const long = side === 'BUY_CE';
+        await this._col.insertOne({
+            alert_date: alertDate,
+            symbol: String(symbol).toUpperCase(),
+            side,
+            entry: null,
+            stop_loss: null,
+            target1: null,
+            target2: null,
+            confidence,
+            confluence: null,
+            group_id: groupId,
+            strategy_source: strategySource,
+            setup_score: null,
+            underlying_symbol: String(symbol).toUpperCase(),
+            underlying_entry: spot,
+            underlying_stop: long ? spot - indexRisk : spot + indexRisk,
+            underlying_target: long ? spot + indexRisk : spot - indexRisk,
+            outcome: 'PENDING',
+            posted_at: new Date(),
+        });
+        logger.info(`📐 Index trade journaled: ${strategySource} ${side} @ ${spot} (1R ${indexRisk} pts)`);
+        return { logged: true };
+    }
+
     async getCalibration() {
         if (!this._tuneCol) {
             return { minConfidence: 70, minConfluence: 40, blacklistedSectors: [] };
