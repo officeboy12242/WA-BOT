@@ -9,9 +9,11 @@ import {
     extractAmazonAsin,
     parseAmazonProduct,
     parseFlipkartSearch,
+    parseAmazonSearch,
     parseMyntraSearch,
     parseAjioSearch,
     parseSnapdealSearch,
+    parseTataCliqSearch,
     parsePriceHistoryMeta,
     rankOffers,
     filterRelevant,
@@ -23,6 +25,9 @@ import {
     productKey,
     savePriceSnapshots,
     getPriceSnapshots,
+    normalizeOfferUrl,
+    dedupeOffers,
+    searchQueryOf,
     PRICE_HISTORY_COLLECTION,
 } from '../src/services/PriceTrackerService.js';
 import { COMMAND_REGISTRY } from '../src/commands/registry.js';
@@ -91,6 +96,44 @@ ok(!fk[0].url.includes('marketplace='), 'Flipkart URL drops the tracking params'
 ok(fk[1].price === 3999, 'no Special Price falls back to Selling Price');
 ok(parseFlipkartSearch('<html>nothing</html>').length === 0, 'empty page yields nothing');
 ok(parseFlipkartSearch('').length === 0, 'null page yields nothing');
+
+/* ─────────────────────────── Amazon search parser ─────────────────────────── */
+const amazonSearchHtml = `<div class="s-main-slot">
+<div data-asin="B0BSLKJPXV" data-index="1">
+<img alt="Puma | Smashic Comfort Casual Sneakers" src="x"/>
+<span class="a-price-whole">1,573</span>
+</div>
+<div data-asin="B0FYPSRGHN" data-index="2">
+<img alt="Puma | Smashic Comfort Casual Sneakers" src="x"/>
+<span class="a-price-whole">3,599</span>
+</div>
+<div data-asin="B0FD43KWLW" data-index="3">
+<img alt="Puma Unisex-Adult Court Curves Sneaker" src="x"/>
+<span class="a-price-whole">2,299</span>
+</div>
+</div>`;
+const amz = parseAmazonSearch(amazonSearchHtml);
+ok(amz.length === 3, 'Amazon search parser finds the result blocks');
+ok(amz[0].price === 1573, 'Amazon search parser reads the price');
+ok(amz[0].url === 'https://www.amazon.in/dp/B0BSLKJPXV', 'Amazon search builds the ASIN link');
+ok(amz[0].site === 'Amazon', 'Amazon search results tagged with site');
+ok(parseAmazonSearch('').length === 0, 'empty Amazon search page yields nothing');
+ok(parseAmazonSearch('<div data-asin="B0XXXXXX"></div>').length === 0, 'block without title+price skipped');
+
+/* ─────────────────────────── Tata CLiQ parser ─────────────────────────── */
+const tataHtml = `{"@context":"https://schema.org","@type":"ItemList","itemListElement":[
+{"@type":"ListItem","name":"Puma Women's Smashic Pearl White Sneakers","url":"/puma-womens-smashic-pearl-white-sneakers/p-mp000000016287608","position":1,"brand":{"@type":"Organization","name":"Puma"},"offers":{"@type":"Offer","priceCurrency":"INR","price":1574.65}},
+{"@type":"ListItem","name":"Smashic Unisex Sneakers","url":"/smashic-unisex-sneakers/p-mp000000016283447","position":2,"brand":{"@type":"Organization","name":"Puma"},"offers":{"@type":"Offer","priceCurrency":"INR","price":1709.62}}
+]}</script>`;
+const tc = parseTataCliqSearch(tataHtml);
+ok(tc.length === 2, 'Tata CLiQ parser finds the ItemList products');
+ok(tc[0].price === 1575, 'Tata CLiQ rounds a decimal price to rupees');
+ok(tc[0].url === 'https://www.tatacliq.com/puma-womens-smashic-pearl-white-sneakers/p-mp000000016287608',
+    'Tata CLiQ builds the product URL');
+ok(tc[0].site === 'Tata CLiQ', 'Tata CLiQ results tagged with site');
+ok(tc[1].price === 1710, 'second Tata CLiQ product parsed');
+ok(parseTataCliqSearch('').length === 0, 'empty Tata CLiQ page yields nothing');
+ok(parseTataCliqSearch('<html>no list</html>').length === 0, 'page without ItemList yields nothing');
 
 /* ─────────────────────────── Myntra parser ─────────────────────────── */
 const myntraHtml = `{"products":[{"landingPageUrl":"casual-shoes\\u002Fpuma\\u002Fpuma-smashic-women-comfort-casual-sneakers\\u002F21766804\\u002Fbuy",
@@ -171,6 +214,21 @@ const relevant = filterRelevant(offers, 'Puma | Smashic Comfort Casual Sneakers'
 ok(relevant.length === 2, 'filter drops the unrelated cheap product');
 ok(!relevant.some((o) => o.title.startsWith('hotstyle')), 'knockoff never tops the ranking');
 
+/* Brand-only matches (other Puma models) must not pass an exact-product query. */
+const brandOnly = filterRelevant(
+    [
+        { title: 'Puma Unisex-Adult Court Curves Sneaker', price: 2299, site: 'Amazon', url: 'x' },
+        { title: 'Smashic Unisex Sneakers', price: 1710, site: 'Tata CLiQ', url: 'x' },
+    ],
+    'Puma | Smashic Comfort Casual Sneakers'
+);
+ok(brandOnly.length === 1 && brandOnly[0].title.startsWith('Smashic'),
+    'brand-only match is dropped when the query has a model word');
+ok(filterRelevant(
+    [{ title: 'Puma Other Sneaker', price: 999, site: 'X', url: 'x' }],
+    'puma sneakers'
+).length === 1, 'brand + generic query still passes brand-only offers');
+
 /* ─────────────────────────── ranking ─────────────────────────── */
 const ranked = rankOffers([
     { site: 'Snapdeal', price: 400 }, { site: 'Amazon', price: 1573 },
@@ -189,6 +247,23 @@ ok(shortTitle('x'.repeat(100)).length <= 70, 'long titles are shortened');
 ok(shortTitle('short').length === 5, 'short titles untouched');
 ok(dedupeBrand('Puma', 'Puma Smashic Women') === 'Puma Smashic Women', 'dedupe drops repeated brand');
 ok(dedupeBrand('Nike', 'Air Max') === 'Nike Air Max', 'different brand is joined');
+
+/* ─────────────────────────── URL dedupe + query cleanup ─────────────────────────── */
+ok(normalizeOfferUrl('https://www.amazon.in/dp/B0BSLKJPXV?th=1&psc=1#x')
+    === 'https://www.amazon.in/dp/b0bslkjpxv', 'tracking params stripped from URL key');
+ok(normalizeOfferUrl('https://www.flipkart.com/p/itm123?pid=SHOGHK')
+    === 'https://www.flipkart.com/p/itm123', 'flipkart pid param stripped');
+ok(dedupeOffers([
+    { site: 'Amazon', url: 'https://www.amazon.in/dp/B0BSLKJPXV?th=1&psc=1', price: 1573 },
+    { site: 'Amazon', url: 'https://www.amazon.in/dp/B0BSLKJPXV', price: 1573 },
+    { site: 'Ajio', url: 'https://www.ajio.com/x/p/1', price: 1210 },
+]).length === 2, 'product-page + search duplicates collapse to one offer');
+ok(dedupeOffers([
+    { site: 'Amazon', url: 'https://www.amazon.in/dp/B0BSLK7CTP', price: 1569 },
+    { site: 'Amazon', url: 'https://www.amazon.in/dp/B0BSLKJPXV', price: 1573 },
+]).length === 2, 'different ASINs are both kept');
+ok(searchQueryOf('Puma | Smashic Comfort Casual Sneakers') === 'Puma Smashic Comfort Casual Sneakers',
+    'pipe separators cleaned from search query');
 ok(productKey('https://www.amazon.in/dp/B0BSLKJPXV', 'B0BSLKJPXV') === 'asin:B0BSLKJPXV', 'ASIN product key');
 ok(productKey('puma smashic sneakers', null) === 'q:puma-smashic-sneakers', 'query product key is slugged');
 ok(PRICE_HISTORY_COLLECTION === 'price_history', 'collection name is stable');

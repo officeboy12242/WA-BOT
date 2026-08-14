@@ -258,6 +258,51 @@ export function parseFlipkartSearch(html) {
     return results;
 }
 
+/* ─────────────────────────── Amazon search ─────────────────────────── */
+
+/**
+ * Parse Amazon.in search results (mobile HTML). Each result sits in a
+ * data-asin block carrying an alt-title and an a-price-whole price.
+ */
+export function parseAmazonSearch(html) {
+    const results = [];
+    if (!html) return results;
+
+    const blocks = html.split('data-asin="');
+    const seen = new Set();
+    for (let i = 1; i < blocks.length && results.length < 8; i++) {
+        const b = blocks[i];
+        const asin = b.slice(0, 12).match(/^([A-Z0-9]{10})/);
+        const title = b.match(/alt="([^"]{15,160})"/) || b.match(/"title":"([^"]{15,160})"/);
+        const price = b.match(/a-price-whole[^>]*>\s*([\d,]+)/) || b.match(/"priceAmount"\s*:\s*(\d+)/);
+        if (!asin || !title || !price) continue;
+        const p = cleanPrice(price[1]);
+        if (!p) continue;
+        if (seen.has(asin[1])) continue;
+        seen.add(asin[1]);
+        results.push({
+            title: shortTitle(title[1]),
+            price: p,
+            url: `https://www.amazon.in/dp/${asin[1]}`,
+            site: 'Amazon',
+        });
+    }
+    return results;
+}
+
+export async function searchAmazon(query, { timeoutMs } = {}) {
+    const { status, text } = await fetchText(`https://www.amazon.in/s?k=${encodeURIComponent(query)}`, {
+        headers: {
+            'User-Agent': MOBILE_UA,
+            'Accept-Language': 'en-IN,en;q=0.9',
+            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        },
+        timeoutMs,
+    });
+    if (status !== 200) throw new Error(`Amazon search returned HTTP ${status}`);
+    return parseAmazonSearch(text);
+}
+
 export async function searchFlipkart(query, { timeoutMs } = {}) {
     const { status, text } = await fetchText(
         `https://www.flipkart.com/search?q=${encodeURIComponent(query)}`,
@@ -394,6 +439,47 @@ export async function searchSnapdeal(query, { timeoutMs } = {}) {
     return parseSnapdealSearch(text);
 }
 
+/* ─────────────────────────── Tata CLiQ ─────────────────────────── */
+
+/**
+ * Parse Tata CLiQ search results — the page carries a schema.org ItemList
+ * JSON-LD block with name / url / brand / price per product.
+ */
+export function parseTataCliqSearch(html) {
+    const results = [];
+    if (!html) return results;
+
+    const listRe = /"@type"\s*:\s*"ItemList"[\s\S]*?\]<\/script>/;
+    const listBlock = html.match(listRe);
+    const source = (listBlock && listBlock[0]) || html;
+
+    const itemRe = /\{"@type"\s*:\s*"ListItem"\s*,\s*"name"\s*:\s*"([^"]+)"\s*,\s*"url"\s*:\s*"([^"]+)"[\s\S]{0,600}?"price"\s*:\s*([\d.]+)/g;
+    let m;
+    const seen = new Set();
+    while ((m = itemRe.exec(source)) !== null) {
+        const title = m[1];
+        const urlPath = m[2];
+        const price = cleanPrice(m[3]);
+        if (!title || !price || !urlPath) continue;
+        const url = urlPath.startsWith('http') ? urlPath : `https://www.tatacliq.com${urlPath}`;
+        const key = `${title}|${price}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        results.push({ title: shortTitle(title), price, url, site: 'Tata CLiQ' });
+        if (results.length >= 8) break;
+    }
+    return results;
+}
+
+export async function searchTataCliq(query, { timeoutMs } = {}) {
+    const { status, text } = await fetchText(
+        `https://www.tatacliq.com/search/?searchCategory=all&text=${encodeURIComponent(query)}`,
+        { headers: { 'User-Agent': MOBILE_UA, 'Accept-Language': 'en-IN,en;q=0.9' }, timeoutMs }
+    );
+    if (status !== 200) throw new Error(`Tata CLiQ returned HTTP ${status}`);
+    return parseTataCliqSearch(text);
+}
+
 /* ─────────────────────────── pricehistory.app ─────────────────────────── */
 
 /**
@@ -475,6 +561,38 @@ export async function fetchPriceHistory(asin, { timeoutMs = 15_000 } = {}) {
 
 /* ─────────────────────────── orchestration ─────────────────────────── */
 
+/** Canonical URL key — strip tracking params so the same product fetched from
+ * the product page and again via search collapses to one offer. */
+export function normalizeOfferUrl(url) {
+    if (!url) return '';
+    try {
+        const u = new URL(url);
+        u.search = '';
+        u.hash = '';
+        return u.href.replace(/\/+$/, '').toLowerCase();
+    } catch {
+        return String(url).split('?')[0].replace(/\/+$/, '').toLowerCase();
+    }
+}
+
+/** Drop duplicate offers (same store + canonical URL), keeping the first. */
+export function dedupeOffers(offers) {
+    const seen = new Set();
+    const out = [];
+    for (const o of offers) {
+        const key = `${o.site}::${normalizeOfferUrl(o.url)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(o);
+    }
+    return out;
+}
+
+/** Make an Amazon title usable as a search query — drop the " | " separators. */
+export function searchQueryOf(titleOrInput) {
+    return String(titleOrInput || '').replace(/\s*\|\s*/g, ' ').trim();
+}
+
 /** Sort offers cheapest-first; keep a sensible cap per site. */
 export function rankOffers(offers, { maxPerSite = 3, maxTotal = 8 } = {}) {
     const perSite = new Map();
@@ -496,15 +614,36 @@ export function rankOffers(offers, { maxPerSite = 3, maxTotal = 8 } = {}) {
  * enough (e.g. "smashic" on Myntra), but generic words never count.
  */
 export function filterRelevant(offers, query, minScore = 0.5) {
-    const q = String(query || '');
-    const distinct = distinctiveTokens(q);
-    // With no distinctive tokens (e.g. a bare "sneakers" query) fall back to
-    // the raw overlap so the command still returns something.
-    if (!distinct.length) {
+    const q = distinctiveTokens(query);
+    if (!q.length) {
+        // No distinctive tokens (e.g. a bare "sneakers" query) — fall back to
+        // raw overlap so the command still returns something.
         return offers.filter((o) => relevanceScore(o.title, q) >= 0.3);
     }
-    return offers.filter((o) => relevanceScore(o.title, q) >= minScore);
+    const nonBrand = q.filter((w) => !BRAND_WORDS.has(w));
+    // A brand + generic-words query ("puma sneakers") can't narrow further —
+    // keep anything sharing ≥1 token.
+    if (!nonBrand.length) {
+        return offers.filter((o) => relevanceScore(o.title, q) >= 0.3);
+    }
+    // Exact-product queries (brand + model) must share a model word too, so
+    // brand-only matches (other Puma models) never win the ranking.
+    return offers.filter((o) => {
+        const t = String(o.title || '').toLowerCase();
+        const hits = q.filter((w) => t.includes(w)).length;
+        return hits / q.length >= minScore && nonBrand.some((w) => t.includes(w));
+    });
 }
+
+/** Brand names are weak evidence — a "puma" match says nothing about model. */
+const BRAND_WORDS = new Set([
+    'puma', 'nike', 'adidas', 'reebok', 'fila', 'asics', 'skechers', 'crocs',
+    'levis', 'wrangler', 'zara', 'uniqlo', 'h&m', 'hm', 'gucci', 'prada',
+    'boat', 'samsung', 'sony', 'xiaomi', 'redmi', 'poco', 'realme', 'oppo',
+    'vivo', 'iqoo', 'oneplus', 'apple', 'lg', 'panasonic', 'whirlpool',
+    'lenovo', 'dell', 'hp', 'asus', 'acer', 'moto', 'motorola', 'nokia',
+    'jbl', 'philips', 'fastrack', 'titan', 'casio', 'fossil', 'mi',
+]);
 
 /**
  * Run every site search in parallel; a failure on one site never fails the
@@ -512,10 +651,12 @@ export function filterRelevant(offers, query, minScore = 0.5) {
  */
 export async function searchAll(query, { timeoutMs, siteTimeoutMs } = {}) {
     const sites = [
+        searchAmazon(query, { timeoutMs: siteTimeoutMs || timeoutMs }),
         searchFlipkart(query, { timeoutMs: siteTimeoutMs || timeoutMs }),
         searchMyntra(query, { timeoutMs: siteTimeoutMs || timeoutMs }),
         searchAjio(query, { timeoutMs: siteTimeoutMs || timeoutMs }),
         searchSnapdeal(query, { timeoutMs: siteTimeoutMs || timeoutMs }),
+        searchTataCliq(query, { timeoutMs: siteTimeoutMs || timeoutMs }),
     ];
     const settled = await Promise.allSettled(sites);
     const results = [];
@@ -544,7 +685,7 @@ export async function trackProduct(input, { timeoutMs } = {}) {
     if (asin) {
         try {
             amazon = await fetchAmazonProduct(asin, { timeoutMs });
-            if (amazon.title) query = amazon.title;
+            if (amazon.title) query = searchQueryOf(amazon.title);
         } catch (err) {
             logger.warn(`PriceTracker amazon fetch failed: ${err.message}`);
         }
@@ -572,14 +713,15 @@ export async function trackProduct(input, { timeoutMs } = {}) {
         });
     }
     allOffers.push(...offers);
+    const deduped = dedupeOffers(allOffers);
 
     return {
         query,
         asin,
         amazon,
         history,
-        offers: rankOffers(allOffers),
-        rawOffers: allOffers,
+        offers: rankOffers(deduped),
+        rawOffers: deduped,
     };
 }
 
@@ -664,9 +806,11 @@ export const priceTrackerService = {
     extractAmazonAsin,
     parseAmazonProduct,
     parseFlipkartSearch,
+    parseAmazonSearch,
     parseMyntraSearch,
     parseAjioSearch,
     parseSnapdealSearch,
+    parseTataCliqSearch,
     parsePriceHistoryMeta,
     rankOffers,
     relevanceScore,

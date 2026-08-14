@@ -27,11 +27,12 @@ function siteEmoji(site) {
     if (s === 'myntra') return '🅼';
     if (s === 'ajio') return '🅰';
     if (s === 'snapdeal') return '🆂';
+    if (s === 'tata cliq' || s === 'Tata CLiQ') return '🆃';
     return '🛒';
 }
 
 /** Build the main comparison card. */
-function formatTrackCard(result) {
+export function formatTrackCard(result) {
     const { query, amazon, history, offers, asin } = result;
     const lines = [];
 
@@ -62,6 +63,7 @@ function formatTrackCard(result) {
             const diff = Math.round(((amazon.price - best.price) / amazon.price) * 100);
             lines.push(`   _${diff}% below the tracked Amazon price (${inr(amazon.price)})_`);
         }
+        if (best.url) lines.push(`   🔗 ${best.url}`);
         lines.push('');
 
         lines.push('┌─ *ALL OFFERS (cheapest first)* ─');
@@ -90,7 +92,7 @@ function formatTrackCard(result) {
         lines.push('');
     }
 
-    lines.push(`_Data: Amazon · Flipkart · Myntra · Ajio · Snapdeal · pricehistory.app_`);
+    lines.push(`_Data: Amazon · Flipkart · Myntra · Ajio · Snapdeal · Tata CLiQ · pricehistory.app_`);
     lines.push(`_Checked ${new Date().toLocaleString('en-IN', { hour: '2-digit', minute: '2-digit' })} IST_`);
     if (asin) lines.push(`_ASIN ${asin} — re-check with the same link to build history_`);
     lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━');
