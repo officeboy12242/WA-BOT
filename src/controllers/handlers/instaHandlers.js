@@ -9,6 +9,7 @@ import { downloadMediaToFile, createMediaTempFile } from '../../utils/downloadMe
 import { createReadStream, promises as fsp } from 'fs';
 import { extractInstagramUrl, isSupportedInstagramUrl } from '../../utils/instagramUrl.js';
 import { extractTwitterUrl, isSupportedTwitterUrl } from '../../utils/twitterUrl.js';
+import { fetchTwitterMedia } from '../../utils/twitterMedia.js';
 import { safeSendMessage } from '../../utils/waMessage.js';
 
 // Media caps: WhatsApp plays videos as media up to ~64 MB; anything bigger is
@@ -16,6 +17,60 @@ import { safeSendMessage } from '../../utils/waMessage.js';
 // download cap — tune it down on small-RAM Render instances.
 const MAX_MEDIA_BYTES = parseInt(process.env.MEDIA_MAX_BYTES || String(300 * 1024 * 1024), 10) || (300 * 1024 * 1024);
 const MEDIA_AS_VIDEO_BYTES = 60 * 1024 * 1024;
+
+// The snapsave upstream can hang for minutes under load — never let the
+// "⏳ Fetching…" status sit forever; bail with a friendly error instead.
+const SNAPSAVE_TIMEOUT_MS = 30_000;
+
+/**
+ * Resolvers return `[{ url, type, gif? }]`. A resolver that throws — or returns
+ * nothing usable — hands over to the next one in the chain.
+ */
+async function snapsaveResolver(url) {
+    const result = await Promise.race([
+        snapsave(url, { retry: 2, retryDelay: 800 }),
+        new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('Upstream media service timed out')), SNAPSAVE_TIMEOUT_MS),
+        ),
+    ]);
+    if (!result?.success) {
+        throw new Error(result?.message || 'Unknown error.');
+    }
+    return result.data?.media || [];
+}
+snapsaveResolver.resolverName = 'snapsave';
+
+async function twitterApiResolver(url) {
+    return fetchTwitterMedia(url);
+}
+twitterApiResolver.resolverName = 'fxtwitter';
+
+async function resolveMediaList(url, resolvers, logLabel) {
+    let lastMessage = '';
+    for (const resolver of resolvers) {
+        const name = resolver.resolverName || 'resolver';
+        try {
+            const media = [];
+            const seen = new Set();
+            for (const m of await resolver(url)) {
+                // snapsave emits blank-url placeholders for GIF tweets — drop them
+                // so the chain falls through instead of reporting "no media".
+                if (!m?.url || seen.has(m.url)) continue;
+                seen.add(m.url);
+                media.push(m);
+            }
+            if (media.length) {
+                return { media, message: '' };
+            }
+            lastMessage = lastMessage || 'No media URLs in the response.';
+            logger.warn(`${logLabel}: ${name} returned no usable media for ${url}`);
+        } catch (err) {
+            lastMessage = err.message || 'Unknown error.';
+            logger.warn(`${logLabel}: ${name} failed — ${lastMessage}`);
+        }
+    }
+    return { media: [], message: lastMessage || 'Unknown error.' };
+}
 
 function formatInstaDownloadStatus(mediaList) {
     const images = mediaList.filter((m) => m.type === 'image').length;
@@ -82,10 +137,16 @@ async function sendLargeMediaAsDocument(sock, chatId, filePath, waMessage, fileN
     );
 }
 
-async function sendDownloadedMedia(sock, chatId, buffer, waMessage, index, fileNamePrefix = 'instagram') {
+async function sendDownloadedMedia(sock, chatId, buffer, waMessage, index, fileNamePrefix = 'instagram', isGif = false) {
     const detected = await classifyMediaBuffer(buffer);
     if (detected.kind === 'video') {
-        await safeSendMessage(sock, chatId, { video: buffer, mimetype: detected.mime }, waMessage);
+        // X serves GIFs as mp4 — gifPlayback makes WhatsApp loop them silently.
+        await safeSendMessage(
+            sock,
+            chatId,
+            { video: buffer, mimetype: detected.mime, ...(isGif ? { gifPlayback: true } : {}) },
+            waMessage,
+        );
         return true;
     }
     if (detected.kind === 'image') {
@@ -111,6 +172,7 @@ async function handleMediaDownload(sock, chatId, args, quotedMessage, opts) {
         isSupported,
         fileNamePrefix,
         logLabel,
+        resolvers = [snapsaveResolver],
     } = opts;
 
     if (requireCommandArgs && !args.length) {
@@ -128,34 +190,17 @@ async function handleMediaDownload(sock, chatId, args, quotedMessage, opts) {
     try {
         statusMsg = await safeSendMessage(sock, chatId, { text: statusText }, quotedMessage);
 
-        const result = await snapsave(url, { retry: 2, retryDelay: 800 });
+        const { media: mediaList, message: resolveMessage } = await resolveMediaList(url, resolvers, logLabel);
 
-        if (!result.success) {
+        if (!mediaList.length) {
             await safeDeleteChatMessage(sock, chatId, statusMsg);
             statusMsg = null;
             await safeSendMessage(
                 sock,
                 chatId,
-                { text: `Could not fetch media. ${result.message || 'Unknown error.'}` },
+                { text: `Could not fetch media. ${resolveMessage}` },
                 quotedMessage,
             );
-            return;
-        }
-
-        const data = result.data || {};
-        const rawMedia = data.media || [];
-        const seen = new Set();
-        const mediaList = [];
-        for (const m of rawMedia) {
-            if (!m?.url || seen.has(m.url)) continue;
-            seen.add(m.url);
-            mediaList.push(m);
-        }
-
-        if (!mediaList.length) {
-            await safeDeleteChatMessage(sock, chatId, statusMsg);
-            statusMsg = null;
-            await safeSendMessage(sock, chatId, { text: 'No media URLs in the response.' }, quotedMessage);
             return;
         }
 
@@ -172,7 +217,7 @@ async function handleMediaDownload(sock, chatId, args, quotedMessage, opts) {
                 const size = (await fsp.stat(tmpPath)).size;
                 if (size <= MEDIA_AS_VIDEO_BYTES) {
                     const buffer = await fsp.readFile(tmpPath);
-                    await sendDownloadedMedia(sock, chatId, buffer, null, i, fileNamePrefix);
+                    await sendDownloadedMedia(sock, chatId, buffer, null, i, fileNamePrefix, mediaList[i].gif === true);
                 } else {
                     await sendLargeMediaAsDocument(sock, chatId, tmpPath, quotedMessage, `${fileNamePrefix}_${i + 1}`);
                 }
@@ -249,6 +294,9 @@ export async function handleTwitter(sock, chatId, args, quotedMessage, options =
         isSupported: isSupportedTwitterUrl,
         fileNamePrefix: 'twitter',
         logLabel: 'Twitter',
+        // fxtwitter first: it resolves GIFs and /i/status/ links that snapsave
+        // returns blank entries for. snapsave stays as the fallback.
+        resolvers: [twitterApiResolver, snapsaveResolver],
     });
 }
 
