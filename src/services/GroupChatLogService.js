@@ -7,8 +7,62 @@ import { logger } from '../utils/logger.js';
 import { getTextFromWAMessage, resolveConversationChatId } from '../utils/waMessage.js';
 import { extractPhoneNumber } from '../utils/permissions.js';
 import { getTodayDateStrIST } from '../utils/dateIST.js';
+import { clampToSentence } from '../utils/summaryText.js';
 
 const REFRESH_MS = 5 * 60_000;
+
+// Chat filler that would otherwise top every frequency count. Hinglish is in
+// here too — these groups mix English and Hindi in the same sentence.
+const STOP_WORDS = new Set([
+    'about', 'after', 'again', 'ahha', 'also', 'always', 'anyone', 'because', 'been', 'before',
+    'being', 'below', 'bhai', 'bhi', 'bola', 'both', 'come', 'could', 'dont', 'even', 'ever',
+    'every', 'from', 'gaya', 'good', 'guys', 'haan', 'have', 'hain', 'here', 'hoga', 'jaise',
+    'just', 'karo', 'kuch', 'like', 'lots', 'main', 'many', 'matlab', 'more', 'most', 'much',
+    'nahi', 'never', 'okay', 'only', 'other', 'over', 'please', 'raha', 'rahe', 'really', 'same',
+    'says', 'send', 'should', 'some', 'still', 'sure', 'take', 'than', 'thanks', 'that', 'their',
+    'them', 'then', 'there', 'these', 'they', 'thing', 'think', 'this', 'those', 'time', 'tume',
+    'very', 'want', 'well', 'were', 'what', 'when', 'where', 'which', 'while', 'will', 'with',
+    'wont', 'would', 'yaar', 'yeah', 'your',
+]);
+
+/**
+ * Most repeated meaningful words across a set of logged messages.
+ * Used only for the offline recap — it names subjects without quoting anyone.
+ */
+function topTerms(rows, limit) {
+    const counts = new Map();
+    for (const row of rows) {
+        const text = String(row?.text || '');
+        // Placeholders ([sticker]) and links say nothing about the subject.
+        if (!text || /^\[/.test(text)) continue;
+        const words = text
+            .toLowerCase()
+            .replace(/https?:\/\/\S+/g, ' ')
+            .replace(/[^a-z0-9ऀ-ॿ\s]/g, ' ')
+            .split(/\s+/);
+        const seen = new Set();
+        for (const word of words) {
+            if (word.length < 4 || STOP_WORDS.has(word) || /^\d+$/.test(word)) continue;
+            // Count each word once per message so one ranty message cannot
+            // invent a "topic" on its own.
+            if (seen.has(word)) continue;
+            seen.add(word);
+            counts.set(word, (counts.get(word) || 0) + 1);
+        }
+    }
+
+    return [...counts.entries()]
+        .filter(([, n]) => n >= 2)
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .slice(0, limit)
+        .map(([word]) => word);
+}
+
+/** "a, b and c" — reads like a sentence instead of a delimiter dump. */
+function joinList(items) {
+    if (items.length <= 1) return items[0] || '';
+    return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
+}
 
 function normalizeGroupId(chatId) {
     if (!chatId?.endsWith('@g.us')) {
@@ -257,12 +311,14 @@ class GroupChatLogService {
             }
         }
 
+        // senders maps phone -> { name, count }; destructuring the value as a
+        // number made every comparison false, so "Most active" never rendered.
         let topSender = null;
         let topCount = 0;
-        for (const [name, count] of senders) {
-            if (count > topCount) {
-                topCount = count;
-                topSender = name;
+        for (const stat of senders.values()) {
+            if (stat.count > topCount) {
+                topCount = stat.count;
+                topSender = stat.name;
             }
         }
 
@@ -339,7 +395,9 @@ class GroupChatLogService {
                 minute: '2-digit',
                 timeZone: 'Asia/Kolkata',
             });
-            const text = String(row.text || '').slice(0, textLimit);
+            // Word-boundary cut: a message chopped mid-word feeds the model a
+            // broken sentence, and broken sentences come back in the recap.
+            const text = clampToSentence(row.text || '', textLimit);
             return `[${time}] ${row.sender_name}: ${text}`;
         });
     }
@@ -423,6 +481,11 @@ class GroupChatLogService {
 
     /**
      * Offline topics when the LLM times out — still useful for the group.
+     *
+     * This used to paste raw chat lines cut at 60 chars ("Members talked about:
+     * <half a message> · <half a message>"), which is why failed recaps read as
+     * chopped-up chat. It now names the recurring subjects instead and writes
+     * complete sentences around them.
      * @returns {{ topics: object[], notable: string[], wrap_up: string }}
      */
     buildHeuristicSummary(messages, stats) {
@@ -443,41 +506,48 @@ class GroupChatLogService {
             .slice(0, 4);
 
         const topics = rankedHours.map(([hour, rows], idx) => {
-            const sample = rows
-                .filter((r) => r.text && !/^\[/.test(r.text))
-                .slice(0, 3)
-                .map((r) => String(r.text).slice(0, 60))
-                .filter(Boolean);
             const period = hour >= 12 ? 'PM' : 'AM';
             const hour12 = hour % 12 || 12;
+            const speakers = new Set(rows.map((r) => r.sender_name).filter(Boolean));
+            const terms = topTerms(rows, 3);
             const title = idx === 0
-                ? `Busy chat around ${hour12} ${period}`
+                ? `Busiest stretch — around ${hour12} ${period}`
                 : `Chat around ${hour12} ${period}`;
-            const detail = sample.length
-                ? `Members talked about: ${sample.join(' · ')}`
-                : `${rows.length} messages in this hour.`;
+
+            const who = `${rows.length} message${rows.length === 1 ? '' : 's'}` +
+                `${speakers.size ? ` from ${speakers.size} member${speakers.size === 1 ? '' : 's'}` : ''}`;
+            const detail = terms.length
+                ? `${who}, mostly around ${joinList(terms)}.`
+                : `${who}, with no single subject dominating.`;
             return { title, detail };
         });
 
         if (!topics.length) {
             topics.push({
                 title: 'Group activity',
-                detail: `${stats.totalMessages} messages from ${stats.uniqueMembers} members.`,
+                detail:
+                    `${stats.totalMessages} message${stats.totalMessages === 1 ? '' : 's'} ` +
+                    `from ${stats.uniqueMembers} member${stats.uniqueMembers === 1 ? '' : 's'}.`,
             });
         }
 
+        // "Most active" and "Busiest hour" already have their own lines in the
+        // recap — repeating them here just padded it out.
         const notable = [];
-        if (stats.topSender) {
-            notable.push(`${stats.topSender.name} was most active (${stats.topSender.count} msgs)`);
+        const dayTerms = topTerms(messages, 4);
+        if (dayTerms.length) {
+            notable.push(`Talk kept coming back to ${joinList(dayTerms)}.`);
         }
-        if (stats.busiestHourLabel) {
-            notable.push(`Busiest hour: ${stats.busiestHourLabel}`);
+        const quietHours = 24 - new Set(messages.map((r) => new Date(r.ts).getUTCHours())).size;
+        if (quietHours >= 20 && stats.totalMessages >= 10) {
+            notable.push('The whole day happened in just a couple of hours.');
         }
 
         const wrap_up =
             `Active day with ${stats.totalMessages} messages from ${stats.uniqueMembers} members` +
             `${stats.busiestHourLabel ? `, peaking around ${stats.busiestHourLabel}` : ''}.` +
-            (stats.topSender ? ` ${stats.topSender.name} led the chat.` : '');
+            (stats.topSender ? ` ${stats.topSender.name} led the chat.` : '') +
+            (dayTerms.length ? ` Talk kept coming back to ${joinList(dayTerms)}.` : '');
 
         return { topics, notable, wrap_up };
     }

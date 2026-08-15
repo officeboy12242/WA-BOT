@@ -5,6 +5,7 @@
 import axios from 'axios';
 import { logger } from '../utils/logger.js';
 import { buildKeyPool } from '../utils/apiKeyPool.js';
+import { parseLooseJson, tidySentence, tidyTitle } from '../utils/summaryText.js';
 
 const DEFAULT_BASE_URL = 'https://integrate.api.nvidia.com/v1/chat/completions';
 const DEFAULT_SUMMARY_MODEL = 'deepseek-ai/deepseek-v4-flash';
@@ -284,66 +285,76 @@ class NvidiaDeepSeekService {
         return this.complete(systemPrompt, userPrompt, { ...opts, forTrade: true });
     }
 
-    normalizeSummaryShape(parsed, fallbackText = '') {
+    normalizeSummaryShape(parsed, fallbackText = '', { truncated = false } = {}) {
+        const opts = { truncated };
         const topics = [];
         const rawTopics = Array.isArray(parsed?.topics) ? parsed.topics : [];
         for (const t of rawTopics) {
             if (typeof t === 'string' && t.trim()) {
-                topics.push({ title: t.trim().slice(0, 80), detail: '' });
+                topics.push({ title: tidyTitle(t, 80), detail: '' });
             } else if (t && typeof t === 'object') {
-                const title = String(t.title || t.name || t.topic || '').trim();
-                const detail = String(t.detail || t.summary || t.description || '').trim();
+                const title = tidyTitle(t.title || t.name || t.topic || '', 80);
+                const detail = tidySentence(t.detail || t.summary || t.description || '', 280, opts);
                 if (title || detail) {
-                    topics.push({
-                        title: (title || 'Discussion').slice(0, 80),
-                        detail: detail.slice(0, 280),
-                    });
+                    topics.push({ title: title || 'Discussion', detail });
                 }
             }
         }
 
         const notable = (Array.isArray(parsed?.notable) ? parsed.notable : [])
             .map((n) => (typeof n === 'string' ? n : n?.text || n?.detail || ''))
-            .map((s) => String(s).trim())
+            .map((s) => tidySentence(s, 200, opts))
             .filter(Boolean)
             .slice(0, 4);
 
-        const wrap_up = String(
-            parsed?.wrap_up || parsed?.wrapUp || parsed?.summary || fallbackText || ''
-        ).trim();
+        const wrap_up = tidySentence(
+            parsed?.wrap_up || parsed?.wrapUp || parsed?.summary || fallbackText || '',
+            800,
+            opts
+        );
 
-        return { topics, notable, wrap_up };
+        // about / vibe / verdict were silently dropped here, so the recap lost its
+        // 🧭 line, mood tag and closing take even when the model wrote them.
+        return {
+            about: tidySentence(parsed?.about || '', 160, opts),
+            vibe: tidyTitle(parsed?.vibe || '', 60),
+            topics,
+            notable,
+            wrap_up,
+            verdict: tidySentence(parsed?.verdict || '', 500, opts),
+        };
     }
 
     parseSummaryJson(raw) {
-        let text = String(raw || '')
+        const text = String(raw || '')
             .replace(/<think>[\s\S]*?<\/think>/gi, '')
             .replace(/^```(?:json)?\s*/i, '')
             .replace(/\s*```$/i, '')
             .trim();
 
-        const tryParse = (candidate) => {
-            try {
-                return this.normalizeSummaryShape(JSON.parse(candidate), text.slice(0, 400));
-            } catch {
-                return null;
+        const parsed = parseLooseJson(text);
+        if (parsed) {
+            const shaped = this.normalizeSummaryShape(parsed.value, '', { truncated: parsed.repaired });
+            if (shaped.topics.length || shaped.wrap_up) {
+                if (parsed.repaired) {
+                    logger.warn(
+                        `Group summary JSON was truncated — recovered ${shaped.topics.length} topic(s) by repair`
+                    );
+                }
+                return shaped;
             }
-        };
-
-        let parsed = tryParse(text);
-        if (parsed?.topics?.length || parsed?.wrap_up) return parsed;
-
-        const objectMatch = text.match(/\{[\s\S]*\}/);
-        if (objectMatch) {
-            parsed = tryParse(objectMatch[0]);
-            if (parsed?.topics?.length || parsed?.wrap_up) return parsed;
         }
 
+        // Last resort: the response was never JSON. Post whole sentences from it
+        // rather than a mid-word slice of raw model text.
         logger.warn('Group summary JSON parse failed — using text wrap-up only');
         return {
+            about: '',
+            vibe: '',
             topics: [],
             notable: [],
-            wrap_up: text.slice(0, 600),
+            wrap_up: tidySentence(text, 600),
+            verdict: '',
         };
     }
 
@@ -368,13 +379,26 @@ class NvidiaDeepSeekService {
         }
 
         const wrap_up = wrapParts.length
-            ? wrapParts.slice(0, 3).join(' ')
+            ? wrapParts.slice(0, 3).map((w) => tidySentence(w, 300)).filter(Boolean).join(' ')
             : `Busy day${meta.totalMessages ? ` with ${meta.totalMessages} messages` : ''}.`;
 
+        // Carry the whole-day fields through: the first part that produced each
+        // one wins, otherwise a merged recap arrives with no about/vibe/verdict.
+        const firstOf = (field) => {
+            for (const part of partials) {
+                const value = String(part?.[field] || '').trim();
+                if (value) return value;
+            }
+            return '';
+        };
+
         return {
+            about: firstOf('about'),
+            vibe: firstOf('vibe'),
             topics: topics.slice(0, 5),
             notable: notable.slice(0, 3),
-            wrap_up: wrap_up.slice(0, 800),
+            wrap_up: tidySentence(wrap_up, 800),
+            verdict: firstOf('verdict'),
         };
     }
 
