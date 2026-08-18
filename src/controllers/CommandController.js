@@ -53,7 +53,7 @@ import {
     handleRevokeLink,
 } from './handlers/groupHandlers.js';
 
-import { handleTradelert, handleTradenow, handleSwing, handleExpiry, handleIndex } from './handlers/tradeHandlers.js';
+import { handleTradelert, handleTradenow, handleSwing, handleExpiry, handleIndex, handleSvmkr } from './handlers/tradeHandlers.js';
 import { handleHeal, handleFix } from './handlers/healHandlers.js';
 import { handleAssist } from './handlers/assistHandlers.js';
 
@@ -181,6 +181,7 @@ export const COMMAND_HANDLERS = {
     tradelert: ({ sock, chatId, senderJid, args, ctx }) => handleTradelert(sock, chatId, senderJid, args, ctx),
     tradenow: ({ sock, chatId, senderJid, args, ctx }) => handleTradenow(sock, chatId, senderJid, args, ctx),
     index: ({ sock, chatId, senderJid, args, ctx }) => handleIndex(sock, chatId, senderJid, args, ctx),
+    svmkr: ({ sock, chatId, senderJid, args, ctx }) => handleSvmkr(sock, chatId, senderJid, args, ctx),
     swing: ({ sock, chatId, senderJid, args, ctx }) => handleSwing(sock, chatId, senderJid, args, ctx),
     expiry: ({ sock, chatId, senderJid, args, ctx }) => handleExpiry(sock, chatId, senderJid, args, ctx),
 
@@ -340,6 +341,8 @@ class CommandController {
         this.groupChatLogService = null;
         this.groupSummaryController = null;
         this.tradeAlertController = null;
+        this.svmkrTracker = null;
+        this.svmkrScheduler = null;
         this.botStartTime = Date.now();
         this.stickerForwarder = null;
 
@@ -377,6 +380,12 @@ class CommandController {
 
     setTradeAlertController(tradeAlertController) {
         this.tradeAlertController = tradeAlertController;
+    }
+
+    /** Live SVMKR scanner handles — `/svmkr stats` and `/svmkr scan` need these. */
+    setSvmkr({ tracker = null, scheduler = null } = {}) {
+        if (tracker) this.svmkrTracker = tracker;
+        if (scheduler) this.svmkrScheduler = scheduler;
     }
 
     setGetSock(getSock) {
@@ -433,6 +442,8 @@ class CommandController {
             groupChatLogService: this.groupChatLogService,
             groupSummaryController: this.groupSummaryController,
             tradeAlertController: this.tradeAlertController,
+            svmkrTracker: this.svmkrTracker,
+            svmkrScheduler: this.svmkrScheduler,
             assistService: this.assistService,
             interviewQuestionService: this.interviewQuestionService,
             botStartTime: this.botStartTime,

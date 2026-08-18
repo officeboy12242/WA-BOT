@@ -505,6 +505,14 @@ export const COMMAND_REGISTRY = [
         category: 'trade',
     },
     {
+        names: ['/svmkr', '/ut'],
+        key: 'svmkr',
+        scope: 'group_only',
+        role: 'admins',
+        help: 'SVMKR live scanner — `/svmkr`, `/svmkr banknifty`, `/svmkr stats`, `/svmkr scan`',
+        category: 'trade',
+    },
+    {
         names: ['/expiry'],
         key: 'expiry',
         scope: 'group_only',
@@ -757,6 +765,7 @@ export const HELP_CATEGORY = {
 
     // Markets
     tradenow: 'trade', swing: 'trade', expiry: 'trade', tradelert: 'trade', index: 'trade',
+    svmkr: 'trade',
 
     // Scheduled feeds
     news: 'daily', github: 'daily', awesome: 'daily', interviewq: 'daily',

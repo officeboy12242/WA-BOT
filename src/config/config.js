@@ -325,6 +325,40 @@ export const config = {
         9 * 60,
         Math.min(15 * 60 + 30, parseInt(process.env.INDEX_STRATEGY_LAST_ENTRY_MIN, 10) || 15 * 60)
     ),
+    /* ── SVMKR live scanner (/svmkr) ─────────────────────────────────────────
+     * The one continuously-running market scanner: UT Bot trailing-stop cross
+     * confirmed by HMA and regression slope, evaluated on every closed 5m bar
+     * during the session. OFF by default — arming it posts unlimited alerts to
+     * every trade-alert group, so it must be an explicit choice.
+     *
+     * Trades are uncapped per day on purpose; SVMKR_COOLDOWN_MS is the only
+     * brake, and it is per index+side. Dropping it below ~5 min on a choppy day
+     * will produce a card every other bar.
+     */
+    SVMKR_ENABLED: process.env.SVMKR_ENABLED === 'true',
+    SVMKR_INDICES: (process.env.SVMKR_INDICES || 'NIFTY')
+        .split(',')
+        .map((s) => s.trim().toUpperCase())
+        .filter(Boolean),
+    SVMKR_COOLDOWN_MS: Math.max(
+        60_000,
+        Math.min(2 * 3600_000, parseInt(process.env.SVMKR_COOLDOWN_MS, 10) || 15 * 60_000)
+    ),
+    /** UT Bot inputs — defaults are the public script's (ATR 10, sensitivity 1). */
+    SVMKR_ATR_PERIOD: Math.max(2, Math.min(50, parseInt(process.env.SVMKR_ATR_PERIOD, 10) || 10)),
+    SVMKR_SENSITIVITY: Math.max(
+        0.5,
+        Math.min(5, parseFloat(process.env.SVMKR_SENSITIVITY) || 1)
+    ),
+    SVMKR_HEIKIN_ASHI: process.env.SVMKR_HEIKIN_ASHI === 'true',
+    SVMKR_HMA_PERIOD: Math.max(5, Math.min(200, parseInt(process.env.SVMKR_HMA_PERIOD, 10) || 21)),
+    SVMKR_LRS_PERIOD: Math.max(5, Math.min(200, parseInt(process.env.SVMKR_LRS_PERIOD, 10) || 20)),
+    /** IST minute-of-day after which no new SVMKR entry is taken. */
+    SVMKR_LAST_ENTRY_MIN: Math.max(
+        9 * 60 + 30,
+        Math.min(15 * 60 + 15, parseInt(process.env.SVMKR_LAST_ENTRY_MIN, 10) || 15 * 60)
+    ),
+
     /** Parallel symbol analyses during daily scan (1–3). */
     TRADE_ALERT_SCAN_CONCURRENCY: Math.max(
         1,

@@ -16,6 +16,8 @@ import { discoverySourceLabel, parseDiscoverySource } from '../../utils/discover
 import ExpiryTradeService, { EXPIRY_INDICES } from '../../services/ExpiryTradeService.js';
 import { formatExpiryAlert, formatExpiryDigest } from '../../utils/expiryAlertFormatter.js';
 import { nextExpiry } from '../../utils/expiryCalendar.js';
+import SvmkrScanService from '../../services/SvmkrScanService.js';
+import { formatSvmkrCard, formatSvmkrIdle, formatSvmkrStats } from '../../utils/svmkrCard.js';
 
 function parseSymbolList(raw) {
     return String(raw || '')
@@ -774,6 +776,67 @@ async function attachIndexLiveStats(a, ctx) {
  * `/index nifty` — index F&O read. No directional call by design; see
  * IndexAnalysisService for the measurements that decided that.
  */
+let _svmkrScan = null;
+function svmkrScanner() {
+    if (!_svmkrScan) _svmkrScan = new SvmkrScanService(config);
+    return _svmkrScan;
+}
+
+/**
+ * `/svmkr` — on-demand read of the live SVMKR scanner.
+ *   /svmkr              → NIFTY read right now (shows the standing position when
+ *                         no cross just printed)
+ *   /svmkr BANKNIFTY    → another index
+ *   /svmkr stats        → measured premium win rate from tracked trades
+ *   /svmkr scan         → force one live tick (post to groups) — owner/admin path
+ */
+export async function handleSvmkr(sock, chatId, senderJid, args, ctx = {}) {
+    const sub = (args[0] || '').trim().toLowerCase();
+
+    if (sub === 'stats') {
+        const tracker = ctx.svmkrTracker;
+        if (!tracker) {
+            await sock.sendMessage(chatId, { text: '❌ SVMKR tracking is not wired up (no database).' });
+            return;
+        }
+        const stats = await tracker.stats({ lookbackDays: 30 });
+        await sock.sendMessage(chatId, { text: formatSvmkrStats(stats) });
+        return;
+    }
+
+    if (sub === 'scan') {
+        const scheduler = ctx.svmkrScheduler;
+        if (!scheduler?.tick) {
+            await sock.sendMessage(chatId, {
+                text: '❌ The live scanner is not running. Set `SVMKR_ENABLED=true` and restart.',
+            });
+            return;
+        }
+        const loading = await sock.sendMessage(chatId, { text: '⚡ _Running one SVMKR tick…_' });
+        const res = await scheduler.tick({ force: true });
+        const summary = res?.skipped
+            ? `⚠️ Skipped: ${res.skipped}`
+            : `✅ Tick done — ${res.posted || 0} card(s) posted, ` +
+              `${res.tracked?.checked || 0} open position(s) checked, ${res.tracked?.closed || 0} closed.`;
+        await editMessageText(sock, chatId, loading?.key, summary);
+        return;
+    }
+
+    const raw = (args[0] || 'NIFTY').trim();
+    const loading = await sock.sendMessage(chatId, { text: `⚡ _Reading ${raw.toUpperCase()} — UT Bot + HMA + slope…_` });
+    try {
+        // requireFresh:false so an on-demand read reports the standing trend
+        // instead of "nothing" whenever a cross did not just print.
+        const scan = await svmkrScanner().scan(raw, { requireFresh: false });
+        const text = scan.setup ? formatSvmkrCard(scan) : formatSvmkrIdle(scan);
+        await editMessageText(sock, chatId, loading?.key, text);
+        logger.info(`⚡ SVMKR read ${scan.key} in ${chatId}${scan.setup ? ` — ${scan.setup.side}` : ' — no setup'}`);
+    } catch (error) {
+        await editMessageText(sock, chatId, loading?.key, `❌ ${error.message}`);
+        logger.warn(`SVMKR read failed for ${raw}: ${error.message}`);
+    }
+}
+
 export async function handleIndex(sock, chatId, senderJid, args, ctx) {
     const raw = (args[0] || 'NIFTY').trim();
     const loading = await sock.sendMessage(chatId, {

@@ -48,6 +48,9 @@ import ResumeTailorService from './src/services/ResumeTailorService.js';
 import { startGroupSummaryScheduler } from './src/utils/groupSummaryScheduler.js';
 import TradeAlertController from './src/controllers/TradeAlertController.js';
 import { startTradeAlertScheduler } from './src/utils/tradeAlertScheduler.js';
+import SvmkrScanService from './src/services/SvmkrScanService.js';
+import SvmkrPositionTracker from './src/services/SvmkrPositionTracker.js';
+import { startSvmkrScheduler } from './src/utils/svmkrScheduler.js';
 import { initAutoDelete } from './src/utils/autoDelete.js';
 import { startExpiryAlertScheduler } from './src/utils/expiryAlertScheduler.js';
 import { startOutcomeResolverScheduler } from './src/utils/outcomeResolverScheduler.js';
@@ -99,6 +102,9 @@ class WhatsAppCourseBot {
         this.groupSummaryController = null;
         this.tradeAlertController = null;
         this.tradeAlertScheduler = null;
+        this.svmkrScanService = null;
+        this.svmkrTracker = null;
+        this.svmkrScheduler = null;
         this.expiryAlertScheduler = null;
         this.outcomeResolverScheduler = null;
         this.expiryTradeService = null;
@@ -238,7 +244,14 @@ class WhatsAppCourseBot {
                 mongoDb
             );
             await this.tradeAlertController.init();
-            
+
+            // SVMKR live scanner: UT Bot + HMA + slope on every closed 5m bar.
+            // The tracker is built even when the loop is off, so `/svmkr stats`
+            // still reads the history of previously tracked trades.
+            this.svmkrScanService = new SvmkrScanService(config);
+            this.svmkrTracker = new SvmkrPositionTracker(mongoDb, config);
+            await this.svmkrTracker.init();
+
             this.stickerController = new StickerController(config);
 
             this.commandController = new CommandController(
@@ -423,6 +436,20 @@ class WhatsAppCourseBot {
                 jobQueue: this.jobQueue,
             });
 
+            // The only continuously-running scanner: wakes on each closed 5m bar
+            // during market hours. Off unless SVMKR_ENABLED=true.
+            this.svmkrScheduler = startSvmkrScheduler({
+                getSock: () => this.whatsappService.getSock(),
+                scanService: this.svmkrScanService,
+                tracker: this.svmkrTracker,
+                groupManager: this.groupManager,
+                config,
+            });
+            this.commandController.setSvmkr({
+                tracker: this.svmkrTracker,
+                scheduler: this.svmkrScheduler,
+            });
+
             // Expiry-day option alerts — two slots, quiet on non-expiry days.
             this.expiryTradeService = new ExpiryTradeService(config);
             this.expiryAlertScheduler = startExpiryAlertScheduler({
@@ -512,6 +539,9 @@ class WhatsAppCourseBot {
         }
         if (this.expiryAlertScheduler) {
             this.expiryAlertScheduler.stop();
+        }
+        if (this.svmkrScheduler) {
+            this.svmkrScheduler.stop();
         }
         if (this.jobRuntime?.stop) {
             await Promise.resolve(this.jobRuntime.stop()).catch(() => {});

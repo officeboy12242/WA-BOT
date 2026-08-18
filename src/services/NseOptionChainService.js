@@ -196,6 +196,17 @@ class NseOptionChainService {
               }
             : null;
 
+        // Every strike's live premium, so a tracker following an already-open
+        // position can price its exact strike from the same single fetch instead
+        // of hitting NSE once per open trade.
+        const strikes = rows
+            .map((row) => ({
+                strike: row.strikePrice,
+                ce: row.CE ? { ltp: row.CE.lastPrice ?? null, oi: row.CE.openInterest ?? null, iv: row.CE.impliedVolatility ?? null } : null,
+                pe: row.PE ? { ltp: row.PE.lastPrice ?? null, oi: row.PE.openInterest ?? null, iv: row.PE.impliedVolatility ?? null } : null,
+            }))
+            .filter((s) => Number.isFinite(s.strike));
+
         return {
             context: lines.join('\n'),
             snapshot: {
@@ -204,6 +215,7 @@ class NseOptionChainService {
                 expiry,
                 spot,
                 pcr,
+                strikes,
                 totalCeOi,
                 totalPeOi,
                 topCe,
@@ -256,6 +268,19 @@ class NseOptionChainService {
         }
         return null;
     }
+}
+
+/**
+ * Live premium for one strike out of a snapshot.
+ * @param {object|null} snapshot from fetchOptionContext
+ * @param {number} strike
+ * @param {'CE'|'PE'} side
+ * @returns {{ ltp: number|null, iv: number|null, oi: number|null }|null}
+ */
+export function findStrikeLeg(snapshot, strike, side) {
+    const row = (snapshot?.strikes || []).find((s) => Number(s.strike) === Number(strike));
+    if (!row) return null;
+    return (String(side).toUpperCase() === 'PE' ? row.pe : row.ce) || null;
 }
 
 export const nseOptionChainService = new NseOptionChainService();
