@@ -363,6 +363,72 @@ export function sizeIndexTrade({ premium, lot, indexAtr, capital, minProfit, max
     };
 }
 
+/**
+ * Turn a strategy's index-level entry/SL/target into a sized ATM option trade,
+ * with a rupee risk and reward. The fade path already does this via
+ * `sizeIndexTrade` (which assumes 1:1 R:R at 1×ATR). Strategies (KC/ST) have
+ * asymmetric R:R and different SL/target distances, so this sizer uses the
+ * strategy's OWN entry/SL/target1/target2 and translates them to premium via
+ * ATM delta ≈ 0.5 — the same simplification the fade sizing uses.
+ *
+ * Returns { lots, qty, capitalUsed, premEntry, premStop, premT1, premT2,
+ *           riskRs, t1Rs, t2Rs } on success, or { blocked: "..." } when the
+ * smallest lot doesn't fit inside `capital`. Null when inputs are missing —
+ * callers fall back to the index-only display.
+ */
+export function sizeStrategyOption(strat, ctx = {}) {
+    if (!strat) return null;
+    const leg = strat.side === 'CE' ? ctx?.atmCe : strat.side === 'PE' ? ctx?.atmPe : null;
+    const premium = Number(leg?.ltp);
+    const lot = Number(ctx?.lot);
+    const capital = Number(ctx?.capital);
+    const entry = Number(strat.entry);
+    const sl = Number(strat.sl);
+    const target1 = Number(strat.target1);
+    if (!Number.isFinite(premium) || !(premium > 0)) return null;
+    if (!Number.isFinite(lot) || !(lot > 0)) return null;
+    if (!Number.isFinite(capital) || !(capital > 0)) return null;
+    if (![entry, sl, target1].every(Number.isFinite)) return null;
+    const risk = Math.abs(entry - sl);
+    const t1Dist = Math.abs(target1 - entry);
+    if (!(risk > 0) || !(t1Dist > 0)) return null;
+
+    const delta = 0.5;
+    const minProfit = Number(ctx?.minProfit) || 600;
+    const maxProfit = Number(ctx?.maxProfit) || 1200;
+    const target2 = Number(strat.target2);
+    const t2Dist = Number.isFinite(target2) ? Math.abs(target2 - entry) : null;
+
+    const premEntry = Number(premium.toFixed(2));
+    const premStop = Number(Math.max(0.05, premEntry - delta * risk).toFixed(2));
+    const premT1 = Number((premEntry + delta * t1Dist).toFixed(2));
+    const premT2 = t2Dist != null ? Number((premEntry + delta * t2Dist).toFixed(2)) : null;
+
+    const costPerLot = premEntry * lot;
+    if (costPerLot > capital) {
+        return { blocked: `one lot costs ₹${Math.round(costPerLot).toLocaleString('en-IN')}, above the ₹${capital.toLocaleString('en-IN')} capital` };
+    }
+    const pnlPerLot = (premT1 - premEntry) * lot;
+    let lots = pnlPerLot > 0 ? Math.max(1, Math.ceil(minProfit / pnlPerLot)) : 1;
+    while (lots > 1 && (lots * pnlPerLot > maxProfit || lots * costPerLot > capital)) lots--;
+    if (lots * costPerLot > capital) {
+        return { blocked: `cannot fit a lot inside ₹${capital.toLocaleString('en-IN')}` };
+    }
+    const qty = lots * lot;
+    return {
+        lots,
+        qty,
+        capitalUsed: Math.round(lots * costPerLot),
+        premEntry,
+        premStop,
+        premT1,
+        premT2,
+        riskRs: Math.round((premEntry - premStop) * qty),
+        t1Rs: Math.round((premT1 - premEntry) * qty),
+        t2Rs: premT2 != null ? Math.round((premT2 - premEntry) * qty) : null,
+    };
+}
+
 /** PCR read in words. Thresholds are conventional, not fitted to anything. */
 export function pcrLabel(pcr) {
     if (pcr == null || !Number.isFinite(Number(pcr))) return null;
@@ -492,6 +558,28 @@ class IndexAnalysisService {
             nowMin,
             opts: this.strategyOpts,
         });
+
+        // Attach a sized ATM option plan to each firing strategy so the card can
+        // show `Lots / ₹ entry / ₹ exit / ₹ stop / rupee profit + loss` — the
+        // same treatment the fade path gets. Old KC/ST cards printed INDEX levels
+        // only, which left the user to translate 30-point moves into premium by
+        // hand.
+        if (Array.isArray(strategies?.list)) {
+            const sizingCtx = {
+                atmCe: snap.atmCe,
+                atmPe: snap.atmPe,
+                lot,
+                capital: this.capital,
+                minProfit: this.minProfit,
+                maxProfit: this.maxProfit,
+            };
+            for (const strat of strategies.list) {
+                strat.optionPlan = sizeStrategyOption(strat, sizingCtx);
+            }
+            if (strategies.winner && !strategies.winner.optionPlan) {
+                strategies.winner.optionPlan = sizeStrategyOption(strategies.winner, sizingCtx);
+            }
+        }
 
         logger.info(`📐 Index read ${spec.nse}: spot ${fmt(spot)} ATM ${snap.atmStrike} exp ${snap.expiry}`);
 
@@ -643,13 +731,13 @@ class IndexAnalysisService {
                     const dirWord = strat.side === 'CE' ? 'BUY CE' : 'BUY PE';
                     const medal = strat === winner ? '🥇' : '🥈';
                     const betterNote = strat.comparisonNote ? ` _${strat.comparisonNote}_` : '';
+                    const wrSuffix = winRateSuffix(a, strat);
 
                     L.push(`│ ${medal} *${strat.name}*`);
                     L.push(`│ ${dirWord} · ${strat.strength} · Confidence: *${strat.confidence}%* (${strat.confidenceLabel})`);
-                    L.push(`│ Win rate: ${strat.winRateTag} — ${strat.bestFor}`);
+                    L.push(`│ Win rate: ${strat.winRateTag}${wrSuffix} — ${strat.bestFor}`);
                     L.push('│');
 
-                    // Entry / SL / Target levels
                     if (strat.entry != null && strat.sl != null) {
                         const risk = Math.abs(strat.entry - strat.sl);
                         const t1Dist = strat.target1 != null ? Math.abs(strat.target1 - strat.entry) : null;
@@ -661,6 +749,26 @@ class IndexAnalysisService {
                         if (risk > 0 && t1Dist != null) {
                             const rr = (t1Dist / risk).toFixed(1);
                             L.push(`│ ⚖️ R:R = 1:${rr}`);
+                        }
+
+                        // Sized option trade — same UX as the fade card so the
+                        // user does not have to translate index points to premium
+                        // by hand. Falls back gracefully when there's no leg or
+                        // one lot doesn't fit in `capital`.
+                        const op = strat.optionPlan;
+                        if (op && !op.blocked) {
+                            L.push('│');
+                            L.push(`│ *${a.atmStrike} ${strat.side}* · ${a.expiry || '—'}`);
+                            L.push(`│ Lots: *${op.lots}* (${op.qty} qty) · capital used *${inr(op.capitalUsed)}* of ${inr(a.capital)}`);
+                            L.push(`│ 🟢 PREM ENTRY ₹${fmt(op.premEntry)}`);
+                            L.push(`│ 🎯 EXIT AT   ₹${fmt(op.premT1)}  →  profit *${inr(op.t1Rs)}*`);
+                            L.push(`│ 🛑 PREM STOP  ₹${fmt(op.premStop)}  →  loss *${inr(op.riskRs)}*`);
+                            if (op.premT2 != null && op.t2Rs != null) {
+                                L.push(`│ 🏃 runner    ₹${fmt(op.premT2)}  →  profit ${inr(op.t2Rs)}`);
+                            }
+                        } else if (op?.blocked) {
+                            L.push('│');
+                            L.push(`│ ⚠️ Size blocked: ${op.blocked}`);
                         }
                     }
 
@@ -776,6 +884,21 @@ function liveStatTag(a, source) {
     return null;
 }
 
+/**
+ * Suffix for the Keltner/Supertrend win-rate label. Until we have >=3 decided
+ * live trades for a given strategy source, its 77%/67% number is a backtest
+ * CLAIM, not a measured edge like the fade (which cites n=51, 23 sessions).
+ * Callers append this to `strat.winRateTag` so readers can't confuse the two.
+ */
+function winRateSuffix(a, strat) {
+    if (!strat?.key) return '';
+    const source = `index-${strat.key}`;
+    const st = a?.liveStats?.[source];
+    const decided = (st?.win || 0) + (st?.loss || 0);
+    if (decided >= 3) return '';
+    return ' _(backtest claim, unjournaled)_';
+}
+
 function appendStrategyRanking(L, a) {
     const ranked = a.strategies?.list || [];
     const quiet = a.strategies?.quiet || [];
@@ -802,15 +925,15 @@ function appendStrategyRanking(L, a) {
         const sideWord = r.side === 'CE' ? 'BUY CE' : 'BUY PE';
         const short = STRATEGY_META[r.key]?.short || r.key;
         const tag = liveStatTag(a, `index-${r.key}`);
+        const wrSuffix = tag ? '' : winRateSuffix(a, r);
         const medal = r === ranked[0] ? '🥇' : '🥈';
         const betterNote = r.comparisonNote ? ` _${r.comparisonNote}_` : '';
 
         L.push(`│ ${medal} *${short}* — ${sideWord}`);
-        L.push(`│ Win rate: ${r.winRateTag} · Confidence: *${r.confidence}%*${tag || ''}`);
+        L.push(`│ Win rate: ${r.winRateTag}${wrSuffix} · Confidence: *${r.confidence}%*${tag || ''}`);
         L.push(`│ Best for: ${r.bestFor}`);
         L.push(`│`);
 
-        // Entry / SL / Target
         if (r.entry != null && r.sl != null) {
             const risk = Math.abs(r.entry - r.sl);
             const t1Dist = r.target1 != null ? Math.abs(r.target1 - r.entry) : null;
@@ -822,6 +945,18 @@ function appendStrategyRanking(L, a) {
             if (risk > 0 && t1Dist != null) {
                 const rr = (t1Dist / risk).toFixed(1);
                 L.push(`│ ⚖️ R:R = 1:${rr}`);
+            }
+
+            // Premium sizing for the top-ranked strategy so the fade-fired path
+            // also names the option, lots and rupee outcomes.
+            if (r === ranked[0] && r.optionPlan && !r.optionPlan.blocked) {
+                const op = r.optionPlan;
+                L.push(`│`);
+                L.push(`│ *${a.atmStrike} ${r.side}* · ${a.expiry || '—'} · Lots *${op.lots}* (${op.qty} qty)`);
+                L.push(`│ 🟢 PREM ENTRY ₹${fmt(op.premEntry)} · 🎯 EXIT ₹${fmt(op.premT1)} → *${inr(op.t1Rs)}* · 🛑 STOP ₹${fmt(op.premStop)} → loss *${inr(op.riskRs)}*`);
+            } else if (r === ranked[0] && r.optionPlan?.blocked) {
+                L.push(`│`);
+                L.push(`│ ⚠️ Size blocked: ${r.optionPlan.blocked}`);
             }
         }
 

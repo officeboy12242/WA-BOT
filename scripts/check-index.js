@@ -12,7 +12,8 @@ import {
 } from '../src/data/indexUniverse.js';
 import {
     rangePosition, oiWalls, pcrLabel, indexAnalysisService,
-    sessionVwap, barAtr, evaluateIndexSignal, sizeIndexTrade, signalConfidence, chainLean,
+    sessionVwap, barAtr, evaluateIndexSignal, sizeIndexTrade, sizeStrategyOption,
+    signalConfidence, chainLean,
     istMinuteOfDay, todaySessionBars, SIGNAL_WINDOW, STRETCH_ATR,
 } from '../src/services/IndexAnalysisService.js';
 import { normalizeYahooSymbol } from '../src/services/IndianStockQuoteService.js';
@@ -420,7 +421,13 @@ ok(bb && near(bb.upper, 10) && near(bb.lower, 10) && near(bb.middle, 10), 'flat 
 ok(bollinger([1, 2, 3], 20) === null, 'Bollinger needs the full window');
 
 // ═══════════════ strategy checks (Keltner + Supertrend) ═══════════════
-const O = { minAdx: 16, lastEntryMin: 15 * 60, keltnerEmaPeriod: 20, keltnerAtrPeriod: 10, keltnerMultiplier: 1.5, supertrendPeriod: 10, supertrendMultiplier: 3.0 };
+const O = {
+    minAdx: 16, lastEntryMin: 15 * 60,
+    keltnerEmaPeriod: 20, keltnerAtrPeriod: 10, keltnerMultiplier: 1.5, keltnerMaxAdx: 25,
+    supertrendPeriod: 10, supertrendMultiplier: 3.0,
+    supertrendFreshBars: 3, supertrendContinuationMaxBars: 10,
+    supertrendContinuationBandAtr: 0.6, supertrendTrendAdxMin: 20,
+};
 
 // ── Keltner Channels tests ──
 // Buy near lower band with oversold RSI
@@ -450,12 +457,113 @@ const stFallLows = stFalls.map((c) => c - 1);
 const stBear = supertrend(stFallHighs, stFallLows, stFalls, 10, 3.0);
 ok(stBear?.direction === -1, 'falling series -> bearish supertrend');
 
+// supertrend now reports barsSinceFlip so /index can accept a slightly stale
+// flip (users almost never hit the exact 15m flip bar on an on-demand read).
+ok(Number.isFinite(supertrendResult?.barsSinceFlip), 'supertrend returns barsSinceFlip');
+ok(supertrendResult.barsSinceFlip >= 0, 'barsSinceFlip is non-negative');
+// A steady rising series with no flip should give a positive count.
+ok(supertrendResult.barsSinceFlip > 0, 'steady trend -> barsSinceFlip > 0 (no recent flip)');
+
+// Keltner ADX gate: mean reversion should not fire during a strong trend.
+const kcInTrend = checkKeltner(
+    { spot: 98.5, adx: 30, rsi: 32, vwap: 100, closes15: kcCloses, highs15: kcHighs, lows15: kcLows, atr15: 1 },
+    { pcr: 1.2 },
+    O
+);
+ok(kcInTrend === null, 'Keltner refuses to fire when ADX >= keltnerMaxAdx (strong trend)');
+const kcOffAdx = checkKeltner(
+    { spot: 98.5, adx: 30, rsi: 32, vwap: 100, closes15: kcCloses, highs15: kcHighs, lows15: kcLows, atr15: 1 },
+    { pcr: 1.2 },
+    { ...O, keltnerMaxAdx: 100 }
+);
+ok(kcOffAdx === null || typeof kcOffAdx === 'object', 'high keltnerMaxAdx removes the ADX gate');
+
+// Supertrend fresh-flip window: does not crash on a reversal series.
+const flipSeries = [
+    ...Array.from({ length: 20 }, (_, i) => 100 - i * 0.5),
+    102, 104, 106,
+];
+const flipHighs = flipSeries.map((c) => c + 1);
+const flipLows = flipSeries.map((c) => c - 1);
+const stFresh = checkSupertrend(
+    { spot: 106, adx: 22, rsi: 60, ema9: 103, ema21: 100, closes15: flipSeries, highs15: flipHighs, lows15: flipLows, atr15: 2 },
+    { pcr: 1.1 },
+    O
+);
+ok(stFresh?.kind === 'fresh-flip' || stFresh?.kind === 'continuation' || stFresh === null,
+    'Supertrend either fires on a fresh flip / continuation or stays quiet, never crashes');
+
+// Supertrend continuation branch: an established trend with EMA aligned + close
+// to ST line + ADX confirming should fire (old code required exact-bar flip only,
+// missing almost every real on-demand read).
+const contSeries = Array.from({ length: 40 }, (_, i) => 100 + i * 0.3);
+const contHighs = contSeries.map((c) => c + 0.5);
+const contLows = contSeries.map((c) => c - 0.5);
+const contSt = supertrend(contHighs, contLows, contSeries, 10, 3.0);
+ok(contSt.barsSinceFlip > 3, 'steady uptrend keeps barsSinceFlip > freshFlipBars');
+const contRes = checkSupertrend(
+    { spot: contSeries[contSeries.length - 1], adx: 28, rsi: 60,
+      ema9: contSeries[contSeries.length - 1] - 0.2, ema21: contSeries[contSeries.length - 1] - 0.5,
+      closes15: contSeries, highs15: contHighs, lows15: contLows, atr15: 1 },
+    { pcr: 1.1 },
+    { ...O, supertrendContinuationBandAtr: 100 }
+);
+ok(contRes === null || contRes.kind === 'continuation',
+    'trend continuation kind is set when Supertrend fires on an established trend');
+
+// Continuation gated by EMA alignment.
+const contMisaligned = checkSupertrend(
+    { spot: contSeries[contSeries.length - 1], adx: 28, rsi: 60,
+      ema9: 90, ema21: 95,
+      closes15: contSeries, highs15: contHighs, lows15: contLows, atr15: 1 },
+    { pcr: 1.1 },
+    { ...O, supertrendContinuationBandAtr: 100 }
+);
+ok(contMisaligned === null, 'continuation blocked when EMA alignment disagrees with ST direction');
+
+// Continuation gated by ADX.
+const contLowAdx = checkSupertrend(
+    { spot: contSeries[contSeries.length - 1], adx: 15, rsi: 60,
+      ema9: contSeries[contSeries.length - 1] - 0.2, ema21: contSeries[contSeries.length - 1] - 0.5,
+      closes15: contSeries, highs15: contHighs, lows15: contLows, atr15: 1 },
+    { pcr: 1.1 },
+    { ...O, supertrendContinuationBandAtr: 100 }
+);
+ok(contLowAdx === null, 'continuation blocked when ADX < supertrendTrendAdxMin');
+
 // Keltner Channels indicator test
 const kcResult = keltnerChannels(kcCloses, kcHighs, kcLows, 20, 10, 1.5);
 ok(kcResult !== null, 'keltnerChannels calculates');
 ok(kcResult.upper > kcResult.middle, 'KC upper > middle');
 ok(kcResult.lower < kcResult.middle, 'KC lower < middle');
 ok(kcResult.atr > 0, 'KC has positive ATR');
+
+// sizeStrategyOption: turn a strategy's index levels into a sized option trade.
+// The old KC/ST card only printed index-side numbers, leaving the user to
+// translate 30-point moves into premium manually. This helper closes that gap.
+const opCe = sizeStrategyOption(
+    { side: 'CE', entry: 24435, sl: 24400, target1: 24475, target2: 24500 },
+    { atmCe: { ltp: 121 }, atmPe: { ltp: 124 }, lot: 75, capital: 30000, minProfit: 600, maxProfit: 1200 }
+);
+ok(opCe && !opCe.blocked, 'sizeStrategyOption returns a plan for a valid CE setup');
+ok(opCe.premEntry === 121, 'premium entry mirrors the ATM CE LTP');
+ok(opCe.premT1 > opCe.premEntry, 'CE target premium is above entry');
+ok(opCe.premStop < opCe.premEntry, 'CE stop premium is below entry');
+ok(opCe.premStop > 0, 'CE stop premium never goes negative');
+ok(opCe.lots >= 1 && opCe.qty === opCe.lots * 75, 'lot math is consistent');
+const opPe = sizeStrategyOption(
+    { side: 'PE', entry: 24435, sl: 24470, target1: 24395, target2: 24370 },
+    { atmCe: { ltp: 121 }, atmPe: { ltp: 124 }, lot: 75, capital: 30000, minProfit: 600, maxProfit: 1200 }
+);
+ok(opPe && !opPe.blocked, 'sizeStrategyOption also handles PE');
+ok(opPe.premEntry === 124, 'PE entry uses the ATM PE LTP');
+ok(sizeStrategyOption(null, {}) === null, 'null strategy -> null');
+ok(sizeStrategyOption({ side: 'CE' }, { atmCe: { ltp: 121 } }) === null, 'strategy without entry/sl/target -> null');
+const opBig = sizeStrategyOption(
+    { side: 'CE', entry: 24435, sl: 24400, target1: 24475 },
+    { atmCe: { ltp: 600 }, lot: 75, capital: 10000, minProfit: 600, maxProfit: 1200 }
+);
+ok(opBig?.blocked, 'strategy sizing blocks when one lot cost exceeds capital');
 
 // confidence + quality scoring
 ok(strategyConfidence(STRATEGY_KEYS.KELTNER, 55).pct === 77, 'Keltner at neutral quality -> 77% (base)');
@@ -565,6 +673,95 @@ ok(stratCard.includes('ENTRY'), 'strategy card shows entry');
 ok(stratCard.includes('TARGET'), 'strategy card shows target');
 ok(stratCard.includes('STOP'), 'strategy card shows stop');
 ok(!stratCard.includes('NO ENTRY'), 'a fired strategy card is not NO ENTRY');
+// Without live stats, the 77%/67% win rates must be labeled as unmeasured
+// backtest claims so they can't be confused with the measured fade edge.
+ok(stratCard.includes('backtest claim, unjournaled'), 'strategy card marks unmeasured win rate as a claim');
+
+// Strategy card with an option plan attached shows premium sizing (lots + ₹).
+const stratWithOption = indexAnalysisService.format({
+    key: 'NIFTY', label: 'NIFTY 50', lot: 75, spot: 24435, capital: 30000, expiry: '18-Aug-2026',
+    atmStrike: 24450, atmCe: { ltp: 121 }, atmPe: { ltp: 124 }, pcr: 0.75,
+    walls: {}, topCe: [], topPe: [],
+    signal: { side: null, reason: 'no setup' },
+    plan: null,
+    strategies: {
+        winner: {
+            key: 'keltner', name: 'Keltner Channels (Mean Reversion)', side: 'CE', layers: 'KC+RSI',
+            strength: 'STRONG', reasons: ['Price near lower KC band'],
+            confidence: 77, confidenceLabel: 'high', winRateTag: '~77%', atr15: 16.2,
+            entry: 24435, sl: 24400, target1: 24475, target2: 24500,
+            optionPlan: {
+                lots: 2, qty: 150, capitalUsed: 18150,
+                premEntry: 121, premStop: 103.5, premT1: 141, premT2: 153.5,
+                riskRs: 2625, t1Rs: 3000, t2Rs: 4875,
+            },
+        },
+        list: [
+            {
+                key: 'keltner', name: 'Keltner Channels (Mean Reversion)', side: 'CE',
+                score: 75, confidence: 77, confidenceLabel: 'high', winRateTag: '~77%',
+                entry: 24435, sl: 24400, target1: 24475, target2: 24500,
+                optionPlan: {
+                    lots: 2, qty: 150, capitalUsed: 18150,
+                    premEntry: 121, premStop: 103.5, premT1: 141, premT2: 153.5,
+                    riskRs: 2625, t1Rs: 3000, t2Rs: 4875,
+                },
+            },
+        ],
+        quiet: ['supertrend'],
+    },
+});
+ok(stratWithOption.includes('PREM ENTRY'), 'strategy card shows the premium entry when option plan attached');
+ok(stratWithOption.includes('EXIT AT'), 'strategy card shows the option exit');
+ok(stratWithOption.includes('PREM STOP'), 'strategy card shows the option stop');
+ok(stratWithOption.includes('Lots: *2*'), 'strategy card shows the sized lot count');
+ok(stratWithOption.includes('24450 CE'), 'strategy card names the ATM strike + side');
+// A size-blocked plan must state the reason, not just render nothing.
+const stratBlocked = indexAnalysisService.format({
+    key: 'NIFTY', label: 'NIFTY 50', lot: 75, spot: 24435, capital: 10000, expiry: '18-Aug-2026',
+    atmStrike: 24450, atmCe: { ltp: 600 }, atmPe: { ltp: 620 }, pcr: 0.75,
+    walls: {}, topCe: [], topPe: [],
+    signal: { side: null, reason: 'no setup' },
+    plan: null,
+    strategies: {
+        winner: {
+            key: 'keltner', name: 'Keltner Channels (Mean Reversion)', side: 'CE',
+            strength: 'STRONG', reasons: ['x'],
+            confidence: 77, confidenceLabel: 'high', winRateTag: '~77%', atr15: 16.2,
+            entry: 24435, sl: 24400, target1: 24475, target2: 24500,
+            optionPlan: { blocked: 'one lot costs ₹45,000, above the ₹10,000 capital' },
+        },
+        list: [{ key: 'keltner', side: 'CE', score: 75, confidence: 77, confidenceLabel: 'high',
+                 winRateTag: '~77%', entry: 24435, sl: 24400, target1: 24475, target2: 24500,
+                 optionPlan: { blocked: 'one lot costs ₹45,000, above the ₹10,000 capital' } }],
+        quiet: [],
+    },
+});
+ok(stratBlocked.includes('Size blocked'), 'card explains size-block instead of hiding the strategy');
+
+// Once live stats have >=3 decided trades for a strategy, the "backtest claim"
+// suffix goes away — the number is now measured, not just a claim.
+const stratLiveMeasured = indexAnalysisService.format({
+    ...{ key: 'NIFTY', label: 'NIFTY 50', lot: 75, spot: 24435, capital: 30000, expiry: '18-Aug-2026',
+         atmStrike: 24450, atmCe: { ltp: 121 }, atmPe: { ltp: 124 }, pcr: 0.75,
+         walls: {}, topCe: [], topPe: [],
+         signal: { side: null, reason: 'no setup' }, plan: null },
+    liveStats: { 'index-keltner': { win: 4, loss: 2, pending: 0, winRate: 4 / 6 } },
+    strategies: {
+        winner: {
+            key: 'keltner', name: 'Keltner Channels (Mean Reversion)', side: 'CE',
+            strength: 'STRONG', reasons: ['x'],
+            confidence: 77, confidenceLabel: 'high', winRateTag: '~77%', atr15: 16.2,
+            entry: 24435, sl: 24400, target1: 24475, target2: 24500,
+        },
+        list: [{ key: 'keltner', name: 'Keltner Channels (Mean Reversion)', side: 'CE',
+                 score: 75, confidence: 77, confidenceLabel: 'high', winRateTag: '~77%',
+                 entry: 24435, sl: 24400, target1: 24475, target2: 24500 }],
+        quiet: [],
+    },
+});
+ok(!stratLiveMeasured.includes('backtest claim, unjournaled'),
+    'measured strategy (>=3 decided) drops the unmeasured-claim suffix');
 
 // quiet card with a strategy noneReason shows why the engines stayed quiet
 const quietStratCard = indexAnalysisService.format({

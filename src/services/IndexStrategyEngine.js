@@ -166,6 +166,12 @@ export function checkKeltner(tech, chain, opts) {
     const { spot, adx: adxV, rsi: rsiV, vwap, closes15, highs15, lows15 } = tech;
     if (spot == null || !closes15?.length) return null;
 
+    // Hard ADX gate: Keltner is a mean-reversion strategy, and mean reversion loses
+    // in a strong trend. The old code let KC fire in any ADX regime and only
+    // downgraded the score — which produced low-confidence CE calls in the middle
+    // of a bearish trend. Refuse to fire when ADX says the market is trending.
+    if (adxV != null && adxV >= (opts.keltnerMaxAdx ?? 25)) return null;
+
     const kc = keltnerChannels(closes15, highs15, lows15,
         opts.keltnerEmaPeriod, opts.keltnerAtrPeriod, opts.keltnerMultiplier);
     if (!kc) return null;
@@ -249,50 +255,96 @@ export function checkSupertrend(tech, chain, opts) {
     const pcr = Number(chain?.pcr) != null ? Number(chain.pcr) : 1;
     const reasons = [];
 
-    // Only fire on a fresh flip (direction changed from previous bar)
-    const freshFlip = st.direction !== st.prevDirection && st.prevDirection !== 0;
+    // Two ways ST fires on an on-demand /index read:
+    //   1. Fresh flip — the last few bars just changed direction. The old code
+    //      only accepted a flip on the LAST bar; /index is manual and 15m bars
+    //      are 15 minutes wide, so almost no user ever hit that. We now accept a
+    //      flip within the last `freshFlipBars` completed bars (default 3, ~45m).
+    //   2. Trend continuation — direction is established and price pulled back
+    //      near the ST line, so the entry is at a sensible risk point (not late
+    //      chasing). This requires ADX-confirmed trend + EMA alignment so we
+    //      don't call every faint drift a trend.
+    const freshFlipBars = opts.supertrendFreshBars ?? 3;
+    const continuationMaxBars = opts.supertrendContinuationMaxBars ?? 10;
+    const continuationBandAtr = opts.supertrendContinuationBandAtr ?? 0.6;
+    const trendAdxMin = opts.supertrendTrendAdxMin ?? 20;
+
+    const barsSince = Number.isFinite(st.barsSinceFlip) ? st.barsSinceFlip : 0;
+    const freshFlip = st.prevDirection !== 0 && barsSince <= freshFlipBars;
+    const bullEmaAligned = ema9 != null && ema21 != null && ema9 > ema21;
+    const bearEmaAligned = ema9 != null && ema21 != null && ema9 < ema21;
+    const proximityAtr = atr > 0 ? Math.abs(spot - st.supertrend) / atr : Infinity;
+    const strongAdx = adxV != null && adxV >= trendAdxMin;
+    const continuation =
+        !freshFlip &&
+        barsSince <= continuationMaxBars &&
+        proximityAtr <= continuationBandAtr &&
+        strongAdx &&
+        ((st.direction === 1 && bullEmaAligned) || (st.direction === -1 && bearEmaAligned));
 
     let side = null;
+    let kind = null;
 
-    if (st.direction === 1 && freshFlip) {
-        // Supertrend flipped bullish — BUY CE
+    if (st.direction === 1 && (freshFlip || continuation)) {
         side = 'CE';
-        reasons.push(`Supertrend flipped BULLISH at ${st.supertrend.toFixed(0)}`);
-        reasons.push('Fresh trend flip — entry signal');
+        kind = freshFlip ? 'fresh-flip' : 'continuation';
+        if (freshFlip) {
+            reasons.push(`Supertrend flipped BULLISH at ${st.supertrend.toFixed(0)}`);
+            reasons.push(barsSince === 0
+                ? 'Fresh trend flip on this bar'
+                : `Recent trend flip (${barsSince} bar${barsSince === 1 ? '' : 's'} ago)`);
+        } else {
+            reasons.push(`Bullish trend intact — ${barsSince} bars since flip`);
+            reasons.push(`Pullback near ST line (${proximityAtr.toFixed(2)}×ATR) — entry on retest`);
+        }
         if (ema9 != null && ema21 != null) {
-            if (ema9 > ema21) reasons.push(`EMA9(${ema9.toFixed(0)}) > EMA21(${ema21.toFixed(0)}) uptrend`);
+            if (bullEmaAligned) reasons.push(`EMA9(${ema9.toFixed(0)}) > EMA21(${ema21.toFixed(0)}) uptrend`);
             else reasons.push('EMA alignment pending — trend early stage');
         }
-        if (adxV != null && adxV >= 20) reasons.push(`ADX ${adxV.toFixed(0)} — strong trend`);
+        if (strongAdx) reasons.push(`ADX ${adxV.toFixed(0)} — strong trend`);
         if (pcr > 1.0) reasons.push(`PCR ${pcr.toFixed(2)} — put writing supports upside`);
     }
-    else if (st.direction === -1 && freshFlip) {
-        // Supertrend flipped bearish — BUY PE
+    else if (st.direction === -1 && (freshFlip || continuation)) {
         side = 'PE';
-        reasons.push(`Supertrend flipped BEARISH at ${st.supertrend.toFixed(0)}`);
-        reasons.push('Fresh trend flip — entry signal');
+        kind = freshFlip ? 'fresh-flip' : 'continuation';
+        if (freshFlip) {
+            reasons.push(`Supertrend flipped BEARISH at ${st.supertrend.toFixed(0)}`);
+            reasons.push(barsSince === 0
+                ? 'Fresh trend flip on this bar'
+                : `Recent trend flip (${barsSince} bar${barsSince === 1 ? '' : 's'} ago)`);
+        } else {
+            reasons.push(`Bearish trend intact — ${barsSince} bars since flip`);
+            reasons.push(`Pullback near ST line (${proximityAtr.toFixed(2)}×ATR) — entry on retest`);
+        }
         if (ema9 != null && ema21 != null) {
-            if (ema9 < ema21) reasons.push(`EMA9(${ema9.toFixed(0)}) < EMA21(${ema21.toFixed(0)}) downtrend`);
+            if (bearEmaAligned) reasons.push(`EMA9(${ema9.toFixed(0)}) < EMA21(${ema21.toFixed(0)}) downtrend`);
             else reasons.push('EMA alignment pending — trend early stage');
         }
-        if (adxV != null && adxV >= 20) reasons.push(`ADX ${adxV.toFixed(0)} — strong trend`);
+        if (strongAdx) reasons.push(`ADX ${adxV.toFixed(0)} — strong trend`);
         if (pcr < 1.0) reasons.push(`PCR ${pcr.toFixed(2)} — call writing supports downside`);
     }
 
     if (!side) return null;
 
-    // Calculate entry, SL, targets (Supertrend line is the trailing SL)
     const entry = spot;
-    const sl = st.supertrend; // Supertrend line is the stop
+    const sl = st.supertrend;
     const risk = Math.abs(entry - sl);
     const target1 = side === 'CE' ? entry + 1.5 * risk : entry - 1.5 * risk;
     const target2 = side === 'CE' ? entry + 2.5 * risk : entry - 2.5 * risk;
 
+    // Continuation is a weaker read than a fresh flip: entry is later in the move
+    // and stops are wider. Downgrade the strength label so scoring reflects that.
+    const strongTrend = adxV != null && adxV >= 25;
+    let strength;
+    if (kind === 'continuation') strength = strongTrend ? 'MODERATE' : 'WEAK';
+    else strength = strongTrend ? 'STRONG' : 'MODERATE';
+
     return {
         key: STRATEGY_KEYS.SUPERTREND,
         side,
-        strength: adxV != null && adxV >= 25 ? 'STRONG' : 'MODERATE',
+        strength,
         layers: 'ST+EMA',
+        kind,
         reasons,
         entry,
         sl,
@@ -338,8 +390,17 @@ export function qualityScore(result, tech, chain) {
                 (side === 'PE' && ema9 < ema21 && spot < ema9);
             if (aligned) score += 20;
         }
-        // Fresh flip bonus
-        if (result.supertrend?.direction !== result.supertrend?.prevDirection) score += 10;
+        // Freshness bonus — heavier the closer to the flip bar. A continuation
+        // read is intentionally scored lower than a fresh flip.
+        const barsSince = Number(result.supertrend?.barsSinceFlip);
+        if (result.kind === 'continuation') score += 3;
+        else if (Number.isFinite(barsSince)) {
+            if (barsSince === 0) score += 12;
+            else if (barsSince <= 1) score += 8;
+            else score += 5;
+        } else if (result.supertrend?.direction !== result.supertrend?.prevDirection) {
+            score += 10;
+        }
     }
 
     return score + 10;

@@ -205,8 +205,11 @@ export function keltnerChannels(closes, highs, lows, emaPeriod = 20, atrPeriod =
  * @param {number[]} closes
  * @param {number} period ATR period
  * @param {number} multiplier ATR multiplier
- * @returns {{supertrend:number, direction:number, prevDirection:number}|null}
+ * @returns {{supertrend:number, direction:number, prevDirection:number, barsSinceFlip:number}|null}
  *   direction: 1 = bullish (price above), -1 = bearish (price below)
+ *   barsSinceFlip: how many completed bars have passed since the last direction change
+ *   (0 means the last bar itself was the flip). On-demand `/index` reads rarely land on
+ *   the exact flip bar, so callers use this to accept a slightly stale flip too.
  */
 export function supertrend(highs, lows, closes, period = 10, multiplier = 3.0) {
     const n = closes.length;
@@ -292,9 +295,17 @@ export function supertrend(highs, lows, closes, period = 10, multiplier = 3.0) {
     }
 
     const last = n - 1;
+    // Walk back to count bars since the last direction change. Stop at firstValid
+    // so we don't count the seed as a flip.
+    let barsSinceFlip = 0;
+    for (let i = last; i > firstValid; i--) {
+        if (dir[i] !== dir[i - 1]) break;
+        barsSinceFlip++;
+    }
     return {
         supertrend: st[last],
         direction: dir[last],
         prevDirection: dir[last - 1] || 0,
+        barsSinceFlip,
     };
 }
