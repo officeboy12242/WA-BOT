@@ -509,7 +509,7 @@ export const COMMAND_REGISTRY = [
         key: 'svmkr',
         scope: 'group_only',
         role: 'admins',
-        help: 'SVMKR live scanner — `/svmkr`, `/svmkr banknifty`, `/svmkr stats`, `/svmkr scan`',
+        help: 'SVMKR live CE/PE alerts — `/svmkr on|off|status`, `/svmkr` (read now), `/svmkr stats`, `/svmkr scan`',
         category: 'trade',
     },
     {

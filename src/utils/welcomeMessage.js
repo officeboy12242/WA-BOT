@@ -13,6 +13,7 @@ const USERNAME_PLACEHOLDER = '@username';
 const GROUP_PLACEHOLDER = '{group}';
 
 const JID_DOMAIN_RE = /@(s\.whatsapp\.net|lid(?:\.\w+)?|g\.us)$/i;
+const LID_DOMAIN_RE = /@lid(?:\.\w+)?$/i;
 
 export const DEFAULT_HEADER_TEMPLATE = `hey ${USERNAME_PLACEHOLDER} , welcome to "${GROUP_PLACEHOLDER}"`;
 
@@ -127,6 +128,11 @@ export function normalizeParticipantEntry(entry) {
     return '';
 }
 
+/** A `@lid` JID's user part is an internal privacy id, never a phone number. */
+export function isLidJid(jid) {
+    return LID_DOMAIN_RE.test(String(jid || ''));
+}
+
 /**
  * @param {string} jid
  * @returns {string}
@@ -140,15 +146,57 @@ export function mentionDisplayToken(jid) {
 }
 
 /**
+ * Split "who to show" from "who to tag" for a group participant.
+ *
+ * THE BUG THIS FIXES: Baileys documents `Contact.id` as "either in lid or jid
+ * format", so in a LID-addressed group `participant.id` IS the @lid. The welcome
+ * used that id for the visible token, so the message read
+ * `hey @209476153887421 , welcome to "X"` — a 15-digit privacy id that matches
+ * nobody's phone and reads as garbage to the group.
+ *
+ * So: display the phone-number JID whenever one is known, and put BOTH the phone
+ * and LID forms in `mentions` so the tag resolves whichever way the group
+ * addresses its members.
+ *
+ * @param {string | object} participant Baileys participant record or a raw JID
+ * @returns {{ displayJid: string, phoneJid: string, lidJid: string, mentions: string[] }}
+ */
+export function resolveMentionIdentity(participant) {
+    const fromField = (v) => normalizeParticipantEntry(v);
+    const isObject = participant && typeof participant === 'object';
+
+    const pn = isObject ? fromField(participant.phoneNumber ?? participant.pn) : '';
+    const lid = isObject ? fromField(participant.lid) : '';
+    const id = fromField(isObject ? (participant.id ?? participant.jid) : participant);
+
+    // Anything that is not a @lid is a usable phone JID.
+    const phoneJid = [pn, id, lid].find((j) => j && !isLidJid(j)) || '';
+    const lidJid = [lid, id].find((j) => j && isLidJid(j)) || '';
+    const displayJid = phoneJid || lidJid;
+
+    return {
+        displayJid,
+        phoneJid,
+        lidJid,
+        mentions: [...new Set([displayJid, phoneJid, lidJid].filter(Boolean))],
+    };
+}
+
+/**
  * @param {string} customPart
  * @param {string} groupName
- * @param {string} memberJid
+ * @param {string|object} member participant record, or the JID to display
+ * @param {{ extraMentions?: string[] }} [opts] additional JIDs to tag — used to
+ *   include the LID form alongside the phone form of the same person
  * @returns {{ text: string, mentions: string[] }}
  */
-export function renderWelcomeMessage(customPart, groupName, memberJid) {
+export function renderWelcomeMessage(customPart, groupName, member, { extraMentions = [] } = {}) {
     const safeGroup = groupName || 'this group';
     const template = buildWelcomeTemplate(customPart);
-    const safeJid = isValidParticipantJid(memberJid) ? memberJid : '';
+
+    // Accepts either a bare JID (old callers, previews) or a participant record.
+    const identity = resolveMentionIdentity(member);
+    const safeJid = identity.displayJid;
     const mentionToken = mentionDisplayToken(safeJid);
 
     let text = template
@@ -159,7 +207,8 @@ export function renderWelcomeMessage(customPart, groupName, memberJid) {
         .split('"Group Name"')
         .join(safeGroup);
 
-    return { text, mentions: safeJid ? [safeJid] : [] };
+    const mentions = [...new Set([...identity.mentions, ...extraMentions].filter(Boolean))];
+    return { text, mentions };
 }
 
 /**

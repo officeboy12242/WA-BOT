@@ -1235,6 +1235,52 @@ class GroupManager {
             .toArray();
     }
 
+    /**
+     * SVMKR live alerts are opted into per group, separately from the daily trade
+     * alert. They are a different product: unlimited intraday CE/PE cards plus
+     * follow-up replies, so a group that wants the 09:20 digest does not
+     * automatically want a card every time a 5m bar crosses.
+     */
+    async setSvmkrEnabled(groupId, groupName, enabled, setBy) {
+        const normalizedId = jidNormalizedUser(String(groupId).replace(/:\d+(?=@)/, '')) || groupId;
+        await this.groups.updateOne(
+            { group_id: normalizedId },
+            {
+                $set: {
+                    group_name: groupName,
+                    svmkr_enabled: enabled,
+                    svmkr_set_by: setBy,
+                    svmkr_set_at: new Date(),
+                },
+                $setOnInsert: { group_id: normalizedId, is_active: false },
+            },
+            { upsert: true }
+        );
+        logger.info(
+            `${enabled ? '⚡ SVMKR ON' : '⚡ SVMKR OFF'}: ${groupName} (${normalizedId}) by ${setBy}`
+        );
+    }
+
+    async isSvmkrEnabled(groupId) {
+        const normalizedId = jidNormalizedUser(String(groupId).replace(/:\d+(?=@)/, '')) || groupId;
+        const row = await this.groups.findOne(
+            { group_id: normalizedId },
+            { projection: { svmkr_enabled: 1 } }
+        );
+        return row?.svmkr_enabled === true;
+    }
+
+    async getSvmkrGroups() {
+        return this.groups
+            .find({ svmkr_enabled: true }, { projection: { _id: 0 } })
+            .toArray();
+    }
+
+    /** Cheap gate for the live loop: is anyone listening at all? */
+    async countSvmkrGroups() {
+        return this.groups.countDocuments({ svmkr_enabled: true });
+    }
+
     async setTradeAlertSymbols(groupId, groupName, symbols, setBy) {
         const normalizedId = jidNormalizedUser(String(groupId).replace(/:\d+(?=@)/, '')) || groupId;
         const list = Array.isArray(symbols)

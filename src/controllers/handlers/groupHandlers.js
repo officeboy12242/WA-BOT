@@ -16,6 +16,7 @@ import {
     normalizeParticipantEntry,
     previewWelcomeMessage,
     renderWelcomeMessage,
+    resolveMentionIdentity,
 } from '../../utils/welcomeMessage.js';
 import {
     dedupeParticipantRecords,
@@ -102,10 +103,21 @@ function shouldSendWelcome(groupId, memberJid) {
     return true;
 }
 
-async function resolveWelcomeMentionJid(sock, groupId, memberJid, groupManager = null) {
+/**
+ * Find the group's own participant record for a joiner, so the welcome can show a
+ * phone number and tag both its addressing forms.
+ *
+ * Returning the record (not just a JID) is the fix: the previous version returned
+ * `p.id`, which Baileys documents as "lid or jid format" — in a LID-addressed
+ * group that is the @lid, and the welcome then printed its 15-digit privacy id
+ * instead of the member's number.
+ *
+ * @returns {Promise<{ displayJid: string, phoneJid: string, lidJid: string, mentions: string[] }>}
+ */
+async function resolveWelcomeMentionIdentity(sock, groupId, memberJid, groupManager = null) {
     const normalized = normalizeParticipantEntry(memberJid);
     if (!normalized) {
-        return '';
+        return resolveMentionIdentity('');
     }
 
     try {
@@ -118,18 +130,25 @@ async function resolveWelcomeMentionJid(sock, groupId, memberJid, groupManager =
                 normalizeParticipantEntry(p.phoneNumber),
             ].filter(Boolean);
 
-            if (candidates.includes(normalized)) {
-                return candidates[0] || normalized;
-            }
-            if (targetPhone && candidates.some((c) => extractPhoneNumber(c) === targetPhone)) {
-                return normalizeParticipantEntry(p.id) || normalizeParticipantEntry(p.lid) || normalized;
+            const sameJid = candidates.includes(normalized);
+            const samePhone =
+                targetPhone && candidates.some((c) => extractPhoneNumber(c) === targetPhone);
+            if (sameJid || samePhone) {
+                const identity = resolveMentionIdentity(p);
+                // The event's own JID may carry a form the metadata record lacks.
+                if (identity.displayJid) {
+                    return {
+                        ...identity,
+                        mentions: [...new Set([...identity.mentions, normalized])],
+                    };
+                }
             }
         }
     } catch (err) {
         logger.debug(`Welcome mention resolve failed: ${err.message}`);
     }
 
-    return normalized;
+    return resolveMentionIdentity(normalized);
 }
 
 async function captureWelcomeBaseline(sock, groupId, groupManager = null) {
@@ -181,8 +200,8 @@ async function sendWelcomeForMember(sock, groupManager, groupId, rawParticipant,
         logger.warn(`Welcome: could not fetch group name for ${groupId}: ${err.message}`);
     }
 
-    const mentionJid = await resolveWelcomeMentionJid(sock, groupId, memberJid, groupManager);
-    if (!isValidParticipantJid(mentionJid)) {
+    const identity = await resolveWelcomeMentionIdentity(sock, groupId, memberJid, groupManager);
+    if (!isValidParticipantJid(identity.displayJid)) {
         logger.debug(`Welcome skipped — invalid mention JID for ${groupId}`);
         return;
     }
@@ -190,7 +209,8 @@ async function sendWelcomeForMember(sock, groupManager, groupId, rawParticipant,
     const { text, mentions } = renderWelcomeMessage(
         config.welcome_message || '',
         groupName,
-        mentionJid,
+        identity.displayJid,
+        { extraMentions: identity.mentions },
     );
 
     const sent = await sock.sendMessage(groupId, {
@@ -202,7 +222,10 @@ async function sendWelcomeForMember(sock, groupManager, groupId, rawParticipant,
         scheduleAutoDelete(sock, sent.key.remoteJid || groupId, sent.key, AUTO_DELETE_2_MIN);
     }
 
-    logger.info(`👋 Welcome sent in ${groupName} to ${mentionJid} (auto-delete in 2m)`);
+    logger.info(
+        `👋 Welcome sent in ${groupName} to ${identity.displayJid}` +
+            `${identity.lidJid && identity.phoneJid ? ' (+lid tagged)' : ''} (auto-delete in 2m)`
+    );
 }
 
 /**

@@ -328,14 +328,18 @@ export const config = {
     /* ── SVMKR live scanner (/svmkr) ─────────────────────────────────────────
      * The one continuously-running market scanner: UT Bot trailing-stop cross
      * confirmed by HMA and regression slope, evaluated on every closed 5m bar
-     * during the session. OFF by default — arming it posts unlimited alerts to
-     * every trade-alert group, so it must be an explicit choice.
+     * during the session.
+     *
+     * Delivery is opted into PER GROUP with `/svmkr on`. This flag is only a
+     * kill switch: set it to "false" to stop the loop everywhere regardless of
+     * group settings. Left unset, the loop runs but stays idle — with no group
+     * opted in a tick costs one indexed count query and no market API calls.
      *
      * Trades are uncapped per day on purpose; SVMKR_COOLDOWN_MS is the only
      * brake, and it is per index+side. Dropping it below ~5 min on a choppy day
      * will produce a card every other bar.
      */
-    SVMKR_ENABLED: process.env.SVMKR_ENABLED === 'true',
+    SVMKR_ENABLED: process.env.SVMKR_ENABLED === 'false' ? false : true,
     SVMKR_INDICES: (process.env.SVMKR_INDICES || 'NIFTY')
         .split(',')
         .map((s) => s.trim().toUpperCase())

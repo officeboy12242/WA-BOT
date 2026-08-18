@@ -792,6 +792,55 @@ function svmkrScanner() {
  */
 export async function handleSvmkr(sock, chatId, senderJid, args, ctx = {}) {
     const sub = (args[0] || '').trim().toLowerCase();
+    const { groupManager } = ctx;
+
+    // Per-group opt-in. Separate from /tradelert: this posts unlimited intraday
+    // cards plus follow-ups, which is not what a daily-digest group signed up for.
+    if (sub === 'on' || sub === 'off') {
+        if (!groupManager) {
+            await sock.sendMessage(chatId, { text: '❌ Group settings are unavailable.' });
+            return;
+        }
+        const enabled = sub === 'on';
+        let groupName = chatId;
+        try {
+            const meta = await groupManager.getGroupMetadataCached(sock, chatId);
+            groupName = meta.subject || chatId;
+        } catch {
+            /* name is cosmetic — the toggle must still work */
+        }
+        await groupManager.setSvmkrEnabled(chatId, groupName, enabled, extractPhoneNumber(senderJid));
+
+        const total = await groupManager.countSvmkrGroups();
+        await sock.sendMessage(chatId, {
+            text: enabled
+                ? '⚡ *SVMKR alerts ON for this group*\n\n' +
+                  'You will get a card whenever a UT Bot cross is confirmed by HMA and slope on a closed 5m bar, ' +
+                  'then replies on that same card as it moves — hold, target, stop or exit.\n\n' +
+                  `_Unlimited per day; ${Math.round((config.SVMKR_COOLDOWN_MS || 900000) / 60000)}-min cooldown per direction. ` +
+                  `Groups listening: ${total}._\n` +
+                  '_Turn off with_ `/svmkr off`'
+                : '⚡ *SVMKR alerts OFF for this group*\n\n' +
+                  '_Any trade already open will still be followed to its exit, so nothing is left hanging._\n' +
+                  `_Groups still listening: ${total}._`,
+        });
+        return;
+    }
+
+    if (sub === 'status') {
+        const on = groupManager ? await groupManager.isSvmkrEnabled(chatId) : false;
+        const total = groupManager ? await groupManager.countSvmkrGroups() : 0;
+        const open = ctx.svmkrTracker ? (await ctx.svmkrTracker.openPositions()).length : 0;
+        await sock.sendMessage(chatId, {
+            text:
+                `⚡ *SVMKR here:* ${on ? '✅ ON' : '❌ OFF'}\n` +
+                `Groups listening: ${total}\n` +
+                `Open tracked trades: ${open}\n` +
+                `Watching: ${(config.SVMKR_INDICES || ['NIFTY']).join(', ')}\n` +
+                (config.SVMKR_ENABLED === false ? '\n⚠️ _Globally disabled by SVMKR_ENABLED=false._' : ''),
+        });
+        return;
+    }
 
     if (sub === 'stats') {
         const tracker = ctx.svmkrTracker;

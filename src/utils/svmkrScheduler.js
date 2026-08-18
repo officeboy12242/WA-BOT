@@ -43,9 +43,12 @@ export function msToNextBarClose(nowMs = Date.now(), settleMs = BAR_SETTLE_MS) {
  * @param {object} o.config
  */
 export function startSvmkrScheduler({ getSock, scanService, tracker, groupManager, config = {} }) {
-    if (config.SVMKR_ENABLED !== true) {
-        logger.info('⚡ SVMKR live scanner is off (set SVMKR_ENABLED=true to arm it)');
-        return { stop() {}, tick: async () => ({ skipped: 'disabled' }) };
+    // SVMKR_ENABLED=false is a kill switch. Otherwise the real switch is per
+    // group (`/svmkr on`): with no group opted in, a tick costs one indexed
+    // count query and makes no Yahoo or NSE calls at all.
+    if (config.SVMKR_ENABLED === false) {
+        logger.info('⚡ SVMKR live scanner is disabled by SVMKR_ENABLED=false');
+        return { stop() {}, tick: async () => ({ skipped: 'disabled by config' }) };
     }
 
     const indices = (config.SVMKR_INDICES || ['NIFTY']).filter(Boolean);
@@ -77,6 +80,16 @@ export function startSvmkrScheduler({ getSock, scanService, tracker, groupManage
                 return { skipped: `market mode ${mode.mode}` };
             }
 
+            // Nobody opted in → do no work. Open positions are still followed to
+            // their exit, so turning a group off mid-trade cannot orphan a trade.
+            const listeners = await groupManager.countSvmkrGroups();
+            if (!listeners) {
+                const orphaned = await tracker.openPositions();
+                if (!orphaned.length) {
+                    return { skipped: 'no group has /svmkr on' };
+                }
+            }
+
             const sock = getSock();
             const utPosByIndex = {};
             let posted = 0;
@@ -105,9 +118,9 @@ export function startSvmkrScheduler({ getSock, scanService, tracker, groupManage
                     continue;
                 }
 
-                const groups = await groupManager.getTradeAlertGroups();
+                const groups = await groupManager.getSvmkrGroups();
                 if (!groups.length) {
-                    logger.warn('SVMKR: a setup fired but no group has trade alerts enabled');
+                    logger.info('SVMKR: a setup fired but no group has `/svmkr on`');
                     continue;
                 }
 
@@ -161,7 +174,8 @@ export function startSvmkrScheduler({ getSock, scanService, tracker, groupManage
 
     logger.info(
         `⚡ SVMKR live scanner armed — ${indices.join(', ')} on 5m bar close, ` +
-            `${Math.round(cooldownMs / 60000)}m cooldown per side`
+            `${Math.round(cooldownMs / 60000)}m cooldown per side. ` +
+            'Idle until a group runs `/svmkr on`.'
     );
     loop();
 
