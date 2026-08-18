@@ -45,6 +45,13 @@ export function computeMovedOffSources(config = {}) {
     ];
 }
 
+/**
+ * The morning volatility slot does NOT move sources off the shared clock.
+ * It is an ADDITIONAL scan at 09:35 that re-runs discovery with fresh data.
+ * Groups already posted at 09:20 skip duplicate symbols via trade_alert_sent dedup.
+ * This is a pure additive clock — it never excludes sources from other slots.
+ */
+
 function parseAlertTime(timeStr) {
     const [h, m = '0'] = String(timeStr || '09:20').trim().split(':');
     return { hour: Number(h), minute: Number(m) };
@@ -176,6 +183,24 @@ export function startTradeAlertScheduler({
         scheduleSlot('turnover', turnoverTime, {
             onlySources: [TURNOVER],
             slotLabel: 'turnover band',
+        });
+    }
+
+    // Morning volatility scan — runs AFTER market opens (default 09:35 IST).
+    // Only for heatmap2 groups: at 09:20 the opening range hasn't closed yet,
+    // so v2 can only show live movers (selection) but not breakout levels.
+    // At 09:35 the 09:15 range is closed + confirming bar exists — this is when
+    // heatmap2's VWAP/RS/ATR filters actually work.
+    //
+    // Other sources (heatmap, nse, legacy, preopen, turnover) keep their single
+    // 09:20 slot — they don't benefit from a second scan.
+    // Groups already posted at 09:20 skip duplicate symbols via trade_alert_sent.
+    const morningVolatilityTime = config.TRADE_ALERT_MORNING_VOLATILITY_TIME;
+    if (morningVolatilityTime) {
+        scheduleSlot('morning-volatility', morningVolatilityTime, {
+            onlySources: [HEATMAP2],
+            slotLabel: 'morning volatility',
+            forceRefresh: true,
         });
     }
 

@@ -141,6 +141,9 @@ export async function handleTradelert(sock, chatId, senderJid, args, { groupMana
             r += `🧠 *Mode:* ${modeLabel(mode)}\n`;
             r += `📡 *Discovery:* ${sourceLabel(discoverySource)}\n`;
             r += `🕐 *Daily time:* ${formatAlertTime(discoverySource)} IST (trading days only)\n`;
+            if (config.TRADE_ALERT_MORNING_VOLATILITY_TIME) {
+                r += `⚡ *Morning volatility:* ${config.TRADE_ALERT_MORNING_VOLATILITY_TIME} IST (fresh scan after open)\n`;
+            }
             if (discoverySource === 'heatmap2' && !config.TRADE_ALERT_HEATMAP2_TIMES?.length) {
                 r += '   _At this hour v2 posts live movers as a watchlist; breakout levels\n' +
                      '   need the 09:15 range closed — use `/tradelert scan` after 09:45._\n';

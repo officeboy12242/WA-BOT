@@ -300,6 +300,19 @@ export const config = {
      */
     TRADE_ALERT_TURNOVER_TIME: (process.env.TRADE_ALERT_TURNOVER_TIME || '').trim(),
     /**
+     * Optional morning volatility scan — runs AFTER the market opens (09:15).
+     *
+     * The pre-market scan at TRADE_ALERT_TIME (09:20) uses stale data because
+     * the market hasn't opened yet. This second clock fires at 09:35 by default
+     * — 20 minutes after open — when the opening range has closed and real
+     * intraday moves are visible. It re-runs discovery with fresh data, so
+     * stocks that only became movers after the open appear here.
+     *
+     * Groups already posted at 09:20 skip duplicate symbols (dedup by trade_alert_sent).
+     * Empty by default: set to a time like 09:35 to enable.
+     */
+    TRADE_ALERT_MORNING_VOLATILITY_TIME: (process.env.TRADE_ALERT_MORNING_VOLATILITY_TIME || '09:35').trim(),
+    /**
      * /index position sizing. The measured index-fade edge is at 1:1, so target
      * and risk are the same size — one lot at a 1R move lands inside this band for
      * all four indices (NIFTY Rs608, BANKNIFTY Rs874, FINNIFTY Rs912, MIDCPNIFTY

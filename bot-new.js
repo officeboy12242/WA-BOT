@@ -378,6 +378,7 @@ class WhatsAppCourseBot {
                             onlySources: payload.onlySources || null,
                             excludeSources: payload.excludeSources || null,
                             slotLabel: payload.slotLabel || null,
+                            forceRefresh: payload.forceRefresh || false,
                         });
                     },
                     'news.scrape': async () => {
