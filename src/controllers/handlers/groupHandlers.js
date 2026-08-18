@@ -3,7 +3,7 @@
  */
 
 import { jidNormalizedUser } from 'baileys';
-import { logger } from '../../utils/logger.js';
+import { logger, describeError } from '../../utils/logger.js';
 import { sendTextWithLinkPreview } from '../../utils/linkPreview.js';
 import { extractPhoneNumber } from '../../utils/permissions.js';
 import { scheduleAutoDelete, AUTO_DELETE_2_MIN } from '../../utils/autoDelete.js';
@@ -52,8 +52,27 @@ const LEAVE_ACTIONS = new Set(['remove', 'leave', 'left']);
 /** @type {Map<string, { timer: NodeJS.Timeout, baseline: { keys: Set<string>, memberCount: number } }>} */
 const pendingWelcomeJobs = new Map();
 
+/**
+ * A WhatsApp group JID is either the modern all-digit form (`1203630…@g.us`,
+ * 15+ digits) or the legacy `creatorPhone-timestamp@g.us`. Anything shorter is
+ * malformed — usually a stale or hand-edited database row — and every
+ * groupMetadata call for it will fail forever. Catching the shape here turns a
+ * recurring mystery warning into one that names the cause.
+ */
+const GROUP_JID_RE = /^(?:\d{15,25}|\d{8,15}-\d{8,14})@g\.us$/;
+
+export function isPlausibleGroupJid(groupId) {
+    return GROUP_JID_RE.test(String(groupId || ''));
+}
+
 /** Prefer cached metadata — raw groupMetadata is brutal in 500–1000+ member groups. */
 async function getGroupMeta(sock, groupId, groupManager = null) {
+    if (!isPlausibleGroupJid(groupId)) {
+        throw new Error(`malformed group id "${groupId}" — not a WhatsApp group JID`);
+    }
+    if (!sock?.groupMetadata && !groupManager?.getGroupMetadataCached) {
+        throw new Error('WhatsApp socket not ready');
+    }
     if (groupManager?.getGroupMetadataCached) {
         return groupManager.getGroupMetadataCached(sock, groupId);
     }
@@ -145,7 +164,7 @@ async function resolveWelcomeMentionIdentity(sock, groupId, memberJid, groupMana
             }
         }
     } catch (err) {
-        logger.debug(`Welcome mention resolve failed: ${err.message}`);
+        logger.debug(`Welcome mention resolve failed: ${describeError(err)}`);
     }
 
     return resolveMentionIdentity(normalized);
@@ -158,15 +177,20 @@ async function captureWelcomeBaseline(sock, groupId, groupManager = null) {
         keys = groupParticipantSnapshot.cloneGroupKeys(groupId);
     }
 
+    // memberCount is only a cheap "did anyone actually join" gate; when it cannot
+    // be read the key diff below still decides correctly, so this is a warning
+    // rather than a failure. `countKnown` records which of the two we have.
     let memberCount = 0;
+    let countKnown = false;
     try {
         const meta = await getGroupMeta(sock, groupId, groupManager);
         memberCount = meta.participants?.length || 0;
+        countKnown = true;
     } catch (err) {
-        logger.warn(`Welcome baseline count failed for ${groupId}: ${err.message}`);
+        logger.warn(`Welcome baseline count failed for ${groupId}: ${describeError(err)}`);
     }
 
-    return { keys, memberCount };
+    return { keys, memberCount, countKnown };
 }
 
 async function sendWelcomeForMember(sock, groupManager, groupId, rawParticipant, config) {
@@ -197,7 +221,7 @@ async function sendWelcomeForMember(sock, groupManager, groupId, rawParticipant,
         const meta = await groupManager.getGroupMetadataCached(sock, groupId);
         groupName = meta.subject || groupName;
     } catch (err) {
-        logger.warn(`Welcome: could not fetch group name for ${groupId}: ${err.message}`);
+        logger.warn(`Welcome: could not fetch group name for ${groupId}: ${describeError(err)}`);
     }
 
     const identity = await resolveWelcomeMentionIdentity(sock, groupId, memberJid, groupManager);
@@ -247,7 +271,7 @@ export async function handleParticipantJoin(sock, groupId, participants, { group
         try {
             await sendWelcomeForMember(sock, groupManager, groupId, entry, config);
         } catch (err) {
-            logger.error(`Welcome failed for ${groupId}: ${err.message}`);
+            logger.error(`Welcome failed for ${groupId}: ${describeError(err)}`);
         }
         await delay(400);
     }
@@ -270,7 +294,7 @@ async function filterCurrentGroupMembers(sock, groupId, entries, groupManager = 
     try {
         meta = await getGroupMeta(sock, groupId, groupManager);
     } catch (err) {
-        logger.warn(`Welcome member filter failed for ${groupId}: ${err.message}`);
+        logger.warn(`Welcome member filter failed for ${groupId}: ${describeError(err)}`);
         return [];
     }
 
@@ -302,24 +326,30 @@ async function runWelcomeAfterJoin(sock, groupManager, groupId, baseline) {
     try {
         meta = await getGroupMeta(sock, groupId, groupManager);
     } catch (err) {
-        logger.warn(`Welcome metadata fetch failed for ${groupId}: ${err.message}`);
+        logger.warn(`Welcome metadata fetch failed for ${groupId}: ${describeError(err)}`);
         return;
     }
 
+    // Only trust the count gate when the baseline count was actually read. A
+    // failed baseline left memberCount at 0, and comparing against 0 turned a
+    // metadata hiccup into a silent "nobody joined" for the whole group.
     const currentCount = meta.participants?.length || 0;
-    if (currentCount <= baseline.memberCount) {
+    if (baseline.countKnown && currentCount <= baseline.memberCount) {
         logger.debug(
             `Welcome skipped for ${groupId} — member count did not increase (${baseline.memberCount} → ${currentCount})`,
         );
         await groupParticipantSnapshot.refresh(sock, groupId);
         return;
     }
+    if (!baseline.countKnown) {
+        logger.debug(`Welcome for ${groupId}: no baseline count, relying on the participant key diff`);
+    }
 
     let newParticipants = [];
     try {
         newParticipants = await groupParticipantSnapshot.detectNewSince(sock, groupId, baseline.keys);
     } catch (err) {
-        logger.warn(`Welcome participant diff failed for ${groupId}: ${err.message}`);
+        logger.warn(`Welcome participant diff failed for ${groupId}: ${describeError(err)}`);
         return;
     }
 
@@ -348,7 +378,7 @@ async function captureAndScheduleWelcome(sock, groupManager, groupId) {
     const timer = setTimeout(() => {
         pendingWelcomeJobs.delete(groupId);
         void runWelcomeAfterJoin(sock, groupManager, groupId, baseline).catch((err) => {
-            logger.error(`Welcome after join failed for ${groupId}: ${err.message}`);
+            logger.error(`Welcome after join failed for ${groupId}: ${describeError(err)}`);
         });
     }, WELCOME_JOIN_DELAY_MS);
 
@@ -361,7 +391,7 @@ export function scheduleWelcomeAfterJoin(sock, groupManager, groupId) {
     }
 
     void captureAndScheduleWelcome(sock, groupManager, groupId).catch((err) => {
-        logger.error(`Welcome schedule failed for ${groupId}: ${err.message}`);
+        logger.error(`Welcome schedule failed for ${groupId}: ${describeError(err)}`);
     });
 }
 
