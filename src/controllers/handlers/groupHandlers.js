@@ -170,27 +170,14 @@ async function resolveWelcomeMentionIdentity(sock, groupId, memberJid, groupMana
     return resolveMentionIdentity(normalized);
 }
 
-async function captureWelcomeBaseline(sock, groupId, groupManager = null) {
+async function captureWelcomeBaseline(sock, groupId) {
     let keys = groupParticipantSnapshot.cloneGroupKeys(groupId);
     if (!keys.size) {
         await groupParticipantSnapshot.seedGroup(sock, groupId);
         keys = groupParticipantSnapshot.cloneGroupKeys(groupId);
     }
 
-    // memberCount is only a cheap "did anyone actually join" gate; when it cannot
-    // be read the key diff below still decides correctly, so this is a warning
-    // rather than a failure. `countKnown` records which of the two we have.
-    let memberCount = 0;
-    let countKnown = false;
-    try {
-        const meta = await getGroupMeta(sock, groupId, groupManager);
-        memberCount = meta.participants?.length || 0;
-        countKnown = true;
-    } catch (err) {
-        logger.warn(`Welcome baseline count failed for ${groupId}: ${describeError(err)}`);
-    }
-
-    return { keys, memberCount, countKnown };
+    return { keys };
 }
 
 async function sendWelcomeForMember(sock, groupManager, groupId, rawParticipant, config) {
@@ -322,29 +309,12 @@ async function runWelcomeAfterJoin(sock, groupManager, groupId, baseline) {
         return;
     }
 
-    let meta;
-    try {
-        meta = await getGroupMeta(sock, groupId, groupManager);
-    } catch (err) {
-        logger.warn(`Welcome metadata fetch failed for ${groupId}: ${describeError(err)}`);
-        return;
-    }
-
-    // Only trust the count gate when the baseline count was actually read. A
-    // failed baseline left memberCount at 0, and comparing against 0 turned a
-    // metadata hiccup into a silent "nobody joined" for the whole group.
-    const currentCount = meta.participants?.length || 0;
-    if (baseline.countKnown && currentCount <= baseline.memberCount) {
-        logger.debug(
-            `Welcome skipped for ${groupId} — member count did not increase (${baseline.memberCount} → ${currentCount})`,
-        );
-        await groupParticipantSnapshot.refresh(sock, groupId);
-        return;
-    }
-    if (!baseline.countKnown) {
-        logger.debug(`Welcome for ${groupId}: no baseline count, relying on the participant key diff`);
-    }
-
+    // Detect new members via participant key diff. The baseline keys are
+    // captured from the snapshot at event time, before the delayed check,
+    // so they reliably represent the pre-join participant set. We used to
+    // also gate on a member-count comparison, but the baseline count was
+    // fetched from metadata *after* the join (the event fires post-join),
+    // making the gate always see "no increase" and skip the welcome.
     let newParticipants = [];
     try {
         newParticipants = await groupParticipantSnapshot.detectNewSince(sock, groupId, baseline.keys);
@@ -364,7 +334,7 @@ async function runWelcomeAfterJoin(sock, groupManager, groupId, baseline) {
 }
 
 async function captureAndScheduleWelcome(sock, groupManager, groupId) {
-    const baseline = await captureWelcomeBaseline(sock, groupId, groupManager);
+    const baseline = await captureWelcomeBaseline(sock, groupId);
     if (!baseline.keys.size) {
         logger.debug(`Welcome skipped for ${groupId} — no participant baseline`);
         return;
