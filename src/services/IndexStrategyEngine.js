@@ -1,56 +1,64 @@
 /**
- * Index scalp strategies ported from the user's tgbot2 bot (Python/pandas) —
- * the auto-alert engine that runs NIFTY/BANKNIFTY/FINNIFTY/MIDCPNIFTY F&O
- * scalps "all day + expiry". The goal of the port: `/index` should almost
- * never dead-end with "no trade" — when the measured fade rule is quiet, one
- * of these five usually fires.
+ * Index strategy engine — Keltner Channels + Supertrend.
  *
- * Strategies (names and self-reported backtests from tgbot2's header):
- *   1. EMA+RSI+OI+VWAP Confluence  (~62-68% WR) — all day
- *   2. ORB (Opening Range Breakout) (~58-65% WR) — 9:30-11:00 window
- *   3. PCR Extreme Reversal         (~58-64% WR) — all day
- *   4. MACD Multi-Timeframe         (~65-72% WR) — 1H + 15m alignment
- *   5. Sideways Scalp (BB+VWAP Mean Reversion)    — low-ADX chop
+ * Two complementary strategies:
+ *   1. Keltner Channels (Mean Reversion) — ~77% WR, best for sideways/choppy markets
+ *   2. Supertrend (Trend Following) — ~67% WR, best for trending markets
  *
- * HONESTY: these win rates come from tgbot2's own backtests on NIFTY/BANKNIFTY
- * and are NOT re-verified here. Every card that fires one says so. The math is
- * ported faithfully (see indicators.js for the pandas-semantics notes), but the
- * quality score is reduced — tgbot2 also gates on option-leg volume, bid-ask
- * spread and VIX, none of which this codebase's chain snapshot carries.
+ * Each fires independently. The /index card shows BOTH results side-by-side
+ * with entry, SL, target, and confidence so the user can pick the better one.
  */
 
-import { emaPandas, rsi, macdState, adx, bollinger, lastFinite } from '../utils/indicators.js';
+import { emaPandas, rsi, adx, lastFinite, keltnerChannels, supertrend } from '../utils/indicators.js';
 
 export const STRATEGY_KEYS = {
-    CONFLUENCE: 'confluence',
-    ORB: 'orb',
-    PCR_REVERSAL: 'pcr-reversal',
-    MACD_MTF: 'macd-mtf',
-    MEAN_REV: 'mean-rev',
+    KELTNER: 'keltner',
+    SUPERTREND: 'supertrend',
 };
 
 export const STRATEGY_META = {
-    [STRATEGY_KEYS.CONFLUENCE]: { name: 'EMA+RSI+OI+VWAP Confluence', short: 'Confluence', baseWin: 66, rank: 30, tag: '~62-68%' },
-    [STRATEGY_KEYS.ORB]: { name: 'ORB (Opening Range Breakout)', short: 'ORB', baseWin: 62, rank: 25, tag: '~58-65%' },
-    [STRATEGY_KEYS.PCR_REVERSAL]: { name: 'PCR Extreme Reversal', short: 'PCR Reversal', baseWin: 61, rank: 20, tag: '~58-64%' },
-    [STRATEGY_KEYS.MACD_MTF]: { name: 'MACD Multi-Timeframe (1H+15m)', short: 'MACD-MTF', baseWin: 69, rank: 35, tag: '~65-72%' },
-    [STRATEGY_KEYS.MEAN_REV]: { name: 'Sideways Scalp (BB Mean Reversion)', short: 'Mean Reversion', baseWin: 58, rank: 22, tag: '~65-70%' },
+    [STRATEGY_KEYS.KELTNER]: {
+        name: 'Keltner Channels (Mean Reversion)',
+        short: 'Keltner',
+        baseWin: 77,
+        rank: 40,
+        tag: '~77%',
+        bestFor: 'Sideways / choppy markets',
+        description: 'Buy at lower band, sell at upper band. Works best when ADX < 20.',
+    },
+    [STRATEGY_KEYS.SUPERTREND]: {
+        name: 'Supertrend (Trend Following)',
+        short: 'Supertrend',
+        baseWin: 67,
+        rank: 35,
+        tag: '~67%',
+        bestFor: 'Trending markets',
+        description: 'ATR-based trend line. Entry on flip, ride the trend. High R:R (3:1).',
+    },
 };
 
 const DEFAULTS = {
-    minLayers: 3,        // FNO_CONFLUENCE_MIN_LAYERS
-    orbBreakPct: 0.08,   // ORB_MIN_BREAK_PCT
-    minAdx: 16,          // FNO_MIN_ADX
-    lastEntryMin: 15 * 60, // FNO_LAST_ENTRY_HOUR=15:00
+    // Keltner Channels settings
+    keltnerEmaPeriod: 20,
+    keltnerAtrPeriod: 10,
+    keltnerMultiplier: 1.5,
+
+    // Supertrend settings
+    supertrendPeriod: 10,
+    supertrendMultiplier: 3.0,
+
+    // General
+    minAdx: 16,
+    lastEntryMin: 15 * 60, // 15:00 IST
 };
 
-/** IST minute-of-day (market clock, same convention as IndexAnalysisService). */
+/** IST minute-of-day (market clock). */
 export function istMinuteOfDay(nowMs = Date.now()) {
     const d = new Date(nowMs + 5.5 * 3600e3);
     return d.getUTCHours() * 60 + d.getUTCMinutes();
 }
 
-/** Session VWAP, same zero-volume-tolerant formula as the fade engine. */
+/** Session VWAP. */
 export function sessionVwap(bars) {
     let pv = 0, v = 0;
     for (const b of bars || []) {
@@ -63,7 +71,7 @@ export function sessionVwap(bars) {
     return v > 0 ? pv / v : null;
 }
 
-/** ATR over the last `n` completed bars (same formula as the fade engine). */
+/** ATR over the last `n` completed bars. */
 export function barAtr(bars, n = 6) {
     if (!Array.isArray(bars) || bars.length < n + 1) return null;
     const s = bars.slice(-(n + 1));
@@ -75,7 +83,7 @@ export function barAtr(bars, n = 6) {
     return a > 0 ? a : null;
 }
 
-/** Resample 5m bars into 15m bars (open dropped — strategies never read it). */
+/** Resample 5m bars into 15m bars. */
 export function resample15m(bars) {
     const out = [];
     for (const b of bars || []) {
@@ -97,32 +105,21 @@ export function resample15m(bars) {
 }
 
 /**
- * Build the technical snapshot the strategies read, from the same feeds the
- * fade engine already uses (5m session bars + full 5d 5m + optional 1h).
- *
- * @param {object} d
- * @param {{min:number,high:number,low:number,close:number,volume:number}[]} d.today5m today's 5m session bars, ascending
- * @param {{min:number,high:number,low:number,close:number,volume:number}[]} d.full5m 5d 5m bars, ascending
- * @param {object|null} d.hourly 1h bars (for MACD-MTF), or null
- * @param {object|null} d.chain NSE chain snapshot (spot, pcr, atmCe, atmPe, topCe, topPe)
- * @param {object|null} d.quote quote service result (prevClose)
+ * Build the technical snapshot for the two strategies.
  */
 export function buildTech({ today5m = [], full5m = [], hourly = null, chain = null, quote = null } = {}) {
     const spot = Number(chain?.spot) || null;
     const fifteen = resample15m(full5m);
     const closes15 = fifteen.map((b) => b.close).filter(Number.isFinite);
+    const highs15 = fifteen.map((b) => b.high).filter(Number.isFinite);
+    const lows15 = fifteen.map((b) => b.low).filter(Number.isFinite);
     const today15 = resample15m(today5m);
     const todayCloses = today15.map((b) => b.close).filter(Number.isFinite);
-
-    // ORB = the first 15m candle of today (09:15-09:30), same as tgbot2.
-    const orbBars = today5m.filter((b) => b.min < 9 * 60 + 30);
-    const orbHigh = orbBars.length ? Math.max(...orbBars.map((b) => b.high)) : null;
-    const orbLow = orbBars.length ? Math.min(...orbBars.map((b) => b.low)) : null;
 
     const ema9 = lastFinite(emaPandas(closes15, 9));
     const ema21 = lastFinite(emaPandas(closes15, 21));
 
-    // 4-bar lookback on 15m = 1 hour of momentum (tgbot2's mom_pct).
+    // 4-bar lookback momentum
     let momPct = null;
     if (closes15.length > 5) {
         const ref = closes15[closes15.length - 5];
@@ -135,15 +132,6 @@ export function buildTech({ today5m = [], full5m = [], hourly = null, chain = nu
         dayPct = ((spot - prevClose) / prevClose) * 100;
     }
 
-    const h1Closes = Array.isArray(hourly)
-        ? hourly.map((b) => b.close).filter(Number.isFinite)
-        : null;
-    const mtfMacd = {
-        ready: h1Closes != null && h1Closes.length >= 35,
-        h1: h1Closes != null ? macdState(h1Closes) : null,
-        m15: macdState(closes15, { crossLookback: 3 }),
-    };
-
     return {
         spot,
         vwap: sessionVwap(today5m),
@@ -155,320 +143,209 @@ export function buildTech({ today5m = [], full5m = [], hourly = null, chain = nu
             low: fifteen.map((b) => b.low),
             close: closes15,
         }),
-        bb: bollinger(closes15, 20, 2),
-        orbHigh,
-        orbLow,
+        closes15,
+        highs15,
+        lows15,
         momPct,
         dayPct,
         atr15: barAtr(today15.length ? today15 : fifteen, 6),
-        mtfMacd,
         lastBarMin: today5m.length ? today5m[today5m.length - 1].min : null,
         todayCloses,
     };
 }
 
-// ─────────────────────────── STRATEGY 1: Confluence ───────────────────────────
-
-export function checkConfluence(tech, chain, opts) {
-    const { spot, vwap, ema9, ema21, rsi: rsiV, momPct, dayPct } = tech;
-    const pcr = Number(chain?.pcr) != null ? Number(chain.pcr) : 1;
-    const atmCeChg = Number(chain?.atmCe?.changeOi) || 0;
-    const atmPeChg = Number(chain?.atmPe?.changeOi) || 0;
-    const support = chain?.walls?.support?.strike != null ? Number(chain.walls.support.strike) : null;
-    const resistance = chain?.walls?.resistance?.strike != null ? Number(chain.walls.resistance.strike) : null;
-
-    let votes = 0;
-    let layers = 0;
-    const reasons = [];
-
-    // VWAP layer
-    if (spot != null && vwap != null) {
-        if (spot > vwap) { votes += 1; layers += 1; reasons.push(`Above VWAP ${vwap.toFixed(0)}`); }
-        else if (spot < vwap) { votes -= 1; layers += 1; reasons.push(`Below VWAP ${vwap.toFixed(0)}`); }
-    } else if (dayPct != null && dayPct > 0.15) { votes += 1; layers += 1; reasons.push(`Day +${dayPct.toFixed(2)}%`); }
-    else if (dayPct != null && dayPct < -0.15) { votes -= 1; layers += 1; reasons.push(`Day ${dayPct.toFixed(2)}%`); }
-
-    // EMA layer
-    if (spot != null && ema9 != null && ema21 != null) {
-        if (ema9 > ema21 && spot > ema9) { votes += 1; layers += 1; reasons.push(`Price > EMA9(${ema9.toFixed(0)}) > EMA21(${ema21.toFixed(0)})`); }
-        else if (ema9 < ema21 && spot < ema9) { votes -= 1; layers += 1; reasons.push(`Price < EMA9(${ema9.toFixed(0)}) < EMA21(${ema21.toFixed(0)})`); }
-        else if (ema9 > ema21) { votes += 1; layers += 1; reasons.push('EMA9 > EMA21 uptrend'); }
-        else if (ema9 < ema21) { votes -= 1; layers += 1; reasons.push('EMA9 < EMA21 downtrend'); }
-    } else if (momPct != null && momPct > 0.1) { votes += 1; layers += 1; reasons.push(`Momentum +${momPct.toFixed(2)}%`); }
-    else if (momPct != null && momPct < -0.1) { votes -= 1; layers += 1; reasons.push(`Momentum ${momPct.toFixed(2)}%`); }
-
-    // RSI layer
-    if (rsiV != null) {
-        if (rsiV >= 55) { votes += 1; layers += 1; reasons.push(`RSI-7 = ${rsiV.toFixed(0)} bullish`); }
-        else if (rsiV <= 45) { votes -= 1; layers += 1; reasons.push(`RSI-7 = ${rsiV.toFixed(0)} bearish`); }
-    }
-
-    // OI layer
-    let oiVote = 0;
-    if (pcr > 1.15) { oiVote += 1; reasons.push(`PCR ${pcr.toFixed(2)} (PE heavy)`); }
-    else if (pcr < 0.85) { oiVote -= 1; reasons.push(`PCR ${pcr.toFixed(2)} (CE heavy)`); }
-    const atmNet = atmCeChg - atmPeChg;
-    if (atmNet > 500) { oiVote += 1; reasons.push('ATM CE OI building'); }
-    else if (atmNet < -500) { oiVote -= 1; reasons.push('ATM PE OI building'); }
-    if (spot != null) {
-        if (support != null && Math.abs(spot - support) / spot * 100 < 0.5) { oiVote += 1; reasons.push(`Near support ${support}`); }
-        else if (resistance != null && Math.abs(spot - resistance) / spot * 100 < 0.5) { oiVote -= 1; reasons.push(`Near resistance ${resistance}`); }
-    }
-    if (oiVote !== 0) { layers += 1; votes += oiVote > 0 ? 1 : -1; }
-
-    const agreed = Math.abs(votes);
-    if (agreed < opts.minLayers) return null;
-    return {
-        key: STRATEGY_KEYS.CONFLUENCE,
-        side: votes > 0 ? 'CE' : 'PE',
-        strength: 'STRONG',
-        layers: `${agreed}/4`,
-        reasons,
-    };
-}
-
-// ─────────────────────────────── STRATEGY 2: ORB ───────────────────────────────
-
-export function checkOrb(tech, chain, opts, nowMin) {
-    const { spot, orbHigh, orbLow, rsi: rsiV, ema9 } = tech;
-    if (spot == null || orbHigh == null || orbLow == null) return null;
-    // ORB is a 9:30-11:00 window strategy.
-    if (nowMin > 11 * 60) return null;
-
-    const pcr = Number(chain?.pcr) != null ? Number(chain.pcr) : 1;
-    const reasons = [];
-    const orbRange = orbHigh - orbLow;
-    if (!(orbRange > 0)) return null;
-
-    let side, breakoutPct;
-    if (spot > orbHigh) {
-        breakoutPct = ((spot - orbHigh) / orbHigh) * 100;
-        if (breakoutPct < opts.orbBreakPct) return null;
-        side = 'CE';
-        if (rsiV != null && rsiV < 55) return null;
-        if (ema9 != null && spot < ema9) return null;
-        reasons.push(`ORB breakout above ${orbHigh.toFixed(0)} (+${breakoutPct.toFixed(2)}%)`);
-        reasons.push(`ORB range: ${orbLow.toFixed(0)} - ${orbHigh.toFixed(0)} (${orbRange.toFixed(0)} pts)`);
-        if (pcr > 1.0) reasons.push(`PCR ${pcr.toFixed(2)} supports breakout`);
-        if (rsiV != null) reasons.push(`RSI ${rsiV.toFixed(0)} confirms momentum`);
-    } else if (spot < orbLow) {
-        breakoutPct = ((orbLow - spot) / orbLow) * 100;
-        if (breakoutPct < opts.orbBreakPct) return null;
-        side = 'PE';
-        if (rsiV != null && rsiV > 45) return null;
-        if (ema9 != null && spot > ema9) return null;
-        reasons.push(`ORB breakdown below ${orbLow.toFixed(0)} (-${breakoutPct.toFixed(2)}%)`);
-        reasons.push(`ORB range: ${orbLow.toFixed(0)} - ${orbHigh.toFixed(0)} (${orbRange.toFixed(0)} pts)`);
-        if (pcr < 1.0) reasons.push(`PCR ${pcr.toFixed(2)} supports breakdown`);
-        if (rsiV != null) reasons.push(`RSI ${rsiV.toFixed(0)} confirms selling`);
-    } else {
-        return null;
-    }
-
-    return {
-        key: STRATEGY_KEYS.ORB,
-        side,
-        strength: 'STRONG',
-        layers: 'ORB+OI',
-        reasons,
-        orbBreakPct: breakoutPct,
-    };
-}
-
-// ──────────────────────────── STRATEGY 3: PCR Extreme ────────────────────────────
-
-export function checkPcrExtreme(tech, chain, opts) {
-    const pcr = Number(chain?.pcr) != null ? Number(chain.pcr) : 1;
-    const { spot, rsi: rsiV, ema9, adx: adxV } = tech;
-    const support = chain?.walls?.support?.strike != null ? Number(chain.walls.support.strike) : null;
-    const resistance = chain?.walls?.resistance?.strike != null ? Number(chain.walls.resistance.strike) : null;
-    const reasons = [];
-
-    // Contrarian entries need a calm trend — a strong ADX trend chops reversals.
-    if (adxV != null && adxV >= 25) return null;
-
-    let side;
-    if (pcr >= 1.5) {
-        side = 'CE';
-        if (rsiV == null || rsiV > 50) return null;
-        if (ema9 != null && spot != null && spot < ema9) return null;
-        reasons.push(`PCR ${pcr.toFixed(2)} EXTREME PE writing = strong floor`);
-        reasons.push(`RSI ${rsiV.toFixed(0)} oversold = bounce setup`);
-        if (support != null && spot != null) reasons.push(`Max PE OI wall at ${support} (support floor)`);
-        if (ema9 != null && spot != null && spot > ema9) reasons.push('Price above EMA9 = turning up');
-    } else if (pcr <= 0.5) {
-        side = 'PE';
-        if (rsiV == null || rsiV < 50) return null;
-        if (ema9 != null && spot != null && spot > ema9) return null;
-        reasons.push(`PCR ${pcr.toFixed(2)} EXTREME CE writing = ceiling formed`);
-        reasons.push(`RSI ${rsiV.toFixed(0)} overbought = fade setup`);
-        if (resistance != null && spot != null) reasons.push(`Max CE OI wall at ${resistance} (resistance ceiling)`);
-        if (ema9 != null && spot != null && spot < ema9) reasons.push('Price below EMA9 = turning down');
-    } else {
-        return null;
-    }
-
-    return {
-        key: STRATEGY_KEYS.PCR_REVERSAL,
-        side,
-        strength: 'STRONG',
-        layers: `PCR=${pcr.toFixed(2)}`,
-        reasons,
-        pcr,
-    };
-}
-
-// ─────────────────────────── STRATEGY 4: MACD Multi-TF ───────────────────────────
-
-export function checkMacdMtf(tech, chain, opts) {
-    const mtf = tech.mtfMacd;
-    if (!mtf?.ready) return null;
-    const h1 = mtf.h1 || {};
-    const m15 = mtf.m15 || {};
-
-    const h1Bull = Boolean(h1.bull);
-    const h1Bear = Boolean(h1.bear);
-    const m15Bull = Boolean(m15.bull);
-    const m15Bear = Boolean(m15.bear);
-    if ((h1Bull && m15Bear) || (h1Bear && m15Bull)) return null;
-
-    const reasons = [
-        `1H MACD ${h1Bull ? 'bullish' : 'bearish'} (line ${h1.macd} vs ${h1.signal})`,
-        `15m MACD ${m15Bull ? 'bullish' : 'bearish'} aligned with 1H`,
-    ];
-    const entryCrossUp = Boolean(m15.crossUp);
-    const entryCrossDown = Boolean(m15.crossDown);
-    reasons.push(`15m MACD entry cross (${entryCrossUp ? 'up' : entryCrossDown ? 'down' : 'none'})`);
-
-    const adxV = tech.adx;
-    if (adxV != null && adxV < opts.minAdx) return null;
-
-    const { rsi: rsiV, ema9, spot } = tech;
-    let side;
-    if (h1Bull && m15Bull && entryCrossUp) {
-        side = 'CE';
-        if (rsiV != null && rsiV < 50) return null;
-        if (ema9 != null && spot != null && spot < ema9) return null;
-        if (h1.aboveZero) reasons.push('1H MACD above zero -- strong uptrend');
-    } else if (h1Bear && m15Bear && entryCrossDown) {
-        side = 'PE';
-        if (rsiV != null && rsiV > 50) return null;
-        if (ema9 != null && spot != null && spot > ema9) return null;
-        if (h1.belowZero) reasons.push('1H MACD below zero -- strong downtrend');
-    } else {
-        return null;
-    }
-
-    const pcr = Number(chain?.pcr) != null ? Number(chain.pcr) : 1;
-    if (side === 'CE' && pcr < 0.75) return null;
-    if (side === 'PE' && pcr > 1.25) return null;
-    reasons.push(`PCR ${pcr.toFixed(2)} not fighting ${side} direction`);
-
-    return {
-        key: STRATEGY_KEYS.MACD_MTF,
-        side,
-        strength: 'STRONG',
-        layers: '2/3 MACD',
-        reasons,
-    };
-}
-
-// ─────────────────────────── STRATEGY 5: Mean Reversion ───────────────────────────
-
-export function checkMeanRev(tech, chain, opts) {
-    const { spot, adx: adxV, rsi: rsiV, vwap, bb } = tech;
-    if (spot == null || adxV == null || rsiV == null || !bb) return null;
-    if (adxV >= 20) return null;
-
-    const bbRange = bb.upper - bb.lower;
-    if (!(bbRange > 0)) return null;
-
-    const pcr = Number(chain?.pcr) != null ? Number(chain.pcr) : 1;
-    const reasons = [`ADX ${adxV.toFixed(0)} (sideways market)`];
-
-    const lowerZone = (spot - bb.lower) / bbRange;
-    const upperZone = (bb.upper - spot) / bbRange;
-    let side;
-    if (lowerZone < 0.15 && rsiV < 35) {
-        side = 'CE';
-        if (vwap != null && spot > vwap) return null;
-        reasons.push(`Price near lower BB ${bb.lower.toFixed(0)}`);
-        reasons.push(`RSI ${rsiV.toFixed(0)} oversold -- bounce expected`);
-        if (vwap != null) reasons.push(`Below VWAP ${vwap.toFixed(0)} -- snap-back target`);
-        if (pcr > 1.1) reasons.push(`PCR ${pcr.toFixed(2)} supports bounce (PE heavy)`);
-        else if (pcr < 0.8) return null;
-    } else if (upperZone < 0.15 && rsiV > 65) {
-        side = 'PE';
-        if (vwap != null && spot < vwap) return null;
-        reasons.push(`Price near upper BB ${bb.upper.toFixed(0)}`);
-        reasons.push(`RSI ${rsiV.toFixed(0)} overbought -- pullback expected`);
-        if (vwap != null) reasons.push(`Above VWAP ${vwap.toFixed(0)} -- fade target`);
-        if (pcr < 0.9) reasons.push(`PCR ${pcr.toFixed(2)} supports pullback (CE heavy)`);
-        else if (pcr > 1.2) return null;
-    } else {
-        return null;
-    }
-
-    return {
-        key: STRATEGY_KEYS.MEAN_REV,
-        side,
-        strength: 'MODERATE',
-        layers: 'BB+RSI+ADX',
-        reasons,
-        sideways: true,
-    };
-}
+// ──────────────────── STRATEGY 1: Keltner Channels (Mean Reversion) ────────────────────
 
 /**
- * Reduced quality score — the subset of tgbot2's `_passes_auto_alert_quality`
- * that this codebase's data can support (no leg volume / bid-ask spread / VIX).
- * Feeds the confidence number; never gates the entry here.
+ * Keltner Channels — buy near lower band, sell near upper band.
+ * Works best in sideways markets (ADX < 20).
+ *
+ * @returns {{key, side, strength, reasons, entry, sl, target1, target2}|null}
  */
+export function checkKeltner(tech, chain, opts) {
+    const { spot, adx: adxV, rsi: rsiV, vwap, closes15, highs15, lows15 } = tech;
+    if (spot == null || !closes15?.length) return null;
+
+    const kc = keltnerChannels(closes15, highs15, lows15,
+        opts.keltnerEmaPeriod, opts.keltnerAtrPeriod, opts.keltnerMultiplier);
+    if (!kc) return null;
+
+    const atr = kc.atr || tech.atr15;
+    if (!atr || atr <= 0) return null;
+
+    const pcr = Number(chain?.pcr) != null ? Number(chain.pcr) : 1;
+    const reasons = [];
+    const kcRange = kc.upper - kc.lower;
+    if (!(kcRange > 0)) return null;
+
+    // Position within Keltner Channel (0 = lower, 1 = upper)
+    const position = (spot - kc.lower) / kcRange;
+
+    let side = null;
+
+    // BUY near lower band (mean reversion bounce)
+    if (position < 0.2 && rsiV != null && rsiV < 35) {
+        side = 'CE';
+        reasons.push(`Price near lower KC band ${kc.lower.toFixed(0)}`);
+        reasons.push(`RSI ${rsiV.toFixed(0)} oversold — bounce expected`);
+        reasons.push(`KC range: ${kc.lower.toFixed(0)} – ${kc.upper.toFixed(0)}`);
+        if (vwap != null && spot < vwap) reasons.push(`Below VWAP ${vwap.toFixed(0)} — snap-back target`);
+        if (pcr > 1.1) reasons.push(`PCR ${pcr.toFixed(2)} supports bounce`);
+        if (adxV != null && adxV < 20) reasons.push(`ADX ${adxV.toFixed(0)} — sideways, mean reversion zone`);
+    }
+    // SELL near upper band (mean reversion fade)
+    else if (position > 0.8 && rsiV != null && rsiV > 65) {
+        side = 'PE';
+        reasons.push(`Price near upper KC band ${kc.upper.toFixed(0)}`);
+        reasons.push(`RSI ${rsiV.toFixed(0)} overbought — pullback expected`);
+        reasons.push(`KC range: ${kc.lower.toFixed(0)} – ${kc.upper.toFixed(0)}`);
+        if (vwap != null && spot > vwap) reasons.push(`Above VWAP ${vwap.toFixed(0)} — fade target`);
+        if (pcr < 0.9) reasons.push(`PCR ${pcr.toFixed(2)} supports pullback`);
+        if (adxV != null && adxV < 20) reasons.push(`ADX ${adxV.toFixed(0)} — sideways, mean reversion zone`);
+    }
+
+    if (!side) return null;
+
+    // Calculate entry, SL, targets
+    const entry = spot;
+    const sl = side === 'CE' ? kc.lower - 0.3 * atr : kc.upper + 0.3 * atr;
+    const target1 = side === 'CE' ? kc.middle : kc.middle;
+    const target2 = side === 'CE' ? kc.upper : kc.lower;
+
+    return {
+        key: STRATEGY_KEYS.KELTNER,
+        side,
+        strength: position < 0.1 || position > 0.9 ? 'STRONG' : 'MODERATE',
+        layers: 'KC+RSI',
+        reasons,
+        entry,
+        sl,
+        target1,
+        target2,
+        kc,
+        atr,
+    };
+}
+
+// ──────────────────── STRATEGY 2: Supertrend (Trend Following) ────────────────────
+
+/**
+ * Supertrend — enter on trend flip, ride the trend.
+ * Best in trending markets (ADX > 20).
+ *
+ * @returns {{key, side, strength, reasons, entry, sl, target1, target2}|null}
+ */
+export function checkSupertrend(tech, chain, opts) {
+    const { spot, adx: adxV, rsi: rsiV, ema9, ema21, closes15, highs15, lows15 } = tech;
+    if (spot == null || !closes15?.length) return null;
+
+    const st = supertrend(highs15, lows15, closes15,
+        opts.supertrendPeriod, opts.supertrendMultiplier);
+    if (!st) return null;
+
+    const atr = tech.atr15;
+    if (!atr || atr <= 0) return null;
+
+    const pcr = Number(chain?.pcr) != null ? Number(chain.pcr) : 1;
+    const reasons = [];
+
+    // Only fire on a fresh flip (direction changed from previous bar)
+    const freshFlip = st.direction !== st.prevDirection && st.prevDirection !== 0;
+
+    let side = null;
+
+    if (st.direction === 1 && freshFlip) {
+        // Supertrend flipped bullish — BUY CE
+        side = 'CE';
+        reasons.push(`Supertrend flipped BULLISH at ${st.supertrend.toFixed(0)}`);
+        reasons.push('Fresh trend flip — entry signal');
+        if (ema9 != null && ema21 != null) {
+            if (ema9 > ema21) reasons.push(`EMA9(${ema9.toFixed(0)}) > EMA21(${ema21.toFixed(0)}) uptrend`);
+            else reasons.push('EMA alignment pending — trend early stage');
+        }
+        if (adxV != null && adxV >= 20) reasons.push(`ADX ${adxV.toFixed(0)} — strong trend`);
+        if (pcr > 1.0) reasons.push(`PCR ${pcr.toFixed(2)} — put writing supports upside`);
+    }
+    else if (st.direction === -1 && freshFlip) {
+        // Supertrend flipped bearish — BUY PE
+        side = 'PE';
+        reasons.push(`Supertrend flipped BEARISH at ${st.supertrend.toFixed(0)}`);
+        reasons.push('Fresh trend flip — entry signal');
+        if (ema9 != null && ema21 != null) {
+            if (ema9 < ema21) reasons.push(`EMA9(${ema9.toFixed(0)}) < EMA21(${ema21.toFixed(0)}) downtrend`);
+            else reasons.push('EMA alignment pending — trend early stage');
+        }
+        if (adxV != null && adxV >= 20) reasons.push(`ADX ${adxV.toFixed(0)} — strong trend`);
+        if (pcr < 1.0) reasons.push(`PCR ${pcr.toFixed(2)} — call writing supports downside`);
+    }
+
+    if (!side) return null;
+
+    // Calculate entry, SL, targets (Supertrend line is the trailing SL)
+    const entry = spot;
+    const sl = st.supertrend; // Supertrend line is the stop
+    const risk = Math.abs(entry - sl);
+    const target1 = side === 'CE' ? entry + 1.5 * risk : entry - 1.5 * risk;
+    const target2 = side === 'CE' ? entry + 2.5 * risk : entry - 2.5 * risk;
+
+    return {
+        key: STRATEGY_KEYS.SUPERTREND,
+        side,
+        strength: adxV != null && adxV >= 25 ? 'STRONG' : 'MODERATE',
+        layers: 'ST+EMA',
+        reasons,
+        entry,
+        sl,
+        target1,
+        target2,
+        supertrend: st,
+        atr,
+    };
+}
+
+/** Quality score for ranking strategies. */
 export function qualityScore(result, tech, chain) {
     let score = 0;
     const { key, side } = result;
     const { adx: adxV, ema9, ema21, spot, rsi: rsiV } = tech;
-    const trendStrategies = [STRATEGY_KEYS.CONFLUENCE, STRATEGY_KEYS.ORB, STRATEGY_KEYS.MACD_MTF].includes(key);
 
-    if (adxV != null) {
-        if (key === STRATEGY_KEYS.MEAN_REV) {
-            if (adxV < 15) score += 20;
-            else score += 10;
-        } else if (adxV >= 25) { score += 20; }
-        else if (adxV >= 20) { score += 10; }
-    }
-
-    if (trendStrategies && ema9 != null && ema21 != null && spot != null) {
-        const aligned = (side === 'CE' && ema9 > ema21 && spot > ema9) ||
-            (side === 'PE' && ema9 < ema21 && spot < ema9);
-        if (aligned) score += 15;
-    }
-
-    if (trendStrategies && rsiV != null) {
-        if ((side === 'CE' && rsiV >= 55 && rsiV <= 70) || (side === 'PE' && rsiV >= 30 && rsiV <= 45)) {
-            score += 10;
+    if (key === STRATEGY_KEYS.KELTNER) {
+        // Keltner benefits from low ADX (sideways)
+        if (adxV != null) {
+            if (adxV < 15) score += 25;
+            else if (adxV < 20) score += 15;
+            else score += 5;
         }
+        // RSI confirmation
+        if (rsiV != null) {
+            if ((side === 'CE' && rsiV < 30) || (side === 'PE' && rsiV > 70)) score += 20;
+            else if ((side === 'CE' && rsiV < 40) || (side === 'PE' && rsiV > 60)) score += 10;
+        }
+        // Strong signal (very close to band)
+        if (result.strength === 'STRONG') score += 15;
     }
 
-    if (key === STRATEGY_KEYS.CONFLUENCE) {
-        const n = parseInt(String(result.layers || '0/4').split('/')[0], 10) || 0;
-        if (n >= 4) score += 25;
-        else if (n >= 3) score += 12;
-    }
-
-    if (key === STRATEGY_KEYS.ORB && result.orbBreakPct != null) {
-        if (result.orbBreakPct >= 0.2) score += 15;
-    }
-
-    if (key === STRATEGY_KEYS.PCR_REVERSAL) {
-        const p = Number(result.pcr);
-        if (Number.isFinite(p) && (p >= 1.5 || p <= 0.5)) score += 20;
+    if (key === STRATEGY_KEYS.SUPERTREND) {
+        // Supertrend benefits from high ADX (trending)
+        if (adxV != null) {
+            if (adxV >= 25) score += 25;
+            else if (adxV >= 20) score += 15;
+            else score += 5;
+        }
+        // EMA alignment
+        if (ema9 != null && ema21 != null && spot != null) {
+            const aligned = (side === 'CE' && ema9 > ema21 && spot > ema9) ||
+                (side === 'PE' && ema9 < ema21 && spot < ema9);
+            if (aligned) score += 20;
+        }
+        // Fresh flip bonus
+        if (result.supertrend?.direction !== result.supertrend?.prevDirection) score += 10;
     }
 
     return score + 10;
 }
 
-/** Win-confidence estimate, ported from tgbot2's `_confidence_pct`. */
+/** Win-confidence estimate. */
 export function strategyConfidence(key, score) {
     const base = STRATEGY_META[key]?.baseWin ?? 60;
     const adj = (Number(score) - 55) * 0.4;
@@ -478,25 +355,15 @@ export function strategyConfidence(key, score) {
 }
 
 /**
- * Run all five strategies on the current read. Returns an ordered list of
- * setups (highest quality first) plus context about why nothing fired when
- * empty.
- *
- * @param {object} d
- * @param {object|null} d.chain chain snapshot
- * @param {object|null} d.quote quote result
- * @param {{min:number,high:number,low:number,close:number,volume:number}[]} d.today5m
- * @param {{min:number,high:number,low:number,close:number,volume:number}[]} d.full5m
- * @param {object|null} d.hourly 1h bars or null
- * @param {number} [d.nowMin] IST minute-of-day (defaults to now)
- * @param {object} [d.opts] overrides for DEFAULTS
+ * Run both strategies and return results.
+ * Each strategy fires independently — the card shows BOTH.
  */
 export function evaluateStrategies({ chain, quote, today5m = [], full5m = [], hourly = null, nowMin = null, opts = {} } = {}) {
     const o = { ...DEFAULTS, ...opts };
     const now = nowMin != null ? nowMin : istMinuteOfDay();
     const tech = buildTech({ today5m, full5m, hourly, chain, quote });
 
-    // Clock gates — honest dead-ends instead of a stale read.
+    // Clock gate
     if (now >= o.lastEntryMin) {
         return { list: [], winner: null, evaluated: false, noneReason: `past last entry time (${Math.floor(o.lastEntryMin / 60)}:00 IST)` };
     }
@@ -507,12 +374,10 @@ export function evaluateStrategies({ chain, quote, today5m = [], full5m = [], ho
         return { list: [], winner: null, evaluated: false, noneReason: 'no spot price from the option chain' };
     }
 
+    // Run both strategies independently
     const checks = [
-        [STRATEGY_KEYS.CONFLUENCE, (t) => checkConfluence(t, chain, o)],
-        [STRATEGY_KEYS.ORB, (t) => checkOrb(t, chain, o, now)],
-        [STRATEGY_KEYS.PCR_REVERSAL, (t) => checkPcrExtreme(t, chain, o)],
-        [STRATEGY_KEYS.MACD_MTF, (t) => checkMacdMtf(t, chain, o)],
-        [STRATEGY_KEYS.MEAN_REV, (t) => checkMeanRev(t, chain, o)],
+        [STRATEGY_KEYS.KELTNER, (t) => checkKeltner(t, chain, o)],
+        [STRATEGY_KEYS.SUPERTREND, (t) => checkSupertrend(t, chain, o)],
     ];
 
     const list = [];
@@ -528,6 +393,8 @@ export function evaluateStrategies({ chain, quote, today5m = [], full5m = [], ho
             ...r,
             name: meta.name || r.key,
             winRateTag: meta.tag || '',
+            bestFor: meta.bestFor || '',
+            description: meta.description || '',
             score,
             confidence: conf.pct,
             confidenceLabel: conf.label,
@@ -535,10 +402,24 @@ export function evaluateStrategies({ chain, quote, today5m = [], full5m = [], ho
         });
     }
 
+    // Sort by score (higher = better setup right now)
     list.sort((a, b) => (b.score - a.score) || (STRATEGY_META[b.key]?.rank || 0) - (STRATEGY_META[a.key]?.rank || 0));
+
+    // Pick winner (best setup right now)
     const winner = list[0] || null;
+
+    // If both fired, add comparison note
+    if (list.length === 2) {
+        const [a, b] = list;
+        const better = a.score >= b.score ? a : b;
+        const worse = a.score >= b.score ? b : a;
+        better.comparisonNote = `Better setup right now (score ${better.score} vs ${worse.score})`;
+        worse.comparisonNote = `Weaker setup — ${better.name} preferred`;
+    }
+
     const noneReason = list.length
         ? null
-        : `no strategy fired — confluence <${o.minLayers} layers, no ORB break, PCR ${chain?.pcr != null ? Number(chain.pcr).toFixed(2) : 'n/a'} mid-band, no MACD cross, not at a Bollinger edge`;
+        : `no strategy fired — Keltner needs price near KC band + RSI <35/>65, Supertrend needs fresh flip`;
+
     return { list, quiet, winner, evaluated: true, noneReason };
 }

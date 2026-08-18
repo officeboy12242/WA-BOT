@@ -629,40 +629,52 @@ class IndexAnalysisService {
         const s = a.signal || {};
         const p = a.plan;
         if (!s.side) {
-            // The measured fade rule is quiet — but the tgbot2 strategy engines
-            // usually have a setup, so the card should not dead-end with NO ENTRY.
-            const strat = a.strategies?.winner;
-            if (strat) {
-                const dirWord = strat.side === 'CE' ? 'BUY CE' : 'BUY PE';
-                const leg = strat.side === 'CE' ? a.atmCe : a.atmPe;
-                const sp = strat.side && leg?.ltp != null && strat.atr15
-                    ? sizeIndexTrade({
-                          premium: leg.ltp,
-                          lot: a.lot,
-                          indexAtr: strat.atr15,
-                          capital: a.capital ?? this.capital,
-                          minProfit: this.minProfit,
-                          maxProfit: this.maxProfit,
-                      })
-                    : null;
-                L.push(`┌─ *🎯 STRATEGY — ${strat.name}* ─`);
-                L.push(`│ ${dirWord} · layers ${strat.layers} · ${strat.strength}`);
-                L.push(`│ Why: ${(strat.reasons || []).join(' · ')}`);
-                L.push(`│ 📊 Confidence: *${strat.confidence}%* — ${strat.confidenceLabel} _(tgbot2 backtest ${strat.winRateTag || '—'}, not re-verified here)_`);
-                if (sp?.blocked) {
-                    L.push(`│ ⚠️ ${sp.blocked}`);
-                } else if (sp) {
+            // The measured fade rule is quiet — show both Keltner and Supertrend results
+            const ranked = a.strategies?.list || [];
+            const quiet = a.strategies?.quiet || [];
+            const winner = a.strategies?.winner;
+
+            if (ranked.length > 0) {
+                L.push('┌─ *🎯 STRATEGY RESULTS — Keltner vs Supertrend* ─');
+                L.push('│ _Both strategies run independently — pick the better setup_');
+                L.push('│');
+
+                for (const strat of ranked) {
+                    const dirWord = strat.side === 'CE' ? 'BUY CE' : 'BUY PE';
+                    const medal = strat === winner ? '🥇' : '🥈';
+                    const betterNote = strat.comparisonNote ? ` _${strat.comparisonNote}_` : '';
+
+                    L.push(`│ ${medal} *${strat.name}*`);
+                    L.push(`│ ${dirWord} · ${strat.strength} · Confidence: *${strat.confidence}%* (${strat.confidenceLabel})`);
+                    L.push(`│ Win rate: ${strat.winRateTag} — ${strat.bestFor}`);
                     L.push('│');
-                    L.push(`│ *${a.atmStrike} ${strat.side}* · ${a.expiry}`);
-                    L.push(`│ Lots: *${sp.lots}* (${sp.qty} qty) · capital used *${inr(sp.capitalUsed)}* of ${inr(a.capital ?? this.capital)}`);
+
+                    // Entry / SL / Target levels
+                    if (strat.entry != null && strat.sl != null) {
+                        const risk = Math.abs(strat.entry - strat.sl);
+                        const t1Dist = strat.target1 != null ? Math.abs(strat.target1 - strat.entry) : null;
+                        const t2Dist = strat.target2 != null ? Math.abs(strat.target2 - strat.entry) : null;
+                        L.push(`│ 🟢 ENTRY   ${fmt(strat.entry, 0)}`);
+                        L.push(`│ 🎯 TARGET1 ${fmt(strat.target1, 0)}  (${t1Dist != null ? '+' + fmt(t1Dist, 0) + ' pts' : '—'})`);
+                        L.push(`│ 🎯 TARGET2 ${fmt(strat.target2, 0)}  (${t2Dist != null ? '+' + fmt(t2Dist, 0) + ' pts' : '—'})`);
+                        L.push(`│ 🛑 STOP    ${fmt(strat.sl, 0)}  (${fmt(risk, 0)} pts risk)`);
+                        if (risk > 0 && t1Dist != null) {
+                            const rr = (t1Dist / risk).toFixed(1);
+                            L.push(`│ ⚖️ R:R = 1:${rr}`);
+                        }
+                    }
+
                     L.push('│');
-                    L.push(`│ 🟢 ENTRY  ₹${fmt(sp.premEntry)}`);
-                    L.push(`│ 🎯 EXIT AT ₹${fmt(sp.premT1)}  →  profit *${inr(sp.t1Rs)}*`);
-                    L.push(`│ 🛑 STOP   ₹${fmt(sp.premStop)}  →  loss *${inr(sp.riskRs)}*`);
-                    L.push(`│ 🏃 runner ₹${fmt(sp.premT2)}  →  profit ${inr(sp.t2Rs)} _(beyond the tested target)_`);
+                    L.push(`│ Why: ${(strat.reasons || []).join(' · ')}`);
+                    if (betterNote) L.push(`│ ${betterNote}`);
+                    L.push('│ ─────────────────────────');
                 }
+
+                for (const key of quiet) {
+                    L.push(`│ ➖ ${STRATEGY_META[key]?.short || key} · no setup`);
+                }
+
                 L.push('└────────────────────────────');
-                appendStrategyRanking(L, a);
             } else {
                 L.push('┌─ *🚫 NO ENTRY* ─');
                 L.push(`│ ${s.reason || 'no setup'}`);
@@ -765,36 +777,65 @@ function liveStatTag(a, source) {
 }
 
 function appendStrategyRanking(L, a) {
-    const s = a.signal || {};
     const ranked = a.strategies?.list || [];
     const quiet = a.strategies?.quiet || [];
-    if (!ranked.length && !quiet.length) return;
+    const s = a.signal || {};
+    if (!ranked.length && !quiet.length && !s.side) return;
 
     L.push('');
-    L.push('┌─ *📊 ALL STRATEGIES (ranked)* ─');
-    const medal = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣'];
-    let i = 0;
-    let liveShown = false;
-    if (s.side) {
+    L.push('┌─ *📊 STRATEGY COMPARISON* ─');
+    L.push('│ _Both strategies run independently — pick the better setup_');
+    L.push('│');
+
+    // Show the measured fade as the lead row when it fires
+    if (s.side && s.kind) {
+        const fadeName = FADE_STRATEGY_NAMES[s.kind] || s.kind;
+        const fadeSideWord = s.side === 'long' ? 'BUY CE' : 'BUY PE';
+        const fadeTag = liveStatTag(a, `index-fade-${s.kind}`);
         const conf = signalConfidence(s);
-        const fadeShort = FADE_STRATEGY_NAMES[s.kind] || s.kind;
-        const tag = liveStatTag(a, `index-fade-${s.kind}`);
-        if (tag) liveShown = true;
-        L.push(`│ ${medal[i++] || `${i}.`} *Fade* — ${fadeShort} · ${s.side === 'long' ? 'BUY CE' : 'BUY PE'} · ${conf ? conf.pct : '—'}%${tag || ''}`);
+        L.push(`│ 🥇 *Fade* — ${fadeName} · ${fadeSideWord} · ${conf ? conf.pct + '%' : '?'}${fadeTag || ''}`);
+        L.push('│ ─────────────────────────');
     }
+
+    // Show each firing strategy with full details
     for (const r of ranked) {
-        const sideWord = r.side === 'CE' ? 'BUY CE' : r.side === 'PE' ? 'BUY PE' : '—';
+        const sideWord = r.side === 'CE' ? 'BUY CE' : 'BUY PE';
         const short = STRATEGY_META[r.key]?.short || r.key;
         const tag = liveStatTag(a, `index-${r.key}`);
-        if (tag) liveShown = true;
-        L.push(`│ ${medal[i++] || `${i}.`} ${short} · ${sideWord} · ${r.score} pts · ${r.confidence}%${tag || ''}`);
+        const medal = r === ranked[0] ? '🥇' : '🥈';
+        const betterNote = r.comparisonNote ? ` _${r.comparisonNote}_` : '';
+
+        L.push(`│ ${medal} *${short}* — ${sideWord}`);
+        L.push(`│ Win rate: ${r.winRateTag} · Confidence: *${r.confidence}%*${tag || ''}`);
+        L.push(`│ Best for: ${r.bestFor}`);
+        L.push(`│`);
+
+        // Entry / SL / Target
+        if (r.entry != null && r.sl != null) {
+            const risk = Math.abs(r.entry - r.sl);
+            const t1Dist = r.target1 != null ? Math.abs(r.target1 - r.entry) : null;
+            const t2Dist = r.target2 != null ? Math.abs(r.target2 - r.entry) : null;
+            L.push(`│ 🟢 ENTRY   ${fmt(r.entry, 0)}`);
+            L.push(`│ 🎯 TARGET1 ${fmt(r.target1, 0)}  (${t1Dist != null ? '+' + fmt(t1Dist, 0) + ' pts' : '—'})`);
+            L.push(`│ 🎯 TARGET2 ${fmt(r.target2, 0)}  (${t2Dist != null ? '+' + fmt(t2Dist, 0) + ' pts' : '—'})`);
+            L.push(`│ 🛑 STOP    ${fmt(r.sl, 0)}  (${fmt(risk, 0)} pts risk)`);
+            if (risk > 0 && t1Dist != null) {
+                const rr = (t1Dist / risk).toFixed(1);
+                L.push(`│ ⚖️ R:R = 1:${rr}`);
+            }
+        }
+
+        L.push(`│`);
+        L.push(`│ Why: ${(r.reasons || []).join(' · ')}`);
+        if (betterNote) L.push(`│ ${betterNote}`);
+        L.push('│ ─────────────────────────');
     }
+
+    // Show quiet strategies
     for (const key of quiet) {
         L.push(`│ ➖ ${STRATEGY_META[key]?.short || key} · no setup`);
     }
-    if (liveShown) {
-        L.push('│ _live = graded on the underlying\'s direction from journaled /index reads_');
-    }
+
     L.push('└────────────────────────────');
 }
 
