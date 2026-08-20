@@ -57,6 +57,7 @@ import { handleTradelert, handleTradenow, handleSwing, handleExpiry, handleIndex
 import { handleHeal, handleFix } from './handlers/healHandlers.js';
 import { handleAssist } from './handlers/assistHandlers.js';
 import IpoController from './IpoController.js';
+import BacktestController from './BacktestController.js';
 
 import {
     handleAddAdmin,
@@ -192,6 +193,12 @@ export const COMMAND_HANDLERS = {
     svmkr: ({ sock, chatId, senderJid, args, ctx }) => handleSvmkr(sock, chatId, senderJid, args, ctx),
     swing: ({ sock, chatId, senderJid, args, ctx }) => handleSwing(sock, chatId, senderJid, args, ctx),
     expiry: ({ sock, chatId, senderJid, args, ctx }) => handleExpiry(sock, chatId, senderJid, args, ctx),
+    backtest: async ({ sock, chatId, args, ctx }) => {
+        if (!ctx.backtestController) {
+            ctx.backtestController = new BacktestController(ctx.config || {});
+        }
+        return ctx.backtestController.handleCommand(chatId, `/backtest${args?.length ? ' ' + args.join(' ') : ''}`, sock);
+    },
 
     /* ── Admin management ── */
     addadmin: ({ sock, chatId, senderJid, args, originalMsg, ctx }) => handleAddAdmin(sock, chatId, senderJid, args, originalMsg, ctx),

@@ -537,6 +537,14 @@ export const COMMAND_REGISTRY = [
         category: 'trade',
     },
     {
+        names: ['/backtest'],
+        key: 'backtest',
+        scope: 'any',
+        role: 'admins',
+        help: 'NIFTY backtest — `/backtest`, `/backtest 30` (days)',
+        category: 'trade',
+    },
+    {
         names: ['/addpremium'],
         key: 'addpremium',
         scope: 'any',
