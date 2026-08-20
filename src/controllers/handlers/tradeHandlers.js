@@ -18,6 +18,7 @@ import ExpiryTradeService, { EXPIRY_INDICES } from '../../services/ExpiryTradeSe
 import { formatExpiryAlert, formatExpiryDigest } from '../../utils/expiryAlertFormatter.js';
 import { nextExpiry } from '../../utils/expiryCalendar.js';
 import SvmkrScanService from '../../services/SvmkrScanService.js';
+import { svmkrLlmVerdictService } from '../../services/SvmkrLlmVerdictService.js';
 import { formatSvmkrCard, formatSvmkrIdle, formatSvmkrStats } from '../../utils/svmkrCard.js';
 
 function parseSymbolList(raw) {
@@ -881,6 +882,8 @@ export async function handleSvmkr(sock, chatId, senderJid, args, ctx = {}) {
         // requireFresh:false so an on-demand read reports the standing trend
         // instead of "nothing" whenever a cross did not just print.
         const scan = await svmkrScanner().scan(raw, { requireFresh: false });
+        // LLM verdict is a decoration: never blocks the card, returns null on failure.
+        if (scan.setup) scan.verdict = await svmkrLlmVerdictService.verdict(scan);
         const text = scan.setup ? formatSvmkrCard(scan) : formatSvmkrIdle(scan);
         await editMessageText(sock, chatId, loading?.key, text);
         logger.info(`⚡ SVMKR read ${scan.key} in ${chatId}${scan.setup ? ` — ${scan.setup.side}` : ' — no setup'}`);

@@ -19,6 +19,7 @@
 import { logger } from './logger.js';
 import { isIndianEquityTradingDay, getIndiaMarketMode } from './indianMarketCalendar.js';
 import { formatSvmkrCard } from './svmkrCard.js';
+import { svmkrLlmVerdictService } from '../services/SvmkrLlmVerdictService.js';
 import { safeSendMessage } from './waMessage.js';
 
 const BAR_MS = 5 * 60 * 1000;
@@ -124,6 +125,8 @@ export function startSvmkrScheduler({ getSock, scanService, tracker, groupManage
                     continue;
                 }
 
+                // LLM verdict once per fired signal, shared across all group posts.
+                scan.verdict = await svmkrLlmVerdictService.verdict(scan);
                 const text = formatSvmkrCard(scan, { nowMs });
                 let opened = 0;
                 for (const group of groups) {

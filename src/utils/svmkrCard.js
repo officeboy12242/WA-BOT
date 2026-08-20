@@ -35,6 +35,16 @@ export function formatSvmkrCard(scan, { nowMs = Date.now() } = {}) {
     L.push(fired ? '  ⚡ *SVMKR SIGNAL* ⚡' : '  👁️ *SVMKR READ — NOT A SIGNAL*');
     L.push('┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛');
     L.push('');
+    // AI verdict lands at the top so the reader sees BUY / SKIP / WAIT before
+    // any premium. Missing when the LLM was skipped or every model failed —
+    // in that case the card renders like it always did.
+    if (scan.verdict) {
+        const v = scan.verdict;
+        const badge = v.verdict === 'BUY' ? '🟢' : v.verdict === 'SKIP' ? '⛔' : '⏸️';
+        L.push(`🤖 *AI VERDICT: ${v.verdict} · ${v.confidence}%* ${badge}`);
+        L.push(`_${v.why}_`);
+        L.push('');
+    }
     if (!fired) {
         L.push(
             s.fresh
