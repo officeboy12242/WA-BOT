@@ -12,10 +12,15 @@
  * all do, verdict() returns null and the card renders exactly like today.
  *
  * Model ladder (all free on OrcaRouter):
- *   1. qwen/qwen3.8-27b-free           — Qwen 3.8 27B, primary
- *   2. deepseek/deepseek-v4-flash-free — backstop, already used by /chainai
+ *   1. deepseek/deepseek-v4-pro-free   — reasoning-heavy primary, ~15s typical
+ *   2. deepseek/deepseek-v4-flash-free — fast non-reasoning backstop, ~9s typical
  *
  * Override via SVMKR_LLM_MODELS env var (comma-separated).
+ *
+ * IMPORTANT: v4-pro is a reasoning model — its hidden reasoning tokens count
+ * against max_tokens. We give it 4000 so the schema-shaped JSON always has
+ * room to land AFTER the reasoning burn (measured: ~580 reasoning + ~80
+ * content tokens for a compact verdict). Timeout is 30s to cover cold starts.
  */
 
 import axios from 'axios';
@@ -24,11 +29,13 @@ import { config } from '../config/config.js';
 
 const ORCAROUTER_URL = 'https://api.orcarouter.ai/v1/chat/completions';
 const DEFAULT_MODELS = [
-    'qwen/qwen3.8-27b-free',
+    'deepseek/deepseek-v4-pro-free',
     'deepseek/deepseek-v4-flash-free',
 ];
-/** Per-model timeout: 2 models × 10s = 20s worst-case latency added to a scan. */
-const PER_MODEL_TIMEOUT_MS = 10_000;
+/** Per-model timeout: 2 models × 30s = 60s worst-case latency added to a scan. */
+const PER_MODEL_TIMEOUT_MS = 30_000;
+/** Big enough to leave content headroom AFTER the reasoning model burns its budget. */
+const MAX_TOKENS = 4_000;
 
 const SYSTEM_PROMPT = `You are a disciplined Indian F&O options trader grading ONE specific SVMKR (UT Bot + HMA + slope) setup card.
 
@@ -130,7 +137,10 @@ class SvmkrLlmVerdictService {
                         { role: 'user', content: userPrompt },
                     ],
                     temperature: 0.2,
-                    max_tokens: 500,
+                    max_tokens: MAX_TOKENS,
+                    // Reasoning models on OrcaRouter honour this — keeps latency sane
+                    // while still producing a reasoned JSON verdict.
+                    reasoning_effort: 'low',
                 },
                 {
                     headers: {
