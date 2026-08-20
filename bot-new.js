@@ -54,6 +54,8 @@ import { startSvmkrScheduler } from './src/utils/svmkrScheduler.js';
 import { initAutoDelete } from './src/utils/autoDelete.js';
 import { startExpiryAlertScheduler } from './src/utils/expiryAlertScheduler.js';
 import { startOutcomeResolverScheduler } from './src/utils/outcomeResolverScheduler.js';
+import { startIpoAlertScheduler } from './src/utils/ipoAlertScheduler.js';
+import IpoController from './src/controllers/IpoController.js';
 import ExpiryTradeService from './src/services/ExpiryTradeService.js';
 import { formatExpiryDigest } from './src/utils/expiryAlertFormatter.js';
 import { deployNotificationService } from './src/services/DeployNotificationService.js';
@@ -307,7 +309,10 @@ class WhatsAppCourseBot {
             this.commandController.setTradeAlertController(this.tradeAlertController);
             this.commandController.setAssistService(this.assistService);
             this.commandController.setResumeTailor(this.resumeStore, this.resumeTailorService);
-            
+            this.ipoController = new IpoController(config, mongoDb);
+            await this.ipoController.init();
+            this.commandController.setIpoController(this.ipoController);
+
             this.whatsappService = new WhatsAppService(
                 this.commandController,
                 this.stickerForwarder,
@@ -490,6 +495,14 @@ class WhatsAppCourseBot {
                 config,
             });
 
+            // IPO close-day + listing-day auto-alerts
+            this.ipoAlertScheduler = startIpoAlertScheduler({
+                config,
+                groupManager: this.groupManager,
+                mongoDb,
+                getSock: () => this.whatsappService?.getSock?.() || null,
+            });
+
             this.checkInterval = setInterval(async () => {
                 try {
                     await this.courseController.checkAndPostCourses(
@@ -537,6 +550,9 @@ class WhatsAppCourseBot {
         }
         if (this.outcomeResolverScheduler) {
             this.outcomeResolverScheduler.stop();
+        }
+        if (this.ipoAlertScheduler) {
+            this.ipoAlertScheduler.stop();
         }
         if (this.expiryAlertScheduler) {
             this.expiryAlertScheduler.stop();

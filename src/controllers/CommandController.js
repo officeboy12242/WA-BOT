@@ -56,6 +56,7 @@ import {
 import { handleTradelert, handleTradenow, handleSwing, handleExpiry, handleIndex, handleSvmkr, handleChainAi } from './handlers/tradeHandlers.js';
 import { handleHeal, handleFix } from './handlers/healHandlers.js';
 import { handleAssist } from './handlers/assistHandlers.js';
+import IpoController from './IpoController.js';
 
 import {
     handleAddAdmin,
@@ -182,6 +183,12 @@ export const COMMAND_HANDLERS = {
     tradenow: ({ sock, chatId, senderJid, args, ctx }) => handleTradenow(sock, chatId, senderJid, args, ctx),
     index: ({ sock, chatId, senderJid, args, ctx }) => handleIndex(sock, chatId, senderJid, args, ctx),
     chainai: ({ sock, chatId, senderJid, args, ctx }) => handleChainAi(sock, chatId, senderJid, args, ctx),
+    ipo: ({ sock, chatId, senderJid, args, originalMsg, ctx }) => {
+        if (!ctx.ipoController) {
+            return safeSendMessage(sock, chatId, { text: '⚠️ IPO analysis service is not available.' }, originalMsg);
+        }
+        return ctx.ipoController.handle(sock, chatId, senderJid, args, originalMsg);
+    },
     svmkr: ({ sock, chatId, senderJid, args, ctx }) => handleSvmkr(sock, chatId, senderJid, args, ctx),
     swing: ({ sock, chatId, senderJid, args, ctx }) => handleSwing(sock, chatId, senderJid, args, ctx),
     expiry: ({ sock, chatId, senderJid, args, ctx }) => handleExpiry(sock, chatId, senderJid, args, ctx),
@@ -346,6 +353,7 @@ class CommandController {
         this.svmkrScheduler = null;
         this.botStartTime = Date.now();
         this.stickerForwarder = null;
+        this.ipoController = null;
 
         this._isOwnerFromJid = this._isOwnerFromJid.bind(this);
     }
@@ -391,6 +399,10 @@ class CommandController {
 
     setGetSock(getSock) {
         this.getSock = getSock;
+    }
+
+    setIpoController(ipoController) {
+        this.ipoController = ipoController;
     }
 
     /**
@@ -450,6 +462,7 @@ class CommandController {
             botStartTime: this.botStartTime,
             courseAPI: this.courseAPI,
             isOwnerFromJid: this._isOwnerFromJid,
+            ipoController: this.ipoController,
         };
     }
 

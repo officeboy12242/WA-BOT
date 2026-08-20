@@ -641,6 +641,14 @@ export const COMMAND_REGISTRY = [
         help: 'Trigger Render redeploy of latest commit (owner only)',
     },
     {
+        names: ['/ipo'],
+        key: 'ipo',
+        scope: 'any',
+        role: 'anyone',
+        help: 'Indian IPO analysis — `/ipo` list, `/ipo <name>` AI analysis, `/ipo gmp` leaderboard',
+        category: 'trade',
+    },
+    {
         names: ['/resume', '/cv', '/setcv', '/mycv'],
         key: 'resume',
         scope: 'any',
@@ -773,7 +781,7 @@ export const HELP_CATEGORY = {
 
     // Markets
     tradenow: 'trade', swing: 'trade', expiry: 'trade', tradelert: 'trade', index: 'trade',
-    svmkr: 'trade', chainai: 'trade',
+    svmkr: 'trade', chainai: 'trade', ipo: 'trade',
 
     // Scheduled feeds
     news: 'daily', github: 'daily', awesome: 'daily', interviewq: 'daily',
@@ -822,7 +830,7 @@ export const HELP_CATEGORIES = [
     },
     { key: 'media', emoji: '📥', title: 'MEDIA DOWNLOAD', blurb: 'Instagram, Twitter & conversions' },
     { key: 'sticker', emoji: '🎭', title: 'STICKERS', blurb: 'Create, steal, animate' },
-    { key: 'trade', emoji: '📈', title: 'TRADING & MARKETS', blurb: 'NSE stocks, options & swing setups' },
+    { key: 'trade', emoji: '📈', title: 'TRADING & MARKETS', blurb: 'NSE stocks, options, swing setups & IPO analysis' },
     { key: 'daily', emoji: '📰', title: 'DAILY FEEDS', blurb: 'News, repos & interview prep' },
     { key: 'fun', emoji: '🎲', title: 'FUN', blurb: 'Horoscope, advice, facts' },
     { key: 'resume', emoji: '📄', title: 'RESUME TOOLS', blurb: 'Tailor a CV to a job description' },

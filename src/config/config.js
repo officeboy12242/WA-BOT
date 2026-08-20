@@ -458,6 +458,10 @@ export const config = {
     TRADE_ALERT_FORCE_TRADING_DAYS: (process.env.TRADE_ALERT_FORCE_TRADING_DAYS || '').trim(),
     /** OrcaRouter — free DeepSeek V4 Flash for /chainai option-chain AI reads. */
     ORCAROUTER_API_KEY: process.env.ORCAROUTER_API_KEY?.trim() || '',
+    /** IPO auto-alerts: close day (last to apply) and listing day */
+    IPO_ALERT_CLOSE_TIME: (process.env.IPO_ALERT_CLOSE_TIME || '08:30').trim(),
+    IPO_ALERT_LISTING_TIME: (process.env.IPO_ALERT_LISTING_TIME || '09:45').trim(),
+    IPO_ALERT_TIMEZONE: process.env.IPO_ALERT_TIMEZONE || 'Asia/Kolkata',
     /** SVMKR verdict model ladder (comma-separated, first that responds wins). */
     SVMKR_LLM_MODELS: (process.env.SVMKR_LLM_MODELS || 'deepseek/deepseek-v4-pro-free,deepseek/deepseek-v4-flash-free').trim(),
     /** Per-model timeout. Pro is a reasoning model — typical latency 12-25s. */
