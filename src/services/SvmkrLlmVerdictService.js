@@ -12,9 +12,8 @@
  * all do, verdict() returns null and the card renders exactly like today.
  *
  * Model ladder (all free on OrcaRouter):
- *   1. qwen/qwen3-32b-free       — heavier reasoning, first choice
- *   2. qwen/qwen3-8b-free        — faster, smaller
- *   3. deepseek/deepseek-v4-flash-free — backstop, already used elsewhere
+ *   1. qwen/qwen3.8-27b-free           — Qwen 3.8 27B, primary
+ *   2. deepseek/deepseek-v4-flash-free — backstop, already used by /chainai
  *
  * Override via SVMKR_LLM_MODELS env var (comma-separated).
  */
@@ -25,11 +24,10 @@ import { config } from '../config/config.js';
 
 const ORCAROUTER_URL = 'https://api.orcarouter.ai/v1/chat/completions';
 const DEFAULT_MODELS = [
-    'qwen/qwen3-32b-free',
-    'qwen/qwen3-8b-free',
+    'qwen/qwen3.8-27b-free',
     'deepseek/deepseek-v4-flash-free',
 ];
-/** Per-model timeout: 3 models × 10s = 30s worst-case latency added to a scan. */
+/** Per-model timeout: 2 models × 10s = 20s worst-case latency added to a scan. */
 const PER_MODEL_TIMEOUT_MS = 10_000;
 
 const SYSTEM_PROMPT = `You are a disciplined Indian F&O options trader grading ONE specific SVMKR (UT Bot + HMA + slope) setup card.

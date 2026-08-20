@@ -459,7 +459,7 @@ export const config = {
     /** OrcaRouter — free DeepSeek V4 Flash for /chainai option-chain AI reads. */
     ORCAROUTER_API_KEY: process.env.ORCAROUTER_API_KEY?.trim() || '',
     /** SVMKR verdict model ladder (comma-separated, first that responds wins). */
-    SVMKR_LLM_MODELS: (process.env.SVMKR_LLM_MODELS || 'qwen/qwen3-32b-free,qwen/qwen3-8b-free,deepseek/deepseek-v4-flash-free').trim(),
+    SVMKR_LLM_MODELS: (process.env.SVMKR_LLM_MODELS || 'qwen/qwen3.8-27b-free,deepseek/deepseek-v4-flash-free').trim(),
     SVMKR_LLM_TIMEOUT_MS: parseInt(process.env.SVMKR_LLM_TIMEOUT_MS || '10000', 10) || 10_000,
 
     /** OpenRouter — LLM fallback when Gemini/Groq/NVIDIA fail (summary, trade, assist). */
