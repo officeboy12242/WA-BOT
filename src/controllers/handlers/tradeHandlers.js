@@ -932,7 +932,7 @@ function getChainAiService() {
 export async function handleChainAi(sock, chatId, senderJid, args, ctx) {
     const raw = (args[0] || 'NIFTY').trim();
     const loading = await sock.sendMessage(chatId, {
-        text: `🧠 _Deep AI read on ${raw.toUpperCase()} option chain… (~30–90s)_`,
+        text: `🧠 _Chain AI finding the strongest ${raw.toUpperCase()} setup… (~30–90s)_`,
     });
     try {
         const result = await getChainAiService().analyze(raw);
