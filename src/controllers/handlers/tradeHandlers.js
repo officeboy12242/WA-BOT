@@ -4,6 +4,7 @@
 
 import { logger } from '../../utils/logger.js';
 import { indexAnalysisService } from '../../services/IndexAnalysisService.js';
+import OptionChainAiService from '../../services/OptionChainAiService.js';
 import { extractPhoneNumber } from '../../utils/permissions.js';
 import { config } from '../../config/config.js';
 import { editMessageText } from '../../utils/waMessage.js';
@@ -910,5 +911,39 @@ export async function handleIndex(sock, chatId, senderJid, args, ctx) {
         if (loading?.key) {
             await sock.sendMessage(chatId, { delete: loading.key }).catch(() => {});
         }
+    }
+}
+
+// Built lazily so a startup without ORCAROUTER_API_KEY does not lug an extra
+// service around for groups that never call /chainai.
+let _chainAiSvc = null;
+function getChainAiService() {
+    if (!_chainAiSvc) _chainAiSvc = new OptionChainAiService(config);
+    return _chainAiSvc;
+}
+
+/**
+ * `/chainai <symbol>` — LLM-driven option-chain deep read. Same live chain
+ * IndexAnalysisService uses, but interpreted end-to-end by DeepSeek V4 Flash
+ * (via OrcaRouter, free), so PCR + IV skew + OI walls + unusual activity are
+ * fused into one strategy call. Falls back to Gemini/Groq/NVIDIA when the free
+ * key is missing, and to a raw-chain card when every LLM path fails.
+ */
+export async function handleChainAi(sock, chatId, senderJid, args, ctx) {
+    const raw = (args[0] || 'NIFTY').trim();
+    const loading = await sock.sendMessage(chatId, {
+        text: `🧠 _Deep AI read on ${raw.toUpperCase()} option chain… (~30–90s)_`,
+    });
+    try {
+        const result = await getChainAiService().analyze(raw);
+        if (!result) {
+            await editMessageText(sock, chatId, loading?.key, `❌ Unknown symbol: ${raw}`);
+            return;
+        }
+        await editMessageText(sock, chatId, loading?.key, result.text);
+        logger.info(`🧠 Chain AI read ${raw.toUpperCase()} in ${chatId}`);
+    } catch (error) {
+        logger.warn(`Chain AI failed for ${raw}: ${error.message}`);
+        await editMessageText(sock, chatId, loading?.key, `❌ ${error.message}`);
     }
 }

@@ -456,6 +456,9 @@ export const config = {
     TRADE_ALERT_EXTRA_HOLIDAYS: (process.env.TRADE_ALERT_EXTRA_HOLIDAYS || '').trim(),
     /** Force run on specific dates (e.g. budget Sunday) YYYY-MM-DD, comma-separated */
     TRADE_ALERT_FORCE_TRADING_DAYS: (process.env.TRADE_ALERT_FORCE_TRADING_DAYS || '').trim(),
+    /** OrcaRouter — free DeepSeek V4 Flash for /chainai option-chain AI reads. */
+    ORCAROUTER_API_KEY: process.env.ORCAROUTER_API_KEY?.trim() || '',
+
     /** OpenRouter — LLM fallback when Gemini/Groq/NVIDIA fail (summary, trade, assist). */
     OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY?.trim() || '',
     OPENROUTER_MODEL: process.env.OPENROUTER_MODEL?.trim() || 'google/gemma-4-26b-a4b-it:free',

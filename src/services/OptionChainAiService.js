@@ -1,0 +1,189 @@
+/**
+ * Option Chain AI Service
+ * Orchestrates live NSE chain fetch → market data → LLM deep analysis.
+ * Uses DeepSeek V4 Flash via OrcaRouter (free) with Gemini/Groq/NVIDIA fallback.
+ */
+
+import { nseOptionChainService } from './NseOptionChainService.js';
+import { indianStockQuoteService } from './IndianStockQuoteService.js';
+import { maxPain } from '../utils/blackScholes.js';
+import { oiWalls, pcrLabel } from './IndexAnalysisService.js';
+import { CHAIN_AI_SYSTEM_PROMPT, buildChainAiUserPrompt, formatChainAiAnalysis } from '../prompts/optionChainPrompt.js';
+import { logger } from '../utils/logger.js';
+
+class OptionChainAiService {
+    constructor(config = {}) {
+        this.config = config;
+    }
+
+    /**
+     * Fetch all data needed for AI analysis.
+     * @param {string} symbol - e.g. "NIFTY", "BANKNIFTY", "RELIANCE"
+     * @returns {Promise<{snapshot, quote, chainMeta, error}|null>}
+     */
+    async _fetchAllData(symbol) {
+        const [chainRes, quoteRes] = await Promise.allSettled([
+            nseOptionChainService.fetchOptionContext(symbol),
+            indianStockQuoteService.fetchQuote(symbol),
+        ]);
+
+        const chain = chainRes.status === 'fulfilled' ? chainRes.value : null;
+        const quote = quoteRes.status === 'fulfilled' ? quoteRes.value : null;
+
+        if (!chain?.snapshot) {
+            return { error: `Option chain unavailable for ${symbol}` };
+        }
+
+        const snap = chain.snapshot;
+        const spot = snap.spot ?? quote?.price ?? null;
+
+        const mp = maxPain(
+            (snap.topCe || []).map((c) => ({
+                strike: c.strike,
+                ceOi: c.oi,
+                peOi: (snap.topPe || []).find((p) => p.strike === c.strike)?.oi || 0,
+            }))
+        );
+
+        const walls = oiWalls(snap.topCe, snap.topPe, spot);
+        const pcrLbl = pcrLabel(snap.pcr);
+
+        return {
+            snapshot: snap,
+            quote,
+            chainMeta: {
+                maxPain: mp,
+                walls,
+                pcrLabel: pcrLbl,
+            },
+        };
+    }
+
+    /**
+     * Call OrcaRouter DeepSeek V4 Flash for option chain analysis.
+     * Falls back to the standard trade LLM chain (Gemini/Groq/NVIDIA) when
+     * OrcaRouter is unset or fails.
+     */
+    async _callLlm(systemPrompt, userPrompt) {
+        const orcaKey = this.config.ORCAROUTER_API_KEY;
+        if (orcaKey) {
+            try {
+                const resp = await fetch('https://api.orcarouter.ai/v1/chat/completions', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        Authorization: `Bearer ${orcaKey}`,
+                    },
+                    body: JSON.stringify({
+                        model: 'deepseek/deepseek-v4-flash-free',
+                        messages: [
+                            { role: 'system', content: systemPrompt },
+                            { role: 'user', content: userPrompt },
+                        ],
+                        temperature: 0.3,
+                        max_tokens: 16000,
+                        reasoning_effort: 'low',
+                    }),
+                    signal: AbortSignal.timeout(150_000),
+                });
+                if (resp.ok) {
+                    const data = await resp.json();
+                    const content = data.choices?.[0]?.message?.content || '';
+                    if (content) return content;
+                    logger.warn('OrcaRouter chain AI returned empty content');
+                } else {
+                    logger.warn(`OrcaRouter chain AI failed: HTTP ${resp.status}`);
+                }
+            } catch (err) {
+                logger.warn(`OrcaRouter chain AI error: ${err.message}`);
+            }
+        }
+
+        // Fallback: use the existing trade LLM chain (Gemini → Groq → NVIDIA → OpenRouter)
+        try {
+            const { default: TradeLlmRouterService } = await import('./TradeLlmRouterService.js');
+            const router = new TradeLlmRouterService(this.config);
+            if (router.isConfigured?.()) {
+                return await router.completeTradeAnalysis(systemPrompt, userPrompt, {
+                    temperature: 0.3,
+                    maxTokens: 4000,
+                });
+            }
+        } catch (err) {
+            logger.warn(`Chain AI fallback (trade router) failed: ${err.message}`);
+        }
+
+        throw new Error('No LLM provider available (set ORCAROUTER_API_KEY, or configure Gemini/Groq/NVIDIA/OpenRouter)');
+    }
+
+    /**
+     * Full AI analysis pipeline for a symbol.
+     * @param {string} symbol - e.g. "NIFTY", "BANKNIFTY"
+     * @returns {Promise<{text: string, data: object}|null>}
+     */
+    async analyze(symbol) {
+        const upper = String(symbol || '').trim().toUpperCase();
+        if (!upper) return null;
+
+        const data = await this._fetchAllData(upper);
+        if (data.error) {
+            return { text: `❌ ${data.error}`, data: null };
+        }
+
+        const userPrompt = buildChainAiUserPrompt(data.snapshot, data.quote, data.chainMeta);
+
+        try {
+            const raw = await this._callLlm(CHAIN_AI_SYSTEM_PROMPT, userPrompt);
+            if (raw && raw.length > 100) {
+                return {
+                    text: formatChainAiAnalysis(raw),
+                    data,
+                };
+            }
+            return {
+                text: this._formatFallback(data),
+                data,
+            };
+        } catch (err) {
+            logger.warn(`Chain AI LLM failed: ${err.message}`);
+            return {
+                text: this._formatFallback(data),
+                data,
+            };
+        }
+    }
+
+    /**
+     * Fallback card when LLM is unavailable — shows raw chain data.
+     */
+    _formatFallback(data) {
+        const { snapshot: s, chainMeta: m } = data;
+        const L = [];
+        L.push('┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┓');
+        L.push('┃  🧠 *OPTION CHAIN ANALYSIS* ┃');
+        L.push('┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛');
+        L.push('');
+        L.push(`📊 *${s.symbol}* · Spot: ₹${s.spot} · Expiry: ${s.expiry}`);
+        L.push('');
+
+        if (s.pcr != null) L.push(`PCR: *${s.pcr.toFixed(2)}* — ${m?.pcrLabel || ''}`);
+        if (m?.maxPain != null) L.push(`Max Pain: *${m.maxPain}*`);
+        if (m?.walls?.resistance) L.push(`🔴 Resistance: ${m.walls.resistance.strike} (OI: ${Number(m.walls.resistance.oi).toLocaleString('en-IN')})`);
+        if (m?.walls?.support) L.push(`🟢 Support: ${m.walls.support.strike} (OI: ${Number(m.walls.support.oi).toLocaleString('en-IN')})`);
+        L.push('');
+
+        if (s.atmStrike) {
+            L.push(`*ATM ${s.atmStrike}*`);
+            if (s.atmCe) L.push(`  CE: ₹${s.atmCe.ltp} · IV ${s.atmCe.iv}% · OI ${s.atmCe.oi}`);
+            if (s.atmPe) L.push(`  PE: ₹${s.atmPe.ltp} · IV ${s.atmPe.iv}% · OI ${s.atmPe.oi}`);
+        }
+
+        L.push('');
+        L.push('⚠️ _AI analysis unavailable — showing raw chain data_');
+        L.push('💡 _Set ORCAROUTER_API_KEY for AI-powered deep analysis_');
+        return L.join('\n');
+    }
+}
+
+export default OptionChainAiService;
+export const optionChainAiService = new OptionChainAiService();

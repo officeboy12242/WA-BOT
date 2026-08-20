@@ -505,6 +505,14 @@ export const COMMAND_REGISTRY = [
         category: 'trade',
     },
     {
+        names: ['/chainai'],
+        key: 'chainai',
+        scope: 'group_only',
+        role: 'admins',
+        help: 'AI option chain analysis — `/chainai nifty` (IV skew · OI walls · PCR · unusual activity · strategy)',
+        category: 'trade',
+    },
+    {
         names: ['/svmkr', '/ut'],
         key: 'svmkr',
         scope: 'group_only',
@@ -765,7 +773,7 @@ export const HELP_CATEGORY = {
 
     // Markets
     tradenow: 'trade', swing: 'trade', expiry: 'trade', tradelert: 'trade', index: 'trade',
-    svmkr: 'trade',
+    svmkr: 'trade', chainai: 'trade',
 
     // Scheduled feeds
     news: 'daily', github: 'daily', awesome: 'daily', interviewq: 'daily',

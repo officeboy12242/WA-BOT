@@ -53,7 +53,7 @@ import {
     handleRevokeLink,
 } from './handlers/groupHandlers.js';
 
-import { handleTradelert, handleTradenow, handleSwing, handleExpiry, handleIndex, handleSvmkr } from './handlers/tradeHandlers.js';
+import { handleTradelert, handleTradenow, handleSwing, handleExpiry, handleIndex, handleSvmkr, handleChainAi } from './handlers/tradeHandlers.js';
 import { handleHeal, handleFix } from './handlers/healHandlers.js';
 import { handleAssist } from './handlers/assistHandlers.js';
 
@@ -181,6 +181,7 @@ export const COMMAND_HANDLERS = {
     tradelert: ({ sock, chatId, senderJid, args, ctx }) => handleTradelert(sock, chatId, senderJid, args, ctx),
     tradenow: ({ sock, chatId, senderJid, args, ctx }) => handleTradenow(sock, chatId, senderJid, args, ctx),
     index: ({ sock, chatId, senderJid, args, ctx }) => handleIndex(sock, chatId, senderJid, args, ctx),
+    chainai: ({ sock, chatId, senderJid, args, ctx }) => handleChainAi(sock, chatId, senderJid, args, ctx),
     svmkr: ({ sock, chatId, senderJid, args, ctx }) => handleSvmkr(sock, chatId, senderJid, args, ctx),
     swing: ({ sock, chatId, senderJid, args, ctx }) => handleSwing(sock, chatId, senderJid, args, ctx),
     expiry: ({ sock, chatId, senderJid, args, ctx }) => handleExpiry(sock, chatId, senderJid, args, ctx),
