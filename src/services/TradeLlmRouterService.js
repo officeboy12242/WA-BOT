@@ -1,5 +1,10 @@
 /**
- * Trade LLM router: Gemini → Groq → NVIDIA → OpenRouter fallback chain.
+ * Trade LLM router: OrcaRouter (free DeepSeek V4 Flash) → Gemini → Groq → NVIDIA
+ * → OpenRouter fallback chain.
+ *
+ * OrcaRouter sits at the head of the chain because it is free — /tradenow and
+ * the daily scan cost nothing on the happy path. If OrcaRouter's key is unset
+ * or its bucket is drained, everything else works exactly as before.
  *
  * Two things keep repeated `/tradenow` calls from failing:
  *  1. LlmRateGate — per-provider RPM budget + concurrency cap, so a burst of
@@ -15,9 +20,10 @@ import GeminiTradeService, { isGeminiRateLimitError } from './GeminiTradeService
 import GroqTradeService, { isGroqRateLimitError } from './GroqTradeService.js';
 import NvidiaDeepSeekService from './NvidiaDeepSeekService.js';
 import OpenRouterLlmService, { isOpenRouterRateLimitError } from './OpenRouterLlmService.js';
+import OrcaRouterTradeService, { isOrcaRouterRateLimitError } from './OrcaRouterTradeService.js';
 import LlmRateGate, { parseRpmMap } from './LlmRateGate.js';
 
-const DEFAULT_PROVIDER_ORDER = ['gemini', 'groq', 'nvidia', 'openrouter'];
+const DEFAULT_PROVIDER_ORDER = ['orcarouter', 'gemini', 'groq', 'nvidia', 'openrouter'];
 /** After a 429, skip this provider for a bit (shared across daily scan symbols). */
 const DEFAULT_COOLDOWN_MS = 90_000;
 /** A bad/expired key is not going to fix itself in 90s. */
@@ -40,7 +46,12 @@ function errorDetail(err) {
 
 export function isTradeLlmRateLimitError(err) {
     if (err?.isRateLimit) return true;
-    if (isGeminiRateLimitError(err) || isGroqRateLimitError(err) || isOpenRouterRateLimitError(err)) {
+    if (
+        isOrcaRouterRateLimitError(err) ||
+        isGeminiRateLimitError(err) ||
+        isGroqRateLimitError(err) ||
+        isOpenRouterRateLimitError(err)
+    ) {
         return true;
     }
     const status = err?.response?.status ?? err?.cause?.response?.status;
@@ -70,6 +81,7 @@ export function isTradeLlmFallbackError(err) {
 export default class TradeLlmRouterService {
     constructor(cfg = config) {
         this.config = cfg;
+        this.orcarouter = new OrcaRouterTradeService(cfg);
         this.gemini = new GeminiTradeService(cfg);
         this.groq = new GroqTradeService(cfg);
         this.nvidia = new NvidiaDeepSeekService(cfg);
@@ -110,6 +122,11 @@ export default class TradeLlmRouterService {
 
     _providerMap() {
         return {
+            orcarouter: {
+                name: 'orcarouter',
+                svc: this.orcarouter,
+                label: () => `OrcaRouter ${this.orcarouter.tradeModel}`,
+            },
             gemini: { name: 'gemini', svc: this.gemini, label: () => `Gemini ${this.gemini.tradeModel}` },
             groq: { name: 'groq', svc: this.groq, label: () => `Groq ${this.groq.tradeModel}` },
             nvidia: {
@@ -224,7 +241,7 @@ export default class TradeLlmRouterService {
         const all = this._providers();
         if (!all.length) {
             throw new Error(
-                'No trade LLM configured (set GEMINI_API_KEY, GROQ_API_KEY, NVIDIA_API_KEY, or OPENROUTER_API_KEY)'
+                'No trade LLM configured (set ORCAROUTER_API_KEY [free], GEMINI_API_KEY, GROQ_API_KEY, NVIDIA_API_KEY, or OPENROUTER_API_KEY)'
             );
         }
 

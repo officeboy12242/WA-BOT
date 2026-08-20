@@ -102,8 +102,8 @@ export const config = {
     GROQ_API_KEY: process.env.GROQ_API_KEY?.trim() || '',
     GROQ_TRADE_MODEL: process.env.GROQ_TRADE_MODEL?.trim() || 'llama-3.3-70b-versatile',
     GROQ_TRADE_MODELS: process.env.GROQ_TRADE_MODELS?.trim() || 'llama-3.3-70b-versatile,llama-3.1-8b-instant',
-    /** Provider order: gemini,groq,nvidia,openrouter */
-    TRADE_LLM_PROVIDERS: (process.env.TRADE_LLM_PROVIDERS || 'gemini,groq,nvidia,openrouter').trim(),
+    /** Provider order: orcarouter (free DeepSeek V4 Flash) → gemini → groq → nvidia → openrouter */
+    TRADE_LLM_PROVIDERS: (process.env.TRADE_LLM_PROVIDERS || 'orcarouter,gemini,groq,nvidia,openrouter').trim(),
     /** After a provider 429, skip it for this many ms (daily scan keeps using fallbacks). */
     TRADE_LLM_COOLDOWN_MS: (() => {
         const n = parseInt(process.env.TRADE_LLM_COOLDOWN_MS, 10);

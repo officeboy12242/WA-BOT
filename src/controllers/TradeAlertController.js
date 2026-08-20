@@ -153,8 +153,11 @@ class TradeAlertController {
                 `prompt ${userPrompt.length} chars, research=${researchBrief ? 'yes' : 'no'})…`
         );
 
+        // 16k so a full analysis + verdict + why + trade plan never truncates
+        // mid-JSON on the OrcaRouter (DeepSeek V4 Flash, free) primary path.
+        // Fallback providers cap this internally to what they support.
         let body = await this.tradeLlm.completeTradeAnalysis(TRADE_ANALYSIS_SYSTEM_PROMPT, userPrompt, {
-            maxTokens: 8192,
+            maxTokens: 16_384,
         });
 
         body = enforceLiveSpotPrice(body, intel.quote);
