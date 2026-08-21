@@ -3,8 +3,10 @@
  * Fetches sticker packs from Telegram via Bot API and converts to WhatsApp format.
  *
  * - Static WebP → resize + compress
- * - Animated TGS → SVG→sharp frame rendering → node-webpmux animated WebP (proper ANIM/ANMF format)
- * - Video stickers (MP4) → send directly as WhatsApp video sticker
+ * - Animated TGS (gzipped Lottie JSON) → real Lottie frames via
+ *   @lottiefiles/dotlottie-web (ThorVG WASM engine) on @napi-rs/canvas →
+ *   MP4 video sticker (primary, most reliable on WhatsApp) or animated WebP.
+ * - Video stickers (MP4/WEBM) → sent directly as WhatsApp video sticker.
  *
  * Supports abort via AbortController (user sends /tgstop).
  *
@@ -20,6 +22,8 @@ import os from 'os';
 import crypto from 'crypto';
 import zlib from 'zlib';
 import { execSync } from 'child_process';
+import { createCanvas } from '@napi-rs/canvas';
+import { DotLottie } from '@lottiefiles/dotlottie-web';
 
 const TG_API = 'https://api.telegram.org';
 const STICKER_WEBP_MAX = 100 * 1024; // 100 KB — WhatsApp sticker limit
@@ -127,353 +131,95 @@ class TelegramStickerService {
         return { tempPath, buffer, size: buffer.length, isAnimated, isVideo, emoji, format, index };
     }
 
-        /* ──────────────────────────────────────────────
-     *  SVG-based Lottie renderer (via sharp/librsvg)
-     * ────────────────────────────────────────────── */
-
-    /** Render a Lottie JSON to PNG buffer for a given frame using SVG→sharp. */
-    async _lottieFrameToPng(lottie, frame) {
-        const sharp = (await import('sharp')).default;
-        const w = lottie.w || 512;
-        const h = lottie.h || 512;
-        const svg = this._lottieToSvg(lottie, frame, w, h);
-        return sharp(Buffer.from(svg)).png().toBuffer();
-    }
-
-    /** Convert Lottie JSON to SVG string for a single frame. */
-    _lottieToSvg(lottie, frame, w, h) {
-        const layers = lottie.layers || [];
-        const assets = lottie.assets || [];
-        const assetMap = new Map();
-        for (const a of assets) { if (a.id) assetMap.set(a.id, a); }
-        const sorted = [...layers].sort((a, b) => (a.zi ?? 0) - (b.zi ?? 0));
-        let gradDefs = '';
-        let inner = '';
-        for (const layer of sorted) {
-            const result = this._svgLayer(layer, frame, w, h, assetMap);
-            gradDefs += result.defs;
-            inner += result.svg;
-        }
-        return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs>${gradDefs}</defs>${inner}</svg>`;
-    }
-
-    _svgLayer(layer, frame, w, h, assetMap) {
-        const result = { defs: '', svg: '' };
-        if (!layer) return result;
-        const ip = layer.ip ?? 0;
-        const op = layer.op ?? Infinity;
-        if (frame < ip || frame > op) return result;
-        const opacity = this._resolveProp(layer.ks?.o, frame) ?? 100;
-        if (opacity <= 0) return result;
-
-        // Precomp
-        if (layer.ty === 0) {
-            const comp = assetMap.get(layer.refId);
-            if (!comp?.layers) return result;
-            let inner = '';
-            for (const sub of comp.layers) {
-                const r = this._svgLayer(sub, frame, w, h, assetMap);
-                result.defs += r.defs;
-                inner += r.svg;
-            }
-            const tr = this._svgTransform(layer.ks?.tr, frame, w, h);
-            const opA = opacity < 100 ? ` opacity="${(opacity / 100).toFixed(3)}"` : '';
-            result.svg = `<g${tr}${opA}>${inner}</g>`;
-            return result;
-        }
-
-        if (layer.ty === 1 || layer.ty === 2 || layer.ty === 3) return result; // solid/image/null
-
-        if (layer.ty === 4) {
-            const tr = this._svgTransform(layer.ks?.tr, frame, w, h);
-            const opA = opacity < 100 ? ` opacity="${(opacity / 100).toFixed(3)}"` : '';
-            let shapes = '';
-            for (const s of (layer.shapes || [])) {
-                const r = this._svgShape(s, frame, assetMap, w, h);
-                result.defs += r.defs;
-                shapes += r.svg;
-            }
-            result.svg = `<g${tr}${opA}>${shapes}</g>`;
-            return result;
-        }
-        return result;
-    }
-
-    _svgShape(shape, frame, assetMap, w, h) {
-        const result = { defs: '', svg: '' };
-        if (!shape) return result;
-        if (shape.ty === 'gr') {
-            const items = shape.it || [];
-            let trStr = '';
-            const pathDs = [];
-            let fillStr = '', strokeStr = '';
-            for (const item of items) {
-                if (item.ty === 'tr') {
-                    trStr = this._svgTransform(item, frame, 0, 0);
-                } else if (item.ty === 'sh' || item.ty === 'el' || item.ty === 'rc') {
-                    pathDs.push(this._svgPathD(item, frame));
-                } else if (item.ty === 'fl') {
-                    fillStr += this._svgFill(item, frame, w, h);
-                } else if (item.ty === 'st') {
-                    strokeStr += this._svgStroke(item, frame, w, h);
-                } else if (item.ty === 'gf') {
-                    const g = this._svgGradFill(item, frame, w, h);
-                    result.defs += g.defs;
-                    fillStr += g.attr;
-                }
-            }
-            const d = pathDs.join(' ');
-            if (!d) return result;
-            result.svg = `<g${trStr}><path d="${d}"${fillStr}${strokeStr}/></g>`;
-            return result;
-        }
-        return result;
-    }
-
-    _svgPathD(shape, frame) {
-        if (shape.ty === 'sh') {
-            const pd = shape.ks;
-            const verts = pd?.k?.v || pd?.v || [];
-            const inn = pd?.k?.i || pd?.i || [];
-            const out = pd?.k?.o || pd?.o || [];
-            const closed = pd?.k?.c ?? pd?.c ?? false;
-            if (!verts.length) return '';
-            let d = `M${verts[0][0]} ${verts[0][1]}`;
-            for (let i = 1; i < verts.length; i++) {
-                const c1x = verts[i-1][0] + (out[i-1]?.[0] || 0);
-                const c1y = verts[i-1][1] + (out[i-1]?.[1] || 0);
-                const c2x = verts[i][0] + (inn[i]?.[0] || 0);
-                const c2y = verts[i][1] + (inn[i]?.[1] || 0);
-                d += ` C${c1x} ${c1y} ${c2x} ${c2y} ${verts[i][0]} ${verts[i][1]}`;
-            }
-            if (closed) d += ' Z';
-            return d;
-        }
-        if (shape.ty === 'el') {
-            const pos = this._resolveProp(shape.p, frame) ?? [0, 0];
-            const size = this._resolveProp(shape.s, frame) ?? [0, 0];
-            const rx = Math.abs((Array.isArray(size) ? size[0] : 0) / 2);
-            const ry = Math.abs((Array.isArray(size) ? size[1] : 0) / 2);
-            const cx = Array.isArray(pos) ? pos[0] : 0;
-            const cy = Array.isArray(pos) ? pos[1] : 0;
-            // Approximate ellipse with 4 bezier curves (kappa constant)
-            const k = 0.5522847498;
-            const kx = rx * k, ky = ry * k;
-            return `M${cx} ${cy - ry} C${cx + kx} ${cy - ry} ${cx + rx} ${cy - ky} ${cx + rx} ${cy} C${cx + rx} ${cy + ky} ${cx + kx} ${cy + ry} ${cx} ${cy + ry} C${cx - kx} ${cy + ry} ${cx - rx} ${cy + ky} ${cx - rx} ${cy} C${cx - rx} ${cy - ky} ${cx - kx} ${cy - ry} ${cx} ${cy - ry} Z`;
-        }
-        if (shape.ty === 'rc') {
-            const pos = this._resolveProp(shape.p, frame) ?? [0, 0];
-            const size = this._resolveProp(shape.s, frame) ?? [100, 100];
-            const sw = Array.isArray(size) ? size[0] : 100;
-            const sh = Array.isArray(size) ? size[1] : 100;
-            const r = Math.min(this._resolveProp(shape.r, frame) ?? 0, sw / 2, sh / 2);
-            const cx = (Array.isArray(pos) ? pos[0] : 0) - sw / 2;
-            const cy = (Array.isArray(pos) ? pos[1] : 0) - sh / 2;
-            if (r > 0) return `M${cx + r} ${cy} L${cx + sw - r} ${cy} Q${cx + sw} ${cy} ${cx + sw} ${cy + r} L${cx + sw} ${cy + sh - r} Q${cx + sw} ${cy + sh} ${cx + sw - r} ${cy + sh} L${cx + r} ${cy + sh} Q${cx} ${cy + sh} ${cx} ${cy + sh - r} L${cx} ${cy + r} Q${cx} ${cy} ${cx + r} ${cy} Z`;
-            return `M${cx} ${cy} L${cx + sw} ${cy} L${cx + sw} ${cy + sh} L${cx} ${cy + sh} Z`;
-        }
-        return '';
-    }
-
-    _svgFill(shape, frame) {
-        const c = shape.c?.k || [0,0,0,1];
-        const a = this._resolveProp(shape.o, frame) ?? 100;
-        const alpha = a / 100;
-        const color = this._svgColor(c);
-        if (alpha < 1) return ` fill="${color}" fill-opacity="${alpha.toFixed(3)}"`;
-        return ` fill="${color}"`;
-    }
-
-    _svgStroke(shape, frame) {
-        const c = shape.c?.k || [0,0,0,1];
-        const a = this._resolveProp(shape.o, frame) ?? 100;
-        const sw = this._resolveProp(shape.w, frame) ?? 1;
-        const alpha = a / 100;
-        const color = this._svgColor(c);
-        let attrs = ` stroke="${color}" stroke-width="${sw}" fill="none"`;
-        if (alpha < 1) attrs += ` stroke-opacity="${alpha.toFixed(3)}"`;
-        return attrs;
-    }
-
-    _svgGradFill(shape, frame) {
-        const stops = shape.g?.k || [];
-        const p = shape.g?.p || 2;
-        const gradId = `g${Math.random().toString(36).slice(2, 8)}`;
-        if (p >= 2 && stops.length >= p * 4) {
-            const sx = shape.s?.k ?? 0;
-            const sy = shape.e?.k ?? 100;
-            let defs = `<linearGradient id="${gradId}" x1="${sx}" y1="0" x2="${sy}" y2="0" gradientUnits="userSpaceOnUse">`;
-            for (let i = 0; i < p; i++) {
-                const off = (i / (p - 1)).toFixed(3);
-                const r = Math.round((stops[i*4] || 0) * 255);
-                const g = Math.round((stops[i*4+1] || 0) * 255);
-                const b = Math.round((stops[i*4+2] || 0) * 255);
-                const a = stops[i*4+3] ?? 1;
-                defs += `<stop offset="${off}" stop-color="rgb(${r},${g},${b})" stop-opacity="${a.toFixed(3)}"/>`;
-            }
-            defs += '</linearGradient>';
-            return { defs, attr: ` fill="url(#${gradId})"` };
-        }
-        return { defs: '', attr: ' fill="black"' };
-    }
-
-    _svgColor(c) {
-        if (!c) return '#000';
-        const r = Math.round((c[0] || 0) * 255);
-        const g = Math.round((c[1] || 0) * 255);
-        const b = Math.round((c[2] || 0) * 255);
-        return `rgb(${r},${g},${b})`;
-    }
-
-    _svgTransform(tr, frame, w, h) {
-        if (!tr) return '';
-        const pos = this._resolveProp(tr.p, frame);
-        const anchor = this._resolveProp(tr.a, frame);
-        const scale = this._resolveProp(tr.s, frame);
-        const rotation = this._resolveProp(tr.r, frame) ?? 0;
-        const px = Array.isArray(pos) ? pos[0] : w / 2;
-        const py = Array.isArray(pos) ? pos[1] : h / 2;
-        const ax = Array.isArray(anchor) ? anchor[0] : 0;
-        const ay = Array.isArray(anchor) ? anchor[1] : 0;
-        let sx = 1, sy = 1;
-        if (Array.isArray(scale)) { sx = scale[0] / 100; sy = scale[1] / 100; }
-        else if (typeof scale === 'number') { sx = sy = scale / 100; }
-        const parts = [`translate(${px},${py})`];
-        if (rotation) parts.push(`rotate(${rotation})`);
-        if (sx !== 1 || sy !== 1) parts.push(`scale(${sx.toFixed(4)},${sy.toFixed(4)})`);
-        if (ax || ay) parts.push(`translate(${-ax},${-ay})`);
-        return ` transform="${parts.join(' ')}"`;
-    }
-
-    _resolveProp(prop, frame) {
-        if (!prop) return undefined;
-        if (prop.k !== undefined && !Array.isArray(prop.k)) return prop.k;
-        if (Array.isArray(prop.k) && prop.k.length <= 4 && typeof prop.k[0] !== 'object') return prop.k;
-        if (Array.isArray(prop.k) && prop.k.length > 0 && prop.k[0]?.t !== undefined) {
-            return this._interpolateKeyframes(prop.k, frame);
-        }
-        return prop.k;
-    }
-
-    _interpolateKeyframes(keyframes, frame) {
-        if (!keyframes?.length) return undefined;
-        let prev = keyframes[0], next = keyframes[keyframes.length - 1];
-        for (let i = 0; i < keyframes.length; i++) {
-            if (keyframes[i].t <= frame) prev = keyframes[i];
-            if (keyframes[i].t > frame && next === keyframes[keyframes.length - 1]) { next = keyframes[i]; break; }
-        }
-        if (prev.t === next.t || next.t > frame) return prev.s ?? prev.e ?? prev.k;
-        const rawT = (frame - prev.t) / (next.t - prev.t);
-        let t = rawT;
-        if (prev.o && prev.i) t = this._bezierInterpolate(rawT, prev.o, prev.i);
-        else if (prev.o) t = this._bezierInterpolate(rawT, prev.o, [1 - prev.o[0], 1 - prev.o[1]]);
-        else if (prev.i) t = this._bezierInterpolate(rawT, [1 - prev.i[0], 1 - prev.i[1]], prev.i);
-        const from = prev.s ?? prev.e ?? prev.k;
-        const to = next.s ?? next.e ?? next.k;
-        if (Array.isArray(from) && Array.isArray(to)) return from.map((v, i) => v + ((to[i] ?? v) - v) * t);
-        if (typeof from === 'number' && typeof to === 'number') return from + (to - from) * t;
-        return from;
-    }
-
-    _bezierInterpolate(t, outT, inT) {
-        const cx = 3 * (outT[0] || 0);
-        const bx = 3 * ((inT?.[0] ?? 1) - outT[0]) - cx;
-        const ax = 1 - cx - bx;
-        const cy = 3 * (outT[1] || 0);
-        const by = 3 * ((inT?.[1] ?? 1) - outT[1]) - cy;
-        const ay = 1 - cy - by;
-        let x = t;
-        for (let i = 0; i < 8; i++) {
-            const cur = ((ax * x + bx) * x + cx) * x - t;
-            if (Math.abs(cur) < 1e-6) break;
-            const dx = (3 * ax * x + 2 * bx) * x + cx;
-            if (Math.abs(dx) < 1e-6) break;
-            x -= cur / dx;
-        }
-        x = Math.max(0, Math.min(1, x));
-        return ((ay * x + by) * x + cy) * x;
-    }
-
     /* ──────────────────────────────────────────────
-     *  TGS conversion methods (SVG-based)
+     *  Lottie renderer — @lottiefiles/dotlottie-web (ThorVG WASM)
+     *  running on @napi-rs/canvas. Replaces a hand-rolled SVG-based
+     *  Lottie renderer that failed on the majority of real TGS packs
+     *  (mattes, masks, expressions, precomps, gradient strokes, etc).
      * ────────────────────────────────────────────── */
 
-    /** Create animated WebP from TGS using SVG→sharp frames + node-webpmux. */
+    /**
+     * Render N frames from a TGS (gzipped Lottie JSON) buffer as PNG buffers.
+     * Uses the official LottieFiles WASM renderer; if it can't load a given
+     * Lottie, that's a real bug in the Lottie file — no hand-written renderer
+     * would be more forgiving.
+     */
+    async _renderLottieFrames(tgsBuffer, frameCount = ANIM_FRAME_COUNT) {
+        const lottieJson = zlib.gunzipSync(tgsBuffer).toString('utf-8');
+        const lottie = JSON.parse(lottieJson);
+        const width = lottie.w || 512;
+        const height = lottie.h || 512;
+        const frameRate = lottie.fr || 30;
+
+        const canvas = createCanvas(width, height);
+        const dot = new DotLottie({
+            canvas,
+            data: lottieJson,
+            autoplay: false,
+            loop: false,
+        });
+
+        await new Promise((resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error('dotlottie load timeout')), 15_000);
+            dot.addEventListener('load', () => { clearTimeout(timer); resolve(); });
+            dot.addEventListener('loadError', (e) => {
+                clearTimeout(timer);
+                reject(new Error(`lottie load error: ${e?.error?.message || 'unknown'}`));
+            });
+        });
+
+        const totalFrames = dot.totalFrames || lottie.op || 30;
+        const step = Math.max(1, Math.floor(totalFrames / frameCount));
+        const frames = [];
+        for (let i = 0; i < frameCount; i++) {
+            const f = Math.min(totalFrames - 1, i * step);
+            dot.setFrame(f);
+            frames.push(await canvas.encode('png'));
+        }
+        dot.destroy();
+        return { frames, width, height, frameRate };
+    }
+
+    /** Assemble PNG frames into an animated WebP with proper ANIM/ANMF chunks. */
     async tgsToAnimatedWebp(tgsBuffer) {
         const sharp = (await import('sharp')).default;
         const { Image: WebpImage } = await import('node-webpmux');
         await WebpImage.initLib();
 
-        const lottieJson = zlib.gunzipSync(tgsBuffer).toString('utf-8');
-        const lottie = JSON.parse(lottieJson);
-        const width = lottie.w || 512;
-        const height = lottie.h || 512;
-        const totalFrames = lottie.op || lottie.fr || 30;
-        const frameRate = lottie.fr || 30;
+        const { frames, width, height, frameRate } = await this._renderLottieFrames(tgsBuffer);
         const fps = Math.min(ANIM_FPS, frameRate);
         const delayMs = Math.round(1000 / fps);
 
-        // Render frames as PNG via SVG→sharp, then convert each to WebP
-        const frameStep = Math.max(1, Math.floor(totalFrames / ANIM_FRAME_COUNT));
-        const framesToRender = [];
-        for (let f = 0; f < totalFrames; f += frameStep) {
-            if (framesToRender.length >= ANIM_FRAME_COUNT) break;
-            framesToRender.push(f);
-        }
-
         const webpFrames = [];
-        for (let i = 0; i < framesToRender.length; i++) {
-            const pngBuf = await this._lottieFrameToPng(lottie, framesToRender[i]);
-            const webpBuf = await sharp(pngBuf).webp({ quality: 80 }).toBuffer();
-            webpFrames.push(webpBuf);
+        for (const png of frames) {
+            webpFrames.push(await sharp(png).webp({ quality: 80 }).toBuffer());
         }
 
-        // Combine into animated WebP using node-webpmux (proper ANIM/ANMF format)
         const img = new WebpImage();
         await img.load(webpFrames[0]);
         if (!img.hasAnim) await img.convertToAnim();
 
-        const frameData = webpFrames.map(buf => ({
-            buffer: buf,
-            delay: delayMs,
-            blend: true,
-            dispose: false,
-        }));
-
         const out = await img.save(null, {
-            frames: frameData,
+            frames: webpFrames.map((buf) => ({ buffer: buf, delay: delayMs, blend: true, dispose: false })),
             width,
             height,
-            loops: 0, // infinite loop
+            loops: 0,
         });
-
         logger.info(`TGS → animated WebP: ${out.length} bytes, ${webpFrames.length} frames, ${fps}fps`);
         return out;
     }
 
-    /** Create MP4 video sticker from TGS using SVG→sharp frame rendering + ffmpeg. */
+    /** Assemble PNG frames into an MP4 video sticker via ffmpeg. */
     async tgsToMp4Video(tgsBuffer) {
-        const lottieJson = zlib.gunzipSync(tgsBuffer).toString('utf-8');
-        const lottie = JSON.parse(lottieJson);
-        const width = lottie.w || 512;
-        const height = lottie.h || 512;
-        const totalFrames = lottie.op || lottie.fr || 30;
-        const frameRate = lottie.fr || 30;
+        const { frames, width, height, frameRate } = await this._renderLottieFrames(tgsBuffer);
+        const fps = Math.min(ANIM_FPS, frameRate);
         const frameDir = path.join(this.tempDir, `frames_${crypto.randomBytes(4).toString('hex')}`);
         fs.mkdirSync(frameDir, { recursive: true });
         try {
-            const frameStep = Math.max(1, Math.floor(totalFrames / ANIM_FRAME_COUNT));
-            const framesToRender = [];
-            for (let f = 0; f < totalFrames; f += frameStep) {
-                if (framesToRender.length >= ANIM_FRAME_COUNT) break;
-                framesToRender.push(f);
-            }
-            for (let i = 0; i < framesToRender.length; i++) {
-                const pngBuf = await this._lottieFrameToPng(lottie, framesToRender[i]);
-                fs.writeFileSync(path.join(frameDir, `frame_${String(i + 1).padStart(4, '0')}.png`), pngBuf);
+            for (let i = 0; i < frames.length; i++) {
+                fs.writeFileSync(path.join(frameDir, `frame_${String(i + 1).padStart(4, '0')}.png`), frames[i]);
             }
             const outputPath = path.join(this.tempDir, `anim_${crypto.randomBytes(4).toString('hex')}.mp4`);
-            const fps = Math.min(ANIM_FPS, frameRate);
             execSync(
                 `ffmpeg -y -framerate ${fps} -i "${path.join(frameDir, 'frame_%04d.png')}" `
                 + `-vf "scale=${width}:${height},format=yuv420p" `
@@ -489,17 +235,13 @@ class TelegramStickerService {
         }
     }
 
-    /** Fallback: extract just the first frame as static WebP. */
+    /** First-frame PNG for the static fallback path. */
     async tgsToStaticFrame(tgsBuffer) {
-        const lottieJson = zlib.gunzipSync(tgsBuffer).toString('utf-8');
-        const lottie = JSON.parse(lottieJson);
-        return this._lottieFrameToPng(lottie, 0);
+        const { frames } = await this._renderLottieFrames(tgsBuffer, 1);
+        return frames[0];
     }
 
     /* ──────────────────────────────────────────────
-     *  Sticker conversion pipeline
-     * ────────────────────────────────────────────── */
-/* ──────────────────────────────────────────────
      *  Sticker conversion pipeline
      * ────────────────────────────────────────────── */
 
@@ -541,35 +283,36 @@ class TelegramStickerService {
             return { buffer, type: 'video' };
         }
 
-        // Animated TGS — try animated WebP first (standard WhatsApp format), then MP4, then static
+        // Animated TGS — MP4 first (WhatsApp accepts video stickers most reliably),
+        // then animated WebP (some clients still prefer this), then static frame.
         if (format === 'tgs') {
-            // 1st: Try animated WebP (standard animated sticker format with ANIM chunk)
-            try {
-                const animWebp = await this.tgsToAnimatedWebp(buffer);
-                if (animWebp && animWebp.length > 0 && animWebp.length <= ANIM_WEBP_MAX) {
-                    const hasAnim = animWebp.includes(Buffer.from('ANIM'));
-                    logger.info(`TGS → animated WebP: ${animWebp.length} bytes, ANIM: ${hasAnim}`);
-                    if (hasAnim) {
-                        return { buffer: animWebp, type: 'sticker', isAnimated: true };
-                    }
-                    logger.info('Animated WebP missing ANIM marker, trying MP4...');
-                }
-            } catch (err) {
-                logger.warn(`TGS → animated WebP failed: ${err.message}`);
-            }
-
-            // 2nd: Try MP4 video sticker
+            // 1st: MP4 video sticker — most reliable animated path on WhatsApp
             try {
                 const mp4Buffer = await this.tgsToMp4Video(buffer);
                 if (mp4Buffer && mp4Buffer.length > 0 && mp4Buffer.length <= VIDEO_STICKER_MAX) {
                     logger.info(`TGS → MP4 video sticker: ${mp4Buffer.length} bytes`);
                     return { buffer: mp4Buffer, type: 'video' };
                 }
+                logger.info(`TGS → MP4 too large or empty: ${mp4Buffer?.length ?? 0}b, trying animated WebP…`);
             } catch (err) {
                 logger.warn(`TGS → MP4 failed: ${err.message}`);
             }
 
-            // 3rd: Fallback to static first frame
+            // 2nd: Animated WebP (proper ANIM chunk via node-webpmux)
+            try {
+                const animWebp = await this.tgsToAnimatedWebp(buffer);
+                if (animWebp && animWebp.length > 0 && animWebp.length <= ANIM_WEBP_MAX) {
+                    const hasAnim = animWebp.includes(Buffer.from('ANIM'));
+                    if (hasAnim) {
+                        return { buffer: animWebp, type: 'sticker', isAnimated: true };
+                    }
+                    logger.info('Animated WebP missing ANIM marker, falling to static.');
+                }
+            } catch (err) {
+                logger.warn(`TGS → animated WebP failed: ${err.message}`);
+            }
+
+            // 3rd: Static first frame fallback
             try {
                 logger.info('TGS → static frame fallback');
                 const pngBuffer = await this.tgsToStaticFrame(buffer);
