@@ -138,7 +138,7 @@ async function handleTgStickers(sock, chatId, args, quotedMessage) {
                 '*Examples:*\n' +
                 '• `/tgstickers PupperStickers`\n' +
                 '• `/tgstickers https://t.me/addstickers/PupperStickers`\n\n' +
-                '_Animated stickers (TGS) are skipped — only static WebP stickers are converted._',
+                '_Animated stickers (TGS) are converted to static frames._',
         }, quotedMessage);
         return;
     }
@@ -154,8 +154,8 @@ async function handleTgStickers(sock, chatId, args, quotedMessage) {
 
     let statusMsg = null;
     try {
-        const { createProgressBar } = await import('../../utils/progressBar.js');
-        const { editMessageText } = await import('../../utils/waMessage.js');
+        const { createProgressBar } = await import('../utils/progressBar.js');
+        const { editMessageText } = await import('../utils/waMessage.js');
 
         // Helper to update progress in-place
         const updateProgress = async (text) => {
