@@ -287,11 +287,8 @@ class TelegramStickerService {
             }
         }
 
-        const summary = [];
-        if (results.length) summary.push(`${results.length} ready`);
-        if (errors.length) summary.push(`${errors.length} failed`);
-
-        report(`✅ *${pack.title || packName}* — ${summary.join(', ')}`);
+        // Final progress callback — all done
+        report(convertedCount, failedCount, 'done');
 
         return { pack, stickers: results, errors };
     }
