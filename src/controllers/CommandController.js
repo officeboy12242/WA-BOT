@@ -58,7 +58,7 @@ import { handleHeal, handleFix } from './handlers/healHandlers.js';
 import { handleAssist } from './handlers/assistHandlers.js';
 import IpoController from './IpoController.js';
 import BacktestController from './BacktestController.js';
-import { telegramStickerService } from '../services/TelegramStickerService.js';
+import { telegramStickerService, abortImport, isImportActive, activeImports } from '../services/TelegramStickerService.js';
 
 import {
     handleAddAdmin,
@@ -121,6 +121,7 @@ import {
 
 /**
  * Import a Telegram sticker pack and send as WhatsApp stickers.
+ * Supports abort via /tgstop. Handles static, animated (TGS→animated WebP), and video (MP4) stickers.
  */
 async function handleTgStickers(sock, chatId, args, quotedMessage) {
     if (!telegramStickerService.isConfigured) {
@@ -138,7 +139,18 @@ async function handleTgStickers(sock, chatId, args, quotedMessage) {
                 '*Examples:*\n' +
                 '• `/tgstickers PupperStickers`\n' +
                 '• `/tgstickers https://t.me/addstickers/PupperStickers`\n\n' +
-                '_Animated stickers (TGS) are converted to static frames._',
+                '*Types supported:*\n' +
+                '• Static (WebP) — resized + compressed\n' +
+                '• Animated (TGS) — rendered as animated sticker\n' +
+                '• Video (MP4) — sent as WhatsApp video sticker\n\n' +
+                '_Send `/tgstop` to cancel import at any time._',
+        }, quotedMessage);
+        return;
+    }
+
+    if (isImportActive(chatId)) {
+        await safeSendMessage(sock, chatId, {
+            text: '⚠️ An import is already running. Send `/tgstop` to cancel it first.',
         }, quotedMessage);
         return;
     }
@@ -153,27 +165,43 @@ async function handleTgStickers(sock, chatId, args, quotedMessage) {
     }
 
     let statusMsg = null;
+    const abortController = new AbortController();
+    const { signal } = abortController;
+    const chatKey = String(chatId);
+    activeImports.set(chatKey, abortController);
+
     try {
         const { createProgressBar } = await import('../utils/progressBar.js');
         const { editMessageText } = await import('../utils/waMessage.js');
 
-        // Helper to update progress in-place
         const updateProgress = async (text) => {
             if (statusMsg?.key) {
                 try { await editMessageText(sock, chatId, statusMsg.key, text); } catch {}
             }
         };
 
-        // Phase 1: Fetch pack metadata
         statusMsg = await safeSendMessage(sock, chatId, {
-            text: `🎭 *Importing Telegram Stickers*\n\n📡 Fetching pack: *${packName}*…`,
+            text: `🎭 *Importing Telegram Stickers*\n\n📡 Fetching pack: *${packName}*…\n_Send /tgstop to cancel._`,
         }, quotedMessage);
 
         const pack = await telegramStickerService.getStickerSet(packName);
         const total = pack.stickers?.length || 0;
+
+        const counts = { static: 0, animated: 0, video: 0 };
+        for (const s of (pack.stickers || [])) {
+            if (s.is_video) counts.video++;
+            else if (s.is_animated) counts.animated++;
+            else counts.static++;
+        }
+        const typeBreakdown = [];
+        if (counts.static) typeBreakdown.push(`${counts.static} static`);
+        if (counts.animated) typeBreakdown.push(`${counts.animated} animated`);
+        if (counts.video) typeBreakdown.push(`${counts.video} video`);
+
         await updateProgress(
             `🎭 *Importing Telegram Stickers*\n\n📦 *${pack.title || packName}* — ${total} sticker(s)\n` +
-            `\n${createProgressBar(0)} 0/${total}\n⏳ Preparing downloads…`
+            `_Types: ${typeBreakdown.join(', ') || 'unknown'}_\n\n` +
+            `${createProgressBar(0)} 0/${total}\n⏳ Preparing downloads…\n\n_Send /tgstop to cancel._`
         );
 
         if (!total) {
@@ -181,72 +209,89 @@ async function handleTgStickers(sock, chatId, args, quotedMessage) {
             return;
         }
 
-        // Phase 2: Download + convert all stickers
         const { stickers, errors } = await telegramStickerService.fetchAndConvertPack(
             packName,
             async (converted, failed, phase) => {
+                if (signal.aborted) return;
                 const pct = Math.round(((converted + failed) / total) * 100);
                 const bar = createProgressBar(pct);
-                const emoji = converted > 0 ? '✅' : failed > 0 ? '⚠️' : '⏳';
-                const detail = phase === 'download'
-                    ? `⬇️ Downloading… ${converted + failed}/${total}`
-                    : `🔄 Converting… ${converted + failed}/${total}`;
                 await updateProgress(
                     `🎭 *Importing Telegram Stickers*\n\n📦 *${pack.title || packName}*\n` +
-                    `\n${bar} ${converted + failed}/${total}\n${detail}`
+                    `\n${bar} ${converted + failed}/${total}\n🔄 Processing… ${converted + failed}/${total}\n\n_Send /tgstop to cancel._`
                 );
-            }
+            },
+            signal
         );
+
+        if (signal.aborted) {
+            await updateProgress(`🛑 *Import cancelled.*\n_Sent 0 sticker(s) before cancellation._`);
+            return;
+        }
 
         if (!stickers.length) {
             const reasons = [];
             if (errors?.length) reasons.push(`${errors.length} failed`);
-            await updateProgress(`❌ No stickers converted from *${pack.title || packName}*.
-${reasons.join('\n') || 'Empty pack.'}`);
+            await updateProgress(`❌ No stickers converted from *${pack.title || packName}*.*\n${reasons.join('\n') || 'Empty pack.'}`);
             return;
         }
 
-        // Phase 3: Send each sticker with live progress
         let sent = 0;
         let sendFailed = 0;
+        let videoSent = 0;
         for (let i = 0; i < stickers.length; i++) {
+            if (signal.aborted) {
+                await updateProgress(`🛑 *Import cancelled mid-send.*\n_Sent ${sent}/${stickers.length} stickers._`);
+                return;
+            }
+
             const sticker = stickers[i];
             try {
-                await sock.sendMessage(chatId, {
-                    sticker: sticker.buffer,
-                }, { quoted: quotedMessage });
+                if (sticker.type === 'video') {
+                    await sock.sendMessage(chatId, {
+                        video: sticker.buffer,
+                        mimetype: 'video/mp4',
+                        gifPlayback: false,
+                    }, { quoted: quotedMessage });
+                    videoSent++;
+                } else {
+                    await sock.sendMessage(chatId, {
+                        sticker: sticker.buffer,
+                    }, { quoted: quotedMessage });
+                }
                 sent++;
             } catch (err) {
                 sendFailed++;
                 logger.warn(`Failed to send sticker ${sticker.emoji}: ${err.message}`);
             }
 
-            // Update progress bar every sticker
             const pct = Math.round(((i + 1) / stickers.length) * 100);
             const bar = createProgressBar(pct);
             await updateProgress(
                 `🎭 *Importing Telegram Stickers*\n\n📦 *${pack.title || packName}*\n` +
                 `\n${bar} ${i + 1}/${stickers.length}\n` +
-                `📤 Sending… ${sent} sent${sendFailed ? `, ${sendFailed} failed` : ''}`
+                `📤 Sending… ${sent} sent${sendFailed ? `, ${sendFailed} failed` : ''}` +
+                (videoSent ? ` · ${videoSent} video` : '') +
+                `\n\n_Send /tgstop to cancel._`
             );
 
-            // Delay between sends
-            await new Promise((r) => setTimeout(r, 300));
+            await new Promise((r) => setTimeout(r, sticker.type === 'video' ? 500 : 300));
         }
 
-        // Final summary
         const parts = [`✅ *${pack.title || packName}* — sent *${sent}* sticker(s)`];
-        if (sendFailed) parts.push(`_${sendFailed} failed to send_`);
-        if (errors?.length) parts.push(`_${errors.length} conversion errors_`);
-        parts.push(`\n_Pack: ${sent}/${total} stickers shown_`);
+        if (videoSent) parts.push(`📹 ${videoSent} video stickers`);
+        if (sendFailed) parts.push(`❌ ${sendFailed} failed to send`);
+        if (errors?.length) parts.push(`⚠️ ${errors.length} conversion errors`);
+        parts.push(`\n_Pack: ${sent}/${total} stickers sent_`);
 
         await updateProgress(parts.join('\n'));
-        logger.info(`TG sticker pack imported: ${packName} — ${sent} sent, ${sendFailed} failed`);
+        logger.info(`TG sticker pack imported: ${packName} — ${sent} sent, ${sendFailed} failed, ${videoSent} video`);
     } catch (err) {
         logger.error(`TG stickers error: ${err.message}`);
         await safeSendMessage(sock, chatId, {
             text: `❌ Failed to import stickers: ${err.message}`,
         }, quotedMessage);
+    } finally {
+        activeImports.delete(chatKey);
     }
 }
 
@@ -463,6 +508,12 @@ export const COMMAND_HANDLERS = {
             logger.error('TG stickers command error:', err);
             void safeSendMessage(sock, chatId, { text: `⚠️ ${err.message || 'Failed to import stickers.'}` }, originalMsg);
         });
+    },
+    tgstop: ({ sock, chatId, originalMsg }) => {
+        const stopped = abortImport(chatId);
+        void safeSendMessage(sock, chatId, {
+            text: stopped ? '🛑 *Import cancelled.*' : 'ℹ️ No active import to cancel.',
+        }, originalMsg);
     },
 };
 
