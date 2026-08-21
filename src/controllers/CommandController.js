@@ -58,6 +58,7 @@ import { handleHeal, handleFix } from './handlers/healHandlers.js';
 import { handleAssist } from './handlers/assistHandlers.js';
 import IpoController from './IpoController.js';
 import BacktestController from './BacktestController.js';
+import { telegramStickerService } from '../services/TelegramStickerService.js';
 
 import {
     handleAddAdmin,
@@ -117,6 +118,137 @@ import {
     handleInterviewQOn,
     handleInterviewQOff,
 } from '../interviewQuestion/interviewQuestion.commands.js';
+
+/**
+ * Import a Telegram sticker pack and send as WhatsApp stickers.
+ */
+async function handleTgStickers(sock, chatId, args, quotedMessage) {
+    if (!telegramStickerService.isConfigured) {
+        await safeSendMessage(sock, chatId, {
+            text: '❌ Telegram Bot token not configured.\nSet `TELEGRAM_BOT_TOKEN` in .env (create a bot via @BotFather on Telegram).',
+        }, quotedMessage);
+        return;
+    }
+
+    if (!args.length) {
+        await safeSendMessage(sock, chatId, {
+            text:
+                '🎭 *Import Telegram Stickers*\n\n' +
+                'Usage: `/tgstickers <pack-name-or-url>`\n\n' +
+                '*Examples:*\n' +
+                '• `/tgstickers PupperStickers`\n' +
+                '• `/tgstickers https://t.me/addstickers/PupperStickers`\n\n' +
+                '_Animated stickers (TGS) are skipped — only static WebP stickers are converted._',
+        }, quotedMessage);
+        return;
+    }
+
+    const input = args.join(' ');
+    const packName = telegramStickerService.parsePackInput(input);
+    if (!packName) {
+        await safeSendMessage(sock, chatId, {
+            text: '❌ Could not parse pack name. Use `/tgstickers <t.me/addstickers/PackName>` or just `/tgstickers PackName`.',
+        }, quotedMessage);
+        return;
+    }
+
+    let statusMsg = null;
+    try {
+        const { createProgressBar } = await import('../../utils/progressBar.js');
+        const { editMessageText } = await import('../../utils/waMessage.js');
+
+        // Helper to update progress in-place
+        const updateProgress = async (text) => {
+            if (statusMsg?.key) {
+                try { await editMessageText(sock, chatId, statusMsg.key, text); } catch {}
+            }
+        };
+
+        // Phase 1: Fetch pack metadata
+        statusMsg = await safeSendMessage(sock, chatId, {
+            text: `🎭 *Importing Telegram Stickers*\n\n📡 Fetching pack: *${packName}*…`,
+        }, quotedMessage);
+
+        const pack = await telegramStickerService.getStickerSet(packName);
+        const total = pack.stickers?.length || 0;
+        await updateProgress(
+            `🎭 *Importing Telegram Stickers*\n\n📦 *${pack.title || packName}* — ${total} sticker(s)\n` +
+            `\n${createProgressBar(0)} 0/${total}\n⏳ Preparing downloads…`
+        );
+
+        if (!total) {
+            await updateProgress(`❌ Empty sticker pack: *${packName}*`);
+            return;
+        }
+
+        // Phase 2: Download + convert all stickers
+        const { stickers, errors } = await telegramStickerService.fetchAndConvertPack(
+            packName,
+            async (converted, failed, phase) => {
+                const pct = Math.round(((converted + failed) / total) * 100);
+                const bar = createProgressBar(pct);
+                const emoji = converted > 0 ? '✅' : failed > 0 ? '⚠️' : '⏳';
+                const detail = phase === 'download'
+                    ? `⬇️ Downloading… ${converted + failed}/${total}`
+                    : `🔄 Converting… ${converted + failed}/${total}`;
+                await updateProgress(
+                    `🎭 *Importing Telegram Stickers*\n\n📦 *${pack.title || packName}*\n` +
+                    `\n${bar} ${converted + failed}/${total}\n${detail}`
+                );
+            }
+        );
+
+        if (!stickers.length) {
+            const reasons = [];
+            if (errors?.length) reasons.push(`${errors.length} failed`);
+            await updateProgress(`❌ No stickers converted from *${pack.title || packName}*.
+${reasons.join('\n') || 'Empty pack.'}`);
+            return;
+        }
+
+        // Phase 3: Send each sticker with live progress
+        let sent = 0;
+        let sendFailed = 0;
+        for (let i = 0; i < stickers.length; i++) {
+            const sticker = stickers[i];
+            try {
+                await sock.sendMessage(chatId, {
+                    sticker: sticker.buffer,
+                }, { quoted: quotedMessage });
+                sent++;
+            } catch (err) {
+                sendFailed++;
+                logger.warn(`Failed to send sticker ${sticker.emoji}: ${err.message}`);
+            }
+
+            // Update progress bar every sticker
+            const pct = Math.round(((i + 1) / stickers.length) * 100);
+            const bar = createProgressBar(pct);
+            await updateProgress(
+                `🎭 *Importing Telegram Stickers*\n\n📦 *${pack.title || packName}*\n` +
+                `\n${bar} ${i + 1}/${stickers.length}\n` +
+                `📤 Sending… ${sent} sent${sendFailed ? `, ${sendFailed} failed` : ''}`
+            );
+
+            // Delay between sends
+            await new Promise((r) => setTimeout(r, 300));
+        }
+
+        // Final summary
+        const parts = [`✅ *${pack.title || packName}* — sent *${sent}* sticker(s)`];
+        if (sendFailed) parts.push(`_${sendFailed} failed to send_`);
+        if (errors?.length) parts.push(`_${errors.length} conversion errors_`);
+        parts.push(`\n_Pack: ${sent}/${total} stickers shown_`);
+
+        await updateProgress(parts.join('\n'));
+        logger.info(`TG sticker pack imported: ${packName} — ${sent} sent, ${sendFailed} failed`);
+    } catch (err) {
+        logger.error(`TG stickers error: ${err.message}`);
+        await safeSendMessage(sock, chatId, {
+            text: `❌ Failed to import stickers: ${err.message}`,
+        }, quotedMessage);
+    }
+}
 
 /**
  * Data-driven dispatch table — command key (from the registry) -> handler.
@@ -324,6 +456,12 @@ export const COMMAND_HANDLERS = {
         void ctx.stickerController.handleRgbSticker(sock, chatId, args, originalMsg).catch((err) => {
             logger.error('RGB sticker error:', err);
             void safeSendMessage(sock, chatId, { text: '⚠️ Failed to generate RGB sticker.' }, originalMsg);
+        });
+    },
+    tgstickers: ({ sock, chatId, args, originalMsg }) => {
+        void handleTgStickers(sock, chatId, args, originalMsg).catch((err) => {
+            logger.error('TG stickers command error:', err);
+            void safeSendMessage(sock, chatId, { text: `⚠️ ${err.message || 'Failed to import stickers.'}` }, originalMsg);
         });
     },
 };

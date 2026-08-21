@@ -552,6 +552,9 @@ export const config = {
     KOYEB_API_KEY: process.env.KOYEB_API_KEY?.trim() || '',
     KOYEB_SERVICE_ID: process.env.KOYEB_SERVICE_ID?.trim() || '',
 
+    /** Telegram Bot API token — required for /tgstickers command. */
+    TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN?.trim() || '',
+
     /** Optional bootstrap for drive sources: JSON array of { url, renderServiceId?, renderApiKey? } */
     DRIVE_SOURCES: (() => {
         try {

@@ -116,6 +116,13 @@ export const COMMAND_REGISTRY = [
         help: 'Animated rainbow/RGB text sticker — `/rgb Your Text`',
     },
     {
+        names: ['/tgstickers', '/tgsticker', '/tgstk'],
+        key: 'tgstickers',
+        scope: 'any',
+        role: 'anyone',
+        help: 'Import Telegram sticker pack — `/tgstickers <t.me/addstickers/PackName or just PackName>`',
+    },
+    {
         names: ['/news'],
         key: 'news',
         scope: 'any',
@@ -785,7 +792,7 @@ export const HELP_CATEGORY = {
     insta: 'media', tw: 'media', toimg: 'media',
 
     // Stickers
-    sticker: 'sticker', steal: 'sticker', rgb: 'sticker',
+    sticker: 'sticker', steal: 'sticker', rgb: 'sticker', tgstickers: 'sticker',
 
     // Markets
     tradenow: 'trade', swing: 'trade', expiry: 'trade', tradelert: 'trade', index: 'trade',
