@@ -405,7 +405,6 @@ class TelegramStickerService {
     _interpolateKeyframes(keyframes, frame) {
         if (!keyframes?.length) return undefined;
 
-        // Find keyframe at or before frame
         let prev = keyframes[0];
         let next = keyframes[keyframes.length - 1];
 
@@ -417,21 +416,55 @@ class TelegramStickerService {
             }
         }
 
-        // Same keyframe — return its value
         if (prev.t === next.t || next.t > frame) return prev.s ?? prev.e ?? prev.k;
 
-        // Linear interpolation between keyframes
-        const t = (frame - prev.t) / (next.t - prev.t);
+        const rawT = (frame - prev.t) / (next.t - prev.t);
+        // Apply bezier easing if present (i = in-tangent, o = out-tangent)
+        let t = rawT;
+        if (prev.o && prev.i) {
+            t = this._bezierInterpolate(rawT, prev.o, prev.i);
+        } else if (prev.o) {
+            t = this._bezierInterpolate(rawT, prev.o, [1 - prev.o[0], 1 - prev.o[1]]);
+        } else if (prev.i) {
+            t = this._bezierInterpolate(rawT, [1 - prev.i[0], 1 - prev.i[1]], prev.i);
+        }
+
         const from = prev.s ?? prev.e ?? prev.k;
         const to = next.s ?? next.e ?? next.k;
 
         if (Array.isArray(from) && Array.isArray(to)) {
-            return from.map((v, i) => v + (to[i] - v) * t);
+            return from.map((v, i) => v + ((to[i] ?? v) - v) * t);
         }
         if (typeof from === 'number' && typeof to === 'number') {
             return from + (to - from) * t;
         }
         return from;
+    }
+
+    /** Bezier easing — Newton-Raphson solve for cubic bezier at time t. */
+    _bezierInterpolate(t, outTangent, inTangent) {
+        // outTangent = [x1, y1] (from current keyframe)
+        // inTangent = [x2, y2] (to next keyframe)
+        const cx = 3 * (outTangent[0] || 0);
+        const bx = 3 * ((inTangent?.[0] ?? 1) - outTangent[0]) - cx;
+        const ax = 1 - cx - bx;
+        const cy = 3 * (outTangent[1] || 0);
+        const by = 3 * ((inTangent?.[1] ?? 1) - outTangent[1]) - cy;
+        const ay = 1 - cy - by;
+
+        // Solve for x given t using Newton-Raphson
+        let x = t;
+        for (let i = 0; i < 8; i++) {
+            const currentX = ((ax * x + bx) * x + cx) * x - t;
+            if (Math.abs(currentX) < 1e-6) break;
+            const dx = (3 * ax * x + 2 * bx) * x + cx;
+            if (Math.abs(dx) < 1e-6) break;
+            x -= currentX / dx;
+        }
+        x = Math.max(0, Math.min(1, x));
+
+        // Evaluate y at solved x
+        return ((ay * x + by) * x + cy) * x;
     }
 
     _renderShapeGroup(ctx, shapes, frame, assetMap) {
@@ -447,19 +480,17 @@ class TelegramStickerService {
         if (shape.ty === 'gr') {
             const items = shape.it || [];
             ctx.save();
+            // Apply group transform first
             for (const item of items) {
                 if (item.ty === 'tr') this._applyTransform(ctx, item, frame, 0, 0);
             }
-            // Render shapes first, then modifiers
-            const renderItems = items.filter(it => it.ty !== 'tr');
-            const pathItems = renderItems.filter(it => it.ty === 'sh' || it.ty === 'el' || it.ty === 'rc');
-            const styleItems = renderItems.filter(it => it.ty === 'fl' || it.ty === 'st' || it.ty === 'gf');
-
-            // Apply styles
-            for (const si of styleItems) this._renderShape(ctx, si, frame, assetMap);
-            // Then render paths (fill/stroke are applied to the current path)
-            for (const pi of pathItems) this._renderShape(ctx, pi, frame, assetMap);
-
+            // Build composite path from all path items FIRST
+            const pathItems = items.filter(it => it.ty === 'sh' || it.ty === 'el' || it.ty === 'rc');
+            const styleItems = items.filter(it => it.ty === 'fl' || it.ty === 'st' || it.ty === 'gf');
+            // Draw all paths into current path
+            for (const pi of pathItems) this._drawPath(ctx, pi, frame);
+            // Then apply fill/stroke to the composite path
+            for (const si of styleItems) this._applyStyle(ctx, si, frame);
             ctx.restore();
         } else if (shape.ty === 'sh') {
             const pathData = shape.ks;
@@ -542,6 +573,73 @@ class TelegramStickerService {
         return `rgba(${r},${g},${b},${alpha})`;
     }
 
+    /** Draw path shape (sh/el/rc) onto current ctx path without fill/stroke. */
+    _drawPath(ctx, shape, frame) {
+        if (!shape) return;
+        if (shape.ty === 'sh') {
+            const pd = shape.ks;
+            if (!pd) return;
+            const verts = pd.k?.v || pd.v || [];
+            const inn = pd.k?.i || pd.i || [];
+            const out = pd.k?.o || pd.o || [];
+            const closed = pd.k?.c ?? pd.c ?? false;
+            if (!verts.length) return;
+            ctx.moveTo(verts[0][0], verts[0][1]);
+            for (let i = 1; i < verts.length; i++) {
+                const cp1x = verts[i-1][0] + (out[i-1]?.[0] || 0);
+                const cp1y = verts[i-1][1] + (out[i-1]?.[1] || 0);
+                const cp2x = verts[i][0] + (inn[i]?.[0] || 0);
+                const cp2y = verts[i][1] + (inn[i]?.[1] || 0);
+                ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, verts[i][0], verts[i][1]);
+            }
+            if (closed) ctx.closePath();
+        } else if (shape.ty === 'el') {
+            const sz = this._resolveProp(shape.s, frame) ?? [0,0];
+            const rx = (Array.isArray(sz) ? sz[0] : 0) / 2;
+            const ry = (Array.isArray(sz) ? sz[1] : 0) / 2;
+            ctx.ellipse(0, 0, Math.abs(rx), Math.abs(ry), 0, 0, Math.PI * 2);
+        } else if (shape.ty === 'rc') {
+            const sz = this._resolveProp(shape.s, frame) ?? [100,100];
+            const sw = Array.isArray(sz) ? sz[0] : 100;
+            const sh = Array.isArray(sz) ? sz[1] : 100;
+            const r = this._resolveProp(shape.r, frame) ?? 0;
+            if (r > 0) ctx.roundRect(-sw/2, -sh/2, sw, sh, r);
+            else ctx.rect(-sw/2, -sh/2, sw, sh);
+        }
+    }
+
+    /** Apply fill or stroke style from shape element. */
+    _applyStyle(ctx, shape, frame) {
+        if (!shape) return;
+        if (shape.ty === 'fl') {
+            const c = shape.c?.k || [0,0,0,1];
+            const a = this._resolveProp(shape.o, frame) ?? 100;
+            ctx.fillStyle = this._rgba(c, a / 100);
+            ctx.fill();
+        } else if (shape.ty === 'st') {
+            const c = shape.c?.k || [0,0,0,1];
+            const a = this._resolveProp(shape.o, frame) ?? 100;
+            const w = this._resolveProp(shape.w, frame) ?? 1;
+            ctx.strokeStyle = this._rgba(c, a / 100);
+            ctx.lineWidth = w;
+            ctx.stroke();
+        } else if (shape.ty === 'gf') {
+            const stops = shape.g?.k || [];
+            const p = shape.g?.p || 2;
+            const s = shape.s?.k ?? 0;
+            if (p >= 2 && stops.length >= p * 4) {
+                const x1 = shape.s?.k ?? 0, y1 = shape.e?.k ?? 100;
+                const grad = ctx.createLinearGradient(x1, 0, y1, 0);
+                for (let i = 0; i < p; i++) {
+                    const off = i / (p - 1);
+                    grad.addColorStop(off, this._rgba([stops[i*4], stops[i*4+1], stops[i*4+2]], stops[i*4+3] ?? 1));
+                }
+                ctx.fillStyle = grad;
+                ctx.fill();
+            }
+        }
+    }
+
     /* ──────────────────────────────────────────────
      *  Sticker conversion pipeline
      * ────────────────────────────────────────────── */
@@ -584,32 +682,35 @@ class TelegramStickerService {
             return { buffer, type: 'video' };
         }
 
-        // Animated TGS — convert to MP4 video sticker (most reliable WhatsApp support)
+        // Animated TGS — try animated WebP first (standard WhatsApp format), then MP4, then static
         if (format === 'tgs') {
-            // Try MP4 video sticker first
+            // 1st: Try animated WebP (standard animated sticker format with ANIM chunk)
+            try {
+                const animWebp = await this.tgsToAnimatedWebp(buffer);
+                if (animWebp && animWebp.length > 0 && animWebp.length <= ANIM_WEBP_MAX) {
+                    const hasAnim = animWebp.includes(Buffer.from('ANIM'));
+                    logger.info(`TGS → animated WebP: ${animWebp.length} bytes, ANIM: ${hasAnim}`);
+                    if (hasAnim) {
+                        return { buffer: animWebp, type: 'sticker', isAnimated: true };
+                    }
+                    logger.info('Animated WebP missing ANIM marker, trying MP4...');
+                }
+            } catch (err) {
+                logger.warn(`TGS → animated WebP failed: ${err.message}`);
+            }
+
+            // 2nd: Try MP4 video sticker
             try {
                 const mp4Buffer = await this.tgsToMp4Video(buffer);
                 if (mp4Buffer && mp4Buffer.length > 0 && mp4Buffer.length <= VIDEO_STICKER_MAX) {
                     logger.info(`TGS → MP4 video sticker: ${mp4Buffer.length} bytes`);
                     return { buffer: mp4Buffer, type: 'video' };
                 }
-                logger.info(`TGS → MP4 too large (${mp4Buffer?.length || 0} bytes), trying animated WebP`);
             } catch (err) {
-                logger.warn(`TGS → MP4 failed: ${err.message}, trying animated WebP`);
+                logger.warn(`TGS → MP4 failed: ${err.message}`);
             }
 
-            // Fallback: try animated WebP with isAnimated flag
-            try {
-                const animWebp = await this.tgsToAnimatedWebp(buffer);
-                if (animWebp && animWebp.length > 0 && animWebp.length <= ANIM_WEBP_MAX) {
-                    logger.info(`TGS → animated WebP: ${animWebp.length} bytes`);
-                    return { buffer: animWebp, type: 'sticker', isAnimated: true };
-                }
-            } catch (err) {
-                logger.warn(`TGS → animated WebP failed: ${err.message}`);
-            }
-
-            // Final fallback: static first frame
+            // 3rd: Fallback to static first frame
             try {
                 logger.info('TGS → static frame fallback');
                 const pngBuffer = await this.tgsToStaticFrame(buffer);
