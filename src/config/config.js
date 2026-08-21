@@ -549,6 +549,8 @@ export const config = {
     PUBLIC_URL: (process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || '').replace(/\/$/, ''),
     RENDER_API_KEY: process.env.RENDER_API_KEY?.trim() || '',
     RENDER_SERVICE_ID: process.env.RENDER_SERVICE_ID?.trim() || '',
+    KOYEB_API_KEY: process.env.KOYEB_API_KEY?.trim() || '',
+    KOYEB_SERVICE_ID: process.env.KOYEB_SERVICE_ID?.trim() || '',
 
     /** Optional bootstrap for drive sources: JSON array of { url, renderServiceId?, renderApiKey? } */
     DRIVE_SOURCES: (() => {

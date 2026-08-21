@@ -19,9 +19,9 @@ function serializeMessageKey(key) {
     };
 }
 
-function buildStartedText(commitMsg, deployId) {
+function buildStartedText(commitMsg, deployId, platformLabel = 'Render') {
     return (
-        `📤 *Deploy started*\n\n` +
+        `📤 *${platformLabel} deploy started*\n\n` +
         `💬 *Commit:* ${commitMsg}\n` +
         `🆔 *Deploy:* \`${deployId}\`\n` +
         `🔄 *Status:* Building…\n\n` +
@@ -71,8 +71,8 @@ class DeployNotificationService {
         void this._collection.createIndex({ status: 1, started_at: 1 }, { name: 'deploy_pending_status' });
     }
 
-    buildStartedText(commitMsg, deployId) {
-        return buildStartedText(commitMsg, deployId);
+    buildStartedText(commitMsg, deployId, platformLabel) {
+        return buildStartedText(commitMsg, deployId, platformLabel);
     }
 
     /**

@@ -1,5 +1,5 @@
 /**
- * Owner-only /deploy command — triggers a Render redeploy of the latest commit.
+ * Owner-only /deploy command — triggers a redeploy on Render or Koyeb.
  * Status message is persisted and edited after the new instance starts.
  */
 
@@ -13,9 +13,22 @@ import {
 } from '../../services/DeployNotificationService.js';
 
 const RENDER_API = 'https://api.render.com/v1';
+const KOYEB_API = 'https://app.koyeb.com/api/v1';
 const POLL_INTERVAL_MS = 5000;
 const MAX_POLL_MS = 30 * 60 * 1000;
 
+// ── Platform detection ──────────────────────────────────────────────
+function detectPlatform() {
+    if (config.RENDER_API_KEY && config.RENDER_SERVICE_ID) return 'render';
+    if (config.KOYEB_API_KEY && config.KOYEB_SERVICE_ID) return 'koyeb';
+    return null;
+}
+
+function platformLabel(platform) {
+    return platform === 'koyeb' ? 'Koyeb' : 'Render';
+}
+
+// ── Render API ──────────────────────────────────────────────────────
 async function renderFetch(path, method = 'GET', body = undefined) {
     const res = await fetch(`${RENDER_API}${path}`, {
         method,
@@ -33,6 +46,25 @@ async function renderFetch(path, method = 'GET', body = undefined) {
     return res.json();
 }
 
+// ── Koyeb API ───────────────────────────────────────────────────────
+async function koyebFetch(path, method = 'GET', body = undefined) {
+    const res = await fetch(`${KOYEB_API}${path}`, {
+        method,
+        headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${config.KOYEB_API_KEY}`,
+        },
+        body: body ? JSON.stringify(body) : undefined,
+    });
+    if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`Koyeb API ${res.status}: ${text.slice(0, 200)}`);
+    }
+    return res.json();
+}
+
+// ── Generic helpers ─────────────────────────────────────────────────
 async function getLatestCommitMessage() {
     try {
         const res = await fetch('https://api.github.com/repos/officeboy12242/WA-BOT/commits?per_page=1');
@@ -46,7 +78,8 @@ async function getLatestCommitMessage() {
     }
 }
 
-async function pollDeployStatus(deployId, sock, commitMsg) {
+// ── Render polling ──────────────────────────────────────────────────
+async function pollRenderStatus(deployId, sock, commitMsg) {
     const startTime = Date.now();
 
     const poll = async () => {
@@ -56,12 +89,9 @@ async function pollDeployStatus(deployId, sock, commitMsg) {
             );
 
             const status = deploy.status || 'unknown';
-            logger.debug(`Deploy ${deployId} status: ${status}`);
+            logger.debug(`Render deploy ${deployId} status: ${status}`);
 
-            if (status === 'live') {
-                // New instance will handle the edit on startup — old process is dying.
-                return;
-            }
+            if (status === 'live') return;
 
             if (status === 'canceled' || status === 'build_failed' || status === 'deploy_failed') {
                 const text = buildFailedText(commitMsg, deployId, status);
@@ -77,7 +107,7 @@ async function pollDeployStatus(deployId, sock, commitMsg) {
 
             setTimeout(poll, POLL_INTERVAL_MS);
         } catch (err) {
-            logger.warn(`Deploy poll failed: ${err.message}`);
+            logger.warn(`Render deploy poll failed: ${err.message}`);
             if (Date.now() - startTime < 30000) {
                 setTimeout(poll, POLL_INTERVAL_MS);
             }
@@ -87,24 +117,79 @@ async function pollDeployStatus(deployId, sock, commitMsg) {
     poll();
 }
 
+// ── Koyeb polling ───────────────────────────────────────────────────
+async function pollKoyebStatus(deployId, sock, commitMsg) {
+    const startTime = Date.now();
+
+    const poll = async () => {
+        try {
+            const svc = await koyebFetch(`/services/${config.KOYEB_SERVICE_ID}`);
+            const status = svc?.service?.status?.value || 'unknown';
+            logger.debug(`Koyeb service status: ${status}`);
+
+            // Koyeb statuses: deploying, starting, running, failed, suspended
+            if (status === 'running') return;
+
+            if (status === 'failed') {
+                const text = buildFailedText(commitMsg, deployId, 'deploy failed');
+                await deployNotificationService.completePendingNow(sock, deployId, commitMsg, text, 'failed');
+                return;
+            }
+
+            if (Date.now() - startTime > MAX_POLL_MS) {
+                const text = buildFailedText(commitMsg, deployId, 'timeout — check Koyeb dashboard');
+                await deployNotificationService.completePendingNow(sock, deployId, commitMsg, text, 'failed');
+                return;
+            }
+
+            setTimeout(poll, POLL_INTERVAL_MS);
+        } catch (err) {
+            logger.warn(`Koyeb deploy poll failed: ${err.message}`);
+            if (Date.now() - startTime < 30000) {
+                setTimeout(poll, POLL_INTERVAL_MS);
+            }
+        }
+    };
+
+    poll();
+}
+
+// ── Main handler ────────────────────────────────────────────────────
 export async function handleDeploy(sock, chatId, senderJid, originalMsg) {
-    if (!config.RENDER_API_KEY || !config.RENDER_SERVICE_ID) {
+    const platform = detectPlatform();
+
+    if (!platform) {
         await sock.sendMessage(chatId, {
-            text: '❌ Render deploy not configured.\nSet `RENDER_API_KEY` and `RENDER_SERVICE_ID` in .env.',
+            text:
+                '❌ Deploy not configured.\n\n' +
+                'Set one of:\n' +
+                '• `RENDER_API_KEY` + `RENDER_SERVICE_ID` (Render)\n' +
+                '• `KOYEB_API_KEY` + `KOYEB_SERVICE_ID` (Koyeb)',
         }, { quoted: originalMsg });
         return;
     }
 
     try {
         const commitMsg = await getLatestCommitMessage();
+        const label = platformLabel(platform);
+        let deployId;
 
-        const deployId = (await renderFetch(
-            `/services/${config.RENDER_SERVICE_ID}/deploys`,
-            'POST',
-            { clearCache: 'do_not_clear' },
-        )).id;
+        if (platform === 'render') {
+            deployId = (await renderFetch(
+                `/services/${config.RENDER_SERVICE_ID}/deploys`,
+                'POST',
+                { clearCache: 'do_not_clear' },
+            )).id;
+        } else {
+            // Koyeb — POST to /redeploy triggers a new deploy from the latest commit
+            const resp = await koyebFetch(
+                `/services/${config.KOYEB_SERVICE_ID}/redeploy`,
+                'POST',
+            );
+            deployId = resp?.deploy?.id || `koyeb-${Date.now()}`;
+        }
 
-        const startedText = deployNotificationService.buildStartedText(commitMsg, deployId);
+        const startedText = deployNotificationService.buildStartedText(commitMsg, deployId, label);
         const deployMsg = await sock.sendMessage(chatId, { text: startedText }, { quoted: originalMsg });
 
         const targets = [];
@@ -141,11 +226,15 @@ export async function handleDeploy(sock, chatId, senderJid, originalMsg) {
             targets,
         });
 
-        logger.info(`Render deploy triggered by ${senderJid}: deploy=${deployId} commit=${commitMsg}`);
+        logger.info(`${label} deploy triggered by ${senderJid}: deploy=${deployId} commit=${commitMsg}`);
 
-        pollDeployStatus(deployId, sock, commitMsg);
+        if (platform === 'render') {
+            pollRenderStatus(deployId, sock, commitMsg);
+        } else {
+            pollKoyebStatus(deployId, sock, commitMsg);
+        }
     } catch (err) {
-        logger.error(`Render deploy failed: ${err.message}`);
+        logger.error(`Deploy failed: ${err.message}`);
         await sock.sendMessage(chatId, {
             text: `❌ Deploy failed: ${err.message}`,
         }, { quoted: originalMsg });

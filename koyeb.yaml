@@ -1,0 +1,40 @@
+# Koyeb App Spec — WhatsApp Bot
+# Deploy: koyeb service create --git https://github.com/YOUR_USER/REPO --git-branch main --dockerfile Dockerfile whatsapp-bot
+# Or apply this spec: koyeb service init --file koyeb.yaml whatsapp-bot
+
+name: whatsapp-bot
+
+services:
+  - name: whatsapp-bot-service
+    docker:
+      dockerfile: Dockerfile
+    ports:
+      - port: 3000
+        protocol: http
+    instances:
+      type: nano
+      scalings:
+        min: 1
+        max: 1
+    env:
+      # ── Runtime ──
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: "22"
+      # ── App ──
+      - key: CHECK_INTERVAL
+        value: "180"
+      # ── MongoDB (set via dashboard or CLI) ──
+      # - key: MONGODB_URI
+      #   value: "mongodb+srv://..."
+      # - key: MONGODB_DB_NAME
+      #   value: "telegramUdemy"
+      # ── Owner (set via dashboard) ──
+      # - key: OWNER_NUMBERS
+      #   value: "918830285258"
+      # ── Stickers ──
+      - key: STICKER_PACK_NAME
+        value: "Created By Sassy Bot 🤖"
+      - key: STICKER_PACK_AUTHOR
+        value: ""

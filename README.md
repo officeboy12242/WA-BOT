@@ -74,7 +74,7 @@ Copy [`.env.example`](.env.example) → `.env`. Important variables:
 | `ADMIN_TOKEN` | Web admin panel (`/admin?token=…`) |
 | `PUBLIC_URL` | Movie short-link base (Render sets `RENDER_EXTERNAL_URL`) |
 
-Full list and comments: **`.env.example`**. Deploy notes: **[DEPLOY.md](DEPLOY.md)** / **[QUICKSTART_RENDER.md](QUICKSTART_RENDER.md)**.
+Full list and comments: **`.env.example`**. Deploy notes: **[DEPLOY.md](DEPLOY.md)** (Render) / **[DEPLOY_KOYEB.md](DEPLOY_KOYEB.md)** (Koyeb — free tier, never sleeps) / **[QUICKSTART_RENDER.md](QUICKSTART_RENDER.md)**.
 
 ---
 

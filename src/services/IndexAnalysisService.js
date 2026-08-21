@@ -504,7 +504,11 @@ class IndexAnalysisService {
         const snap = chain?.snapshot || null;
 
         if (!snap) {
-            throw new Error(`Option chain unavailable for ${spec.label} — NSE may be rate limiting.`);
+            const chainErr = chainRes.status === 'rejected' ? chainRes.reason?.message : '';
+            const hint = chainErr.includes('rate limit') || chainErr.includes('429')
+                ? 'Try again in 30–60 seconds.'
+                : 'Try again shortly.';
+            throw new Error(`Option chain unavailable for ${spec.label}. ${hint}`);
         }
 
         // Prefer the chain's own underlyingValue: it is the number the strikes are

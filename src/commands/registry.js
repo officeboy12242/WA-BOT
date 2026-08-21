@@ -646,7 +646,7 @@ export const COMMAND_REGISTRY = [
         key: 'deploy',
         scope: 'any',
         role: 'owner',
-        help: 'Trigger Render redeploy of latest commit (owner only)',
+        help: 'Trigger redeploy on Render or Koyeb (owner only)',
     },
     {
         names: ['/ipo'],

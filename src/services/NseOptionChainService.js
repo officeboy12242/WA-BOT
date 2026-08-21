@@ -18,6 +18,12 @@ const BASE_HEADERS = {
 
 const TIMEOUT_MS = 22_000;
 const COOKIE_TTL_MS = 5 * 60 * 1000;
+const NSE_MAX_RETRIES = 3;
+const NSE_RETRY_DELAY_MS = 2000;
+
+function sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+}
 
 const INDEX_SYMBOLS = new Set([
     'NIFTY',
@@ -55,10 +61,16 @@ async function getNseCookie() {
 }
 
 async function nseGet(path, cookie) {
-    const { data } = await axios.get(`https://www.nseindia.com/api/${path}`, {
+    const res = await axios.get(`https://www.nseindia.com/api/${path}`, {
         headers: { ...BASE_HEADERS, Cookie: cookie },
         timeout: TIMEOUT_MS,
+        validateStatus: (s) => s >= 200 && s < 400,
     });
+    const data = res.data;
+    // NSE sometimes returns HTML (rate-limit page) instead of JSON
+    if (typeof data === 'string' && (data.includes('<!DOCTYPE') || data.includes('<html'))) {
+        throw new Error('NSE returned HTML (rate limit / bot detection)');
+    }
     return data;
 }
 
@@ -108,25 +120,56 @@ function formatLegLine(label, item) {
 
 class NseOptionChainService {
     async _fetchChainForNse(nseSymbol, type) {
-        const cookie = await getNseCookie();
-        const contract = await nseGet(`option-chain-contract-info?symbol=${nseSymbol}`, cookie);
-        const expiries = contract?.expiryDates || contract?.records?.expiryDates;
-        const expiry = expiries?.[0];
-        if (!expiry) {
-            logger.debug(`NSE option chain: no expiry for ${nseSymbol}`);
-            return null;
+        let lastErr = null;
+        for (let attempt = 1; attempt <= NSE_MAX_RETRIES; attempt++) {
+            try {
+                const cookie = await getNseCookie();
+                const contract = await nseGet(`option-chain-contract-info?symbol=${nseSymbol}`, cookie);
+                const expiries = contract?.expiryDates || contract?.records?.expiryDates;
+                const expiry = expiries?.[0];
+                if (!expiry) {
+                    logger.debug(`NSE option chain: no expiry for ${nseSymbol}`);
+                    return null;
+                }
+
+                const chain = await nseGet(
+                    `option-chain-v3?type=${type}&symbol=${encodeURIComponent(nseSymbol)}&expiry=${encodeURIComponent(expiry)}`,
+                    cookie
+                );
+
+                const records = chain?.records;
+                const rows = records?.data;
+                if (!rows?.length) return null;
+
+                // Success — build and return the result
+                return this._buildResult(nseSymbol, type, chain, rows);
+            } catch (err) {
+                lastErr = err;
+                const retryable = /rate limit|429|bot detection|HTML|ECONNRESET|ETIMEDOUT|timeout/i.test(err.message);
+                logger.warn(`NSE option chain attempt ${attempt}/${NSE_MAX_RETRIES} for ${nseSymbol}: ${err.message}`);
+                if (retryable && attempt < NSE_MAX_RETRIES) {
+                    const delay = NSE_RETRY_DELAY_MS * attempt;
+                    logger.debug(`Retrying NSE in ${delay}ms…`);
+                    await sleep(delay);
+                    // Invalidate cookie on rate limit so next attempt gets a fresh one
+                    if (/rate limit|429|bot detection|HTML/i.test(err.message)) {
+                        _cookieCache = { value: '', at: 0 };
+                    }
+                    continue;
+                }
+                throw err;
+            }
         }
+        throw lastErr || new Error('NSE option chain failed after retries');
+    }
 
-        const chain = await nseGet(
-            `option-chain-v3?type=${type}&symbol=${encodeURIComponent(nseSymbol)}&expiry=${encodeURIComponent(expiry)}`,
-            cookie
-        );
-
+    /**
+     * Build the context + snapshot from raw NSE chain data.
+     */
+    _buildResult(nseSymbol, type, chain, rows) {
         const records = chain?.records;
-        const rows = records?.data;
-        if (!rows?.length) return null;
-
-        const spot = records.underlyingValue ?? records.underlying ?? null;
+        const expiry = (chain?.records?.expiryDates || [])[0] || records?.expiry || '';
+        const spot = records?.underlyingValue ?? records?.underlying ?? null;
         let totalCeOi = 0;
         let totalPeOi = 0;
         for (const row of rows) {
@@ -182,7 +225,6 @@ class NseOptionChainService {
                   ltp: atm.CE.lastPrice ?? null,
                   oi: atm.CE.openInterest ?? null,
                   iv: atm.CE.impliedVolatility ?? null,
-                  /** Intraday OI change — feeds the Confluence strategy's OI layer. */
                   changeOi: atm.CE.changeinOpenInterest ?? null,
               }
             : null;
@@ -196,9 +238,6 @@ class NseOptionChainService {
               }
             : null;
 
-        // Every strike's live premium, so a tracker following an already-open
-        // position can price its exact strike from the same single fetch instead
-        // of hitting NSE once per open trade.
         const strikes = rows
             .map((row) => ({
                 strike: row.strikePrice,
@@ -223,14 +262,7 @@ class NseOptionChainService {
                 atmStrike: atm?.strikePrice ?? null,
                 atmCe,
                 atmPe,
-                /**
-                 * NSE's own "as of" for these prices, and when we read them.
-                 *
-                 * The premiums on a card are only valid as of chainTimestamp — an
-                 * alert that lands in the group minutes later is quoting a stale
-                 * price, and without these two there is no way to tell how stale.
-                 */
-                chainTimestamp: records.timestamp || null,
+                chainTimestamp: records?.timestamp || null,
                 fetchedAt: new Date().toISOString(),
             },
         };
