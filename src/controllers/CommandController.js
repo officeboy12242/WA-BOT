@@ -246,10 +246,16 @@ async function handleTgStickers(sock, chatId, args, quotedMessage) {
 
             const sticker = stickers[i];
             try {
-                // All stickers (static, animated WebP, MP4 video) sent as sticker type
-                const stickerMsg = { sticker: sticker.buffer };
-                if (sticker.isAnimated) {
-                    stickerMsg.isAnimated = true;
+                // Send as the appropriate type
+                let stickerMsg;
+                if (sticker.type === 'video') {
+                    // MP4 video stickers — send as video with sticker mime
+                    stickerMsg = { video: sticker.buffer, mimetype: 'video/mp4', caption: '' };
+                } else {
+                    stickerMsg = { sticker: sticker.buffer };
+                    if (sticker.isAnimated) {
+                        stickerMsg.isAnimated = true;
+                    }
                 }
                 await sock.sendMessage(chatId, stickerMsg, { quoted: quotedMessage });
                 if (sticker.type === 'video') videoSent++;

@@ -3,7 +3,7 @@
  * Fetches sticker packs from Telegram via Bot API and converts to WhatsApp format.
  *
  * - Static WebP → resize + compress
- * - Animated TGS → render multiple Lottie frames → ffmpeg animated WebP
+ * - Animated TGS → SVG→sharp frame rendering → node-webpmux animated WebP (proper ANIM/ANMF format)
  * - Video stickers (MP4) → send directly as WhatsApp video sticker
  *
  * Supports abort via AbortController (user sends /tgstop).
@@ -398,42 +398,57 @@ class TelegramStickerService {
      *  TGS conversion methods (SVG-based)
      * ────────────────────────────────────────────── */
 
-    /** Create animated WebP from TGS using SVG→sharp frame rendering + ffmpeg. */
+    /** Create animated WebP from TGS using SVG→sharp frames + node-webpmux. */
     async tgsToAnimatedWebp(tgsBuffer) {
+        const sharp = (await import('sharp')).default;
+        const { Image: WebpImage } = await import('node-webpmux');
+        await WebpImage.initLib();
+
         const lottieJson = zlib.gunzipSync(tgsBuffer).toString('utf-8');
         const lottie = JSON.parse(lottieJson);
         const width = lottie.w || 512;
         const height = lottie.h || 512;
         const totalFrames = lottie.op || lottie.fr || 30;
         const frameRate = lottie.fr || 30;
-        const frameDir = path.join(this.tempDir, `frames_${crypto.randomBytes(4).toString('hex')}`);
-        fs.mkdirSync(frameDir, { recursive: true });
-        try {
-            const frameStep = Math.max(1, Math.floor(totalFrames / ANIM_FRAME_COUNT));
-            const framesToRender = [];
-            for (let f = 0; f < totalFrames; f += frameStep) {
-                if (framesToRender.length >= ANIM_FRAME_COUNT) break;
-                framesToRender.push(f);
-            }
-            for (let i = 0; i < framesToRender.length; i++) {
-                const pngBuf = await this._lottieFrameToPng(lottie, framesToRender[i]);
-                fs.writeFileSync(path.join(frameDir, `frame_${String(i + 1).padStart(4, '0')}.png`), pngBuf);
-            }
-            const outputPath = path.join(this.tempDir, `anim_${crypto.randomBytes(4).toString('hex')}.webp`);
-            const fps = Math.min(ANIM_FPS, frameRate);
-            execSync(
-                `ffmpeg -y -framerate ${fps} -i "${path.join(frameDir, 'frame_%04d.png')}" `
-                + `-vf "scale=${width}:${height}" `
-                + `-vcodec libwebp -lossless 0 -q:v 60 -loop 0 -preset drawing `
-                + `-an -vsync 0 "${outputPath}" 2>&1`,
-                { timeout: 30000, stdio: 'pipe' }
-            );
-            const webpBuffer = fs.readFileSync(outputPath);
-            fs.unlinkSync(outputPath);
-            return webpBuffer;
-        } finally {
-            try { for (const f of fs.readdirSync(frameDir)) fs.unlinkSync(path.join(frameDir, f)); fs.rmdirSync(frameDir); } catch {}
+        const fps = Math.min(ANIM_FPS, frameRate);
+        const delayMs = Math.round(1000 / fps);
+
+        // Render frames as PNG via SVG→sharp, then convert each to WebP
+        const frameStep = Math.max(1, Math.floor(totalFrames / ANIM_FRAME_COUNT));
+        const framesToRender = [];
+        for (let f = 0; f < totalFrames; f += frameStep) {
+            if (framesToRender.length >= ANIM_FRAME_COUNT) break;
+            framesToRender.push(f);
         }
+
+        const webpFrames = [];
+        for (let i = 0; i < framesToRender.length; i++) {
+            const pngBuf = await this._lottieFrameToPng(lottie, framesToRender[i]);
+            const webpBuf = await sharp(pngBuf).webp({ quality: 80 }).toBuffer();
+            webpFrames.push(webpBuf);
+        }
+
+        // Combine into animated WebP using node-webpmux (proper ANIM/ANMF format)
+        const img = new WebpImage();
+        await img.load(webpFrames[0]);
+        if (!img.hasAnim) await img.convertToAnim();
+
+        const frameData = webpFrames.map(buf => ({
+            buffer: buf,
+            delay: delayMs,
+            blend: true,
+            dispose: false,
+        }));
+
+        const out = await img.save(null, {
+            frames: frameData,
+            width,
+            height,
+            loops: 0, // infinite loop
+        });
+
+        logger.info(`TGS → animated WebP: ${out.length} bytes, ${webpFrames.length} frames, ${fps}fps`);
+        return out;
     }
 
     /** Create MP4 video sticker from TGS using SVG→sharp frame rendering + ffmpeg. */

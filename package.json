@@ -37,6 +37,7 @@
     "link-preview-js": "^3.0.0",
     "mammoth": "^1.12.0",
     "mongodb": "^6.21.0",
+    "node-webpmux": "^3.2.1",
     "pdf-parse": "^1.1.1",
     "pdfkit": "^0.19.1",
     "pino": "^8.19.0",
