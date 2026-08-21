@@ -135,33 +135,217 @@ class TelegramStickerService {
      * Decompress a TGS file (gzipped Lottie JSON) and extract the first frame as PNG buffer.
      */
     async tgsToStaticFrame(tgsBuffer) {
-        // Decompress gzip
+        // Decompress gzip to get Lottie JSON
         const lottieJson = zlib.gunzipSync(tgsBuffer).toString('utf-8');
         const lottie = JSON.parse(lottieJson);
 
-        // Extract first frame dimensions and use canvas to render
         const width = lottie.w || 512;
         const height = lottie.h || 512;
 
-        // Use @napi-rs/canvas for rendering
         const { createCanvas } = await import('@napi-rs/canvas');
         const canvas = createCanvas(width, height);
         const ctx = canvas.getContext('2d');
-
-        // Clear with transparent background
         ctx.clearRect(0, 0, width, height);
 
-        // For now, render a simple placeholder showing it's an animated sticker
-        // A proper Lottie renderer would draw the actual frame
-        ctx.fillStyle = 'rgba(200, 200, 200, 0.3)';
-        ctx.fillRect(0, 0, width, height);
-        ctx.fillStyle = '#666';
-        ctx.font = 'bold 24px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText('🎬', width / 2, height / 2 + 8);
+        // Render the first frame of Lottie layers
+        this._renderLottieFrame(ctx, lottie, 0, width, height);
 
-        // Convert to PNG buffer
         return canvas.toBuffer('image/png');
+    }
+
+    /**
+     * Minimal Lottie frame renderer — handles shapes, fills, strokes, and basic transforms.
+     * Enough to produce a recognizable static frame from most Telegram animated stickers.
+     */
+    _renderLottieFrame(ctx, lottie, frame, w, h) {
+        const layers = lottie.layers || [];
+        const assets = lottie.assets || [];
+        const assetMap = new Map();
+        for (const a of assets) {
+            if (a.id) assetMap.set(a.id, a);
+        }
+
+        // Layers are bottom-to-top; reverse to draw in order
+        const sorted = [...layers].sort((a, b) => (a.zi ?? 0) - (b.zi ?? 0));
+
+        for (const layer of sorted) {
+            if (layer.ty === 0) continue; // precomp — skip for now
+            if (layer.ty === 1) continue; // solid — skip
+            if (layer.ty === 3) continue; // null layer
+
+            // Check layer visibility (ip = in-point, op = out-point)
+            const ip = layer.ip ?? 0;
+            const op = layer.op ?? Infinity;
+            if (frame < ip || frame > op) continue;
+
+            // Get layer opacity
+            const opacity = this._resolveProp(layer.ks?.o, frame) ?? 100;
+            if (opacity <= 0) continue;
+
+            ctx.save();
+            ctx.globalAlpha = opacity / 100;
+
+            // Apply layer transform
+            this._applyTransform(ctx, layer.ks?.tr, frame, w, h);
+
+            if (layer.ty === 4) {
+                // Shape layer
+                this._renderShapeGroup(ctx, layer.shapes, frame, assetMap);
+            } else if (layer.ty === 2) {
+                // Image layer
+                const refId = layer.refId;
+                const asset = assetMap.get(refId);
+                if (asset?.u && asset?.p) {
+                    // Asset has a path — we can't fetch it here, skip
+                }
+            }
+
+            ctx.restore();
+        }
+    }
+
+    /** Apply layer transform (position, scale, rotation) to ctx. */
+    _applyTransform(ctx, tr, frame, w, h) {
+        if (!tr) return;
+
+        const pos = this._resolveProp(tr.p, frame);
+        const anchor = this._resolveProp(tr.a, frame);
+        const scale = this._resolveProp(tr.s, frame);
+        const rotation = this._resolveProp(tr.r, frame) ?? 0;
+
+        // Lottie origin is center; canvas origin is top-left
+        const px = Array.isArray(pos) ? pos[0] : (w / 2);
+        const py = Array.isArray(pos) ? pos[1] : (h / 2);
+        const ax = Array.isArray(anchor) ? anchor[0] : 0;
+        const ay = Array.isArray(anchor) ? anchor[1] : 0;
+        const sx = Array.isArray(scale) ? scale[0] / 100 : 1;
+        const sy = Array.isArray(scale) ? scale[1] / 100 : 1;
+
+        ctx.translate(px, py);
+        ctx.rotate((rotation * Math.PI) / 180);
+        ctx.scale(sx, sy);
+        ctx.translate(-ax, -ay);
+    }
+
+    /** Resolve a Lottie property to its value at a given frame. */
+    _resolveProp(prop, frame) {
+        if (!prop) return undefined;
+        if (prop.k !== undefined && !Array.isArray(prop.k)) return prop.k;
+        if (Array.isArray(prop.k) && prop.k.length <= 4) return prop.k;
+        // Keyframed — find the value at frame
+        if (prop.k?.[0]?.t !== undefined) {
+            return this._interpolateKeyframes(prop.k, frame);
+        }
+        return prop.k;
+    }
+
+    /** Interpolate keyframes to find value at frame. */
+    _interpolateKeyframes(keyframes, frame) {
+        if (!keyframes?.length) return undefined;
+        // Find the keyframe at or before frame
+        let kf = keyframes[0];
+        for (const k of keyframes) {
+            if (k.t <= frame) kf = k;
+            else break;
+        }
+        return kf.s ?? kf.e ?? kf.k;
+    }
+
+    /** Render a shape group (items array). */
+    _renderShapeGroup(ctx, shapes, frame, assetMap) {
+        if (!shapes) return;
+        for (const shape of shapes) {
+            this._renderShape(ctx, shape, frame, assetMap);
+        }
+    }
+
+    /** Render a single shape item. */
+    _renderShape(ctx, shape, frame, assetMap) {
+        if (!shape) return;
+
+        if (shape.ty === 'gr') {
+            // Group — recurse
+            const items = shape.it || [];
+            ctx.save();
+            // Apply group transforms
+            for (const item of items) {
+                if (item.ty === 'tr') {
+                    this._applyTransform(ctx, item, frame, 0, 0);
+                }
+            }
+            // Render shapes first, then modifiers
+            for (const item of items) {
+                if (item.ty !== 'tr') {
+                    this._renderShape(ctx, item, frame, assetMap);
+                }
+            }
+            ctx.restore();
+        } else if (shape.ty === 'sh') {
+            // Path shape
+            const pathData = shape.ks;
+            if (!pathData) return;
+            const vertices = pathData.k?.v || pathData.v || [];
+            const inTangents = pathData.k?.i || pathData.i || [];
+            const outTangents = pathData.k?.o || pathData.o || [];
+            const closed = pathData.k?.c ?? pathData.c ?? false;
+
+            if (!vertices.length) return;
+
+            ctx.beginPath();
+            const first = vertices[0];
+            ctx.moveTo(first[0], first[1]);
+
+            for (let i = 1; i < vertices.length; i++) {
+                const prev = vertices[i - 1];
+                const curr = vertices[i];
+                const cp1 = [prev[0] + (outTangents[i - 1]?.[0] || 0), prev[1] + (outTangents[i - 1]?.[1] || 0)];
+                const cp2 = [curr[0] + (inTangents[i]?.[0] || 0), curr[1] + (inTangents[i]?.[1] || 0)];
+                ctx.bezierCurveTo(cp1[0], cp1[1], cp2[0], cp2[1], curr[0], curr[1]);
+            }
+            if (closed) ctx.closePath();
+        } else if (shape.ty === 'el') {
+            // Ellipse
+            const pos = this._resolveProp(shape.p, frame) ?? [0, 0];
+            const size = this._resolveProp(shape.s, frame) ?? [0, 0];
+            const rx = (Array.isArray(size) ? size[0] : 0) / 2;
+            const ry = (Array.isArray(size) ? size[1] : 0) / 2;
+            const cx = Array.isArray(pos) ? pos[0] : 0;
+            const cy = Array.isArray(pos) ? pos[1] : 0;
+            ctx.beginPath();
+            ctx.ellipse(cx, cy, Math.abs(rx), Math.abs(ry), 0, 0, Math.PI * 2);
+        } else if (shape.ty === 'rc') {
+            // Rectangle
+            const pos = this._resolveProp(shape.p, frame) ?? [0, 0];
+            const size = this._resolveProp(shape.s, frame) ?? [0, 0];
+            const sw = Array.isArray(size) ? size[0] : 100;
+            const sh = Array.isArray(size) ? size[1] : 100;
+            const cx = Array.isArray(pos) ? pos[0] : 0;
+            const cy = Array.isArray(pos) ? pos[1] : 0;
+            ctx.beginPath();
+            ctx.rect(cx - sw / 2, cy - sh / 2, sw, sh);
+        } else if (shape.ty === 'fl') {
+            // Fill
+            const color = shape.c?.k || [0, 0, 0, 1];
+            const alpha = shape.o?.k ?? 100;
+            ctx.fillStyle = this._rgba(color, alpha / 100);
+            ctx.fill();
+        } else if (shape.ty === 'st') {
+            // Stroke
+            const color = shape.c?.k || [0, 0, 0, 1];
+            const alpha = shape.o?.k ?? 100;
+            const width = shape.w?.k ?? 1;
+            ctx.strokeStyle = this._rgba(color, alpha / 100);
+            ctx.lineWidth = width;
+            ctx.stroke();
+        }
+    }
+
+    /** Convert Lottie RGBA [0-1] array to CSS string. */
+    _rgba(color, alpha = 1) {
+        const r = Math.round((color[0] || 0) * 255);
+        const g = Math.round((color[1] || 0) * 255);
+        const b = Math.round((color[2] || 0) * 255);
+        return `rgba(${r},${g},${b},${alpha})`;
     }
 
     /**
