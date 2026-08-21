@@ -191,6 +191,62 @@ class TelegramStickerService {
         }
     }
 
+    /** Create MP4 video sticker from TGS using multi-frame Lottie rendering + ffmpeg. */
+    async tgsToMp4Video(tgsBuffer) {
+        const lottieJson = zlib.gzipSync(tgsBuffer).toString('utf-8');
+        const lottie = JSON.parse(lottieJson);
+
+        const width = lottie.w || 512;
+        const height = lottie.h || 512;
+        const totalFrames = lottie.op || lottie.fr || 30;
+        const frameRate = lottie.fr || 30;
+
+        const { createCanvas } = await import('@napi-rs/canvas');
+
+        const frameDir = path.join(this.tempDir, `frames_${crypto.randomBytes(4).toString('hex')}`);
+        fs.mkdirSync(frameDir, { recursive: true });
+
+        try {
+            const frameStep = Math.max(1, Math.floor(totalFrames / ANIM_FRAME_COUNT));
+            const framesToRender = [];
+            for (let f = 0; f < totalFrames; f += frameStep) {
+                if (framesToRender.length >= ANIM_FRAME_COUNT) break;
+                framesToRender.push(f);
+            }
+
+            for (let i = 0; i < framesToRender.length; i++) {
+                const frame = framesToRender[i];
+                const canvas = createCanvas(width, height);
+                const ctx = canvas.getContext('2d');
+                ctx.clearRect(0, 0, width, height);
+                this._renderLottieFrame(ctx, lottie, frame, width, height);
+                const framePath = path.join(frameDir, `frame_${String(i + 1).padStart(4, '0')}.png`);
+                fs.writeFileSync(framePath, canvas.toBuffer('image/png'));
+            }
+
+            const outputPath = path.join(this.tempDir, `anim_${crypto.randomBytes(4).toString('hex')}.mp4`);
+            const fps = Math.min(ANIM_FPS, frameRate);
+
+            execSync(
+                `ffmpeg -y -framerate ${fps} -i "${path.join(frameDir, 'frame_%04d.png')}" `
+                + `-vf "scale=${width}:${height},format=yuv420p" `
+                + `-c:v libx264 -preset fast -crf 26 -pix_fmt yuv420p `
+                + `-an -movflags +faststart -t 6 "${outputPath}" 2>&1`,
+                { timeout: 30000, stdio: 'pipe' }
+            );
+
+            const mp4Buffer = fs.readFileSync(outputPath);
+            fs.unlinkSync(outputPath);
+            return mp4Buffer;
+        } finally {
+            try {
+                const files = fs.readdirSync(frameDir);
+                for (const f of files) fs.unlinkSync(path.join(frameDir, f));
+                fs.rmdirSync(frameDir);
+            } catch {}
+        }
+    }
+
     /** Fallback: extract just the first frame as static WebP. */
     async tgsToStaticFrame(tgsBuffer) {
         const lottieJson = zlib.gunzipSync(tgsBuffer).toString('utf-8');
@@ -528,32 +584,42 @@ class TelegramStickerService {
             return { buffer, type: 'video' };
         }
 
-        // Animated TGS — try animated WebP first
+        // Animated TGS — convert to MP4 video sticker (most reliable WhatsApp support)
         if (format === 'tgs') {
+            // Try MP4 video sticker first
+            try {
+                const mp4Buffer = await this.tgsToMp4Video(buffer);
+                if (mp4Buffer && mp4Buffer.length > 0 && mp4Buffer.length <= VIDEO_STICKER_MAX) {
+                    logger.info(`TGS → MP4 video sticker: ${mp4Buffer.length} bytes`);
+                    return { buffer: mp4Buffer, type: 'video' };
+                }
+                logger.info(`TGS → MP4 too large (${mp4Buffer?.length || 0} bytes), trying animated WebP`);
+            } catch (err) {
+                logger.warn(`TGS → MP4 failed: ${err.message}, trying animated WebP`);
+            }
+
+            // Fallback: try animated WebP with isAnimated flag
             try {
                 const animWebp = await this.tgsToAnimatedWebp(buffer);
-                if (animWebp.length <= ANIM_WEBP_MAX) {
-                    return { buffer: animWebp, type: 'sticker' };
+                if (animWebp && animWebp.length > 0 && animWebp.length <= ANIM_WEBP_MAX) {
+                    logger.info(`TGS → animated WebP: ${animWebp.length} bytes`);
+                    return { buffer: animWebp, type: 'sticker', isAnimated: true };
                 }
-                // Too big — try smaller quality
-                const tmpPng = await this.tgsToStaticFrame(buffer);
-                const fallback = await sharp(tmpPng)
+            } catch (err) {
+                logger.warn(`TGS → animated WebP failed: ${err.message}`);
+            }
+
+            // Final fallback: static first frame
+            try {
+                logger.info('TGS → static frame fallback');
+                const pngBuffer = await this.tgsToStaticFrame(buffer);
+                const fallback = await sharp(pngBuffer)
                     .resize(512, 512, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
-                    .webp({ quality: 50, alphaQuality: 80 })
+                    .webp({ quality: 80, alphaQuality: 100 })
                     .toBuffer();
                 return { buffer: fallback, type: 'sticker' };
-            } catch (err) {
-                logger.warn(`TGS animated conversion failed, falling back to static: ${err.message}`);
-                try {
-                    const pngBuffer = await this.tgsToStaticFrame(buffer);
-                    const fallback = await sharp(pngBuffer)
-                        .resize(512, 512, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
-                        .webp({ quality: 80, alphaQuality: 100 })
-                        .toBuffer();
-                    return { buffer: fallback, type: 'sticker' };
-                } catch (e2) {
-                    throw new Error(`Animated sticker conversion failed: ${e2.message}`);
-                }
+            } catch (e2) {
+                throw new Error(`Animated sticker conversion failed: ${e2.message}`);
             }
         }
 
@@ -637,12 +703,13 @@ class TelegramStickerService {
                 const dl = result.value;
 
                 try {
-                    const { buffer: waBuffer, type } = await this.convertToWhatsAppSticker(dl.buffer, dl.emoji, dl.format);
+                    const { buffer: waBuffer, type, isAnimated } = await this.convertToWhatsAppSticker(dl.buffer, dl.emoji, dl.format);
                     results.push({
                         buffer: waBuffer,
                         emoji: dl.emoji,
                         index: dl.index,
                         type, // 'sticker' or 'video'
+                        isAnimated: isAnimated || false,
                     });
                     convertedCount++;
                     report(convertedCount, failedCount, 'convert');

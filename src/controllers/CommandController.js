@@ -254,9 +254,11 @@ async function handleTgStickers(sock, chatId, args, quotedMessage) {
                     }, { quoted: quotedMessage });
                     videoSent++;
                 } else {
-                    await sock.sendMessage(chatId, {
-                        sticker: sticker.buffer,
-                    }, { quoted: quotedMessage });
+                    const stickerMsg = { sticker: sticker.buffer };
+                    if (sticker.isAnimated) {
+                        stickerMsg.isAnimated = true;
+                    }
+                    await sock.sendMessage(chatId, stickerMsg, { quoted: quotedMessage });
                 }
                 sent++;
             } catch (err) {
