@@ -127,275 +127,228 @@ class TelegramStickerService {
         return { tempPath, buffer, size: buffer.length, isAnimated, isVideo, emoji, format, index };
     }
 
-    /** Create animated WebP from TGS using multi-frame Lottie rendering + ffmpeg. */
-    async tgsToAnimatedWebp(tgsBuffer) {
-        const lottieJson = zlib.gunzipSync(tgsBuffer).toString('utf-8');
-        const lottie = JSON.parse(lottieJson);
-
-        const width = lottie.w || 512;
-        const height = lottie.h || 512;
-        const totalFrames = lottie.op || lottie.fr || 30;
-        const frameRate = lottie.fr || 30;
-
-        const { createCanvas } = await import('@napi-rs/canvas');
-
-        // Create temp dir for frames
-        const frameDir = path.join(this.tempDir, `frames_${crypto.randomBytes(4).toString('hex')}`);
-        fs.mkdirSync(frameDir, { recursive: true });
-
-        try {
-            // Calculate which frames to render (spread evenly across the animation)
-            const frameStep = Math.max(1, Math.floor(totalFrames / ANIM_FRAME_COUNT));
-            const framesToRender = [];
-            for (let f = 0; f < totalFrames; f += frameStep) {
-                if (framesToRender.length >= ANIM_FRAME_COUNT) break;
-                framesToRender.push(f);
-            }
-
-            // Render each frame
-            for (let i = 0; i < framesToRender.length; i++) {
-                const frame = framesToRender[i];
-                const canvas = createCanvas(width, height);
-                const ctx = canvas.getContext('2d');
-                ctx.clearRect(0, 0, width, height);
-
-                this._renderLottieFrame(ctx, lottie, frame, width, height);
-
-                const framePath = path.join(frameDir, `frame_${String(i + 1).padStart(4, '0')}.png`);
-                fs.writeFileSync(framePath, canvas.toBuffer('image/png'));
-            }
-
-            // Use ffmpeg to create animated WebP
-            const outputPath = path.join(this.tempDir, `anim_${crypto.randomBytes(4).toString('hex')}.webp`);
-            const fps = Math.min(ANIM_FPS, frameRate);
-
-            execSync(
-                `ffmpeg -y -framerate ${fps} -i "${path.join(frameDir, 'frame_%04d.png')}" ` +
-                `-vf "scale=${width}:${height}" ` +
-                `-vcodec libwebp -lossless 0 -q:v 60 -loop 0 -preset drawing ` +
-                `-an -vsync 0 "${outputPath}" 2>&1`,
-                { timeout: 30000, stdio: 'pipe' }
-            );
-
-            const webpBuffer = fs.readFileSync(outputPath);
-            fs.unlinkSync(outputPath);
-
-            return webpBuffer;
-        } finally {
-            // Cleanup frame directory
-            try {
-                const files = fs.readdirSync(frameDir);
-                for (const f of files) fs.unlinkSync(path.join(frameDir, f));
-                fs.rmdirSync(frameDir);
-            } catch {}
-        }
-    }
-
-    /** Create MP4 video sticker from TGS using multi-frame Lottie rendering + ffmpeg. */
-    async tgsToMp4Video(tgsBuffer) {
-        const lottieJson = zlib.gzipSync(tgsBuffer).toString('utf-8');
-        const lottie = JSON.parse(lottieJson);
-
-        const width = lottie.w || 512;
-        const height = lottie.h || 512;
-        const totalFrames = lottie.op || lottie.fr || 30;
-        const frameRate = lottie.fr || 30;
-
-        const { createCanvas } = await import('@napi-rs/canvas');
-
-        const frameDir = path.join(this.tempDir, `frames_${crypto.randomBytes(4).toString('hex')}`);
-        fs.mkdirSync(frameDir, { recursive: true });
-
-        try {
-            const frameStep = Math.max(1, Math.floor(totalFrames / ANIM_FRAME_COUNT));
-            const framesToRender = [];
-            for (let f = 0; f < totalFrames; f += frameStep) {
-                if (framesToRender.length >= ANIM_FRAME_COUNT) break;
-                framesToRender.push(f);
-            }
-
-            for (let i = 0; i < framesToRender.length; i++) {
-                const frame = framesToRender[i];
-                const canvas = createCanvas(width, height);
-                const ctx = canvas.getContext('2d');
-                ctx.clearRect(0, 0, width, height);
-                this._renderLottieFrame(ctx, lottie, frame, width, height);
-                const framePath = path.join(frameDir, `frame_${String(i + 1).padStart(4, '0')}.png`);
-                fs.writeFileSync(framePath, canvas.toBuffer('image/png'));
-            }
-
-            const outputPath = path.join(this.tempDir, `anim_${crypto.randomBytes(4).toString('hex')}.mp4`);
-            const fps = Math.min(ANIM_FPS, frameRate);
-
-            execSync(
-                `ffmpeg -y -framerate ${fps} -i "${path.join(frameDir, 'frame_%04d.png')}" `
-                + `-vf "scale=${width}:${height},format=yuv420p" `
-                + `-c:v libx264 -preset fast -crf 26 -pix_fmt yuv420p `
-                + `-an -movflags +faststart -t 6 "${outputPath}" 2>&1`,
-                { timeout: 30000, stdio: 'pipe' }
-            );
-
-            const mp4Buffer = fs.readFileSync(outputPath);
-            fs.unlinkSync(outputPath);
-            return mp4Buffer;
-        } finally {
-            try {
-                const files = fs.readdirSync(frameDir);
-                for (const f of files) fs.unlinkSync(path.join(frameDir, f));
-                fs.rmdirSync(frameDir);
-            } catch {}
-        }
-    }
-
-    /** Fallback: extract just the first frame as static WebP. */
-    async tgsToStaticFrame(tgsBuffer) {
-        const lottieJson = zlib.gunzipSync(tgsBuffer).toString('utf-8');
-        const lottie = JSON.parse(lottieJson);
-
-        const width = lottie.w || 512;
-        const height = lottie.h || 512;
-
-        const { createCanvas } = await import('@napi-rs/canvas');
-        const canvas = createCanvas(width, height);
-        const ctx = canvas.getContext('2d');
-        ctx.clearRect(0, 0, width, height);
-
-        this._renderLottieFrame(ctx, lottie, 0, width, height);
-
-        return canvas.toBuffer('image/png');
-    }
-
-    /* ──────────────────────────────────────────────
-     *  Minimal Lottie frame renderer
+        /* ──────────────────────────────────────────────
+     *  SVG-based Lottie renderer (via sharp/librsvg)
      * ────────────────────────────────────────────── */
 
-    _renderLottieFrame(ctx, lottie, frame, w, h) {
+    /** Render a Lottie JSON to PNG buffer for a given frame using SVG→sharp. */
+    async _lottieFrameToPng(lottie, frame) {
+        const sharp = (await import('sharp')).default;
+        const w = lottie.w || 512;
+        const h = lottie.h || 512;
+        const svg = this._lottieToSvg(lottie, frame, w, h);
+        return sharp(Buffer.from(svg)).png().toBuffer();
+    }
+
+    /** Convert Lottie JSON to SVG string for a single frame. */
+    _lottieToSvg(lottie, frame, w, h) {
         const layers = lottie.layers || [];
         const assets = lottie.assets || [];
         const assetMap = new Map();
-        for (const a of assets) {
-            if (a.id) assetMap.set(a.id, a);
-        }
-
+        for (const a of assets) { if (a.id) assetMap.set(a.id, a); }
         const sorted = [...layers].sort((a, b) => (a.zi ?? 0) - (b.zi ?? 0));
-
+        let gradDefs = '';
+        let inner = '';
         for (const layer of sorted) {
-            this._renderLayer(ctx, layer, frame, w, h, assetMap, lottie);
+            const result = this._svgLayer(layer, frame, w, h, assetMap);
+            gradDefs += result.defs;
+            inner += result.svg;
         }
+        return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs>${gradDefs}</defs>${inner}</svg>`;
     }
 
-    _renderLayer(ctx, layer, frame, w, h, assetMap, lottie) {
-        if (!layer) return;
-
-        // Skip invisible layers
+    _svgLayer(layer, frame, w, h, assetMap) {
+        const result = { defs: '', svg: '' };
+        if (!layer) return result;
         const ip = layer.ip ?? 0;
         const op = layer.op ?? Infinity;
-        if (frame < ip || frame > op) return;
-
+        if (frame < ip || frame > op) return result;
         const opacity = this._resolveProp(layer.ks?.o, frame) ?? 100;
-        if (opacity <= 0) return;
+        if (opacity <= 0) return result;
 
-        // Handle precomp layers (type 0) — recurse into nested composition
+        // Precomp
         if (layer.ty === 0) {
-            const refId = layer.refId;
-            const compAsset = assetMap.get(refId);
-            if (compAsset?.layers) {
-                ctx.save();
-                this._applyTransform(ctx, layer.ks?.tr, frame, w, h);
-                ctx.globalAlpha = opacity / 100;
-                for (const subLayer of compAsset.layers) {
-                    this._renderLayer(ctx, subLayer, frame, w, h, assetMap, lottie);
-                }
-                ctx.restore();
+            const comp = assetMap.get(layer.refId);
+            if (!comp?.layers) return result;
+            let inner = '';
+            for (const sub of comp.layers) {
+                const r = this._svgLayer(sub, frame, w, h, assetMap);
+                result.defs += r.defs;
+                inner += r.svg;
             }
-            return;
+            const tr = this._svgTransform(layer.ks?.tr, frame, w, h);
+            const opA = opacity < 100 ? ` opacity="${(opacity / 100).toFixed(3)}"` : '';
+            result.svg = `<g${tr}${opA}>${inner}</g>`;
+            return result;
         }
 
-        if (layer.ty === 1) return; // solid — skip
-        if (layer.ty === 3) return; // null layer
-        if (layer.ty === 2) return; // image layer — can't fetch in Node
-
-        ctx.save();
-        ctx.globalAlpha = opacity / 100;
-
-        // Apply layer transform
-        this._applyTransform(ctx, layer.ks?.tr, frame, w, h);
-
-        // Handle masks (mm = mask mode)
-        if (layer.masks && layer.masks.length > 0) {
-            this._applyMask(ctx, layer.masks, frame, assetMap, w, h);
-        }
+        if (layer.ty === 1 || layer.ty === 2 || layer.ty === 3) return result; // solid/image/null
 
         if (layer.ty === 4) {
-            // Shape layer
-            this._renderShapeGroup(ctx, layer.shapes, frame, assetMap);
-        }
-
-        ctx.restore();
-    }
-
-    _applyMask(ctx, masks, frame, assetMap, w, h) {
-        // Basic mask support — draw mask path as clip
-        for (const mask of masks) {
-            const maskRef = mask.refId ? assetMap.get(mask.refId) : null;
-            if (maskRef?.shape) {
-                ctx.save();
-                ctx.beginPath();
-                this._renderMaskPath(ctx, maskRef.shape, frame);
-                ctx.clip();
-                ctx.restore();
+            const tr = this._svgTransform(layer.ks?.tr, frame, w, h);
+            const opA = opacity < 100 ? ` opacity="${(opacity / 100).toFixed(3)}"` : '';
+            let shapes = '';
+            for (const s of (layer.shapes || [])) {
+                const r = this._svgShape(s, frame, assetMap, w, h);
+                result.defs += r.defs;
+                shapes += r.svg;
             }
+            result.svg = `<g${tr}${opA}>${shapes}</g>`;
+            return result;
         }
+        return result;
     }
 
-    _renderMaskPath(ctx, shapes, frame) {
-        if (!shapes) return;
-        for (const shape of shapes) {
-            if (shape.ty === 'sh') {
-                const pathData = shape.ks;
-                const vertices = pathData?.k?.v || pathData?.v || [];
-                const closed = pathData?.k?.c ?? pathData?.c ?? false;
-                if (vertices.length > 0) {
-                    ctx.moveTo(vertices[0][0], vertices[0][1]);
-                    for (let i = 1; i < vertices.length; i++) {
-                        ctx.lineTo(vertices[i][0], vertices[i][1]);
-                    }
-                    if (closed) ctx.closePath();
+    _svgShape(shape, frame, assetMap, w, h) {
+        const result = { defs: '', svg: '' };
+        if (!shape) return result;
+        if (shape.ty === 'gr') {
+            const items = shape.it || [];
+            let trStr = '';
+            const pathDs = [];
+            let fillStr = '', strokeStr = '';
+            for (const item of items) {
+                if (item.ty === 'tr') {
+                    trStr = this._svgTransform(item, frame, 0, 0);
+                } else if (item.ty === 'sh' || item.ty === 'el' || item.ty === 'rc') {
+                    pathDs.push(this._svgPathD(item, frame));
+                } else if (item.ty === 'fl') {
+                    fillStr += this._svgFill(item, frame, w, h);
+                } else if (item.ty === 'st') {
+                    strokeStr += this._svgStroke(item, frame, w, h);
+                } else if (item.ty === 'gf') {
+                    const g = this._svgGradFill(item, frame, w, h);
+                    result.defs += g.defs;
+                    fillStr += g.attr;
                 }
-            } else if (shape.ty === 'gr') {
-                this._renderMaskPath(ctx, shape.it || [], frame);
             }
+            const d = pathDs.join(' ');
+            if (!d) return result;
+            result.svg = `<g${trStr}><path d="${d}"${fillStr}${strokeStr}/></g>`;
+            return result;
         }
+        return result;
     }
 
-    _applyTransform(ctx, tr, frame, w, h) {
-        if (!tr) return;
+    _svgPathD(shape, frame) {
+        if (shape.ty === 'sh') {
+            const pd = shape.ks;
+            const verts = pd?.k?.v || pd?.v || [];
+            const inn = pd?.k?.i || pd?.i || [];
+            const out = pd?.k?.o || pd?.o || [];
+            const closed = pd?.k?.c ?? pd?.c ?? false;
+            if (!verts.length) return '';
+            let d = `M${verts[0][0]} ${verts[0][1]}`;
+            for (let i = 1; i < verts.length; i++) {
+                const c1x = verts[i-1][0] + (out[i-1]?.[0] || 0);
+                const c1y = verts[i-1][1] + (out[i-1]?.[1] || 0);
+                const c2x = verts[i][0] + (inn[i]?.[0] || 0);
+                const c2y = verts[i][1] + (inn[i]?.[1] || 0);
+                d += ` C${c1x} ${c1y} ${c2x} ${c2y} ${verts[i][0]} ${verts[i][1]}`;
+            }
+            if (closed) d += ' Z';
+            return d;
+        }
+        if (shape.ty === 'el') {
+            const pos = this._resolveProp(shape.p, frame) ?? [0, 0];
+            const size = this._resolveProp(shape.s, frame) ?? [0, 0];
+            const rx = Math.abs((Array.isArray(size) ? size[0] : 0) / 2);
+            const ry = Math.abs((Array.isArray(size) ? size[1] : 0) / 2);
+            const cx = Array.isArray(pos) ? pos[0] : 0;
+            const cy = Array.isArray(pos) ? pos[1] : 0;
+            // Approximate ellipse with 4 bezier curves (kappa constant)
+            const k = 0.5522847498;
+            const kx = rx * k, ky = ry * k;
+            return `M${cx} ${cy - ry} C${cx + kx} ${cy - ry} ${cx + rx} ${cy - ky} ${cx + rx} ${cy} C${cx + rx} ${cy + ky} ${cx + kx} ${cy + ry} ${cx} ${cy + ry} C${cx - kx} ${cy + ry} ${cx - rx} ${cy + ky} ${cx - rx} ${cy} C${cx - rx} ${cy - ky} ${cx - kx} ${cy - ry} ${cx} ${cy - ry} Z`;
+        }
+        if (shape.ty === 'rc') {
+            const pos = this._resolveProp(shape.p, frame) ?? [0, 0];
+            const size = this._resolveProp(shape.s, frame) ?? [100, 100];
+            const sw = Array.isArray(size) ? size[0] : 100;
+            const sh = Array.isArray(size) ? size[1] : 100;
+            const r = Math.min(this._resolveProp(shape.r, frame) ?? 0, sw / 2, sh / 2);
+            const cx = (Array.isArray(pos) ? pos[0] : 0) - sw / 2;
+            const cy = (Array.isArray(pos) ? pos[1] : 0) - sh / 2;
+            if (r > 0) return `M${cx + r} ${cy} L${cx + sw - r} ${cy} Q${cx + sw} ${cy} ${cx + sw} ${cy + r} L${cx + sw} ${cy + sh - r} Q${cx + sw} ${cy + sh} ${cx + sw - r} ${cy + sh} L${cx + r} ${cy + sh} Q${cx} ${cy + sh} ${cx} ${cy + sh - r} L${cx} ${cy + r} Q${cx} ${cy} ${cx + r} ${cy} Z`;
+            return `M${cx} ${cy} L${cx + sw} ${cy} L${cx + sw} ${cy + sh} L${cx} ${cy + sh} Z`;
+        }
+        return '';
+    }
 
+    _svgFill(shape, frame) {
+        const c = shape.c?.k || [0,0,0,1];
+        const a = this._resolveProp(shape.o, frame) ?? 100;
+        const alpha = a / 100;
+        const color = this._svgColor(c);
+        if (alpha < 1) return ` fill="${color}" fill-opacity="${alpha.toFixed(3)}"`;
+        return ` fill="${color}"`;
+    }
+
+    _svgStroke(shape, frame) {
+        const c = shape.c?.k || [0,0,0,1];
+        const a = this._resolveProp(shape.o, frame) ?? 100;
+        const sw = this._resolveProp(shape.w, frame) ?? 1;
+        const alpha = a / 100;
+        const color = this._svgColor(c);
+        let attrs = ` stroke="${color}" stroke-width="${sw}" fill="none"`;
+        if (alpha < 1) attrs += ` stroke-opacity="${alpha.toFixed(3)}"`;
+        return attrs;
+    }
+
+    _svgGradFill(shape, frame) {
+        const stops = shape.g?.k || [];
+        const p = shape.g?.p || 2;
+        const gradId = `g${Math.random().toString(36).slice(2, 8)}`;
+        if (p >= 2 && stops.length >= p * 4) {
+            const sx = shape.s?.k ?? 0;
+            const sy = shape.e?.k ?? 100;
+            let defs = `<linearGradient id="${gradId}" x1="${sx}" y1="0" x2="${sy}" y2="0" gradientUnits="userSpaceOnUse">`;
+            for (let i = 0; i < p; i++) {
+                const off = (i / (p - 1)).toFixed(3);
+                const r = Math.round((stops[i*4] || 0) * 255);
+                const g = Math.round((stops[i*4+1] || 0) * 255);
+                const b = Math.round((stops[i*4+2] || 0) * 255);
+                const a = stops[i*4+3] ?? 1;
+                defs += `<stop offset="${off}" stop-color="rgb(${r},${g},${b})" stop-opacity="${a.toFixed(3)}"/>`;
+            }
+            defs += '</linearGradient>';
+            return { defs, attr: ` fill="url(#${gradId})"` };
+        }
+        return { defs: '', attr: ' fill="black"' };
+    }
+
+    _svgColor(c) {
+        if (!c) return '#000';
+        const r = Math.round((c[0] || 0) * 255);
+        const g = Math.round((c[1] || 0) * 255);
+        const b = Math.round((c[2] || 0) * 255);
+        return `rgb(${r},${g},${b})`;
+    }
+
+    _svgTransform(tr, frame, w, h) {
+        if (!tr) return '';
         const pos = this._resolveProp(tr.p, frame);
         const anchor = this._resolveProp(tr.a, frame);
         const scale = this._resolveProp(tr.s, frame);
         const rotation = this._resolveProp(tr.r, frame) ?? 0;
-
         const px = Array.isArray(pos) ? pos[0] : w / 2;
         const py = Array.isArray(pos) ? pos[1] : h / 2;
         const ax = Array.isArray(anchor) ? anchor[0] : 0;
         const ay = Array.isArray(anchor) ? anchor[1] : 0;
-        let sx = Array.isArray(scale) ? scale[0] / 100 : 1;
-        let sy = Array.isArray(scale) ? scale[1] / 100 : 1;
-        // Lottie scale is percentage-based; handle single-value scale
-        if (!Array.isArray(scale) && typeof scale === 'number') sx = sy = scale / 100;
-
-        ctx.translate(px, py);
-        ctx.rotate((rotation * Math.PI) / 180);
-        ctx.scale(sx, sy);
-        ctx.translate(-ax, -ay);
+        let sx = 1, sy = 1;
+        if (Array.isArray(scale)) { sx = scale[0] / 100; sy = scale[1] / 100; }
+        else if (typeof scale === 'number') { sx = sy = scale / 100; }
+        const parts = [`translate(${px},${py})`];
+        if (rotation) parts.push(`rotate(${rotation})`);
+        if (sx !== 1 || sy !== 1) parts.push(`scale(${sx.toFixed(4)},${sy.toFixed(4)})`);
+        if (ax || ay) parts.push(`translate(${-ax},${-ay})`);
+        return ` transform="${parts.join(' ')}"`;
     }
 
     _resolveProp(prop, frame) {
         if (!prop) return undefined;
         if (prop.k !== undefined && !Array.isArray(prop.k)) return prop.k;
         if (Array.isArray(prop.k) && prop.k.length <= 4 && typeof prop.k[0] !== 'object') return prop.k;
-        // Keyframed
         if (Array.isArray(prop.k) && prop.k.length > 0 && prop.k[0]?.t !== undefined) {
             return this._interpolateKeyframes(prop.k, frame);
         }
@@ -404,243 +357,134 @@ class TelegramStickerService {
 
     _interpolateKeyframes(keyframes, frame) {
         if (!keyframes?.length) return undefined;
-
-        let prev = keyframes[0];
-        let next = keyframes[keyframes.length - 1];
-
+        let prev = keyframes[0], next = keyframes[keyframes.length - 1];
         for (let i = 0; i < keyframes.length; i++) {
             if (keyframes[i].t <= frame) prev = keyframes[i];
-            if (keyframes[i].t > frame && next === keyframes[keyframes.length - 1]) {
-                next = keyframes[i];
-                break;
-            }
+            if (keyframes[i].t > frame && next === keyframes[keyframes.length - 1]) { next = keyframes[i]; break; }
         }
-
         if (prev.t === next.t || next.t > frame) return prev.s ?? prev.e ?? prev.k;
-
         const rawT = (frame - prev.t) / (next.t - prev.t);
-        // Apply bezier easing if present (i = in-tangent, o = out-tangent)
         let t = rawT;
-        if (prev.o && prev.i) {
-            t = this._bezierInterpolate(rawT, prev.o, prev.i);
-        } else if (prev.o) {
-            t = this._bezierInterpolate(rawT, prev.o, [1 - prev.o[0], 1 - prev.o[1]]);
-        } else if (prev.i) {
-            t = this._bezierInterpolate(rawT, [1 - prev.i[0], 1 - prev.i[1]], prev.i);
-        }
-
+        if (prev.o && prev.i) t = this._bezierInterpolate(rawT, prev.o, prev.i);
+        else if (prev.o) t = this._bezierInterpolate(rawT, prev.o, [1 - prev.o[0], 1 - prev.o[1]]);
+        else if (prev.i) t = this._bezierInterpolate(rawT, [1 - prev.i[0], 1 - prev.i[1]], prev.i);
         const from = prev.s ?? prev.e ?? prev.k;
         const to = next.s ?? next.e ?? next.k;
-
-        if (Array.isArray(from) && Array.isArray(to)) {
-            return from.map((v, i) => v + ((to[i] ?? v) - v) * t);
-        }
-        if (typeof from === 'number' && typeof to === 'number') {
-            return from + (to - from) * t;
-        }
+        if (Array.isArray(from) && Array.isArray(to)) return from.map((v, i) => v + ((to[i] ?? v) - v) * t);
+        if (typeof from === 'number' && typeof to === 'number') return from + (to - from) * t;
         return from;
     }
 
-    /** Bezier easing — Newton-Raphson solve for cubic bezier at time t. */
-    _bezierInterpolate(t, outTangent, inTangent) {
-        // outTangent = [x1, y1] (from current keyframe)
-        // inTangent = [x2, y2] (to next keyframe)
-        const cx = 3 * (outTangent[0] || 0);
-        const bx = 3 * ((inTangent?.[0] ?? 1) - outTangent[0]) - cx;
+    _bezierInterpolate(t, outT, inT) {
+        const cx = 3 * (outT[0] || 0);
+        const bx = 3 * ((inT?.[0] ?? 1) - outT[0]) - cx;
         const ax = 1 - cx - bx;
-        const cy = 3 * (outTangent[1] || 0);
-        const by = 3 * ((inTangent?.[1] ?? 1) - outTangent[1]) - cy;
+        const cy = 3 * (outT[1] || 0);
+        const by = 3 * ((inT?.[1] ?? 1) - outT[1]) - cy;
         const ay = 1 - cy - by;
-
-        // Solve for x given t using Newton-Raphson
         let x = t;
         for (let i = 0; i < 8; i++) {
-            const currentX = ((ax * x + bx) * x + cx) * x - t;
-            if (Math.abs(currentX) < 1e-6) break;
+            const cur = ((ax * x + bx) * x + cx) * x - t;
+            if (Math.abs(cur) < 1e-6) break;
             const dx = (3 * ax * x + 2 * bx) * x + cx;
             if (Math.abs(dx) < 1e-6) break;
-            x -= currentX / dx;
+            x -= cur / dx;
         }
         x = Math.max(0, Math.min(1, x));
-
-        // Evaluate y at solved x
         return ((ay * x + by) * x + cy) * x;
     }
 
-    _renderShapeGroup(ctx, shapes, frame, assetMap) {
-        if (!shapes) return;
-        for (const shape of shapes) {
-            this._renderShape(ctx, shape, frame, assetMap);
+    /* ──────────────────────────────────────────────
+     *  TGS conversion methods (SVG-based)
+     * ────────────────────────────────────────────── */
+
+    /** Create animated WebP from TGS using SVG→sharp frame rendering + ffmpeg. */
+    async tgsToAnimatedWebp(tgsBuffer) {
+        const lottieJson = zlib.gunzipSync(tgsBuffer).toString('utf-8');
+        const lottie = JSON.parse(lottieJson);
+        const width = lottie.w || 512;
+        const height = lottie.h || 512;
+        const totalFrames = lottie.op || lottie.fr || 30;
+        const frameRate = lottie.fr || 30;
+        const frameDir = path.join(this.tempDir, `frames_${crypto.randomBytes(4).toString('hex')}`);
+        fs.mkdirSync(frameDir, { recursive: true });
+        try {
+            const frameStep = Math.max(1, Math.floor(totalFrames / ANIM_FRAME_COUNT));
+            const framesToRender = [];
+            for (let f = 0; f < totalFrames; f += frameStep) {
+                if (framesToRender.length >= ANIM_FRAME_COUNT) break;
+                framesToRender.push(f);
+            }
+            for (let i = 0; i < framesToRender.length; i++) {
+                const pngBuf = await this._lottieFrameToPng(lottie, framesToRender[i]);
+                fs.writeFileSync(path.join(frameDir, `frame_${String(i + 1).padStart(4, '0')}.png`), pngBuf);
+            }
+            const outputPath = path.join(this.tempDir, `anim_${crypto.randomBytes(4).toString('hex')}.webp`);
+            const fps = Math.min(ANIM_FPS, frameRate);
+            execSync(
+                `ffmpeg -y -framerate ${fps} -i "${path.join(frameDir, 'frame_%04d.png')}" `
+                + `-vf "scale=${width}:${height}" `
+                + `-vcodec libwebp -lossless 0 -q:v 60 -loop 0 -preset drawing `
+                + `-an -vsync 0 "${outputPath}" 2>&1`,
+                { timeout: 30000, stdio: 'pipe' }
+            );
+            const webpBuffer = fs.readFileSync(outputPath);
+            fs.unlinkSync(outputPath);
+            return webpBuffer;
+        } finally {
+            try { for (const f of fs.readdirSync(frameDir)) fs.unlinkSync(path.join(frameDir, f)); fs.rmdirSync(frameDir); } catch {}
         }
     }
 
-    _renderShape(ctx, shape, frame, assetMap) {
-        if (!shape) return;
-
-        if (shape.ty === 'gr') {
-            const items = shape.it || [];
-            ctx.save();
-            // Apply group transform first
-            for (const item of items) {
-                if (item.ty === 'tr') this._applyTransform(ctx, item, frame, 0, 0);
+    /** Create MP4 video sticker from TGS using SVG→sharp frame rendering + ffmpeg. */
+    async tgsToMp4Video(tgsBuffer) {
+        const lottieJson = zlib.gunzipSync(tgsBuffer).toString('utf-8');
+        const lottie = JSON.parse(lottieJson);
+        const width = lottie.w || 512;
+        const height = lottie.h || 512;
+        const totalFrames = lottie.op || lottie.fr || 30;
+        const frameRate = lottie.fr || 30;
+        const frameDir = path.join(this.tempDir, `frames_${crypto.randomBytes(4).toString('hex')}`);
+        fs.mkdirSync(frameDir, { recursive: true });
+        try {
+            const frameStep = Math.max(1, Math.floor(totalFrames / ANIM_FRAME_COUNT));
+            const framesToRender = [];
+            for (let f = 0; f < totalFrames; f += frameStep) {
+                if (framesToRender.length >= ANIM_FRAME_COUNT) break;
+                framesToRender.push(f);
             }
-            // Build composite path from all path items FIRST
-            const pathItems = items.filter(it => it.ty === 'sh' || it.ty === 'el' || it.ty === 'rc');
-            const styleItems = items.filter(it => it.ty === 'fl' || it.ty === 'st' || it.ty === 'gf');
-            // Draw all paths into current path
-            for (const pi of pathItems) this._drawPath(ctx, pi, frame);
-            // Then apply fill/stroke to the composite path
-            for (const si of styleItems) this._applyStyle(ctx, si, frame);
-            ctx.restore();
-        } else if (shape.ty === 'sh') {
-            const pathData = shape.ks;
-            if (!pathData) return;
-            const vertices = pathData.k?.v || pathData.v || [];
-            const inTangents = pathData.k?.i || pathData.i || [];
-            const outTangents = pathData.k?.o || pathData.o || [];
-            const closed = pathData.k?.c ?? pathData.c ?? false;
-
-            if (!vertices.length) return;
-
-            ctx.beginPath();
-            ctx.moveTo(vertices[0][0], vertices[0][1]);
-
-            for (let i = 1; i < vertices.length; i++) {
-                const prev = vertices[i - 1];
-                const curr = vertices[i];
-                const cp1 = [prev[0] + (outTangents[i - 1]?.[0] || 0), prev[1] + (outTangents[i - 1]?.[1] || 0)];
-                const cp2 = [curr[0] + (inTangents[i]?.[0] || 0), curr[1] + (inTangents[i]?.[1] || 0)];
-                ctx.bezierCurveTo(cp1[0], cp1[1], cp2[0], cp2[1], curr[0], curr[1]);
+            for (let i = 0; i < framesToRender.length; i++) {
+                const pngBuf = await this._lottieFrameToPng(lottie, framesToRender[i]);
+                fs.writeFileSync(path.join(frameDir, `frame_${String(i + 1).padStart(4, '0')}.png`), pngBuf);
             }
-            if (closed) ctx.closePath();
-        } else if (shape.ty === 'el') {
-            const pos = this._resolveProp(shape.p, frame) ?? [0, 0];
-            const size = this._resolveProp(shape.s, frame) ?? [0, 0];
-            const rx = (Array.isArray(size) ? size[0] : 0) / 2;
-            const ry = (Array.isArray(size) ? size[1] : 0) / 2;
-            const cx = Array.isArray(pos) ? pos[0] : 0;
-            const cy = Array.isArray(pos) ? pos[1] : 0;
-            ctx.beginPath();
-            ctx.ellipse(cx, cy, Math.abs(rx), Math.abs(ry), 0, 0, Math.PI * 2);
-        } else if (shape.ty === 'rc') {
-            const pos = this._resolveProp(shape.p, frame) ?? [0, 0];
-            const size = this._resolveProp(shape.s, frame) ?? [0, 0];
-            const sw = Array.isArray(size) ? size[0] : 100;
-            const sh = Array.isArray(size) ? size[1] : 100;
-            const cx = Array.isArray(pos) ? pos[0] : 0;
-            const cy = Array.isArray(pos) ? pos[1] : 0;
-            const r = shape.r?.k ?? 0;
-            if (r > 0) {
-                // Rounded rectangle
-                ctx.beginPath();
-                ctx.roundRect(cx - sw / 2, cy - sh / 2, sw, sh, r);
-            } else {
-                ctx.beginPath();
-                ctx.rect(cx - sw / 2, cy - sh / 2, sw, sh);
-            }
-        } else if (shape.ty === 'fl') {
-            const color = shape.c?.k || [0, 0, 0, 1];
-            const alpha = shape.o?.k ?? 100;
-            ctx.fillStyle = this._rgba(color, alpha / 100);
-            ctx.fill();
-        } else if (shape.ty === 'st') {
-            const color = shape.c?.k || [0, 0, 0, 1];
-            const alpha = shape.o?.k ?? 100;
-            const w = shape.w?.k ?? 1;
-            ctx.strokeStyle = this._rgba(color, alpha / 100);
-            ctx.lineWidth = w;
-            ctx.stroke();
-        } else if (shape.ty === 'gf') {
-            // Gradient fill — simplified: use first/last color stops
-            const colors = shape.g?.p || [];
-            const stops = shape.g?.k || [];
-            if (colors.length >= 2) {
-                const c1 = colors[0]?.p || [0, 0, 0];
-                const c2 = colors[colors.length - 1]?.p || [1, 1, 1];
-                const grad = ctx.createLinearGradient(0, 0, w || 512, h || 512);
-                grad.addColorStop(0, this._rgba(c1, 1));
-                grad.addColorStop(1, this._rgba(c2, 1));
-                ctx.fillStyle = grad;
-                ctx.fill();
-            }
+            const outputPath = path.join(this.tempDir, `anim_${crypto.randomBytes(4).toString('hex')}.mp4`);
+            const fps = Math.min(ANIM_FPS, frameRate);
+            execSync(
+                `ffmpeg -y -framerate ${fps} -i "${path.join(frameDir, 'frame_%04d.png')}" `
+                + `-vf "scale=${width}:${height},format=yuv420p" `
+                + `-c:v libx264 -preset fast -crf 26 -pix_fmt yuv420p `
+                + `-an -movflags +faststart -t 6 "${outputPath}" 2>&1`,
+                { timeout: 30000, stdio: 'pipe' }
+            );
+            const mp4Buffer = fs.readFileSync(outputPath);
+            fs.unlinkSync(outputPath);
+            return mp4Buffer;
+        } finally {
+            try { for (const f of fs.readdirSync(frameDir)) fs.unlinkSync(path.join(frameDir, f)); fs.rmdirSync(frameDir); } catch {}
         }
     }
 
-    _rgba(color, alpha = 1) {
-        const r = Math.round((color[0] || 0) * 255);
-        const g = Math.round((color[1] || 0) * 255);
-        const b = Math.round((color[2] || 0) * 255);
-        return `rgba(${r},${g},${b},${alpha})`;
-    }
-
-    /** Draw path shape (sh/el/rc) onto current ctx path without fill/stroke. */
-    _drawPath(ctx, shape, frame) {
-        if (!shape) return;
-        if (shape.ty === 'sh') {
-            const pd = shape.ks;
-            if (!pd) return;
-            const verts = pd.k?.v || pd.v || [];
-            const inn = pd.k?.i || pd.i || [];
-            const out = pd.k?.o || pd.o || [];
-            const closed = pd.k?.c ?? pd.c ?? false;
-            if (!verts.length) return;
-            ctx.moveTo(verts[0][0], verts[0][1]);
-            for (let i = 1; i < verts.length; i++) {
-                const cp1x = verts[i-1][0] + (out[i-1]?.[0] || 0);
-                const cp1y = verts[i-1][1] + (out[i-1]?.[1] || 0);
-                const cp2x = verts[i][0] + (inn[i]?.[0] || 0);
-                const cp2y = verts[i][1] + (inn[i]?.[1] || 0);
-                ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, verts[i][0], verts[i][1]);
-            }
-            if (closed) ctx.closePath();
-        } else if (shape.ty === 'el') {
-            const sz = this._resolveProp(shape.s, frame) ?? [0,0];
-            const rx = (Array.isArray(sz) ? sz[0] : 0) / 2;
-            const ry = (Array.isArray(sz) ? sz[1] : 0) / 2;
-            ctx.ellipse(0, 0, Math.abs(rx), Math.abs(ry), 0, 0, Math.PI * 2);
-        } else if (shape.ty === 'rc') {
-            const sz = this._resolveProp(shape.s, frame) ?? [100,100];
-            const sw = Array.isArray(sz) ? sz[0] : 100;
-            const sh = Array.isArray(sz) ? sz[1] : 100;
-            const r = this._resolveProp(shape.r, frame) ?? 0;
-            if (r > 0) ctx.roundRect(-sw/2, -sh/2, sw, sh, r);
-            else ctx.rect(-sw/2, -sh/2, sw, sh);
-        }
-    }
-
-    /** Apply fill or stroke style from shape element. */
-    _applyStyle(ctx, shape, frame) {
-        if (!shape) return;
-        if (shape.ty === 'fl') {
-            const c = shape.c?.k || [0,0,0,1];
-            const a = this._resolveProp(shape.o, frame) ?? 100;
-            ctx.fillStyle = this._rgba(c, a / 100);
-            ctx.fill();
-        } else if (shape.ty === 'st') {
-            const c = shape.c?.k || [0,0,0,1];
-            const a = this._resolveProp(shape.o, frame) ?? 100;
-            const w = this._resolveProp(shape.w, frame) ?? 1;
-            ctx.strokeStyle = this._rgba(c, a / 100);
-            ctx.lineWidth = w;
-            ctx.stroke();
-        } else if (shape.ty === 'gf') {
-            const stops = shape.g?.k || [];
-            const p = shape.g?.p || 2;
-            const s = shape.s?.k ?? 0;
-            if (p >= 2 && stops.length >= p * 4) {
-                const x1 = shape.s?.k ?? 0, y1 = shape.e?.k ?? 100;
-                const grad = ctx.createLinearGradient(x1, 0, y1, 0);
-                for (let i = 0; i < p; i++) {
-                    const off = i / (p - 1);
-                    grad.addColorStop(off, this._rgba([stops[i*4], stops[i*4+1], stops[i*4+2]], stops[i*4+3] ?? 1));
-                }
-                ctx.fillStyle = grad;
-                ctx.fill();
-            }
-        }
+    /** Fallback: extract just the first frame as static WebP. */
+    async tgsToStaticFrame(tgsBuffer) {
+        const lottieJson = zlib.gunzipSync(tgsBuffer).toString('utf-8');
+        const lottie = JSON.parse(lottieJson);
+        return this._lottieFrameToPng(lottie, 0);
     }
 
     /* ──────────────────────────────────────────────
+     *  Sticker conversion pipeline
+     * ────────────────────────────────────────────── */
+/* ──────────────────────────────────────────────
      *  Sticker conversion pipeline
      * ────────────────────────────────────────────── */
 
