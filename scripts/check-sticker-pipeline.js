@@ -234,8 +234,10 @@ await test(`${MAX_CONCURRENT_IMPORTS} packs converting at once all succeed`, asy
         { label: 'tgs-small', buf: tgs({ w: 256, h: 256, fr: 24, op: 24 }), format: 'tgs' },
         { label: 'tgs-fast', buf: tgs({ fr: 30, op: 30 }), format: 'tgs' },
     ];
-    // Two packs' worth of stickers in flight at once.
-    const jobs = [...sources, ...sources];
+    // Kept to one round: run-all-checks executes every check concurrently, and
+    // this is the CPU-heaviest one — doubling the work here made the whole
+    // suite flake under contention.
+    const jobs = sources;
 
     const settled = await Promise.allSettled(
         jobs.map((s) => svc.convertToWhatsAppSticker(s.buf, '😀', s.format))

@@ -129,7 +129,7 @@ import {
  * Import a Telegram sticker pack and send as WhatsApp stickers.
  * Supports abort via /tgstop. Handles static, animated (TGS→animated WebP), and video (MP4) stickers.
  */
-async function handleTgStickers(sock, chatId, args, quotedMessage) {
+async function handleTgStickers(sock, chatId, args, quotedMessage, stickerForwarder = null) {
     if (!telegramStickerService.isConfigured) {
         await safeSendMessage(sock, chatId, {
             text: '❌ Telegram Bot token not configured.\nSet `TELEGRAM_BOT_TOKEN` in .env (create a bot via @BotFather on Telegram).',
@@ -314,10 +314,35 @@ async function handleTgStickers(sock, chatId, args, quotedMessage) {
             await new Promise((r) => setTimeout(r, sticker.isAnimated ? 500 : 300));
         }
 
+        // Mirror the pack into the configured sticker-forwarding groups, so an
+        // import run from any chat lands in the shared collection too. Skipped
+        // when the command was already run inside a target group — no point
+        // sending the same pack twice into the same chat.
+        let broadcast = null;
+        if (stickerForwarder?.broadcastStickerBuffers && stickers.length) {
+            try {
+                await updateProgress(
+                    `🎭 *${pack.title || packName}*\n\n✅ Sent ${sent} sticker(s) here\n📤 Forwarding to sticker group(s)…`,
+                    { force: true }
+                );
+                broadcast = await stickerForwarder.broadcastStickerBuffers(
+                    sock,
+                    stickers.map((s) => ({ buffer: s.buffer, isAnimated: s.isAnimated })),
+                    { signal, exclude: [chatId] }
+                );
+            } catch (err) {
+                logger.warn(`Sticker pack broadcast failed: ${err?.message || err}`);
+            }
+        }
+
         const parts = [`✅ *${pack.title || packName}* — sent *${sent}* sticker(s)`];
         if (animatedSent) parts.push(`🎞️ ${animatedSent} animated`);
         if (sendFailed) parts.push(`❌ ${sendFailed} failed to send`);
         if (errors?.length) parts.push(`⚠️ ${errors.length} conversion errors`);
+        if (broadcast?.sent) {
+            parts.push(`📤 Forwarded to ${broadcast.targets.length} sticker group(s) — ${broadcast.sent} sent`
+                + (broadcast.failed ? `, ${broadcast.failed} failed` : ''));
+        }
         parts.push(`\n_Pack: ${sent}/${total} stickers sent_`);
 
         await updateProgress(parts.join('\n'), { force: true });
@@ -540,8 +565,8 @@ export const COMMAND_HANDLERS = {
             void safeSendMessage(sock, chatId, { text: '⚠️ Failed to generate RGB sticker.' }, originalMsg);
         });
     },
-    tgstickers: ({ sock, chatId, args, originalMsg }) => {
-        void handleTgStickers(sock, chatId, args, originalMsg).catch((err) => {
+    tgstickers: ({ sock, chatId, args, originalMsg, ctx }) => {
+        void handleTgStickers(sock, chatId, args, originalMsg, ctx?.stickerForwarder).catch((err) => {
             logger.error('TG stickers command error:', err);
             void safeSendMessage(sock, chatId, { text: `⚠️ ${err.message || 'Failed to import stickers.'}` }, originalMsg);
         });

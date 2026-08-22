@@ -411,6 +411,60 @@ class StickerForwarder {
         return true;
     }
 
+    /**
+     * Send already-converted sticker buffers to the configured target groups.
+     *
+     * The queue-based path above starts from a WhatsApp message it has to
+     * download; this one takes finished buffers, which is what the Telegram
+     * pack importer produces. Sends are sequential per group with a small gap
+     * so a 40-sticker pack doesn't trip WhatsApp's rate limiting.
+     *
+     * @param {import('baileys').WASocket} sock
+     * @param {Array<{ buffer: Buffer, isAnimated?: boolean }>} stickers
+     * @param {{ signal?: AbortSignal, gapMs?: number, exclude?: string[],
+     *           onProgress?: (sent: number, total: number) => void }} [opts]
+     * @returns {Promise<{ targets: string[], sent: number, failed: number }>}
+     */
+    async broadcastStickerBuffers(sock, stickers, { signal, gapMs = 350, exclude = [], onProgress } = {}) {
+        const skip = new Set(exclude);
+        const targets = (await this._resolveTargetGroupIds()).filter((t) => !skip.has(t));
+        if (!targets.length || !stickers?.length) {
+            return { targets: [], sent: 0, failed: 0 };
+        }
+
+        let sent = 0;
+        let failed = 0;
+
+        for (const sticker of stickers) {
+            if (signal?.aborted) break;
+
+            for (const target of targets) {
+                if (signal?.aborted) break;
+                try {
+                    const content = { sticker: sticker.buffer };
+                    if (sticker.isAnimated) content.isAnimated = true;
+                    await sock.sendMessage(target, content, {
+                        ephemeralExpiration: 86400,
+                        mediaUploadTimeoutMs: 90000,
+                    });
+                    sent++;
+                    this.countSent++;
+                } catch (err) {
+                    failed++;
+                    this.countErrors++;
+                    logger.warn(`Sticker broadcast to ${target} failed: ${err?.message || err}`);
+                }
+                await new Promise((r) => setTimeout(r, gapMs));
+            }
+            onProgress?.(sent, stickers.length * targets.length);
+        }
+
+        logger.info(
+            `📤 Broadcast ${stickers.length} sticker(s) → ${targets.length} group(s): ${sent} sent, ${failed} failed`
+        );
+        return { targets, sent, failed };
+    }
+
     getStats() {
         return {
             sent: this.countSent,
