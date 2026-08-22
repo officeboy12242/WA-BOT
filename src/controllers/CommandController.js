@@ -249,8 +249,10 @@ async function handleTgStickers(sock, chatId, args, quotedMessage) {
                 // Send as the appropriate type
                 let stickerMsg;
                 if (sticker.type === 'video') {
-                    // MP4 video stickers — send as video with sticker mime
-                    stickerMsg = { video: sticker.buffer, mimetype: 'video/mp4', caption: '' };
+                    // MP4-based animated/video stickers — must go out as a stickerMessage
+                    // (video/mp4 mimetype + isAnimated) or WhatsApp renders it as a plain
+                    // video attachment instead of a sticker.
+                    stickerMsg = { sticker: sticker.buffer, mimetype: 'video/mp4', isAnimated: true };
                 } else {
                     stickerMsg = { sticker: sticker.buffer };
                     if (sticker.isAnimated) {
