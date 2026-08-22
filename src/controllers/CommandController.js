@@ -237,7 +237,7 @@ async function handleTgStickers(sock, chatId, args, quotedMessage) {
 
         let sent = 0;
         let sendFailed = 0;
-        let videoSent = 0;
+        let animatedSent = 0;
         for (let i = 0; i < stickers.length; i++) {
             if (signal.aborted) {
                 await updateProgress(`🛑 *Import cancelled mid-send.*\n_Sent ${sent}/${stickers.length} stickers._`);
@@ -246,21 +246,13 @@ async function handleTgStickers(sock, chatId, args, quotedMessage) {
 
             const sticker = stickers[i];
             try {
-                // Send as the appropriate type
-                let stickerMsg;
-                if (sticker.type === 'video') {
-                    // MP4-based animated/video stickers — must go out as a stickerMessage
-                    // (video/mp4 mimetype + isAnimated) or WhatsApp renders it as a plain
-                    // video attachment instead of a sticker.
-                    stickerMsg = { sticker: sticker.buffer, mimetype: 'video/mp4', isAnimated: true };
-                } else {
-                    stickerMsg = { sticker: sticker.buffer };
-                    if (sticker.isAnimated) {
-                        stickerMsg.isAnimated = true;
-                    }
-                }
+                // Everything is a WebP sticker — animated ones carry an ANIM
+                // chunk and the isAnimated flag so WhatsApp plays them.
+                const stickerMsg = { sticker: sticker.buffer };
+                if (sticker.isAnimated) stickerMsg.isAnimated = true;
+
                 await sock.sendMessage(chatId, stickerMsg, { quoted: quotedMessage });
-                if (sticker.type === 'video') videoSent++;
+                if (sticker.isAnimated) animatedSent++;
                 sent++;
             } catch (err) {
                 sendFailed++;
@@ -273,21 +265,21 @@ async function handleTgStickers(sock, chatId, args, quotedMessage) {
                 `🎭 *Importing Telegram Stickers*\n\n📦 *${pack.title || packName}*\n` +
                 `\n${bar} ${i + 1}/${stickers.length}\n` +
                 `📤 Sending… ${sent} sent${sendFailed ? `, ${sendFailed} failed` : ''}` +
-                (videoSent ? ` · ${videoSent} video` : '') +
+                (animatedSent ? ` · ${animatedSent} animated` : '') +
                 `\n\n_Send /tgstop to cancel._`
             );
 
-            await new Promise((r) => setTimeout(r, sticker.type === 'video' ? 500 : 300));
+            await new Promise((r) => setTimeout(r, sticker.isAnimated ? 500 : 300));
         }
 
         const parts = [`✅ *${pack.title || packName}* — sent *${sent}* sticker(s)`];
-        if (videoSent) parts.push(`📹 ${videoSent} video stickers`);
+        if (animatedSent) parts.push(`🎞️ ${animatedSent} animated`);
         if (sendFailed) parts.push(`❌ ${sendFailed} failed to send`);
         if (errors?.length) parts.push(`⚠️ ${errors.length} conversion errors`);
         parts.push(`\n_Pack: ${sent}/${total} stickers sent_`);
 
         await updateProgress(parts.join('\n'));
-        logger.info(`TG sticker pack imported: ${packName} — ${sent} sent, ${sendFailed} failed, ${videoSent} video`);
+        logger.info(`TG sticker pack imported: ${packName} — ${sent} sent, ${sendFailed} failed, ${animatedSent} animated`);
     } catch (err) {
         logger.error(`TG stickers error: ${err.message}`);
         await safeSendMessage(sock, chatId, {
