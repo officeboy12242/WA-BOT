@@ -19,7 +19,11 @@ import zlib from 'zlib';
 import fs from 'fs';
 import path from 'path';
 import assert from 'assert';
-import { telegramStickerService as svc } from '../src/services/TelegramStickerService.js';
+import {
+    telegramStickerService as svc,
+    Semaphore,
+    MAX_CONCURRENT_IMPORTS,
+} from '../src/services/TelegramStickerService.js';
 
 const ANIM_MAX = 500 * 1024;
 const STATIC_MAX = 100 * 1024;
@@ -185,6 +189,96 @@ await test('static WebP passes through as a non-animated sticker', async () => {
     assert.strictEqual(out.isAnimated, false);
     assert.ok(out.buffer.length <= STATIC_MAX, `${out.buffer.length}b exceeds ${STATIC_MAX}b`);
     return `${out.buffer.length}b`;
+});
+
+await test('semaphore never exceeds its bound and drains every task', async () => {
+    const gate = new Semaphore(3);
+    let running = 0;
+    let peak = 0;
+    const order = [];
+
+    await Promise.all(Array.from({ length: 25 }, (_, i) => gate.run(async () => {
+        running++;
+        peak = Math.max(peak, running);
+        // Uneven durations so fast tasks finish while slow ones hold slots.
+        await new Promise((r) => setTimeout(r, (i % 5) * 4));
+        order.push(i);
+        running--;
+    })));
+
+    assert.ok(peak <= 3, `concurrency peaked at ${peak}, bound was 3`);
+    assert.ok(peak > 1, `gate never ran anything in parallel (peak ${peak})`);
+    assert.strictEqual(order.length, 25, `only ${order.length}/25 tasks completed`);
+    assert.strictEqual(running, 0, 'slots leaked after drain');
+    return `peak ${peak}/3, all 25 drained`;
+});
+
+await test('a task that throws still releases its slot', async () => {
+    const gate = new Semaphore(2);
+    const results = await Promise.allSettled([
+        gate.run(async () => { throw new Error('boom'); }),
+        gate.run(async () => { throw new Error('boom'); }),
+        gate.run(async () => 'ok'),
+        gate.run(async () => 'ok'),
+    ]);
+    assert.strictEqual(results[2].status, 'fulfilled', 'deadlocked after a rejection');
+    assert.strictEqual(results[3].status, 'fulfilled', 'deadlocked after a rejection');
+});
+
+await test(`${MAX_CONCURRENT_IMPORTS} packs converting at once all succeed`, async () => {
+    // Simulates several /tgstk imports overlapping: distinct sources converting
+    // simultaneously must not collide over temp files, ffmpeg, or the renderer.
+    const sources = [
+        { label: 'tgs-simple', buf: tgs(), format: 'tgs' },
+        { label: 'tgs-heavy', buf: tgs({ shapes: 10, op: 90 }), format: 'tgs' },
+        { label: 'tgs-small', buf: tgs({ w: 256, h: 256, fr: 24, op: 24 }), format: 'tgs' },
+        { label: 'tgs-fast', buf: tgs({ fr: 30, op: 30 }), format: 'tgs' },
+    ];
+    // Two packs' worth of stickers in flight at once.
+    const jobs = [...sources, ...sources];
+
+    const settled = await Promise.allSettled(
+        jobs.map((s) => svc.convertToWhatsAppSticker(s.buf, '😀', s.format))
+    );
+
+    const rejected = settled
+        .map((r, i) => (r.status === 'rejected' ? `${jobs[i].label}: ${r.reason?.message}` : null))
+        .filter(Boolean);
+    assert.strictEqual(rejected.length, 0, `concurrent conversions failed — ${rejected.join(' | ')}`);
+
+    for (let i = 0; i < settled.length; i++) {
+        await assertAnimatedSticker(settled[i].value.buffer, `concurrent:${jobs[i].label}`);
+    }
+    return `${jobs.length} concurrent conversions, all valid`;
+});
+
+await test('no scratch files are left behind after conversions', async () => {
+    const before = fs.readdirSync(svc.tempDir).length;
+    await Promise.all([
+        svc.convertToWhatsAppSticker(tgs(), '😀', 'tgs'),
+        svc.convertToWhatsAppSticker(tgs({ shapes: 6 }), '🔥', 'tgs'),
+    ]);
+    const after = fs.readdirSync(svc.tempDir).length;
+    assert.strictEqual(after, before, `leaked ${after - before} temp entries`);
+    return `${after} entries, unchanged`;
+});
+
+await test('cleanup() spares files still in use by a running import', async () => {
+    // A fresh scratch file stands in for another import's in-flight frames.
+    const inFlight = path.join(svc.tempDir, `inflight_${Date.now()}.png`);
+    fs.writeFileSync(inFlight, 'x');
+    try {
+        svc.cleanup();                       // default 30-minute age gate
+        assert.ok(fs.existsSync(inFlight), 'cleanup() deleted an in-flight file');
+
+        // Negative age ⇒ cutoff in the future ⇒ sweep everything. The margin is
+        // generous because a freshly written file's mtime can read slightly
+        // ahead of Date.now() on Windows.
+        assert.strictEqual(svc.cleanup(-5000), 1, 'forced sweep should reclaim it');
+        assert.ok(!fs.existsSync(inFlight), 'forced sweep left the file behind');
+    } finally {
+        try { fs.unlinkSync(inFlight); } catch {}
+    }
 });
 
 console.log(`\ncheck-sticker-pipeline: ${passed} passed, ${failed} failed`);

@@ -68,6 +68,42 @@ const ANIM_LADDER = [
     { fps: 8, quality: 40, size: 320 },
 ];
 
+/** Most packs that may be importing at once, across all chats. */
+export const MAX_CONCURRENT_IMPORTS = 4;
+
+/**
+ * Counting semaphore gating sticker conversion.
+ *
+ * This is module-level on purpose: CONVERT_CONCURRENCY has to be a *global*
+ * ceiling, not a per-import one. Otherwise four simultaneous pack imports
+ * would run 4 × CONVERT_CONCURRENCY encoders at once and thrash a small host
+ * into ffmpeg timeouts — exactly the "fails when running several packs" case.
+ */
+export class Semaphore {
+    constructor(max) {
+        this.max = Math.max(1, max);
+        this.active = 0;
+        this.waiters = [];
+    }
+
+    async run(fn) {
+        if (this.active >= this.max) {
+            await new Promise((resolve) => this.waiters.push(resolve));
+        } else {
+            this.active++;
+        }
+        try {
+            return await fn();
+        } finally {
+            const next = this.waiters.shift();
+            if (next) next();      // hand the slot straight to the next waiter
+            else this.active--;
+        }
+    }
+}
+
+const conversionGate = new Semaphore(CONVERT_CONCURRENCY);
+
 /* ─── Active imports (for /tgstop) ─── */
 export const activeImports = new Map(); // chatId → AbortController
 
@@ -628,52 +664,50 @@ class TelegramStickerService {
                 batch.map((sticker, j) => this.downloadSticker(sticker, i + j))
             );
 
-            // Convert in parallel — rendering and encoding are CPU-bound, so on
-            // a multi-core host this is close to a linear speedup. CONVERT_
-            // CONCURRENCY collapses to 1 on small instances so the rest of the
-            // bot keeps its share of the CPU.
-            for (let k = 0; k < downloads.length; k += CONVERT_CONCURRENCY) {
-                if (signal?.aborted) {
-                    errors.push('Import cancelled by user');
-                    break;
+            // Convert through the shared gate. Rendering and encoding are
+            // CPU-bound, so this is near-linear on a multi-core host, while the
+            // module-level semaphore keeps the total across *all* concurrent
+            // pack imports at CONVERT_CONCURRENCY rather than multiplying it.
+            await Promise.all(downloads.map(async (result, j) => {
+                if (signal?.aborted) return;
+
+                if (result.status === 'rejected') {
+                    failedCount++;
+                    errors.push(`Sticker ${i + j + 1}: ${result.reason?.message || 'download failed'}`);
+                    report(convertedCount, failedCount, 'convert');
+                    return;
                 }
 
-                const slice = downloads.slice(k, k + CONVERT_CONCURRENCY);
-                await Promise.all(slice.map(async (result, s) => {
-                    const j = k + s;
+                const dl = result.value;
+                try {
+                    const { buffer: converted, type, isAnimated } = await conversionGate.run(
+                        () => this.convertToWhatsAppSticker(dl.buffer, dl.emoji, dl.format)
+                    );
+                    if (signal?.aborted) return;
 
-                    if (result.status === 'rejected') {
-                        failedCount++;
-                        errors.push(`Sticker ${i + j + 1}: ${result.reason?.message || 'download failed'}`);
-                        report(convertedCount, failedCount, 'convert');
-                        return;
-                    }
+                    const waBuffer = await this.applyStickerMetadata(converted);
+                    results.push({
+                        buffer: waBuffer,
+                        emoji: dl.emoji,
+                        index: dl.index,
+                        type,
+                        isAnimated: isAnimated || false,
+                    });
+                    convertedCount++;
+                    report(convertedCount, failedCount, 'convert');
+                } catch (err) {
+                    failedCount++;
+                    errors.push(`Sticker ${i + j + 1} (${dl.emoji}): ${err.message}`);
+                    report(convertedCount, failedCount, 'convert');
+                } finally {
+                    this._cleanup(dl.tempPath);
+                }
+            }));
 
-                    const dl = result.value;
-                    try {
-                        const { buffer: converted, type, isAnimated } =
-                            await this.convertToWhatsAppSticker(dl.buffer, dl.emoji, dl.format);
-                        const waBuffer = await this.applyStickerMetadata(converted);
-                        results.push({
-                            buffer: waBuffer,
-                            emoji: dl.emoji,
-                            index: dl.index,
-                            type,
-                            isAnimated: isAnimated || false,
-                        });
-                        convertedCount++;
-                        report(convertedCount, failedCount, 'convert');
-                    } catch (err) {
-                        failedCount++;
-                        errors.push(`Sticker ${i + j + 1} (${dl.emoji}): ${err.message}`);
-                        report(convertedCount, failedCount, 'convert');
-                    } finally {
-                        this._cleanup(dl.tempPath);
-                    }
-                }));
+            if (signal?.aborted) {
+                errors.push('Import cancelled by user');
+                break;
             }
-
-            if (signal?.aborted) break;
         }
 
         // Parallel conversion finishes out of order — restore pack order.
@@ -712,13 +746,28 @@ class TelegramStickerService {
         try { fs.unlinkSync(filePath); } catch {}
     }
 
-    cleanup() {
+    /**
+     * Sweep abandoned scratch files (e.g. after a crash mid-import).
+     *
+     * Age-gated deliberately: the temp dir is shared by every concurrent
+     * import, so deleting indiscriminately would pull files out from under a
+     * pack that is still converting.
+     */
+    cleanup(maxAgeMs = 30 * 60 * 1000) {
+        const cutoff = Date.now() - maxAgeMs;
+        let removed = 0;
         try {
-            const files = fs.readdirSync(this.tempDir);
-            for (const f of files) {
-                fs.unlinkSync(path.join(this.tempDir, f));
+            for (const entry of fs.readdirSync(this.tempDir, { withFileTypes: true })) {
+                const full = path.join(this.tempDir, entry.name);
+                try {
+                    if (fs.statSync(full).mtimeMs > cutoff) continue;
+                    if (entry.isDirectory()) fs.rmSync(full, { recursive: true, force: true });
+                    else fs.unlinkSync(full);
+                    removed++;
+                } catch {}
             }
         } catch {}
+        return removed;
     }
 }
 

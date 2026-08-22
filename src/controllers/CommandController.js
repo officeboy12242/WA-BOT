@@ -58,7 +58,13 @@ import { handleHeal, handleFix } from './handlers/healHandlers.js';
 import { handleAssist } from './handlers/assistHandlers.js';
 import IpoController from './IpoController.js';
 import BacktestController from './BacktestController.js';
-import { telegramStickerService, abortImport, isImportActive, activeImports } from '../services/TelegramStickerService.js';
+import {
+    telegramStickerService,
+    abortImport,
+    isImportActive,
+    activeImports,
+    MAX_CONCURRENT_IMPORTS,
+} from '../services/TelegramStickerService.js';
 
 import {
     handleAddAdmin,
@@ -141,8 +147,8 @@ async function handleTgStickers(sock, chatId, args, quotedMessage) {
                 '• `/tgstickers https://t.me/addstickers/PupperStickers`\n\n' +
                 '*Types supported:*\n' +
                 '• Static (WebP) — resized + compressed\n' +
-                '• Animated (TGS) — rendered as animated sticker\n' +
-                '• Video (MP4) — sent as WhatsApp video sticker\n\n' +
+                '• Animated (TGS) — animated sticker with transparency\n' +
+                '• Video (WEBM/MP4) — animated sticker with transparency\n\n' +
                 '_Send `/tgstop` to cancel import at any time._',
         }, quotedMessage);
         return;
@@ -150,7 +156,18 @@ async function handleTgStickers(sock, chatId, args, quotedMessage) {
 
     if (isImportActive(chatId)) {
         await safeSendMessage(sock, chatId, {
-            text: '⚠️ An import is already running. Send `/tgstop` to cancel it first.',
+            text: '⚠️ An import is already running in this chat. Send `/tgstop` to cancel it first.',
+        }, quotedMessage);
+        return;
+    }
+
+    // Packs in different chats convert concurrently, but the total is capped —
+    // conversion is CPU-bound and the bot runs on a small heap.
+    if (activeImports.size >= MAX_CONCURRENT_IMPORTS) {
+        await safeSendMessage(sock, chatId, {
+            text:
+                `⚠️ ${activeImports.size} sticker imports are already running elsewhere ` +
+                `(limit ${MAX_CONCURRENT_IMPORTS}).\n\n_Try again in a moment._`,
         }, quotedMessage);
         return;
     }

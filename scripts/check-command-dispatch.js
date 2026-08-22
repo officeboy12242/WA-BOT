@@ -77,7 +77,51 @@ const ctrl = new CommandController(null, { isPaused: false }, fakeGroupManager, 
     assert.ok(last && /PERMISSION DENIED/i.test(last.text), 'group-only admin command is denied for a regular member');
 }
 
-// 3. Unknown command gets the "did you mean" path, not a handler.
+// 3. /tgstk is admin-gated: a regular member is denied before the handler runs.
+{
+    const def = COMMAND_REGISTRY.find((d) => d.key === 'tgstickers');
+    assert.strictEqual(def.role, 'admins', '/tgstickers must stay admin-only');
+    assert.strictEqual(
+        COMMAND_REGISTRY.find((d) => d.key === 'tgstop').role,
+        'admins',
+        '/tgstop must stay admin-only — if you cannot start an import you cannot cancel one'
+    );
+
+    for (const cmd of ['/tgstk', '/tgstickers', '/tgsticker']) {
+        const { sent, sock } = makeCtx();
+        await ctrl.handleCommand(sock, '123@g.us', `${cmd} SomePack`, '919000000000@s.whatsapp.net', null, 'Tester');
+        const last = sent[sent.length - 1];
+        assert.ok(
+            last && /PERMISSION DENIED/i.test(last.text),
+            `${cmd} must be denied for a non-admin (got: ${last?.text?.slice(0, 60)})`
+        );
+    }
+
+    // ...and an owner/bot-admin gets through the gate (no denial message).
+    const privileged = { ...fakeGroupManager, isPrivilegedAsync: async () => true };
+    const owner = new CommandController(null, { isPaused: false }, privileged, null, null, null, null, null, null, null, null, null, null, null);
+    const { sent, sock } = makeCtx();
+    // No token configured in checks, so this stops at the config notice — the
+    // point is only that it got past the permission gate.
+    await owner.handleCommand(sock, '123@g.us', '/tgstk SomePack', '919000000000@s.whatsapp.net', null, 'Owner');
+    assert.ok(
+        !sent.some((m) => /PERMISSION DENIED/i.test(m.text)),
+        'a privileged user must pass the /tgstk gate'
+    );
+
+    // /help lists by the same role field — don't advertise what they can't run.
+    const { formatHelpText } = await import('../src/commands/registry.js');
+    assert.ok(
+        !/tgstickers/.test(formatHelpText({ isPrivileged: false })),
+        '/help must hide /tgstickers from non-admins'
+    );
+    assert.ok(
+        /tgstickers/.test(formatHelpText({ isPrivileged: true })),
+        '/help must still show /tgstickers to admins'
+    );
+}
+
+// 4. Unknown command gets the "did you mean" path, not a handler.
 {
     const { sent, sock } = makeCtx();
     await ctrl.handleCommand(sock, '919000000000@s.whatsapp.net', '/zzzznope', '919000000000@s.whatsapp.net', null, 'Tester');
