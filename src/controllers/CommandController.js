@@ -174,9 +174,30 @@ async function handleTgStickers(sock, chatId, args, quotedMessage) {
         const { createProgressBar } = await import('../utils/progressBar.js');
         const { editMessageText } = await import('../utils/waMessage.js');
 
-        const updateProgress = async (text) => {
-            if (statusMsg?.key) {
-                try { await editMessageText(sock, chatId, statusMsg.key, text); } catch {}
+        // Progress ticks are frequent (one per conversion, one per send) and
+        // purely cosmetic. Two guards matter here:
+        //   - fallback:false — a failed/timed-out edit must NOT turn into a new
+        //     chat message, which is what was spamming the chat mid-import.
+        //   - throttling — coalesce bursts so we don't outrun WhatsApp's edit
+        //     rate and cause those failures in the first place.
+        // Terminal states pass force:true so the final text always lands.
+        const PROGRESS_MIN_INTERVAL_MS = 2500;
+        let lastProgressAt = 0;
+        let progressInFlight = false;
+
+        const updateProgress = async (text, { force = false } = {}) => {
+            if (!statusMsg?.key) return;
+            const now = Date.now();
+            if (!force && (progressInFlight || now - lastProgressAt < PROGRESS_MIN_INTERVAL_MS)) return;
+
+            progressInFlight = true;
+            lastProgressAt = now;
+            try {
+                await editMessageText(sock, chatId, statusMsg.key, text, { fallback: false });
+            } catch {
+                // Best-effort — a dropped progress frame is not worth reporting.
+            } finally {
+                progressInFlight = false;
             }
         };
 
@@ -201,11 +222,12 @@ async function handleTgStickers(sock, chatId, args, quotedMessage) {
         await updateProgress(
             `🎭 *Importing Telegram Stickers*\n\n📦 *${pack.title || packName}* — ${total} sticker(s)\n` +
             `_Types: ${typeBreakdown.join(', ') || 'unknown'}_\n\n` +
-            `${createProgressBar(0)} 0/${total}\n⏳ Preparing downloads…\n\n_Send /tgstop to cancel._`
+            `${createProgressBar(0)} 0/${total}\n⏳ Preparing downloads…\n\n_Send /tgstop to cancel._`,
+            { force: true }
         );
 
         if (!total) {
-            await updateProgress(`❌ Empty sticker pack: *${packName}*`);
+            await updateProgress(`❌ Empty sticker pack: *${packName}*`, { force: true });
             return;
         }
 
@@ -224,14 +246,17 @@ async function handleTgStickers(sock, chatId, args, quotedMessage) {
         );
 
         if (signal.aborted) {
-            await updateProgress(`🛑 *Import cancelled.*\n_Sent 0 sticker(s) before cancellation._`);
+            await updateProgress(`🛑 *Import cancelled.*\n_Sent 0 sticker(s) before cancellation._`, { force: true });
             return;
         }
 
         if (!stickers.length) {
             const reasons = [];
             if (errors?.length) reasons.push(`${errors.length} failed`);
-            await updateProgress(`❌ No stickers converted from *${pack.title || packName}*.*\n${reasons.join('\n') || 'Empty pack.'}`);
+            await updateProgress(
+                `❌ No stickers converted from *${pack.title || packName}*.\n${reasons.join('\n') || 'Empty pack.'}`,
+                { force: true }
+            );
             return;
         }
 
@@ -240,7 +265,7 @@ async function handleTgStickers(sock, chatId, args, quotedMessage) {
         let animatedSent = 0;
         for (let i = 0; i < stickers.length; i++) {
             if (signal.aborted) {
-                await updateProgress(`🛑 *Import cancelled mid-send.*\n_Sent ${sent}/${stickers.length} stickers._`);
+                await updateProgress(`🛑 *Import cancelled mid-send.*\n_Sent ${sent}/${stickers.length} stickers._`, { force: true });
                 return;
             }
 
@@ -278,7 +303,7 @@ async function handleTgStickers(sock, chatId, args, quotedMessage) {
         if (errors?.length) parts.push(`⚠️ ${errors.length} conversion errors`);
         parts.push(`\n_Pack: ${sent}/${total} stickers sent_`);
 
-        await updateProgress(parts.join('\n'));
+        await updateProgress(parts.join('\n'), { force: true });
         logger.info(`TG sticker pack imported: ${packName} — ${sent} sent, ${sendFailed} failed, ${animatedSent} animated`);
     } catch (err) {
         logger.error(`TG stickers error: ${err.message}`);

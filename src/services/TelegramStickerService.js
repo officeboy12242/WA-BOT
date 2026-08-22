@@ -30,21 +30,33 @@ import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
 import zlib from 'zlib';
-import { execFileSync } from 'child_process';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import { createRequire } from 'module';
 import { createCanvas } from '@napi-rs/canvas';
 import { DotLottie } from '@lottiefiles/dotlottie-web';
 
+const execFileAsync = promisify(execFile);
+
 const TG_API = 'https://api.telegram.org';
 const STICKER_WEBP_MAX = 100 * 1024; // 100 KB — WhatsApp static sticker limit
 const ANIM_WEBP_MAX = 500 * 1024;    // 500 KB — WhatsApp animated sticker limit
+// The pack/author EXIF chunk is appended after encoding (~210 bytes in
+// practice). Reserve headroom so injecting it can't push a sticker that just
+// squeaked under the limit back over it.
+const EXIF_OVERHEAD = 1024;
+const ANIM_BUDGET = ANIM_WEBP_MAX - EXIF_OVERHEAD;
+const STATIC_BUDGET = STICKER_WEBP_MAX - EXIF_OVERHEAD;
 const DOWNLOAD_CONCURRENCY = 3;
+// Conversion is CPU-bound (Lottie raster + ffmpeg). Leave a core for the rest
+// of the bot, and stay serial on single/dual-core hosts like small PaaS dynos.
+const CONVERT_CONCURRENCY = Math.max(1, Math.min(3, (os.cpus()?.length || 1) - 1));
 const STICKER_SIZE = 512;            // WhatsApp stickers are 512×512
 const MAX_ANIM_SECONDS = 6;          // Cap animation length
 
 /**
  * Encoder ladder for animated WebP. Tried in order until the output fits
- * ANIM_WEBP_MAX. Real TGS packs vary wildly in complexity, so a fixed
+ * ANIM_BUDGET. Real TGS packs vary wildly in complexity, so a fixed
  * quality either blows the size limit or wastes it.
  */
 const ANIM_LADDER = [
@@ -140,10 +152,18 @@ class TelegramStickerService {
         return resolved;
     }
 
-    _runFfmpeg(args, timeout = 60000) {
-        return execFileSync(this.ffmpegPath, ['-hide_banner', '-loglevel', 'error', ...args], {
-            stdio: 'pipe',
+    /**
+     * Run ffmpeg without blocking the event loop.
+     *
+     * execFileSync would stall every other conversion (and the rest of the
+     * bot) for the duration of the encode, which made CONVERT_CONCURRENCY
+     * meaningless — the parallel tasks just queued behind each other.
+     */
+    _runFfmpeg(args, timeout = 120000) {
+        return execFileAsync(this.ffmpegPath, ['-hide_banner', '-loglevel', 'error', ...args], {
             timeout,
+            maxBuffer: 1 << 24,
+            windowsHide: true,
         });
     }
 
@@ -257,49 +277,52 @@ class TelegramStickerService {
         return { frames, size, fps, durationSec, totalFrames };
     }
 
-    /**
-     * Encode PNG frames into an animated WebP with real VP8X/ANIM/ANMF chunks.
-     *
-     * Primary encoder is ffmpeg's `libwebp_anim` with `yuva420p` — it keeps
-     * the alpha channel and produces the smallest output. If the local ffmpeg
-     * lacks libwebp, falls back to assembling frames with node-webpmux.
-     */
-    async _framesToAnimatedWebp(frames, { fps, quality, size }) {
+    /** Write rendered PNG frames to a scratch dir for ffmpeg to consume. */
+    _writeFrameDir(frames) {
         const frameDir = path.join(this.tempDir, `frames_${crypto.randomBytes(6).toString('hex')}`);
         fs.mkdirSync(frameDir, { recursive: true });
-        const outputPath = path.join(this.tempDir, `anim_${crypto.randomBytes(6).toString('hex')}.webp`);
+        for (let i = 0; i < frames.length; i++) {
+            fs.writeFileSync(path.join(frameDir, `f_${String(i + 1).padStart(4, '0')}.png`), frames[i]);
+        }
+        return frameDir;
+    }
 
+    _rmFrameDir(frameDir) {
         try {
-            for (let i = 0; i < frames.length; i++) {
-                fs.writeFileSync(path.join(frameDir, `f_${String(i + 1).padStart(4, '0')}.png`), frames[i]);
-            }
+            for (const f of fs.readdirSync(frameDir)) fs.unlinkSync(path.join(frameDir, f));
+            fs.rmdirSync(frameDir);
+        } catch {}
+    }
 
-            try {
-                this._runFfmpeg([
-                    '-y',
-                    '-framerate', String(fps),
-                    '-i', path.join(frameDir, 'f_%04d.png'),
-                    '-vcodec', 'libwebp_anim',
-                    '-lossless', '0',
-                    '-q:v', String(quality),
-                    '-compression_level', '5',
-                    '-loop', '0',
-                    '-pix_fmt', 'yuva420p',
-                    '-vf', `scale=${size}:${size}:flags=lanczos`,
-                    '-an', '-vsync', '0',
-                    outputPath,
-                ]);
-                return fs.readFileSync(outputPath);
-            } catch (ffErr) {
-                logger.warn(`libwebp_anim unavailable (${String(ffErr.message).slice(0, 120)}), using node-webpmux`);
-                return await this._framesToAnimatedWebpMux(frames, { fps, quality, size });
-            }
+    /**
+     * Encode a frame dir into an animated WebP with real VP8X/ANIM/ANMF chunks.
+     *
+     * ffmpeg does the frame-rate drop and the downscale itself, so one set of
+     * rasterised frames feeds every rung of the quality ladder — re-rendering
+     * the Lottie per rung was costing ~4s a sticker.
+     */
+    async _encodeAnimatedWebp(frameDir, baseFps, { fps, quality, size }) {
+        const outputPath = path.join(this.tempDir, `anim_${crypto.randomBytes(6).toString('hex')}.webp`);
+        try {
+            await this._runFfmpeg([
+                '-y',
+                '-framerate', String(baseFps),
+                '-i', path.join(frameDir, 'f_%04d.png'),
+                '-vcodec', 'libwebp_anim',
+                '-lossless', '0',
+                '-q:v', String(quality),
+                // compression_level 5 more than doubles encode time for ~5%
+                // smaller output — not worth it when the ladder may re-encode.
+                '-compression_level', '3',
+                '-loop', '0',
+                '-pix_fmt', 'yuva420p',
+                '-vf', `fps=${fps},scale=${size}:${size}:flags=lanczos`,
+                '-an', '-vsync', '0',
+                outputPath,
+            ]);
+            return fs.readFileSync(outputPath);
         } finally {
             this._cleanup(outputPath);
-            try {
-                for (const f of fs.readdirSync(frameDir)) fs.unlinkSync(path.join(frameDir, f));
-                fs.rmdirSync(frameDir);
-            } catch {}
         }
     }
 
@@ -348,48 +371,69 @@ class TelegramStickerService {
 
     /**
      * Walk the quality ladder until the animated WebP fits WhatsApp's limit.
-     * Re-renders Lottie frames when the target resolution changes, otherwise
-     * reuses them — rendering is the expensive half.
+     *
+     * The Lottie is rasterised exactly once, at the top rung; ffmpeg derives
+     * every lower rung from those frames. Rungs are also skipped predictively
+     * — a sticker that came out 3× over the limit has no reason to try the
+     * rung that only shaves 20% off.
      */
     async tgsToAnimatedWebp(tgsBuffer) {
-        let cached = null;
+        const top = ANIM_LADDER[0];
+        const base = await this._renderLottieFrames(tgsBuffer, { fps: top.fps, size: STICKER_SIZE });
+        const frameDir = this._writeFrameDir(base.frames);
+
+        // Rough bits-per-output cost of a rung, used only to rank them.
+        const weight = (r) => r.fps * r.size * r.size * (r.quality + 25);
+        const topWeight = weight(top);
+
         let best = null;
+        let ffmpegUsable = false;
 
-        for (const rung of ANIM_LADDER) {
-            try {
-                if (!cached || cached.size !== rung.size || cached.fps !== rung.fps) {
-                    cached = await this._renderLottieFrames(tgsBuffer, { fps: rung.fps, size: rung.size });
-                }
-                const out = await this._framesToAnimatedWebp(cached.frames, {
-                    fps: rung.fps,
-                    quality: rung.quality,
-                    size: rung.size,
-                });
+        try {
+            for (let i = 0; i < ANIM_LADDER.length; i++) {
+                const rung = ANIM_LADDER[i];
+                try {
+                    const out = await this._encodeAnimatedWebp(frameDir, top.fps, rung);
+                    if (!out?.length || !this._hasAnimChunk(out)) {
+                        throw new Error('encoder produced no ANIM chunk');
+                    }
+                    ffmpegUsable = true;
+                    if (!best || out.length < best.length) best = out;
 
-                if (!out?.length || !this._hasAnimChunk(out)) {
-                    throw new Error('encoder produced no ANIM chunk');
+                    if (out.length <= ANIM_BUDGET) {
+                        logger.info(
+                            `TGS → animated WebP: ${out.length}b, ${base.frames.length} src frames, `
+                            + `${rung.fps}fps, q${rung.quality}, ${rung.size}px`
+                        );
+                        return out;
+                    }
+
+                    // Skip ahead to the first rung light enough to plausibly fit.
+                    const needed = (ANIM_BUDGET / out.length) * (weight(rung) / topWeight);
+                    while (i + 1 < ANIM_LADDER.length && weight(ANIM_LADDER[i + 1]) / topWeight > needed) {
+                        i++;
+                    }
+                    logger.info(`TGS → ${out.length}b at ${rung.fps}fps/q${rung.quality} — over limit, stepping down`);
+                } catch (err) {
+                    logger.warn(`TGS ladder rung ${rung.fps}fps/q${rung.quality} failed: ${err.message}`);
                 }
-                if (!best || out.length < best.length) best = out;
-                if (out.length <= ANIM_WEBP_MAX) {
-                    logger.info(
-                        `TGS → animated WebP: ${out.length}b, ${cached.frames.length} frames, `
-                        + `${rung.fps}fps, q${rung.quality}, ${rung.size}px`
-                    );
-                    return out;
-                }
-                logger.info(`TGS → ${out.length}b at ${rung.fps}fps/q${rung.quality} — over limit, stepping down`);
-            } catch (err) {
-                logger.warn(`TGS ladder rung ${rung.fps}fps/q${rung.quality} failed: ${err.message}`);
             }
-        }
 
-        // Everything overshot the limit — send the smallest we managed rather
-        // than dropping to a static frame; WhatsApp usually still accepts it.
-        if (best) {
-            logger.warn(`TGS → animated WebP stayed over limit (${best.length}b), sending smallest attempt`);
-            return best;
+            // Everything overshot the limit — send the smallest we managed rather
+            // than dropping to a static frame; WhatsApp usually still accepts it.
+            if (best) {
+                logger.warn(`TGS → animated WebP stayed over limit (${best.length}b), sending smallest attempt`);
+                return best;
+            }
+
+            if (!ffmpegUsable) {
+                logger.warn('libwebp_anim unavailable, falling back to node-webpmux');
+                return await this._framesToAnimatedWebpMux(base.frames, { fps: 15, quality: 60, size: STICKER_SIZE });
+            }
+            throw new Error('all animated WebP encodings failed');
+        } finally {
+            this._rmFrameDir(frameDir);
         }
-        throw new Error('all animated WebP encodings failed');
     }
 
     /**
@@ -405,13 +449,13 @@ class TelegramStickerService {
             for (const rung of ANIM_LADDER) {
                 const outputPath = path.join(this.tempDir, `vout_${crypto.randomBytes(6).toString('hex')}.webp`);
                 try {
-                    this._runFfmpeg([
+                    await this._runFfmpeg([
                         '-y',
                         '-i', inputPath,
                         '-vcodec', 'libwebp_anim',
                         '-lossless', '0',
                         '-q:v', String(rung.quality),
-                        '-compression_level', '5',
+                        '-compression_level', '3',
                         '-loop', '0',
                         '-pix_fmt', 'yuva420p',
                         '-vf',
@@ -424,7 +468,7 @@ class TelegramStickerService {
                     const out = fs.readFileSync(outputPath);
                     if (!out.length || !this._hasAnimChunk(out)) throw new Error('no ANIM chunk');
                     if (!best || out.length < best.length) best = out;
-                    if (out.length <= ANIM_WEBP_MAX) {
+                    if (out.length <= ANIM_BUDGET) {
                         logger.info(`video → animated WebP: ${out.length}b at ${rung.fps}fps/q${rung.quality}`);
                         return out;
                     }
@@ -506,11 +550,11 @@ class TelegramStickerService {
         // An animated source WebP must keep its frames, so decode it animated.
         const sourceIsAnimated = this._hasAnimChunk(buffer);
 
-        if (!sourceIsAnimated && buffer.length <= STICKER_WEBP_MAX && this.isStaticWebp(buffer)) {
+        if (!sourceIsAnimated && buffer.length <= STATIC_BUDGET && this.isStaticWebp(buffer)) {
             return { buffer, type: 'sticker', isAnimated: false };
         }
 
-        const limit = sourceIsAnimated ? ANIM_WEBP_MAX : STICKER_WEBP_MAX;
+        const limit = sourceIsAnimated ? ANIM_BUDGET : STATIC_BUDGET;
         for (const quality of [80, 60, 45]) {
             const out = await sharp(buffer, { animated: sourceIsAnimated })
                 .resize(STICKER_SIZE, STICKER_SIZE, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
@@ -528,7 +572,7 @@ class TelegramStickerService {
         const outputPath = path.join(this.tempDir, `vf_${crypto.randomBytes(6).toString('hex')}.webp`);
         fs.writeFileSync(inputPath, buffer);
         try {
-            this._runFfmpeg([
+            await this._runFfmpeg([
                 '-y', '-i', inputPath,
                 '-frames:v', '1',
                 '-vcodec', 'libwebp', '-lossless', '0', '-q:v', '80',
@@ -584,50 +628,84 @@ class TelegramStickerService {
                 batch.map((sticker, j) => this.downloadSticker(sticker, i + j))
             );
 
-            for (let j = 0; j < downloads.length; j++) {
-                // Check abort before each conversion
+            // Convert in parallel — rendering and encoding are CPU-bound, so on
+            // a multi-core host this is close to a linear speedup. CONVERT_
+            // CONCURRENCY collapses to 1 on small instances so the rest of the
+            // bot keeps its share of the CPU.
+            for (let k = 0; k < downloads.length; k += CONVERT_CONCURRENCY) {
                 if (signal?.aborted) {
                     errors.push('Import cancelled by user');
                     break;
                 }
 
-                const result = downloads[j];
-                const sticker = batch[j];
+                const slice = downloads.slice(k, k + CONVERT_CONCURRENCY);
+                await Promise.all(slice.map(async (result, s) => {
+                    const j = k + s;
 
-                if (result.status === 'rejected') {
-                    failedCount++;
-                    errors.push(`Sticker ${i + j + 1}: ${result.reason?.message || 'download failed'}`);
-                    report(convertedCount, failedCount, 'convert');
-                    continue;
-                }
+                    if (result.status === 'rejected') {
+                        failedCount++;
+                        errors.push(`Sticker ${i + j + 1}: ${result.reason?.message || 'download failed'}`);
+                        report(convertedCount, failedCount, 'convert');
+                        return;
+                    }
 
-                const dl = result.value;
-
-                try {
-                    const { buffer: waBuffer, type, isAnimated } = await this.convertToWhatsAppSticker(dl.buffer, dl.emoji, dl.format);
-                    results.push({
-                        buffer: waBuffer,
-                        emoji: dl.emoji,
-                        index: dl.index,
-                        type, // 'sticker' or 'video'
-                        isAnimated: isAnimated || false,
-                    });
-                    convertedCount++;
-                    report(convertedCount, failedCount, 'convert');
-                } catch (err) {
-                    failedCount++;
-                    errors.push(`Sticker ${i + j + 1} (${dl.emoji}): ${err.message}`);
-                    report(convertedCount, failedCount, 'convert');
-                } finally {
-                    this._cleanup(dl.tempPath);
-                }
+                    const dl = result.value;
+                    try {
+                        const { buffer: converted, type, isAnimated } =
+                            await this.convertToWhatsAppSticker(dl.buffer, dl.emoji, dl.format);
+                        const waBuffer = await this.applyStickerMetadata(converted);
+                        results.push({
+                            buffer: waBuffer,
+                            emoji: dl.emoji,
+                            index: dl.index,
+                            type,
+                            isAnimated: isAnimated || false,
+                        });
+                        convertedCount++;
+                        report(convertedCount, failedCount, 'convert');
+                    } catch (err) {
+                        failedCount++;
+                        errors.push(`Sticker ${i + j + 1} (${dl.emoji}): ${err.message}`);
+                        report(convertedCount, failedCount, 'convert');
+                    } finally {
+                        this._cleanup(dl.tempPath);
+                    }
+                }));
             }
 
             if (signal?.aborted) break;
         }
 
+        // Parallel conversion finishes out of order — restore pack order.
+        results.sort((a, b) => a.index - b.index);
+
         report(convertedCount, failedCount, 'done');
         return { pack, stickers: results, errors };
+    }
+
+    /**
+     * Stamp the bot's default pack/author EXIF onto a sticker, so imported
+     * Telegram stickers carry the same attribution as ones the bot makes
+     * itself (STICKER_PACK_NAME / STICKER_PACK_AUTHOR).
+     *
+     * Verified not to disturb the ANIM/ANMF chunks or the alpha channel of an
+     * animated WebP — it only appends an EXIF chunk (~210 bytes). Best-effort:
+     * a sticker without metadata still beats no sticker.
+     */
+    async applyStickerMetadata(buffer) {
+        const pack = config.STICKER_PACK_NAME || '';
+        const author = config.STICKER_PACK_AUTHOR || '';
+        if (!pack && !author) return buffer;
+
+        try {
+            const WSF = (await import('wa-sticker-formatter')).default;
+            const exif = new WSF.Exif({ pack, author });
+            const stamped = await exif.add(buffer);
+            return stamped?.length ? stamped : buffer;
+        } catch (err) {
+            logger.warn(`Sticker metadata injection failed: ${err?.message || err}`);
+            return buffer;
+        }
     }
 
     _cleanup(filePath) {
