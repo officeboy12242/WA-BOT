@@ -5,6 +5,15 @@
 import axios from 'axios';
 import { logger } from '../utils/logger.js';
 import { stockSymbolResolverService } from './StockSymbolResolverService.js';
+import {
+    DIRECT,
+    egressOrder,
+    egressRequestConfig,
+    isBlockError,
+    maskProxy,
+    noteDirectBlocked,
+    noteDirectOk,
+} from '../utils/nseEgress.js';
 
 const UA =
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
@@ -18,6 +27,19 @@ const BASE_HEADERS = {
 
 const TIMEOUT_MS = 22_000;
 const COOKIE_TTL_MS = 5 * 60 * 1000;
+
+/** Reuse a chain this new rather than re-fetching (bursty scans hit NSE hard). */
+const CHAIN_FRESH_MS = 60 * 1000;
+/** Oldest cached chain still worth serving when NSE is unreachable. */
+const CHAIN_STALE_MS = 60 * 60 * 1000;
+const CHAIN_CACHE_MAX = 64;
+
+/** symbol -> { at, result } */
+const _chainCache = new Map();
+
+export function _resetChainCache() {
+    _chainCache.clear();
+}
 const NSE_MAX_RETRIES = 3;
 const NSE_RETRY_DELAY_MS = 2000;
 
@@ -34,37 +56,47 @@ const INDEX_SYMBOLS = new Set([
     'NIFTYNXT50',
 ]);
 
-let _cookieCache = { value: '', at: 0 };
-/** Serialize NSE warm-up so parallel symbol scans don't stampede cookies. */
-let _cookieLock = Promise.resolve();
+/**
+ * Cookies are keyed by egress: NSE ties its session to the requesting IP, so a
+ * cookie obtained directly is rejected when replayed through a proxy (and vice
+ * versa). One cache entry and one warm-up lock per egress.
+ */
+const _cookieCaches = new Map();   // egress -> { value, at }
+const _cookieLocks = new Map();    // egress -> Promise
 
-async function getNseCookie() {
-    const run = _cookieLock.then(async () => {
-        if (_cookieCache.value && Date.now() - _cookieCache.at < COOKIE_TTL_MS) {
-            return _cookieCache.value;
+export function _resetCookies() {
+    _cookieCaches.clear();
+    _cookieLocks.clear();
+}
+
+async function getNseCookie(egress) {
+    const prev = _cookieLocks.get(egress) || Promise.resolve();
+    const run = prev.then(async () => {
+        const cached = _cookieCaches.get(egress);
+        if (cached?.value && Date.now() - cached.at < COOKIE_TTL_MS) {
+            return cached.value;
         }
         const home = await axios.get('https://www.nseindia.com/option-chain', {
             headers: { ...BASE_HEADERS, Accept: 'text/html,application/xhtml+xml' },
             timeout: TIMEOUT_MS,
+            ...egressRequestConfig(egress),
         });
         const cookie = home.headers['set-cookie']?.map((c) => c.split(';')[0]).join('; ') || '';
         if (cookie) {
-            _cookieCache = { value: cookie, at: Date.now() };
+            _cookieCaches.set(egress, { value: cookie, at: Date.now() });
         }
         return cookie;
     });
-    _cookieLock = run.then(
-        () => undefined,
-        () => undefined
-    );
+    _cookieLocks.set(egress, run.then(() => undefined, () => undefined));
     return run;
 }
 
-async function nseGet(path, cookie) {
+async function nseGet(path, cookie, egress) {
     const res = await axios.get(`https://www.nseindia.com/api/${path}`, {
         headers: { ...BASE_HEADERS, Cookie: cookie },
         timeout: TIMEOUT_MS,
         validateStatus: (s) => s >= 200 && s < 400,
+        ...egressRequestConfig(egress),
     });
     const data = res.data;
     // NSE sometimes returns HTML (rate-limit page) instead of JSON
@@ -119,12 +151,13 @@ function formatLegLine(label, item) {
 }
 
 class NseOptionChainService {
-    async _fetchChainForNse(nseSymbol, type) {
+    /** One full chain fetch over a single egress (direct or one proxy). */
+    async _fetchViaEgress(nseSymbol, type, egress) {
         let lastErr = null;
         for (let attempt = 1; attempt <= NSE_MAX_RETRIES; attempt++) {
             try {
-                const cookie = await getNseCookie();
-                const contract = await nseGet(`option-chain-contract-info?symbol=${nseSymbol}`, cookie);
+                const cookie = await getNseCookie(egress);
+                const contract = await nseGet(`option-chain-contract-info?symbol=${nseSymbol}`, cookie, egress);
                 const expiries = contract?.expiryDates || contract?.records?.expiryDates;
                 const expiry = expiries?.[0];
                 if (!expiry) {
@@ -134,7 +167,8 @@ class NseOptionChainService {
 
                 const chain = await nseGet(
                     `option-chain-v3?type=${type}&symbol=${encodeURIComponent(nseSymbol)}&expiry=${encodeURIComponent(expiry)}`,
-                    cookie
+                    cookie,
+                    egress
                 );
 
                 const records = chain?.records;
@@ -146,14 +180,17 @@ class NseOptionChainService {
             } catch (err) {
                 lastErr = err;
                 const retryable = /rate limit|429|bot detection|HTML|ECONNRESET|ETIMEDOUT|timeout/i.test(err.message);
-                logger.warn(`NSE option chain attempt ${attempt}/${NSE_MAX_RETRIES} for ${nseSymbol}: ${err.message}`);
+                logger.warn(
+                    `NSE option chain attempt ${attempt}/${NSE_MAX_RETRIES} for ${nseSymbol} `
+                    + `via ${maskProxy(egress)}: ${err.message}`
+                );
                 if (retryable && attempt < NSE_MAX_RETRIES) {
                     const delay = NSE_RETRY_DELAY_MS * attempt;
                     logger.debug(`Retrying NSE in ${delay}ms…`);
                     await sleep(delay);
-                    // Invalidate cookie on rate limit so next attempt gets a fresh one
+                    // Invalidate this egress's cookie so the next try re-warms.
                     if (/rate limit|429|bot detection|HTML/i.test(err.message)) {
-                        _cookieCache = { value: '', at: 0 };
+                        _cookieCaches.delete(egress);
                     }
                     continue;
                 }
@@ -161,6 +198,44 @@ class NseOptionChainService {
             }
         }
         throw lastErr || new Error('NSE option chain failed after retries');
+    }
+
+    /**
+     * Fetch a chain, trying each configured egress in turn.
+     *
+     * NSE blocks foreign datacenter IPs, so when the bot's own address is
+     * refused we fall through to India-resident proxies (NSE_PROXY_URL). A
+     * direct block is remembered so later calls try proxies first instead of
+     * paying the timeout every time.
+     */
+    async _fetchChainForNse(nseSymbol, type) {
+        const egresses = egressOrder();
+        let lastErr = null;
+
+        for (const egress of egresses) {
+            try {
+                const result = await this._fetchViaEgress(nseSymbol, type, egress);
+                if (egress === DIRECT) noteDirectOk();
+                if (result) {
+                    if (egress !== DIRECT) {
+                        logger.info(`NSE option chain for ${nseSymbol} served via ${maskProxy(egress)}`);
+                    }
+                    return result;
+                }
+                // A clean "no data" (e.g. symbol has no F&O) is not an egress
+                // problem — trying another IP would return the same thing.
+                return null;
+            } catch (err) {
+                lastErr = err;
+                if (egress === DIRECT && isBlockError(err)) noteDirectBlocked();
+                if (egresses.length > 1) {
+                    logger.warn(`NSE egress ${maskProxy(egress)} failed for ${nseSymbol}: ${err.message}`);
+                }
+            }
+        }
+
+        if (lastErr) throw lastErr;
+        return null;
     }
 
     /**
@@ -276,13 +351,18 @@ class NseOptionChainService {
         const userSymbol = String(rawSymbol || '').trim().toUpperCase();
         if (!userSymbol) return null;
 
+        // A very recent chain is worth reusing: it saves hammering NSE during
+        // a burst of scans, which is itself a cause of rate-limit blocks.
+        const fresh = this._cacheGet(userSymbol, CHAIN_FRESH_MS);
+        if (fresh) return fresh;
+
         try {
             let mapping = await stockSymbolResolverService.resolve(userSymbol);
             let nseSymbol = mapping.nseSymbol;
             let type = resolveNseType(nseSymbol);
 
             let result = await this._fetchChainForNse(nseSymbol, type);
-            if (result) return result;
+            if (result) return this._cachePut(userSymbol, result);
 
             mapping = await stockSymbolResolverService.resolve(userSymbol, {
                 forceRefresh: true,
@@ -293,12 +373,49 @@ class NseOptionChainService {
                 nseSymbol = mapping.nseSymbol;
                 type = resolveNseType(nseSymbol);
                 result = await this._fetchChainForNse(nseSymbol, type);
-                if (result) return result;
+                if (result) return this._cachePut(userSymbol, result);
             }
         } catch (err) {
             logger.warn(`NSE option chain failed for ${rawSymbol}: ${err.message}`);
         }
+
+        // Live fetch failed. Serving the last good chain — clearly marked as
+        // stale, with its age — beats "Option chain unavailable", as long as
+        // callers surface the age so nobody trades on it thinking it's live.
+        const stale = this._cacheGet(userSymbol, CHAIN_STALE_MS, { markStale: true });
+        if (stale) {
+            logger.warn(
+                `NSE option chain for ${userSymbol} unavailable — serving cached chain `
+                + `from ${stale.snapshot.ageSec}s ago`
+            );
+            return stale;
+        }
         return null;
+    }
+
+    /** @returns {{context,snapshot}|null} */
+    _cacheGet(symbol, maxAgeMs, { markStale = false } = {}) {
+        const hit = _chainCache.get(symbol);
+        if (!hit) return null;
+        const ageMs = Date.now() - hit.at;
+        if (ageMs > maxAgeMs) return null;
+
+        const ageSec = Math.round(ageMs / 1000);
+        const snapshot = { ...hit.result.snapshot, ageSec, stale: markStale };
+        const context = markStale
+            ? `${hit.result.context}\n\n[cached chain — ${ageSec}s old, NSE unreachable right now]`
+            : hit.result.context;
+        return { context, snapshot };
+    }
+
+    _cachePut(symbol, result) {
+        _chainCache.set(symbol, { at: Date.now(), result });
+        // Bound the cache; the bot scans a lot of symbols over a session.
+        if (_chainCache.size > CHAIN_CACHE_MAX) {
+            const oldest = [..._chainCache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+            if (oldest) _chainCache.delete(oldest[0]);
+        }
+        return { context: result.context, snapshot: { ...result.snapshot, ageSec: 0, stale: false } };
     }
 }
 

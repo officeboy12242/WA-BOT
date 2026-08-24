@@ -11,6 +11,23 @@ import { oiWalls, pcrLabel } from './IndexAnalysisService.js';
 import { CHAIN_AI_SYSTEM_PROMPT, buildChainAiUserPrompt, formatChainAiAnalysis } from '../prompts/optionChainPrompt.js';
 import { logger } from '../utils/logger.js';
 
+/**
+ * Loud warning when the chain came from cache because NSE was unreachable.
+ *
+ * Serving stale data silently on a trading command would be worse than the
+ * "unavailable" error it replaces — a stale PCR or ATM premium looks exactly
+ * like a live one. Anything built on this snapshot has to say so up front.
+ */
+export function staleBanner(snapshot) {
+    if (!snapshot?.stale) return '';
+    const age = Number(snapshot.ageSec) || 0;
+    const mins = Math.floor(age / 60);
+    const label = mins >= 1 ? `${mins} min` : `${age}s`;
+    return `⚠️ *STALE DATA — ${label} old*\n`
+        + `_NSE is unreachable right now; this is the last chain we fetched._\n`
+        + `_Do not treat these premiums as live._\n\n`;
+}
+
 class OptionChainAiService {
     constructor(config = {}) {
         this.config = config;
@@ -136,7 +153,7 @@ class OptionChainAiService {
             const raw = await this._callLlm(CHAIN_AI_SYSTEM_PROMPT, userPrompt);
             if (raw && raw.length > 100) {
                 return {
-                    text: formatChainAiAnalysis(raw),
+                    text: staleBanner(data.snapshot) + formatChainAiAnalysis(raw),
                     data,
                 };
             }
@@ -159,6 +176,8 @@ class OptionChainAiService {
     _formatFallback(data) {
         const { snapshot: s, chainMeta: m } = data;
         const L = [];
+        const banner = staleBanner(s);
+        if (banner) L.push(banner.trimEnd(), '');
         L.push('┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┓');
         L.push('┃  🧠 *OPTION CHAIN ANALYSIS* ┃');
         L.push('┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛');
