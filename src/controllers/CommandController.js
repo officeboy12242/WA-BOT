@@ -3,8 +3,10 @@
  * All handler logic lives in ./handlers/*
  */
 
+import path from 'path';
 import { checkCommandAccess } from '../commands/access.js';
 import { findCommand, findSimilarCommands } from '../commands/registry.js';
+import { ImportProgressStore } from '../utils/importProgress.js';
 import { logger } from '../utils/logger.js';
 import { sendAndDelete } from '../utils/autoDelete.js';
 import { extractPhoneNumber } from '../utils/permissions.js';
@@ -129,7 +131,69 @@ import {
  * Import a Telegram sticker pack and send as WhatsApp stickers.
  * Supports abort via /tgstop. Handles static, animated (TGS→animated WebP), and video (MP4) stickers.
  */
-async function handleTgStickers(sock, chatId, args, quotedMessage, stickerForwarder = null) {
+/**
+ * Resume checkpoints for sticker-pack imports. Lives outside the sticker temp
+ * dir, which TelegramStickerService sweeps on an age timer.
+ */
+const importProgress = new ImportProgressStore(
+    path.join(process.cwd(), 'tmp', 'tg-import-progress.json')
+);
+
+/** How long one sticker upload may take before we treat it as wedged. */
+const STICKER_SEND_TIMEOUT_MS = 60_000;
+const STICKER_SEND_ATTEMPTS = 3;
+
+/**
+ * Send one sticker without letting the import hang.
+ *
+ * `sock.sendMessage` has no built-in timeout: if the socket wedges (a dropped
+ * connection that hasn't surfaced yet, a stalled media upload) the await never
+ * settles and the whole import freezes with no error — which is exactly how
+ * these imports were "pausing". Every send is now bounded, retried, and
+ * re-resolved against the live socket so a reconnect mid-pack doesn't leave us
+ * writing into a dead one.
+ *
+ * @returns {Promise<boolean>} whether the sticker was delivered
+ */
+export async function sendStickerResiliently(
+    sock, chatId, content, quotedMessage, getSock, signal,
+    { timeoutMs = STICKER_SEND_TIMEOUT_MS, attempts = STICKER_SEND_ATTEMPTS, backoffMs = 1000 } = {}
+) {
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+        if (signal?.aborted) return false;
+
+        // Re-resolve each attempt: after a reconnect the original handle is stale.
+        const active = (typeof getSock === 'function' && getSock()) || sock;
+
+        try {
+            const result = await Promise.race([
+                active.sendMessage(chatId, content, {
+                    // Only quote the triggering message on the first sticker's
+                    // first try; a stale quote can itself make sends fail.
+                    ...(attempt === 1 && quotedMessage ? { quoted: quotedMessage } : {}),
+                    mediaUploadTimeoutMs: 90_000,
+                }),
+                new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error('sticker send timeout')), timeoutMs)
+                ),
+            ]);
+            if (result) return true;
+            throw new Error('send returned empty');
+        } catch (err) {
+            const last = attempt === attempts;
+            logger.warn(
+                `Sticker send attempt ${attempt}/${attempts} failed: ${err?.message || err}`
+                + (last ? ' — giving up on this sticker' : ', retrying')
+            );
+            if (last) return false;
+            // Back off before retrying; a wedged socket often needs a moment.
+            await new Promise((r) => setTimeout(r, backoffMs * attempt));
+        }
+    }
+    return false;
+}
+
+async function handleTgStickers(sock, chatId, args, quotedMessage, stickerForwarder = null, getSock = null) {
     if (!telegramStickerService.isConfigured) {
         await safeSendMessage(sock, chatId, {
             text: '❌ Telegram Bot token not configured.\nSet `TELEGRAM_BOT_TOKEN` in .env (create a bot via @BotFather on Telegram).',
@@ -248,22 +312,52 @@ async function handleTgStickers(sock, chatId, args, quotedMessage, stickerForwar
             return;
         }
 
-        const { stickers, errors } = await telegramStickerService.fetchAndConvertPack(
+        // Pick up where a previous run stopped, if it left a checkpoint.
+        const alreadyDone = importProgress.getDone(chatId, packName);
+        const resumeCount = [...alreadyDone].filter((i) => i < total).length;
+
+        if (resumeCount >= total) {
+            importProgress.clear(chatId, packName);
+            await updateProgress(
+                `✅ *${pack.title || packName}* was already fully imported here.\n`
+                + `_Run it again to start over._`,
+                { force: true }
+            );
+            return;
+        }
+
+        if (resumeCount) {
+            await updateProgress(
+                `🎭 *Resuming Import*\n\n📦 *${pack.title || packName}*\n`
+                + `↩️ ${resumeCount}/${total} already sent — continuing with the remaining ${total - resumeCount}.\n\n`
+                + `_Send /tgstop to cancel._`,
+                { force: true }
+            );
+        }
+
+        const { stickers, errors, skipped } = await telegramStickerService.fetchAndConvertPack(
             packName,
             async (converted, failed, phase) => {
                 if (signal.aborted) return;
-                const pct = Math.round(((converted + failed) / total) * 100);
+                const done = converted + failed + resumeCount;
+                const pct = Math.round((done / total) * 100);
                 const bar = createProgressBar(pct);
                 await updateProgress(
                     `🎭 *Importing Telegram Stickers*\n\n📦 *${pack.title || packName}*\n` +
-                    `\n${bar} ${converted + failed}/${total}\n🔄 Processing… ${converted + failed}/${total}\n\n_Send /tgstop to cancel._`
+                    `\n${bar} ${done}/${total}\n🔄 Processing… ${done}/${total}` +
+                    (resumeCount ? `\n_(${resumeCount} carried over from last run)_` : '') +
+                    `\n\n_Send /tgstop to cancel._`
                 );
             },
-            signal
+            signal,
+            { skipIndices: alreadyDone }
         );
 
         if (signal.aborted) {
-            await updateProgress(`🛑 *Import cancelled.*\n_Sent 0 sticker(s) before cancellation._`, { force: true });
+            await updateProgress(
+                `🛑 *Import cancelled.*\n_${resumeCount}/${total} done so far — run the same command to resume._`,
+                { force: true }
+            );
             return;
         }
 
@@ -271,7 +365,8 @@ async function handleTgStickers(sock, chatId, args, quotedMessage, stickerForwar
             const reasons = [];
             if (errors?.length) reasons.push(`${errors.length} failed`);
             await updateProgress(
-                `❌ No stickers converted from *${pack.title || packName}*.\n${reasons.join('\n') || 'Empty pack.'}`,
+                `❌ No stickers converted from *${pack.title || packName}*.\n${reasons.join('\n') || 'Empty pack.'}`
+                + (resumeCount ? `\n\n_${resumeCount}/${total} were already sent previously._` : ''),
                 { force: true }
             );
             return;
@@ -282,30 +377,41 @@ async function handleTgStickers(sock, chatId, args, quotedMessage, stickerForwar
         let animatedSent = 0;
         for (let i = 0; i < stickers.length; i++) {
             if (signal.aborted) {
-                await updateProgress(`🛑 *Import cancelled mid-send.*\n_Sent ${sent}/${stickers.length} stickers._`, { force: true });
+                importProgress.flush();
+                await updateProgress(
+                    `🛑 *Import cancelled mid-send.*\n`
+                    + `_${resumeCount + sent}/${total} sent — run \`/tgstk ${packName}\` again to resume._`,
+                    { force: true }
+                );
                 return;
             }
 
             const sticker = stickers[i];
-            try {
-                // Everything is a WebP sticker — animated ones carry an ANIM
-                // chunk and the isAnimated flag so WhatsApp plays them.
-                const stickerMsg = { sticker: sticker.buffer };
-                if (sticker.isAnimated) stickerMsg.isAnimated = true;
+            // Everything is a WebP sticker — animated ones carry an ANIM chunk
+            // and the isAnimated flag so WhatsApp plays them.
+            const stickerMsg = { sticker: sticker.buffer };
+            if (sticker.isAnimated) stickerMsg.isAnimated = true;
 
-                await sock.sendMessage(chatId, stickerMsg, { quoted: quotedMessage });
+            const ok = await sendStickerResiliently(
+                sock, chatId, stickerMsg, quotedMessage, getSock, signal
+            );
+
+            if (ok) {
                 if (sticker.isAnimated) animatedSent++;
                 sent++;
-            } catch (err) {
+                // Checkpoint by the sticker's index in the Telegram pack, so a
+                // crash or /tgstop mid-pack resumes here instead of restarting.
+                importProgress.markDone(chatId, packName, sticker.index);
+            } else {
                 sendFailed++;
-                logger.warn(`Failed to send sticker ${sticker.emoji}: ${err.message}`);
             }
 
-            const pct = Math.round(((i + 1) / stickers.length) * 100);
+            const done = resumeCount + i + 1;
+            const pct = Math.round((done / total) * 100);
             const bar = createProgressBar(pct);
             await updateProgress(
                 `🎭 *Importing Telegram Stickers*\n\n📦 *${pack.title || packName}*\n` +
-                `\n${bar} ${i + 1}/${stickers.length}\n` +
+                `\n${bar} ${done}/${total}\n` +
                 `📤 Sending… ${sent} sent${sendFailed ? `, ${sendFailed} failed` : ''}` +
                 (animatedSent ? ` · ${animatedSent} animated` : '') +
                 `\n\n_Send /tgstop to cancel._`
@@ -313,6 +419,7 @@ async function handleTgStickers(sock, chatId, args, quotedMessage, stickerForwar
 
             await new Promise((r) => setTimeout(r, sticker.isAnimated ? 500 : 300));
         }
+        importProgress.flush();
 
         // Mirror the pack into the configured sticker-forwarding groups, so an
         // import run from any chat lands in the shared collection too. Skipped
@@ -335,7 +442,17 @@ async function handleTgStickers(sock, chatId, args, quotedMessage, stickerForwar
             }
         }
 
+        // Anything not delivered stays checkpointed so the next run retries
+        // only those; a fully delivered pack drops its checkpoint entirely.
+        const totalDelivered = resumeCount + sent;
+        const complete = totalDelivered >= total;
+        if (complete) {
+            importProgress.clear(chatId, packName);
+        }
+        importProgress.flush();
+
         const parts = [`✅ *${pack.title || packName}* — sent *${sent}* sticker(s)`];
+        if (resumeCount) parts.push(`↩️ ${resumeCount} carried over from a previous run`);
         if (animatedSent) parts.push(`🎞️ ${animatedSent} animated`);
         if (sendFailed) parts.push(`❌ ${sendFailed} failed to send`);
         if (errors?.length) parts.push(`⚠️ ${errors.length} conversion errors`);
@@ -343,16 +460,23 @@ async function handleTgStickers(sock, chatId, args, quotedMessage, stickerForwar
             parts.push(`📤 Forwarded to ${broadcast.targets.length} sticker group(s) — ${broadcast.sent} sent`
                 + (broadcast.failed ? `, ${broadcast.failed} failed` : ''));
         }
-        parts.push(`\n_Pack: ${sent}/${total} stickers sent_`);
+        parts.push(`\n_Pack: ${totalDelivered}/${total} stickers sent_`);
+        if (!complete) {
+            parts.push(`_Run \`/tgstk ${packName}\` again to resume the remaining ${total - totalDelivered}._`);
+        }
 
         await updateProgress(parts.join('\n'), { force: true });
         logger.info(`TG sticker pack imported: ${packName} — ${sent} sent, ${sendFailed} failed, ${animatedSent} animated`);
     } catch (err) {
         logger.error(`TG stickers error: ${err.message}`);
         await safeSendMessage(sock, chatId, {
-            text: `❌ Failed to import stickers: ${err.message}`,
+            text: `❌ Failed to import stickers: ${err.message}`
+                + (packName ? `\n\n_Progress was saved — run \`/tgstk ${packName}\` again to resume._` : ''),
         }, quotedMessage);
     } finally {
+        // Persist whatever was delivered before the failure, so the retry
+        // resumes instead of starting over.
+        importProgress.flush();
         activeImports.delete(chatKey);
     }
 }
@@ -566,7 +690,7 @@ export const COMMAND_HANDLERS = {
         });
     },
     tgstickers: ({ sock, chatId, args, originalMsg, ctx }) => {
-        void handleTgStickers(sock, chatId, args, originalMsg, ctx?.stickerForwarder).catch((err) => {
+        void handleTgStickers(sock, chatId, args, originalMsg, ctx?.stickerForwarder, ctx?.getSock).catch((err) => {
             logger.error('TG stickers command error:', err);
             void safeSendMessage(sock, chatId, { text: `⚠️ ${err.message || 'Failed to import stickers.'}` }, originalMsg);
         });

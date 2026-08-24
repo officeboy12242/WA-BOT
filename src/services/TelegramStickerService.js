@@ -706,9 +706,12 @@ class TelegramStickerService {
      * @param {string} packName
      * @param {Function} onProgress - (convertedCount, failedCount, phase)
      * @param {AbortSignal} [signal] - AbortSignal to cancel
-     * @returns {{ pack, stickers, errors }}
+     * @param {{ skipIndices?: Set<number> }} [opts] - pack indices already
+     *        delivered by an earlier run; skipped before download so a resumed
+     *        import doesn't re-fetch or re-render work that is already done.
+     * @returns {{ pack, stickers, errors, skipped }}
      */
-    async fetchAndConvertPack(packName, onProgress, signal) {
+    async fetchAndConvertPack(packName, onProgress, signal, { skipIndices } = {}) {
         const report = (converted, failed, phase) => {
             try { onProgress?.(converted, failed, phase); } catch {}
         };
@@ -717,10 +720,21 @@ class TelegramStickerService {
         const totalStickers = pack.stickers?.length || 0;
 
         if (!totalStickers) {
-            return { pack, stickers: [], errors: ['Empty sticker pack'] };
+            return { pack, stickers: [], errors: ['Empty sticker pack'], skipped: 0 };
         }
 
-        const toProcess = pack.stickers;
+        // Carry the original pack index so resume checkpoints stay meaningful
+        // even though the work list is now sparse.
+        const skip = skipIndices instanceof Set ? skipIndices : new Set();
+        const toProcess = pack.stickers
+            .map((sticker, index) => ({ sticker, index }))
+            .filter(({ index }) => !skip.has(index));
+        const skipped = totalStickers - toProcess.length;
+
+        if (skipped) {
+            logger.info(`TG pack ${packName}: resuming, skipping ${skipped}/${totalStickers} already delivered`);
+        }
+
         const results = [];
         const errors = [];
         let convertedCount = 0;
@@ -736,7 +750,7 @@ class TelegramStickerService {
             const batch = toProcess.slice(i, i + DOWNLOAD_CONCURRENCY);
 
             const downloads = await Promise.allSettled(
-                batch.map((sticker, j) => this.downloadSticker(sticker, i + j))
+                batch.map(({ sticker, index }) => this.downloadSticker(sticker, index))
             );
 
             // Convert through the shared gate. Rendering and encoding are
@@ -748,7 +762,7 @@ class TelegramStickerService {
 
                 if (result.status === 'rejected') {
                     failedCount++;
-                    errors.push(`Sticker ${i + j + 1}: ${result.reason?.message || 'download failed'}`);
+                    errors.push(`Sticker ${batch[j].index + 1}: ${result.reason?.message || 'download failed'}`);
                     report(convertedCount, failedCount, 'convert');
                     return;
                 }
@@ -772,7 +786,7 @@ class TelegramStickerService {
                     report(convertedCount, failedCount, 'convert');
                 } catch (err) {
                     failedCount++;
-                    errors.push(`Sticker ${i + j + 1} (${dl.emoji}): ${err.message}`);
+                    errors.push(`Sticker ${dl.index + 1} (${dl.emoji}): ${err.message}`);
                     report(convertedCount, failedCount, 'convert');
                 } finally {
                     this._cleanup(dl.tempPath);
@@ -789,7 +803,7 @@ class TelegramStickerService {
         results.sort((a, b) => a.index - b.index);
 
         report(convertedCount, failedCount, 'done');
-        return { pack, stickers: results, errors };
+        return { pack, stickers: results, errors, skipped };
     }
 
     /**

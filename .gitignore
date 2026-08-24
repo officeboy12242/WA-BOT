@@ -42,6 +42,9 @@ desktop.ini
 test-*.mjs
 fix-*.mjs
 
+# Runtime scratch (sticker import resume checkpoints, etc.)
+tmp/
+
 # Build / coverage
 dist/
 coverage/
