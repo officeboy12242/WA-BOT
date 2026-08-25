@@ -139,5 +139,72 @@ await test('cached data is loudly labelled with its age', async () => {
     return '12 min old, warned';
 });
 
+/* ── stale data must never reach trade pricing ───────────────────────────── */
+
+/**
+ * Regression guard. A cache that served stale chains to every caller silently
+ * fed hour-old premiums into entry pricing and into SvmkrPositionTracker's
+ * target/stop-loss checks, which read like live quotes. Stale is opt-in, and
+ * only for advisory surfaces that display the age.
+ */
+await test('pricing callers get null on failure — never a stale premium', async () => {
+    const { default: NseOptionChainService } = await import('../src/services/NseOptionChainService.js');
+    const svc = new NseOptionChainService();
+
+    const fakeChain = {
+        context: 'ctx',
+        snapshot: { symbol: 'NIFTY', spot: 24120, atmStrike: 24100, expiry: '25-Aug-2026', strikes: [] },
+    };
+
+    // Prime the cache with one good fetch, then make NSE fail.
+    let live = true;
+    svc._fetchChainForNse = async () => {
+        if (!live) throw new Error('NSE returned HTML (rate limit / bot detection)');
+        return fakeChain;
+    };
+    const first = await svc.fetchOptionContext('NIFTY');
+    assert.ok(first, 'setup: first fetch should succeed');
+    assert.strictEqual(first.snapshot.stale, false);
+
+    live = false;
+
+    // Default (pricing: position tracker, scans, morning pick, entry premiums)
+    const pricing = await svc.fetchOptionContext('NIFTY');
+    assert.strictEqual(
+        pricing, null,
+        'pricing callers must get null and skip — a wrong premium is worse than none'
+    );
+
+    // Opt-in advisory caller still gets the cached chain, flagged.
+    const advisory = await svc.fetchOptionContext('NIFTY', { allowStale: true });
+    assert.ok(advisory, 'advisory caller should still get the cached chain');
+    assert.strictEqual(advisory.snapshot.stale, true, 'must be flagged stale');
+    assert.ok(staleBanner(advisory.snapshot).includes('STALE'), 'must render the warning');
+
+    return 'pricing → null, advisory → labelled';
+});
+
+await test('no cache reuse by default, even while NSE is healthy', async () => {
+    const { default: NseOptionChainService } = await import('../src/services/NseOptionChainService.js');
+    const svc = new NseOptionChainService();
+
+    let fetches = 0;
+    svc._fetchChainForNse = async () => {
+        fetches++;
+        return { context: 'c', snapshot: { symbol: 'NIFTY', spot: 100 + fetches, strikes: [] } };
+    };
+
+    await svc.fetchOptionContext('NIFTY');
+    const second = await svc.fetchOptionContext('NIFTY');
+    assert.strictEqual(fetches, 2, 'premiums move every tick — default must refetch, not reuse');
+    assert.strictEqual(second.snapshot.spot, 102, 'caller should see the newer chain');
+
+    // An explicit reuse window is honoured when a caller asks for it.
+    const reused = await svc.fetchOptionContext('NIFTY', { maxAgeMs: 60_000 });
+    assert.strictEqual(fetches, 2, 'explicit maxAgeMs should serve from cache');
+    assert.strictEqual(reused.snapshot.stale, false, 'a fresh reuse is not stale');
+    return 'default refetches; maxAgeMs opt-in reuses';
+});
+
 console.log(`\ncheck-nse-egress: ${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

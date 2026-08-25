@@ -28,8 +28,6 @@ const BASE_HEADERS = {
 const TIMEOUT_MS = 22_000;
 const COOKIE_TTL_MS = 5 * 60 * 1000;
 
-/** Reuse a chain this new rather than re-fetching (bursty scans hit NSE hard). */
-const CHAIN_FRESH_MS = 60 * 1000;
 /** Oldest cached chain still worth serving when NSE is unreachable. */
 const CHAIN_STALE_MS = 60 * 60 * 1000;
 const CHAIN_CACHE_MAX = 64;
@@ -347,14 +345,28 @@ class NseOptionChainService {
      * @param {string} rawSymbol
      * @returns {Promise<{ context: string, snapshot: object } | null>}
      */
-    async fetchOptionContext(rawSymbol) {
+    /**
+     * @param {string} rawSymbol
+     * @param {object} [opts]
+     * @param {boolean} [opts.allowStale=false]
+     *   Serve the last cached chain when NSE is unreachable.
+     *   OFF BY DEFAULT, and it must stay that way for anything that prices a
+     *   trade. Option premiums move every tick: handing a cached LTP to entry
+     *   pricing or to the position tracker's target/stop-loss checks silently
+     *   quotes a price that no longer exists. Only advisory surfaces that
+     *   render the stale banner may opt in.
+     * @param {number} [opts.maxAgeMs=0]
+     *   Reuse a cached chain this recent instead of refetching. Also 0 by
+     *   default for the same reason — dedup is the caller's business.
+     */
+    async fetchOptionContext(rawSymbol, { allowStale = false, maxAgeMs = 0 } = {}) {
         const userSymbol = String(rawSymbol || '').trim().toUpperCase();
         if (!userSymbol) return null;
 
-        // A very recent chain is worth reusing: it saves hammering NSE during
-        // a burst of scans, which is itself a cause of rate-limit blocks.
-        const fresh = this._cacheGet(userSymbol, CHAIN_FRESH_MS);
-        if (fresh) return fresh;
+        if (maxAgeMs > 0) {
+            const fresh = this._cacheGet(userSymbol, maxAgeMs);
+            if (fresh) return fresh;
+        }
 
         try {
             let mapping = await stockSymbolResolverService.resolve(userSymbol);
@@ -379,16 +391,18 @@ class NseOptionChainService {
             logger.warn(`NSE option chain failed for ${rawSymbol}: ${err.message}`);
         }
 
-        // Live fetch failed. Serving the last good chain — clearly marked as
-        // stale, with its age — beats "Option chain unavailable", as long as
-        // callers surface the age so nobody trades on it thinking it's live.
-        const stale = this._cacheGet(userSymbol, CHAIN_STALE_MS, { markStale: true });
-        if (stale) {
-            logger.warn(
-                `NSE option chain for ${userSymbol} unavailable — serving cached chain `
-                + `from ${stale.snapshot.ageSec}s ago`
-            );
-            return stale;
+        // Live fetch failed. Only advisory callers that display the staleness
+        // may fall back to cache; pricing callers get null and skip, exactly as
+        // they did before caching existed. A wrong premium is worse than none.
+        if (allowStale) {
+            const stale = this._cacheGet(userSymbol, CHAIN_STALE_MS, { markStale: true });
+            if (stale) {
+                logger.warn(
+                    `NSE option chain for ${userSymbol} unavailable — serving cached chain `
+                    + `from ${stale.snapshot.ageSec}s ago (advisory only)`
+                );
+                return stale;
+            }
         }
         return null;
     }

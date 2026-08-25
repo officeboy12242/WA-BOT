@@ -28,6 +28,12 @@ export function staleBanner(snapshot) {
         + `_Do not treat these premiums as live._\n\n`;
 }
 
+/**
+ * Reuse window for the advisory chain card. Short on purpose: this card also
+ * prints ATM premiums, and a stale LTP reads exactly like a live one.
+ */
+const CHAIN_REUSE_MS = 15_000;
+
 class OptionChainAiService {
     constructor(config = {}) {
         this.config = config;
@@ -40,7 +46,9 @@ class OptionChainAiService {
      */
     async _fetchAllData(symbol) {
         const [chainRes, quoteRes] = await Promise.allSettled([
-            nseOptionChainService.fetchOptionContext(symbol),
+            // Advisory card only, and it renders staleBanner() when the chain
+            // is cached — so this is the one caller allowed to fall back.
+            nseOptionChainService.fetchOptionContext(symbol, { allowStale: true, maxAgeMs: CHAIN_REUSE_MS }),
             indianStockQuoteService.fetchQuote(symbol),
         ]);
 
