@@ -60,6 +60,7 @@ import IpoController from './src/controllers/IpoController.js';
 import ExpiryTradeService from './src/services/ExpiryTradeService.js';
 import { formatExpiryDigest } from './src/utils/expiryAlertFormatter.js';
 import { deployNotificationService } from './src/services/DeployNotificationService.js';
+import scalpAlertService from './src/services/ScalpAlertService.js';
 import { createJobQueue, startJobRuntime } from './src/jobs/index.js';
 
 // Bot state
@@ -511,6 +512,16 @@ class WhatsAppCourseBot {
                 groupManager: this.groupManager,
                 mongoDb,
                 getSock: () => this.whatsappService?.getSock?.() || null,
+            });
+
+            // Auto-trigger scalp alerts when 75%+ confidence setups appear
+            scalpAlertService.start({
+                sock: this.whatsappService?.getSock?.() || null,
+                getGroups: () => this.groupManager.getScalpGroups(),
+                sendMessage: async (chatId, msg) => {
+                    const sock = this.whatsappService?.getSock?.();
+                    if (sock) await sock.sendMessage(chatId, msg);
+                },
             });
 
             this.checkInterval = setInterval(async () => {
