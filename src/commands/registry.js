@@ -543,6 +543,14 @@ export const COMMAND_REGISTRY = [
         category: 'trade',
     },
     {
+        names: ['/scalp'],
+        key: 'scalp',
+        scope: 'group_only',
+        role: 'admins',
+        help: 'NIFTY 2-3 pt micro scalp — live range, premiums, trigger alerts',
+        category: 'trade',
+    },
+    {
         names: ['/addpremium'],
         key: 'addpremium',
         scope: 'any',
@@ -786,7 +794,7 @@ export const HELP_CATEGORY = {
     sticker: 'sticker', steal: 'sticker', rgb: 'sticker', tgstickers: 'sticker', tgstop: 'sticker',
 
     // Markets
-    tradenow: 'trade', swing: 'trade', expiry: 'trade', tradelert: 'trade', index: 'trade',
+    tradenow: 'trade', swing: 'trade', expiry: 'trade', tradelert: 'trade', index: 'trade', scalp: 'trade',
     svmkr: 'trade', chainai: 'trade', ipo: 'trade',
 
     // Scheduled feeds

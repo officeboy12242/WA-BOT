@@ -56,6 +56,7 @@ import {
 } from './handlers/groupHandlers.js';
 
 import { handleTradelert, handleTradenow, handleSwing, handleExpiry, handleIndex, handleSvmkr, handleChainAi } from './handlers/tradeHandlers.js';
+import ScalpService from '../services/ScalpService.js';
 import { handleAssist } from './handlers/assistHandlers.js';
 import IpoController from './IpoController.js';
 import BacktestController from './BacktestController.js';
@@ -558,6 +559,17 @@ export const COMMAND_HANDLERS = {
             ctx.backtestController = new BacktestController(ctx.config || {});
         }
         return ctx.backtestController.handleCommand(chatId, `/backtest${args?.length ? ' ' + args.join(' ') : ''}`, sock);
+    },
+    scalp: async ({ sock, chatId, ctx }) => {
+        try {
+            const svc = new ScalpService();
+            const card = await svc.buildScalpCard('NIFTY');
+            if (card) await safeSendMessage(sock, chatId, { text: card });
+            else await safeSendMessage(sock, chatId, { text: '⚠️ Could not build scalp card.' });
+        } catch (err) {
+            logger.error(`Scalp command failed: ${err.message}`);
+            await safeSendMessage(sock, chatId, { text: `❌ Scalp error: ${err.message}` });
+        }
     },
 
     /* ── Admin management ── */
