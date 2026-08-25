@@ -186,6 +186,7 @@ class ScalpService {
                 });
                 setups.push({
                     type: 'BUY CE', emoji: '\uD83D\uDFE2',
+                    rank: 'primary',
                     trigger: `Spot touches ${support}`,
                     entry: entryPrem, target, stop, speed: '2-5 min',
                     confidence: conf,
@@ -209,6 +210,7 @@ class ScalpService {
                 });
                 setups.push({
                     type: 'BUY PE', emoji: '\uD83D\uDD34',
+                    rank: 'primary',
                     trigger: `Spot touches ${resistance}`,
                     entry: entryPrem, target, stop, speed: '2-5 min',
                     confidence: conf,
@@ -233,6 +235,7 @@ class ScalpService {
                 });
                 setups.push({
                     type: 'SHORT STRADDLE', emoji: '\u26A1',
+                    rank: 'secondary',
                     trigger: `Spot mid-range (${spotPct}%)`,
                     entry: straddle, target, stop, speed: '5-15 min',
                     confidence: conf,
@@ -262,6 +265,7 @@ class ScalpService {
                 });
                 setups.push({
                     type: 'SHORT STRANGLE', emoji: '\uD83E\uDE81',
+                    rank: 'secondary',
                     trigger: `Sell ${otmCeStrike} CE + ${otmPeStrike} PE`,
                     entry: strangle, target, stop, speed: '10-30 min',
                     confidence: conf,
@@ -289,6 +293,7 @@ class ScalpService {
                     setups.push({
                         type: bullBreak ? 'BREAKOUT CE' : 'BREAKDOWN PE',
                         emoji: bullBreak ? '\uD83D\uDE80' : '\uD83E\uDE79',
+                        rank: 'secondary',
                         trigger: `Spot broke ${bullBreak ? 'above resistance' : 'below support'} ${bullBreak ? resistance : support}`,
                         entry: entryPrem, target, stop, speed: '1-3 min',
                         confidence: conf,
@@ -364,16 +369,34 @@ class ScalpService {
         L.push('');
 
         if (setups.length) {
-            L.push('\uD83C\uDFAF *TRIGGER SCALPS*');
-            L.push('');
-            for (const s of setups) {
-                const pick = s.topPick ? ' \u2B50 TOP PICK' : '';
-                L.push(`*${s.emoji} ${s.type}${pick}*`);
-                if (s.trigger) L.push(`  Trigger: ${s.trigger}`);
-                L.push(`  Entry: \u20B9${s.entry} \u00B7 Target: \u20B9${s.target} \u00B7 Stop: \u20B9${s.stop}`);
-                L.push(`  Conf: ${s.confidence}% ${confBar(s.confidence)} ${confLabel(s.confidence)}`);
-                if (s.why) L.push(`  \uD83D\uDCCA ${s.why}`);
+            const primary = setups.filter((s) => s.rank === 'primary');
+            const secondary = setups.filter((s) => s.rank !== 'primary');
+
+            if (primary.length) {
+                L.push('\uD83C\uDFAF *\uD83D\uDD35 PRIMARY \u00B7 Best for 5pt scalps*');
                 L.push('');
+                for (const s of primary) {
+                    const pick = s.topPick ? ' \u2B50 TOP PICK' : '';
+                    L.push(`*${s.emoji} ${s.type}${pick}*`);
+                    if (s.trigger) L.push(`  Trigger: ${s.trigger}`);
+                    L.push(`  Entry: \u20B9${s.entry} \u00B7 Target: \u20B9${s.target} \u00B7 Stop: \u20B9${s.stop}`);
+                    L.push(`  Conf: ${s.confidence}% ${confBar(s.confidence)} ${confLabel(s.confidence)}`);
+                    if (s.why) L.push(`  \uD83D\uDCCA ${s.why}`);
+                    L.push('');
+                }
+            }
+
+            if (secondary.length) {
+                L.push('\u26A1 *\uD83D\uDFE3 SECONDARY \u00B7 Theta & Momentum*');
+                L.push('');
+                for (const s of secondary) {
+                    const pick = s.topPick ? ' \u2B50' : '';
+                    L.push(`*${s.emoji} ${s.type}${pick}*`);
+                    if (s.trigger) L.push(`  Trigger: ${s.trigger}`);
+                    L.push(`  Entry: \u20B9${s.entry} \u00B7 Target: \u20B9${s.target} \u00B7 Stop: \u20B9${s.stop}`);
+                    L.push(`  Conf: ${s.confidence}% ${confBar(s.confidence)} ${confLabel(s.confidence)}`);
+                    L.push('');
+                }
             }
         } else {
             L.push('\u26A0\uFE0F *NO CLEAR SETUP NOW*');
