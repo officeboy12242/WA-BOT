@@ -187,7 +187,7 @@ class ScalpService {
                 setups.push({
                     type: 'BUY CE', emoji: '\uD83D\uDFE2',
                     rank: 'primary',
-                    strike: atmStrike,
+                    strike: ceNearSupport?.strike || support,
                     optionType: 'CE',
                     trigger: `Spot touches ${support}`,
                     entry: entryPrem, target, stop, speed: '2-5 min',
@@ -213,7 +213,7 @@ class ScalpService {
                 setups.push({
                     type: 'BUY PE', emoji: '\uD83D\uDD34',
                     rank: 'primary',
-                    strike: atmStrike,
+                    strike: peNearResistance?.strike || resistance,
                     optionType: 'PE',
                     trigger: `Spot touches ${resistance}`,
                     entry: entryPrem, target, stop, speed: '2-5 min',
