@@ -10,7 +10,7 @@ import { logger } from '../utils/logger.js';
 import ScalpService from './ScalpService.js';
 
 const SCAN_INTERVAL_MS = 3 * 60 * 1000; // 3 minutes
-const COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes per setup type
+const COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes per setup type
 const MARKET_OPEN_HOUR = 9;
 const MARKET_OPEN_MIN = 15;
 const MARKET_CLOSE_HOUR = 15;
