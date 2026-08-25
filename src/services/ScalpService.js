@@ -251,7 +251,10 @@ class ScalpService {
             spot, maxPainVal: mpVal, rangeWidth, vix: 13, pcr: pcr || 1,
         });
 
-        // ── Build 5 setups (target +5 / stop -5) ─────────────────────
+        // ── Build 5 setups (target +8 / stop -5, 75%+ conf filter) ─────────────────────
+        const MIN_CONF = 75;
+        const TARGET_PTS = 8;
+        const STOP_PTS = 5;
         const setups = [];
 
         // 1) Support bounce — Buy CE (best momentum strike)
@@ -259,14 +262,15 @@ class ScalpService {
             const bestCe = findBestStrike(chain, support, 'CE', spot, atmStrike);
             const entryPrem = bestCe?.ltp || (atmCe?.ltp ? atmCe.ltp - 20 : null);
             if (entryPrem && entryPrem >= 5) {
-                const target = entryPrem + 5;
-                const stop = entryPrem - 5;
+                const target = entryPrem + TARGET_PTS;
+                const stop = entryPrem - STOP_PTS;
                 const conf = calcConfidence({
                     oiWallQty: topPeWall?.pe?.oi || 0,
                     totalOi: snap.totalPeOi || 0, pcr: pcr || 1, vix: 13,
                     spotDistance: spot - support, regime: 'directional',
                 });
-                setups.push({
+                if (conf >= MIN_CONF) {
+                    setups.push({
                     type: 'BUY CE', emoji: '\uD83D\uDFE2',
                     rank: 'primary',
                     strike: bestCe?.strike || support,
@@ -276,8 +280,9 @@ class ScalpService {
                     entry: entryPrem, target, stop, speed: '2-5 min',
                     confidence: conf,
                     why: `PE OI wall ${formatOi(topPeWall?.pe?.oi)} at ${support} · Momentum: ${bestCe?.score || 0}/100`,
-                    topPick: conf >= 65,
-                });
+                    topPick: conf >= 80,
+                    });
+                }
             }
         }
 
@@ -286,14 +291,15 @@ class ScalpService {
             const bestPe = findBestStrike(chain, resistance, 'PE', spot, atmStrike);
             const entryPrem = bestPe?.ltp || (atmPe?.ltp ? atmPe.ltp - 20 : null);
             if (entryPrem && entryPrem >= 5) {
-                const target = entryPrem + 5;
-                const stop = entryPrem - 5;
+                const target = entryPrem + TARGET_PTS;
+                const stop = entryPrem - STOP_PTS;
                 const conf = calcConfidence({
                     oiWallQty: topCeWall?.ce?.oi || 0,
                     totalOi: snap.totalCeOi || 0, pcr: pcr || 1, vix: 13,
                     spotDistance: resistance - spot, regime: 'directional',
                 });
-                setups.push({
+                if (conf >= MIN_CONF) {
+                    setups.push({
                     type: 'BUY PE', emoji: '\uD83D\uDD34',
                     rank: 'primary',
                     strike: bestPe?.strike || resistance,
@@ -303,8 +309,9 @@ class ScalpService {
                     entry: entryPrem, target, stop, speed: '2-5 min',
                     confidence: conf,
                     why: `CE OI wall ${formatOi(topCeWall?.ce?.oi)} at ${resistance} · Momentum: ${bestPe?.score || 0}/100`,
-                    topPick: conf >= 65,
-                });
+                    topPick: conf >= 80,
+                    });
+                }
             }
         }
 
@@ -312,7 +319,7 @@ class ScalpService {
         if (spotPct >= 30 && spotPct <= 70) {
             const straddle = (atmCe?.ltp || 0) + (atmPe?.ltp || 0);
             if (straddle > 50) {
-                const target = straddle - 5;
+                const target = straddle - 8;
                 const stop = straddle + 6;
                 const conf = calcConfidence({
                     oiWallQty: Math.max(topCeWall?.ce?.oi || 0, topPeWall?.pe?.oi || 0),
@@ -321,15 +328,17 @@ class ScalpService {
                     spotDistance: Math.min(spot - support, resistance - spot),
                     regime: 'theta',
                 });
-                setups.push({
+                if (conf >= MIN_CONF) {
+                    setups.push({
                     type: 'SHORT STRADDLE', emoji: '\u26A1',
                     rank: 'secondary',
                     trigger: `Spot mid-range (${spotPct}%)`,
                     entry: straddle, target, stop, speed: '5-15 min',
                     confidence: conf,
                     why: `ATM straddle \u20B9${straddle}, theta decay working`,
-                    topPick: regime === 'low_vol' && conf >= 60,
-                });
+                    topPick: regime === 'low_vol' && conf >= 80,
+                    });
+                }
             }
         }
 
@@ -342,7 +351,7 @@ class ScalpService {
             const otmPe = findStrikeLeg({ strikes }, otmPeStrike, 'PE');
             const strangle = (otmCe?.ltp || 0) + (otmPe?.ltp || 0);
             if (strangle > 20) {
-                const target = strangle - Math.max(3, Math.round(strangle * 0.15));
+                const target = strangle - Math.max(5, Math.round(strangle * 0.2));
                 const stop = strangle + Math.max(4, Math.round(strangle * 0.2));
                 const conf = calcConfidence({
                     oiWallQty: Math.max(topCeWall?.ce?.oi || 0, topPeWall?.pe?.oi || 0),
@@ -351,7 +360,8 @@ class ScalpService {
                     spotDistance: Math.min(spot - support, resistance - spot),
                     regime: 'theta',
                 });
-                setups.push({
+                if (conf >= MIN_CONF) {
+                    setups.push({
                     type: 'SHORT STRANGLE', emoji: '\uD83E\uDE81',
                     rank: 'secondary',
                     trigger: `Sell ${otmCeStrike} CE + ${otmPeStrike} PE`,
@@ -359,7 +369,8 @@ class ScalpService {
                     confidence: conf,
                     why: `OTM wings collect \u20B9${strangle}, both legs safe`,
                     topPick: false,
-                });
+                    });
+                }
             }
         }
 
@@ -371,14 +382,15 @@ class ScalpService {
                 const leg = findStrikeLeg({ strikes }, atmStrike, bullBreak ? 'CE' : 'PE');
                 const entryPrem = leg?.ltp || (bullBreak ? atmCe?.ltp : atmPe?.ltp);
                 if (entryPrem && entryPrem > 10) {
-                    const target = entryPrem + 5;
-                    const stop = entryPrem - 5;
+                    const target = entryPrem + TARGET_PTS;
+                    const stop = entryPrem - STOP_PTS;
                     const conf = calcConfidence({
                         oiWallQty: bullBreak ? topCeWall?.ce?.oi || 0 : topPeWall?.pe?.oi || 0,
                         totalOi: (snap.totalCeOi || 0) + (snap.totalPeOi || 0),
                         pcr: pcr || 1, vix: 13, spotDistance: 20, regime: 'directional',
                     });
-                    setups.push({
+                    if (conf >= MIN_CONF) {
+                        setups.push({
                         type: bullBreak ? 'BREAKOUT CE' : 'BREAKDOWN PE',
                         emoji: bullBreak ? '\uD83D\uDE80' : '\uD83E\uDE79',
                         rank: 'secondary',
@@ -386,8 +398,9 @@ class ScalpService {
                         entry: entryPrem, target, stop, speed: '1-3 min',
                         confidence: conf,
                         why: 'Spot beyond the wall \u2014 momentum trade, exit fast',
-                        topPick: conf >= 65,
-                    });
+                        topPick: conf >= 80,
+                        });
+                    }
                 }
             }
         }
@@ -550,7 +563,9 @@ class ScalpService {
         const isLowVol = regime === 'low_vol';
         const isTrending = regime === 'trending';
         L.push('\u26A1 *SCALP RULES*');
-        L.push('  \uD83C\uDFAF +5 pt exit \u00B7 \uD83D\uDED1 \u22125 pt stop');
+        L.push('  \uD83C\uDFAF +8 pt target \u00B7 \uD83D\uDED1 \u22125 pt stop');
+        L.push('  \uD83D\uDCCA Fees: ~3.4 pts \u00B7 Net: +4.6 pts win / \u22128.4 pts loss');
+        L.push('  \u2705 Only 75%+ confidence setups shown');
         L.push(`  \u23F0 2-5 min hold \u00B7 \uD83D\uDCE6 ${isLowVol ? '1 lot' : '2-3 lots'}`);
         L.push(`  \u25BB Max ${isLowVol ? '3' : '4'} trades/day`);
         if (isLowVol) L.push('  \u26A0\uFE0F Low vol \u2014 tighter stops, faster exits');
