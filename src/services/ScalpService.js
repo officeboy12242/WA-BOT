@@ -313,8 +313,8 @@ class ScalpService {
             normal: '📊 NORMAL',
         }[regime] || '📊 NORMAL';
 
-        // Spot position visual
-        const spotBar = buildSpotBar(spotPct);
+        // Build price ladder rows
+        const ladder = buildPriceLadder({ spot, resistance, support, mpVal, atmStrike, atmCe, atmPe, topCeWall, topPeWall });
 
         L.push('╔══════════════════════════════════════╗');
         L.push('║  ⚡ /scalp · NIFTY MICRO SCALP       ║');
@@ -327,14 +327,11 @@ class ScalpService {
         L.push('');
         L.push('📊 *SCALP MAP*');
         L.push('');
-        L.push(`  🔴 RESISTANCE ─── ${fmtNum(resistance)}`);
-        L.push(spotBar.above);
-        L.push(`  📍 SPOT ──────────│─ ${fmtNum(spot)} ◄ YOU`);
-        L.push(spotBar.below);
-        L.push(`  🟢 SUPPORT ─────── ${fmtNum(support)}`);
+        for (const row of ladder) {
+            L.push(row);
+        }
         L.push('');
         L.push(`  Max Pain: ${fmtNum(mpVal)} · Range: ${rangeWidth} pts`);
-        L.push(`  Spot Position: ${spotPct}%`);
         L.push('');
         L.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         L.push('');
@@ -366,10 +363,7 @@ class ScalpService {
                 const pick = s.topPick ? ' ⭐ TOP PICK' : '';
                 L.push(`*${s.emoji} ${s.type}${pick}*`);
                 if (s.trigger) L.push(`  Trigger: ${s.trigger}`);
-                L.push(`  Entry: ₹${s.entry}`);
-                L.push(`  Target: ₹${s.target} (+₹${s.target - s.entry}) ✅`);
-                L.push(`  Stop: ₹${s.stop} (−₹${s.entry - s.stop}) 🛑`);
-                L.push(`  Speed: ${s.speed}`);
+                L.push(`  Entry: ₹${s.entry} · Target: ₹${s.target} · Stop: ₹${s.stop}`);
                 L.push(`  Conf: ${s.confidence}% ${confBar(s.confidence)} ${confLabel(s.confidence)}`);
                 if (s.why) L.push(`  📊 ${s.why}`);
                 L.push('');
@@ -424,28 +418,71 @@ function formatOi(oi) {
     return String(oi);
 }
 
-function buildSpotBar(spotPct) {
-    // Build visual bar showing where spot is in the range
-    const barWidth = 35;
-    const spotPos = Math.round((spotPct / 100) * barWidth);
-    const above = [];
-    const below = [];
-    for (let i = 0; i < barWidth; i++) {
-        if (i === spotPos) {
-            above.push('│');
-            below.push('│');
-        } else if (i < spotPos) {
-            above.push('·');
-            below.push('─');
-        } else {
-            above.push('─');
-            below.push('·');
-        }
+/**
+ * Build a TradingView-style price ladder.
+ * Shows key levels from resistance to support with OI walls, ATM, spot, max pain.
+ */
+function buildPriceLadder({ spot, resistance, support, mpVal, atmStrike, atmCe, atmPe, topCeWall, topPeWall }) {
+    const rows = [];
+    const pad = (s, n) => String(s).padStart(n);
+
+    // Build list of key price levels (descending)
+    const levels = [];
+    const step = Math.max(20, Math.round((resistance - support) / 10 / 5) * 5);
+
+    // Start from resistance + buffer, go down to support - buffer
+    const top = round5(resistance + 20);
+    const bottom = round5(support - 20);
+
+    for (let p = top; p >= bottom; p -= step) {
+        levels.push(p);
     }
-    return {
-        above: '                    ' + above.join(''),
-        below: '                    ' + below.join(''),
-    };
+
+    // Determine nearest round number to spot for "YOU" marker
+    const nearestLevel = levels.reduce((prev, curr) =>
+        Math.abs(curr - spot) < Math.abs(prev - spot) ? curr : prev
+    );
+
+    for (const price of levels) {
+        let line = '';
+        const p = pad(fmtNum(price), 8);
+n        // OI wall marker
+        const isCeWall = topCeWall?.strike === price;
+        const isPeWall = topPeWall?.strike === price;
+
+        if (isCeWall) {
+            line = `${p} ┤ ▓▓▓ CE OI WALL (${formatOi(topCeWall?.ce?.oi)}) ← SELL ZONE`;
+        } else if (isPeWall) {
+            line = `${p} ┤ ▓▓▓ PE OI WALL (${formatOi(topPeWall?.pe?.oi)}) ← BUY ZONE`;
+        } else if (price === resistance) {
+            line = `${p} ┤ ░░░ ·····RESISTANCE·····`;
+        } else if (price === support) {
+            line = `${p} ┤ ░░░ ······SUPPORT······`;
+        } else if (price === nearestLevel) {
+            // Spot line — show CE/PE premiums inline
+            const ceStr = atmCe?.ltp != null ? `CE ₹${atmCe.ltp}` : '';
+            const peStr = atmPe?.ltp != null ? `PE ₹${atmPe.ltp}` : '';
+            const premStr = ceStr && peStr ? `${ceStr} / ${peStr}` : ceStr || peStr || '';
+            line = `${p} ┤ ◄◄◄ YOU ARE HERE ◄◄◄${premStr ? ' ─── ' + premStr : ''}`;
+        } else if (price === mpVal) {
+            line = `${p} ┤ ······MAX PAIN ${fmtNum(mpVal)}······`;
+        } else if (price === atmStrike) {
+            const ceStr = atmCe?.ltp != null ? `CE ₹${atmCe.ltp}` : '';
+            const peStr = atmPe?.ltp != null ? `PE ₹${atmPe.ltp}` : '';
+            const premStr = ceStr && peStr ? `${ceStr} / ${peStr}` : ceStr || peStr || '';
+            line = `${p} ┤ ─── ATM${premStr ? ' ' + premStr : ''} ───`;
+        } else if (price > resistance - step && price < resistance) {
+            line = `${p} ┤`;
+        } else if (price < support + step && price > support) {
+            line = `${p} ┤`;
+        } else {
+            line = `${p} ┤`;
+        }
+
+        rows.push(line);
+    }
+
+    return rows;
 }
 
 export default ScalpService;
