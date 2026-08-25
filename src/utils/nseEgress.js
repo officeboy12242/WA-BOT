@@ -31,6 +31,26 @@ const BLOCK_PATTERN = /rate limit|bot detection|HTML|403|401|429|ECONNREFUSED|EA
 const DIRECT_BLOCK_TTL_MS = 30 * 60 * 1000;
 
 export const DIRECT = 'direct';
+/** Egress token for the ScraperAPI URL-wrapping service. */
+export const SCRAPERAPI = 'scraperapi';
+const SCRAPER_API_URL = 'https://api.scraperapi.com';
+
+/**
+ * Rewrite a target URL for an egress that fetches on our behalf.
+ * Proxy egresses leave the URL alone; ScraperAPI wraps it.
+ */
+export function egressUrl(egress, url, cfg = {}) {
+    if (egress !== SCRAPERAPI) return url;
+    const key = (cfg.scraperKey ?? process.env.SCRAPER_API_KEY ?? '').trim();
+    if (!key) return url;
+    const q = new URLSearchParams({ api_key: key, url, country_code: 'in' });
+    return `${SCRAPER_API_URL}?${q.toString()}`;
+}
+
+/** ScraperAPI fetches the page itself, so it needs a longer ceiling. */
+export function egressTimeout(egress, baseMs) {
+    return egress === SCRAPERAPI ? Math.max(baseMs, 70_000) : baseMs;
+}
 
 let _agentCache = new Map();
 let _directBlockedAt = 0;
@@ -59,6 +79,14 @@ function parseProxyList(raw) {
  */
 export function egressOrder(cfg = {}) {
     const proxies = parseProxyList(cfg.proxyUrls ?? process.env.NSE_PROXY_URL);
+
+    // ScraperAPI fetches the target from an India IP (country_code=in). It is
+    // a URL-wrapping API rather than an HTTP proxy, so it gets its own egress
+    // token and is handled in egressRequestConfig/egressUrl. Same env var name
+    // as the sibling tgbot2 project, so one key serves both.
+    const scraperKey = (cfg.scraperKey ?? process.env.SCRAPER_API_KEY ?? '').trim();
+    if (scraperKey) proxies.push(SCRAPERAPI);
+
     const mode = String(cfg.mode ?? process.env.NSE_PROXY_MODE ?? 'auto').toLowerCase();
 
     if (mode === 'off' || !proxies.length) return [DIRECT];
@@ -87,7 +115,9 @@ export function noteDirectOk() {
  * Agents are cached — building one per request leaks sockets.
  */
 export function egressRequestConfig(egress) {
-    if (!egress || egress === DIRECT) return {};
+    // ScraperAPI is reached over a normal connection — the routing lives in the
+    // wrapped URL, not in an agent.
+    if (!egress || egress === DIRECT || egress === SCRAPERAPI) return {};
 
     let agent = _agentCache.get(egress);
     if (!agent) {
@@ -107,9 +137,23 @@ export function egressRequestConfig(egress) {
     return { httpAgent: agent, httpsAgent: agent, proxy: false };
 }
 
+/**
+ * Strip credentials out of a message before logging it.
+ *
+ * The ScraperAPI key travels inside the request URL, so any error that echoes
+ * the URL (DNS failures, some axios messages) would otherwise write the key
+ * straight into the log file.
+ */
+export function scrubSecrets(text) {
+    return String(text ?? '')
+        .replace(/api_key=[^&\s"']+/gi, 'api_key=***')
+        .replace(/\/\/[^/\s:@]+:[^/\s@]+@/g, '//***:***@');
+}
+
 /** Hide credentials before a proxy URL reaches the logs. */
 export function maskProxy(url) {
     if (!url || url === DIRECT) return DIRECT;
+    if (url === SCRAPERAPI) return 'scraperapi(in)';
     try {
         const u = new URL(url);
         if (u.username || u.password) {

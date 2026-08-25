@@ -14,12 +14,16 @@
 import assert from 'node:assert';
 import {
     DIRECT,
+    SCRAPERAPI,
     egressOrder,
     egressRequestConfig,
+    egressTimeout,
+    egressUrl,
     isBlockError,
     maskProxy,
     noteDirectBlocked,
     noteDirectOk,
+    scrubSecrets,
     _resetEgressState,
 } from '../src/utils/nseEgress.js';
 import { staleBanner } from '../src/services/OptionChainAiService.js';
@@ -137,6 +141,54 @@ await test('cached data is loudly labelled with its age', async () => {
     assert.ok(banner.includes('12 min'), `should show age, got: ${banner}`);
     assert.ok(/not.*live/i.test(banner), 'must warn the premiums are not live');
     return '12 min old, warned';
+});
+
+/* ── ScraperAPI egress (country_code=in) ─────────────────────────────────── */
+
+await test('SCRAPER_API_KEY adds an India-routed egress', async () => {
+    _resetEgressState();
+    const order = egressOrder({ proxyUrls: '', scraperKey: 'k123', mode: 'auto' });
+    assert.deepStrictEqual(order, [DIRECT, SCRAPERAPI]);
+
+    // ...and it sits after any explicit proxies.
+    assert.deepStrictEqual(
+        egressOrder({ proxyUrls: P1, scraperKey: 'k123', mode: 'always' }),
+        [P1, SCRAPERAPI]
+    );
+});
+
+await test('ScraperAPI wraps the target URL with country_code=in', async () => {
+    const target = 'https://www.nseindia.com/api/option-chain-v3?symbol=NIFTY';
+    const wrapped = egressUrl(SCRAPERAPI, target, { scraperKey: 'k123' });
+    const u = new URL(wrapped);
+    assert.strictEqual(u.host, 'api.scraperapi.com');
+    assert.strictEqual(u.searchParams.get('country_code'), 'in', 'must request an India IP');
+    assert.strictEqual(u.searchParams.get('api_key'), 'k123');
+    assert.strictEqual(u.searchParams.get('url'), target, 'target must round-trip intact');
+    return 'routed via India';
+});
+
+await test('other egresses leave the URL untouched', async () => {
+    const target = 'https://www.nseindia.com/api/x';
+    assert.strictEqual(egressUrl(DIRECT, target), target);
+    assert.strictEqual(egressUrl(P1, target), target, 'proxies route by agent, not URL');
+});
+
+await test('ScraperAPI gets a longer timeout (it fetches the page itself)', async () => {
+    assert.ok(egressTimeout(SCRAPERAPI, 22_000) >= 70_000, 'needs headroom');
+    assert.strictEqual(egressTimeout(DIRECT, 22_000), 22_000, 'direct unchanged');
+});
+
+await test('the ScraperAPI key never reaches the logs', async () => {
+    const wrapped = egressUrl(SCRAPERAPI, 'https://www.nseindia.com/api/x', { scraperKey: 'SUPERSECRET' });
+    const logged = scrubSecrets(`connect ETIMEDOUT ${wrapped}`);
+    assert.ok(!logged.includes('SUPERSECRET'), `key leaked: ${logged}`);
+    assert.ok(logged.includes('api_key=***'), 'should show it was redacted');
+
+    // Proxy credentials too.
+    assert.ok(!scrubSecrets(`failed ${P1}`).includes('secret'), 'proxy password leaked');
+    assert.strictEqual(maskProxy(SCRAPERAPI), 'scraperapi(in)');
+    return 'redacted';
 });
 
 /* ── stale data must never reach trade pricing ───────────────────────────── */

@@ -9,20 +9,49 @@ import {
     DIRECT,
     egressOrder,
     egressRequestConfig,
+    egressTimeout,
+    egressUrl,
     isBlockError,
+    scrubSecrets,
     maskProxy,
     noteDirectBlocked,
     noteDirectOk,
 } from '../utils/nseEgress.js';
 
+/**
+ * Browser-consistent header set, matching what the jugaad-data Python client
+ * sends — that client keeps working against NSE from hosts where our old
+ * headers were being challenged.
+ *
+ * The point is internal consistency, not any single header: NSE's WAF
+ * fingerprints the whole request. Claiming to be Chrome in the User-Agent while
+ * sending none of the Sec-CH-UA / Sec-Fetch-* client hints a real Chrome always
+ * sends is a giveaway, and it was earning us the HTML challenge page. Keep the
+ * Chrome version in UA and Sec-CH-UA in step if you bump either.
+ */
 const UA =
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+    'Mozilla/5.0 (Windows NT 11.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.6998.166 Safari/537.36';
+
+const WARMUP_URL = 'https://www.nseindia.com/get-quotes/equity?symbol=LT';
 
 const BASE_HEADERS = {
+    Host: 'www.nseindia.com',
+    Referer: 'https://www.nseindia.com/get-quotes/equity?symbol=SBIN',
+    'X-Requested-With': 'XMLHttpRequest',
+    pragma: 'no-cache',
+    'sec-fetch-dest': 'empty',
+    'sec-fetch-mode': 'cors',
+    'sec-fetch-site': 'same-origin',
     'User-Agent': UA,
-    Accept: 'application/json, text/plain, */*',
-    'Accept-Language': 'en-US,en;q=0.9',
-    Referer: 'https://www.nseindia.com/option-chain',
+    'Sec-CH-UA': '"Google Chrome";v="134", "Chromium";v="134", "Not?A_Brand";v="99"',
+    'Sec-CH-UA-Mobile': '?0',
+    'Sec-CH-UA-Platform': '"Windows"',
+    DNT: '1',
+    'Upgrade-Insecure-Requests': '1',
+    Accept: '*/*',
+    'Accept-Language': 'en-GB,en-US;q=0.9,en;q=0.8',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
 };
 
 const TIMEOUT_MS = 22_000;
@@ -74,9 +103,17 @@ async function getNseCookie(egress) {
         if (cached?.value && Date.now() - cached.at < COOKIE_TTL_MS) {
             return cached.value;
         }
-        const home = await axios.get('https://www.nseindia.com/option-chain', {
-            headers: { ...BASE_HEADERS, Accept: 'text/html,application/xhtml+xml' },
-            timeout: TIMEOUT_MS,
+        // Warm up on the same page jugaad-data uses. NSE hands out its session
+        // cookies here; hitting the API without them earns a challenge page.
+        const home = await axios.get(egressUrl(egress, WARMUP_URL), {
+            headers: {
+                ...BASE_HEADERS,
+                Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'sec-fetch-dest': 'document',
+                'sec-fetch-mode': 'navigate',
+                'sec-fetch-site': 'none',
+            },
+            timeout: egressTimeout(egress, TIMEOUT_MS),
             ...egressRequestConfig(egress),
         });
         const cookie = home.headers['set-cookie']?.map((c) => c.split(';')[0]).join('; ') || '';
@@ -90,12 +127,30 @@ async function getNseCookie(egress) {
 }
 
 async function nseGet(path, cookie, egress) {
-    const res = await axios.get(`https://www.nseindia.com/api/${path}`, {
+    const res = await axios.get(egressUrl(egress, `https://www.nseindia.com/api/${path}`), {
         headers: { ...BASE_HEADERS, Cookie: cookie },
-        timeout: TIMEOUT_MS,
+        timeout: egressTimeout(egress, TIMEOUT_MS),
         validateStatus: (s) => s >= 200 && s < 400,
         ...egressRequestConfig(egress),
     });
+
+    // NSE rotates session cookies on API responses too. A real browser session
+    // carries those forward; dropping them makes later calls look stale.
+    const rotated = res.headers?.['set-cookie'];
+    if (rotated?.length) {
+        const merged = new Map(
+            String(cookie || '')
+                .split('; ')
+                .filter(Boolean)
+                .map((c) => [c.split('=')[0], c])
+        );
+        for (const c of rotated) {
+            const pair = c.split(';')[0];
+            merged.set(pair.split('=')[0], pair);
+        }
+        _cookieCaches.set(egress, { value: [...merged.values()].join('; '), at: Date.now() });
+    }
+
     const data = res.data;
     // NSE sometimes returns HTML (rate-limit page) instead of JSON
     if (typeof data === 'string' && (data.includes('<!DOCTYPE') || data.includes('<html'))) {
@@ -180,7 +235,7 @@ class NseOptionChainService {
                 const retryable = /rate limit|429|bot detection|HTML|ECONNRESET|ETIMEDOUT|timeout/i.test(err.message);
                 logger.warn(
                     `NSE option chain attempt ${attempt}/${NSE_MAX_RETRIES} for ${nseSymbol} `
-                    + `via ${maskProxy(egress)}: ${err.message}`
+                    + `via ${maskProxy(egress)}: ${scrubSecrets(err.message)}`
                 );
                 if (retryable && attempt < NSE_MAX_RETRIES) {
                     const delay = NSE_RETRY_DELAY_MS * attempt;
@@ -227,7 +282,7 @@ class NseOptionChainService {
                 lastErr = err;
                 if (egress === DIRECT && isBlockError(err)) noteDirectBlocked();
                 if (egresses.length > 1) {
-                    logger.warn(`NSE egress ${maskProxy(egress)} failed for ${nseSymbol}: ${err.message}`);
+                    logger.warn(`NSE egress ${maskProxy(egress)} failed for ${nseSymbol}: ${scrubSecrets(err.message)}`);
                 }
             }
         }
@@ -388,7 +443,7 @@ class NseOptionChainService {
                 if (result) return this._cachePut(userSymbol, result);
             }
         } catch (err) {
-            logger.warn(`NSE option chain failed for ${rawSymbol}: ${err.message}`);
+            logger.warn(`NSE option chain failed for ${rawSymbol}: ${scrubSecrets(err.message)}`);
         }
 
         // Live fetch failed. Only advisory callers that display the staleness
