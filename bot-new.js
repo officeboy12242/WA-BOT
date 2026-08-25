@@ -51,6 +51,7 @@ import { startTradeAlertScheduler } from './src/utils/tradeAlertScheduler.js';
 import SvmkrScanService from './src/services/SvmkrScanService.js';
 import SvmkrPositionTracker from './src/services/SvmkrPositionTracker.js';
 import { startSvmkrScheduler } from './src/utils/svmkrScheduler.js';
+import { startTradeNowScheduler } from './src/utils/tradeNowScheduler.js';
 import { initAutoDelete } from './src/utils/autoDelete.js';
 import { startExpiryAlertScheduler } from './src/utils/expiryAlertScheduler.js';
 import { startOutcomeResolverScheduler } from './src/utils/outcomeResolverScheduler.js';
@@ -456,6 +457,15 @@ class WhatsAppCourseBot {
                 scheduler: this.svmkrScheduler,
             });
 
+            // Continuous /tradenow auto-trigger. Off unless
+            // TRADENOW_AUTO_ENABLED=true — it spends an LLM call per scan.
+            this.tradeNowScheduler = startTradeNowScheduler({
+                getSock: () => this.whatsappService.getSock(),
+                tradeAlertController: this.tradeAlertController,
+                groupManager: this.groupManager,
+                config,
+            });
+
             // Expiry-day option alerts — two slots, quiet on non-expiry days.
             this.expiryTradeService = new ExpiryTradeService(config);
             this.expiryAlertScheduler = startExpiryAlertScheduler({
@@ -559,6 +569,9 @@ class WhatsAppCourseBot {
         }
         if (this.svmkrScheduler) {
             this.svmkrScheduler.stop();
+        }
+        if (this.tradeNowScheduler) {
+            this.tradeNowScheduler.stop();
         }
         if (this.jobRuntime?.stop) {
             await Promise.resolve(this.jobRuntime.stop()).catch(() => {});

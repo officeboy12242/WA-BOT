@@ -373,6 +373,27 @@ export const config = {
         .filter(Boolean),
     /** auto = AI picks stocks from live news/movers; manual = fixed watchlist */
     TRADE_ALERT_MODE: (process.env.TRADE_ALERT_MODE || 'auto').trim().toLowerCase() === 'manual' ? 'manual' : 'auto',
+
+    /* ── Continuous /tradenow auto-trigger ──────────────────────────────────
+     * Re-runs the /tradenow analysis through the session and posts when the
+     * model's self-reported confidence clears the threshold. OFF by default:
+     * it spends an LLM call per index per scan, and the gate is the model's
+     * own number rather than any measured win rate.
+     */
+    TRADENOW_AUTO_ENABLED: process.env.TRADENOW_AUTO_ENABLED === 'true',
+    TRADENOW_AUTO_INDICES: (process.env.TRADENOW_AUTO_INDICES || 'NIFTY')
+        .split(',')
+        .map((s) => s.trim().toUpperCase())
+        .filter(Boolean),
+    TRADENOW_AUTO_MIN_CONF: Number.parseInt(process.env.TRADENOW_AUTO_MIN_CONF || '65', 10),
+    TRADENOW_AUTO_INTERVAL_MS:
+        Number.parseInt(process.env.TRADENOW_AUTO_INTERVAL_MIN || '5', 10) * 60_000,
+    TRADENOW_AUTO_COOLDOWN_MS:
+        Number.parseInt(process.env.TRADENOW_AUTO_COOLDOWN_MIN || '30', 10) * 60_000,
+    TRADENOW_AUTO_MAX_PER_DAY: Number.parseInt(process.env.TRADENOW_AUTO_MAX_PER_DAY || '6', 10),
+    /** Ceiling on analysis calls per day — the free LLM tiers are shared. */
+    TRADENOW_AUTO_MAX_SCANS_PER_DAY:
+        Number.parseInt(process.env.TRADENOW_AUTO_MAX_SCANS_PER_DAY || '60', 10),
     /** Daily alerts: only post BUY CALL/PUT when confidence ≥ 70% */
     TRADE_ALERT_ONLY_BUY_SIGNALS: process.env.TRADE_ALERT_ONLY_BUY_SIGNALS !== 'false',
     /** Max actionable alerts per group per day */

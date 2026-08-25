@@ -23,8 +23,15 @@ function parseSectionVerdict(text, sectionPattern) {
     return { verdict, isBuy };
 }
 
-export function parseTradeSignal(body) {
+/**
+ * @param {string} body        AI analysis card
+ * @param {{minConfidence?: number}} [opts]
+ *   Gate for "actionable". Defaults to MIN_CONFIDENCE (70) so every existing
+ *   caller is unchanged; the continuous auto-trigger passes its own threshold.
+ */
+export function parseTradeSignal(body, { minConfidence = MIN_CONFIDENCE } = {}) {
     const text = String(body || '');
+    const gate = Number.isFinite(minConfidence) ? minConfidence : MIN_CONFIDENCE;
 
     const ceBlock = /━━━\s*CALL\s*\(CE\)\s*SETUP\s*━━━[\s\S]*?(?=━━━\s*PUT|Primary Pick:|$)/i;
     const peBlock = /━━━\s*PUT\s*\(PE\)\s*SETUP\s*━━━[\s\S]*?(?=Primary Pick:|$)/i;
@@ -42,29 +49,29 @@ export function parseTradeSignal(body) {
 
     const isBuyCall =
         (/BUY\s*CE/i.test(primaryLine) && !/NO\s*TRADE/i.test(primaryLine)) ||
-        (ce.isBuy && ceConf >= MIN_CONFIDENCE);
+        (ce.isBuy && ceConf >= gate);
     const isBuyPut =
         (/BUY\s*PE/i.test(primaryLine) && !/NO\s*TRADE/i.test(primaryLine)) ||
-        (pe.isBuy && peConf >= MIN_CONFIDENCE);
+        (pe.isBuy && peConf >= gate);
     const isNoTrade =
         /NO\s*TRADE/i.test(primaryLine) ||
-        (!isBuyCall && !isBuyPut && primaryConfidence < MIN_CONFIDENCE);
+        (!isBuyCall && !isBuyPut && primaryConfidence < gate);
 
     const isActionable =
         (isBuyCall || isBuyPut) &&
-        primaryConfidence >= MIN_CONFIDENCE &&
+        primaryConfidence >= gate &&
         !/NO\s*TRADE/i.test(primaryLine);
 
   // Fallback: strong CE or PE even if Primary line missing
     const actionableFallback =
-        (ce.isBuy && ceConf >= MIN_CONFIDENCE) || (pe.isBuy && peConf >= MIN_CONFIDENCE);
+        (ce.isBuy && ceConf >= gate) || (pe.isBuy && peConf >= gate);
 
     return {
         confidence: primaryConfidence,
         ceConfidence: ceConf,
         peConfidence: peConf,
-        isBuyCall: isBuyCall || (ce.isBuy && ceConf >= MIN_CONFIDENCE),
-        isBuyPut: isBuyPut || (pe.isBuy && peConf >= MIN_CONFIDENCE),
+        isBuyCall: isBuyCall || (ce.isBuy && ceConf >= gate),
+        isBuyPut: isBuyPut || (pe.isBuy && peConf >= gate),
         isNoTrade: isNoTrade && !actionableFallback,
         isActionable: isActionable || actionableFallback,
         recommendation: primaryLine || (isBuyCall ? 'BUY CE' : isBuyPut ? 'BUY PE' : 'NO TRADE'),
