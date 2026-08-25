@@ -415,8 +415,10 @@ class GroupChatLogService {
         const narrativeLines = this.narrative
             ? [
                   'Below is the actual member conversation for the day (name: message).',
-                  'Summarize what people actually discussed — themes, who said what, questions, opinions, decisions — not just that chatting happened.',
-                  'Extract 3-5 topics with detail on what was discussed and by whom.',
+                  'Walk through it like a narrator. For each topic tell: WHO started it, WHO replied, WHAT was said, and HOW it evolved.',
+                  'Capture the back-and-forth: questions and answers, jokes that built on each other, debates, claps, roasts.',
+                  'Use actual quotes or close paraphrases from the chat. Show the conversation, do not just summarize it.',
+                  'Extract 3-5 topics with WHO + WHAT + HOW detail for each.',
               ]
             : ['Extract 3-5 concrete topics with short details from the chat lines below.'];
 

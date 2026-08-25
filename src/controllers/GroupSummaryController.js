@@ -12,9 +12,20 @@ import { RECAP_STYLES, DEFAULT_RECAP_STYLE, pickRecapStyle } from '../prompts/re
 /** Extra nudge for free/fallback models that otherwise emit vague "general chat" JSON. */
 const SUMMARY_FALLBACK_SYSTEM_PROMPT = [
     SUMMARY_SYSTEM_PROMPT,
-    'CRITICAL: every topic title+detail must name concrete subjects from the transcript (people, jokes, plans, questions).',
-    'Reject vague fillers like "General discussion", "Casual chat", "Various topics", or "Members talked".',
-    'If the chat is thin, still describe what was actually said — do not invent filler topics.',
+    'CRITICAL RULES:',
+    '1. Every topic MUST name WHO started it, WHO replied, and WHAT they said (use quotes or close paraphrases).',
+    '2. REJECT vague fillers: never use "General discussion", "Casual chat", "Various topics", "Members talked".',
+    '3. Each topic detail must be a mini-story: who said what to whom, and how the conversation evolved.',
+    '4. The wrap_up must tell the story of the day — who was active, what happened first/last, how it ended.',
+    '5. Notable moments MUST include actual quotes from the chat — what someone said that was funny, smart, or memorable.',
+    '6. If the chat is thin, describe what was actually said, do not invent filler topics.',
+    '7. The VERDICT is your closing ROAST. Be savage but loving — like roasting your best friends.',
+    '   - Roast the group collectively (e.g. "This chat has the confidence of a crypto bro with no money")',
+    '   - Playfully roast individuals (e.g. "Rahul needs a financial advisor and a therapist")',
+    '   - Call out the most unhinged take of the day',
+    '   - Praise the MVP who carried the chat',
+    '   - End with a one-liner punchline that lands',
+    '   - Never be actually mean or cruel — lovable roasting only',
 ].join(' ');
 
 const WEAK_TOPIC_RE =
