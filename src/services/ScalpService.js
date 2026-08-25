@@ -187,6 +187,8 @@ class ScalpService {
                 setups.push({
                     type: 'BUY CE', emoji: '\uD83D\uDFE2',
                     rank: 'primary',
+                    strike: atmStrike,
+                    optionType: 'CE',
                     trigger: `Spot touches ${support}`,
                     entry: entryPrem, target, stop, speed: '2-5 min',
                     confidence: conf,
@@ -211,6 +213,8 @@ class ScalpService {
                 setups.push({
                     type: 'BUY PE', emoji: '\uD83D\uDD34',
                     rank: 'primary',
+                    strike: atmStrike,
+                    optionType: 'PE',
                     trigger: `Spot touches ${resistance}`,
                     entry: entryPrem, target, stop, speed: '2-5 min',
                     confidence: conf,
@@ -377,7 +381,9 @@ class ScalpService {
                 L.push('');
                 for (const s of primary) {
                     const pick = s.topPick ? ' \u2B50 TOP PICK' : '';
+                    const strikeLabel = s.strike && s.optionType ? `Buy ${s.optionType} ${fmtNum(s.strike)}` : '';
                     L.push(`*${s.emoji} ${s.type}${pick}*`);
+                    if (strikeLabel) L.push(`  ${strikeLabel}`);
                     if (s.trigger) L.push(`  Trigger: ${s.trigger}`);
                     L.push(`  Entry: \u20B9${s.entry} \u00B7 Target: \u20B9${s.target} \u00B7 Stop: \u20B9${s.stop}`);
                     L.push(`  Conf: ${s.confidence}% ${confBar(s.confidence)} ${confLabel(s.confidence)}`);
