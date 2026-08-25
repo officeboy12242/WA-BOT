@@ -147,8 +147,16 @@ class ScalpService {
             return '⚠️ Incomplete option chain data — cannot build scalp card.';
         }
 
+        // ── Near-spot strike universe (±600 pts) ────────────────────────
+        // Far OTM rows from weekly+monthly chains pollute max pain and OI
+        // walls. Restrict to the tradeable window around spot.
+        const nearStrikes = strikes.filter(
+            (s) => Math.abs(Number(s.strike) - spot) <= 600
+        );
+        const chain = nearStrikes.length >= 5 ? nearStrikes : strikes;
+
         // ── Calculate max pain ──────────────────────────────────────────
-        const mpRows = strikes
+        const mpRows = chain
             .filter((s) => s.ce && s.pe)
             .map((s) => ({
                 strike: s.strike,
@@ -157,9 +165,9 @@ class ScalpService {
             }));
         const mpVal = maxPain(mpRows);
 
-        // ── Find OI walls (highest CE and PE OI) ────────────────────────
-        const sortedByCe = [...strikes].filter((s) => s.ce?.oi).sort((a, b) => b.ce.oi - a.ce.oi);
-        const sortedByPe = [...strikes].filter((s) => s.pe?.oi).sort((a, b) => b.pe.oi - a.pe.oi);
+        // ── Find OI walls (highest CE and PE OI near spot) ─────────────
+        const sortedByCe = [...chain].filter((s) => s.ce?.oi).sort((a, b) => b.ce.oi - a.ce.oi);
+        const sortedByPe = [...chain].filter((s) => s.pe?.oi).sort((a, b) => b.pe.oi - a.pe.oi);
 
         const topCeWall = sortedByCe[0];
         const topPeWall = sortedByPe[0];
@@ -271,6 +279,74 @@ class ScalpService {
                     why: `ATM straddle ₹${straddle}, theta decay working, range-bound`,
                     topPick: regime === 'low_vol' && conf >= 60,
                 });
+            }
+        }
+
+        // Theta scalp — Short Strangle (wider wings, cheaper risk)
+        if (spotPct >= 25 && spotPct <= 75 && rangeWidth >= TIGHT_RANGE_PTS) {
+            const wingStep = Math.max(50, round5(rangeWidth / 4));
+            const otmCeStrike = round5(atmStrike + wingStep);
+            const otmPeStrike = round5(atmStrike - wingStep);
+            const otmCe = findStrikeLeg({ strikes }, otmCeStrike, 'CE');
+            const otmPe = findStrikeLeg({ strikes }, otmPeStrike, 'PE');
+            const strangle = (otmCe?.ltp || 0) + (otmPe?.ltp || 0);
+            if (strangle > 20) {
+                const target = strangle - Math.max(3, Math.round(strangle * 0.15));
+                const stop = strangle + Math.max(4, Math.round(strangle * 0.2));
+                const conf = calcConfidence({
+                    oiWallQty: Math.max(topCeWall?.ce?.oi || 0, topPeWall?.pe?.oi || 0),
+                    totalOi: (snap.totalCeOi || 0) + (snap.totalPeOi || 0),
+                    pcr: pcr || 1,
+                    vix: 13,
+                    spotDistance: Math.min(spot - support, resistance - spot),
+                    regime: 'theta',
+                });
+                setups.push({
+                    type: 'SHORT STRANGLE',
+                    emoji: '🪁',
+                    trigger: `Sell ${otmCeStrike} CE + ${otmPeStrike} PE`,
+                    entry: strangle,
+                    target,
+                    stop,
+                    speed: '10-30 min',
+                    confidence: conf,
+                    why: `OTM wings collect ₹${strangle}, spot mid-range keeps both legs safe`,
+                    topPick: false,
+                });
+            }
+        }
+
+        // Breakout scalp — momentum continuation past the wall
+        if (regime === 'trending') {
+            const bullBreak = spot > resistance;
+            const bearBreak = spot < support;
+            if (bullBreak || bearBreak) {
+                const leg = findStrikeLeg({ strikes }, atmStrike, bullBreak ? 'CE' : 'PE');
+                const entryPrem = leg?.ltp || (bullBreak ? atmCe?.ltp : atmPe?.ltp);
+                if (entryPrem && entryPrem > 10) {
+                    const target = entryPrem + 3;
+                    const stop = entryPrem - 4;
+                    const conf = calcConfidence({
+                        oiWallQty: bullBreak ? topCeWall?.ce?.oi || 0 : topPeWall?.pe?.oi || 0,
+                        totalOi: (snap.totalCeOi || 0) + (snap.totalPeOi || 0),
+                        pcr: pcr || 1,
+                        vix: 13,
+                        spotDistance: 20,
+                        regime: 'directional',
+                    });
+                    setups.push({
+                        type: bullBreak ? 'BREAKOUT CE' : 'BREAKDOWN PE',
+                        emoji: bullBreak ? '🚀' : '🩸',
+                        trigger: `Spot broke ${bullBreak ? 'above resistance' : 'below support'} ${bullBreak ? resistance : support}`,
+                        entry: entryPrem,
+                        target,
+                        stop,
+                        speed: '1-3 min',
+                        confidence: conf,
+                        why: `Spot beyond the wall — momentum trade, exit fast`,
+                        topPick: conf >= 65,
+                    });
+                }
             }
         }
 
@@ -424,7 +500,7 @@ function formatOi(oi) {
  */
 function buildPriceLadder({ spot, resistance, support, mpVal, atmStrike, atmCe, atmPe, topCeWall, topPeWall }) {
     const rows = [];
-    const pad = (s, n) => String(s).padStart(n);
+    const pad = (s, len) => String(s).padStart(len);
 
     // Build list of key price levels (descending)
     const levels = [];
@@ -446,7 +522,7 @@ function buildPriceLadder({ spot, resistance, support, mpVal, atmStrike, atmCe, 
     for (const price of levels) {
         let line = '';
         const p = pad(fmtNum(price), 8);
-n        // OI wall marker
+        // OI wall marker
         const isCeWall = topCeWall?.strike === price;
         const isPeWall = topPeWall?.strike === price;
 
