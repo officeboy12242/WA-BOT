@@ -492,23 +492,23 @@ class ScalpService {
                     const best = tbl[0];
                     L.push(`\uD83C\uDFB2 *WHY ${side} ${fmtNum(best.strike)}?*`);
                     L.push('');
-                    L.push('\u250C\u2500\u2500\u2500\u2500\u2500\u2500\u252C\u2500\u2500\u2500\u2500\u252C\u2500\u2500\u2500\u2500\u2500\u252C\u2500\u2500\u2500\u2500\u2500\u252C\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510');
-                    L.push('\u2502 Strike \u2502  LTP   \u2502  IV    \u2502   OI    \u2502 Score \u2502');
-                    L.push('\u251C\u2500\u2500\u2500\u2500\u2500\u2500\u253C\u2500\u2500\u2500\u2500\u252C\u2500\u2500\u2500\u2500\u2500\u253C\u2500\u2500\u2500\u2500\u2500\u253C\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2524');
                     for (let i = 0; i < tbl.length; i++) {
                         const r = tbl[i];
-                        const star = i === 0 ? ' *' : ' ';
-                        const starEnd = i === 0 ? '*' : '';
-                        L.push(`\u2502 ${fmtNum(r.strike).padStart(6)} \u2502 \u20B9${String(r.ltp).padStart(4)} \u2502 ${String(r.iv.toFixed(1) + '%').padStart(5)} \u2502 ${formatOi(r.oi).padStart(7)} \u2502  ${String(r.score).padStart(2)}/100${star}${starEnd} \u2502`);
+                        const isBest = i === 0;
+                        const star = isBest ? ' \u2B50' : '';
+                        L.push(`  ${fmtNum(r.strike)} \u2524 \u20B9${r.ltp} \u2502 IV ${r.iv.toFixed(1)}% \u2502 OI ${formatOi(r.oi)}`);
+                        const barLen = Math.round(r.score / 5);
+                        const bar = '\u2588'.repeat(barLen) + '\u2591'.repeat(20 - barLen);
+                        L.push(`         \u2502 ${bar} ${r.score}/100${star}`);
+                        if (i < tbl.length - 1) L.push('  \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500');
                     }
-                    L.push('\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518');
                     const reasons = [];
-                    if (best.iv >= 6) reasons.push(`High IV (${best.iv.toFixed(1)}%)`);
-                    if (best.oi >= 100000) reasons.push(`High OI (${formatOi(best.oi)})`);
+                    if (best.iv >= 6) reasons.push(`IV ${best.iv.toFixed(1)}%`);
+                    if (best.oi >= 100000) reasons.push(`OI ${formatOi(best.oi)}`);
                     const distFromAtm = Math.abs(best.strike - atmStrike);
-                    if (distFromAtm <= 50) reasons.push('Near ATM (high delta)');
+                    if (distFromAtm <= 50) reasons.push('Near ATM');
                     else if (distFromAtm <= 100) reasons.push('Moderate delta');
-                    L.push(`  \u2705 Picked ${fmtNum(best.strike)}: ${reasons.join(' + ') || 'Best overall score'}`);
+                    L.push(`  \uD83D\uDCA1 Best pick: ${fmtNum(best.strike)} (${reasons.join(' + ') || 'Best score'})`);
                     L.push('');
                 }
             }
