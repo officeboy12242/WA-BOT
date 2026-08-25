@@ -9,7 +9,7 @@ import { findCommand, findSimilarCommands } from '../commands/registry.js';
 import { ImportProgressStore } from '../utils/importProgress.js';
 import { logger } from '../utils/logger.js';
 import { sendAndDelete } from '../utils/autoDelete.js';
-import { extractPhoneNumber } from '../utils/permissions.js';
+import { extractPhoneNumber, isGroupMessage } from '../utils/permissions.js';
 import { getSafeSendOptions, safeSendMessage, plainSendMessage } from '../utils/waMessage.js';
 import { botTelemetry } from '../utils/botTelemetry.js';
 
