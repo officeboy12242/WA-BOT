@@ -6,6 +6,7 @@ import { logger } from '../utils/logger.js';
 import { formatDateLabelIST, getRecapDateStrIST } from '../utils/dateIST.js';
 import NvidiaDeepSeekService, { SUMMARY_SYSTEM_PROMPT } from '../services/NvidiaDeepSeekService.js';
 import OpenRouterLlmService from '../services/OpenRouterLlmService.js';
+import GeminiTradeService from '../services/GeminiTradeService.js';
 import { RECAP_STYLES, DEFAULT_RECAP_STYLE, pickRecapStyle } from '../prompts/recapStyles.js';
 
 /** Extra nudge for free/fallback models that otherwise emit vague "general chat" JSON. */
@@ -170,6 +171,7 @@ class GroupSummaryController {
         this.mongoDb = mongoDb;
         this.nvidia = new NvidiaDeepSeekService(config);
         this.openrouter = new OpenRouterLlmService(config);
+        this.gemini = new GeminiTradeService(config);
         this.minMessages = Math.max(1, Number(config.GROUP_SUMMARY_MIN_MESSAGES) || 3);
         this.enabled = config.GROUP_SUMMARY_ENABLED !== false;
         this.timezone = config.GROUP_SUMMARY_TIMEZONE || 'Asia/Kolkata';
@@ -181,11 +183,61 @@ class GroupSummaryController {
     }
 
     _hasLlm() {
-        return this.nvidia.isConfigured() || this.openrouter.isConfigured();
+        return this.gemini.isConfigured() || this.nvidia.isConfigured() || this.openrouter.isConfigured();
     }
 
     _summaryTimeoutMs() {
         return this.config.GROUP_SUMMARY_LLM_TIMEOUT_MS || this.config.OPENROUTER_TIMEOUT_MS || 90_000;
+    }
+
+    /**
+     * Try Gemini for summarization — primary LLM.
+     */
+    async _summarizeViaGemini(prompt, opts = {}) {
+        if (!this.gemini.isConfigured()) {
+            throw new Error('Gemini not configured');
+        }
+        try {
+            const { text } = await this.gemini.complete(
+                opts.system || SUMMARY_FALLBACK_SYSTEM_PROMPT,
+                prompt,
+                { temperature: 0.25, maxTokens: opts.maxTokens ?? 1400, timeoutMs: this._summaryTimeoutMs() }
+            );
+            const summary = this.nvidia.parseSummaryJson(text);
+            if (!isUsableGroupSummary(summary)) {
+                logger.warn('Group summary: Gemini returned weak/vague topics');
+                return null;
+            }
+            logger.info('Group summary: Gemini summary complete');
+            return summary;
+        } catch (err) {
+            logger.warn('Group summary: Gemini failed: ' + err.message);
+            throw err;
+        }
+    }
+
+    /**
+     * Try Gemini for chunked summarization.
+     */
+    async _summarizeChunksViaGemini(chunkPrompts, meta = {}) {
+        if (!chunkPrompts.length) {
+            throw new Error('No chunk prompts provided');
+        }
+        if (chunkPrompts.length === 1) {
+            return this._summarizeViaGemini(chunkPrompts[0]);
+        }
+        const partials = [];
+        for (let i = 0; i < chunkPrompts.length; i++) {
+            const partial = await this._summarizeViaGemini(chunkPrompts[i]);
+            if (partial?.topics?.length) partials.push(partial);
+        }
+        if (!partials.length) return null;
+        if (partials.length === 1) return partials[0];
+        const merged = this.nvidia.mergeSummaries(partials);
+        if (isUsableGroupSummary(merged) || merged.topics?.length) {
+            return merged;
+        }
+        return null;
     }
 
     /**
@@ -328,6 +380,14 @@ class GroupSummaryController {
                 `Group summary: ${groupName} — ${messages.length} msgs, ` +
                     `${chunkPrompts.length} chunk(s) for map-reduce`
             );
+            if (this.gemini.isConfigured()) {
+                try {
+                    const geminiResult = await this._summarizeChunksViaGemini(chunkPrompts, chunkMeta);
+                    if (geminiResult) return geminiResult;
+                } catch (err) {
+                    logger.warn(`Gemini chunk recap failed for ${groupName}: ${err.message}`);
+                }
+            }
             if (this.nvidia.isConfigured()) {
                 try {
                     return await this.nvidia.summarizeGroupChatChunks(chunkPrompts, chunkMeta);
@@ -349,6 +409,14 @@ class GroupSummaryController {
             `Group summary: ${groupName} — ${messages.length} msgs, prompt ${prompt.length} chars` +
                 (style ? `, style ${style.key}` : '')
         );
+        if (this.gemini.isConfigured()) {
+            try {
+                const geminiResult = await this._summarizeViaGemini(prompt);
+                if (geminiResult) return geminiResult;
+            } catch (err) {
+                logger.warn(`Gemini recap failed for ${groupName}: ${err.message}`);
+            }
+        }
         if (this.nvidia.isConfigured()) {
             try {
                 const summary = await this.nvidia.summarizeGroupChat(prompt);
@@ -439,7 +507,7 @@ class GroupSummaryController {
             throw new Error('Recap service not ready');
         }
         if (!this._hasLlm()) {
-            throw new Error('No summary LLM configured (set NVIDIA_API_KEY or OPENROUTER_API_KEY)');
+            throw new Error('No summary LLM configured (set GEMINI_API_KEY, NVIDIA_API_KEY, or OPENROUTER_API_KEY)');
         }
 
         const groups = await this.groupManager.getSummaryEnabledGroups();
