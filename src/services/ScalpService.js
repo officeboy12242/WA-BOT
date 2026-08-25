@@ -169,6 +169,28 @@ function findBestStrike(strikes, targetLevel, side, spot, atmStrike) {
     return { strike: bestStrike, score: bestScore, ltp: bestLtp };
 }
 
+/**
+ * Return top N strikes for a side, sorted by momentum score descending.
+ * Each entry: { strike, ltp, iv, oi, score }
+ */
+function getTopStrikes(strikes, side, spot, atmStrike, n = 4) {
+    const candidates = strikes
+        .filter((s) => { const leg = side === 'CE' ? s.ce : s.pe; return leg?.ltp > 0; })
+        .map((s) => {
+            const leg = side === 'CE' ? s.ce : s.pe;
+            return {
+                strike: s.strike,
+                ltp: leg.ltp || 0,
+                iv: leg.iv || 0,
+                oi: leg.oi || 0,
+                score: scoreStrikeForScalp(s.strike, side, spot, atmStrike, strikes),
+            };
+        })
+        .sort((a, b) => b.score - a.score)
+        .slice(0, n);
+    return candidates;
+}
+
 // ── Main function ──────────────────────────────────────────────────────────
 
 class ScalpService {
@@ -376,13 +398,22 @@ class ScalpService {
             return b.confidence - a.confidence;
         });
 
+        // Build strike comparison data for primary setups
+        const primarySetups = setups.filter(s => s.rank === 'primary' && s.optionType);
+        const strikeTables = {};
+        for (const ps of primarySetups) {
+            const topN = getTopStrikes(chain, ps.optionType, spot, atmStrike, 4);
+            if (topN.length) strikeTables[ps.optionType] = topN;
+        }
+
         return this._formatCard({
             spot, pcr, mpVal, resistance, support, rangeWidth, spotPct,
             atmStrike, atmCe, atmPe, topCeWall, topPeWall, regime, setups,
+            strikeTables,
         });
     }
 
-    _formatCard({ spot, pcr, mpVal, resistance, support, rangeWidth, spotPct, atmStrike, atmCe, atmPe, topCeWall, topPeWall, regime, setups }) {
+    _formatCard({ spot, pcr, mpVal, resistance, support, rangeWidth, spotPct, atmStrike, atmCe, atmPe, topCeWall, topPeWall, regime, setups, strikeTables }) {
         const L = [];
         const { hour, minute } = istTime();
         const timeLabel = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
@@ -449,7 +480,35 @@ class ScalpService {
                     if (s.trigger) L.push(`  Trigger: ${s.trigger}`);
                     L.push(`  Entry: \u20B9${s.entry} \u00B7 Target: \u20B9${s.target} \u00B7 Stop: \u20B9${s.stop}`);
                     L.push(`  Conf: ${s.confidence}% ${confBar(s.confidence)} ${confLabel(s.confidence)}`);
+                    if (s.momentumScore) L.push(`  Momentum: ${s.momentumScore}/100`);
                     if (s.why) L.push(`  \uD83D\uDCCA ${s.why}`);
+                    L.push('');
+                }
+
+                // Strike comparison table
+                for (const side of ['CE', 'PE']) {
+                    const tbl = strikeTables?.[side];
+                    if (!tbl?.length) continue;
+                    const best = tbl[0];
+                    L.push(`\uD83C\uDFB2 *WHY ${side} ${fmtNum(best.strike)}?*`);
+                    L.push('');
+                    L.push('\u250C\u2500\u2500\u2500\u2500\u2500\u2500\u252C\u2500\u2500\u2500\u2500\u252C\u2500\u2500\u2500\u2500\u2500\u252C\u2500\u2500\u2500\u2500\u2500\u252C\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510');
+                    L.push('\u2502 Strike \u2502  LTP   \u2502  IV    \u2502   OI    \u2502 Score \u2502');
+                    L.push('\u251C\u2500\u2500\u2500\u2500\u2500\u2500\u253C\u2500\u2500\u2500\u2500\u252C\u2500\u2500\u2500\u2500\u2500\u253C\u2500\u2500\u2500\u2500\u2500\u253C\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2524');
+                    for (let i = 0; i < tbl.length; i++) {
+                        const r = tbl[i];
+                        const star = i === 0 ? ' *' : ' ';
+                        const starEnd = i === 0 ? '*' : '';
+                        L.push(`\u2502 ${fmtNum(r.strike).padStart(6)} \u2502 \u20B9${String(r.ltp).padStart(4)} \u2502 ${String(r.iv.toFixed(1) + '%').padStart(5)} \u2502 ${formatOi(r.oi).padStart(7)} \u2502  ${String(r.score).padStart(2)}/100${star}${starEnd} \u2502`);
+                    }
+                    L.push('\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518');
+                    const reasons = [];
+                    if (best.iv >= 6) reasons.push(`High IV (${best.iv.toFixed(1)}%)`);
+                    if (best.oi >= 100000) reasons.push(`High OI (${formatOi(best.oi)})`);
+                    const distFromAtm = Math.abs(best.strike - atmStrike);
+                    if (distFromAtm <= 50) reasons.push('Near ATM (high delta)');
+                    else if (distFromAtm <= 100) reasons.push('Moderate delta');
+                    L.push(`  \u2705 Picked ${fmtNum(best.strike)}: ${reasons.join(' + ') || 'Best overall score'}`);
                     L.push('');
                 }
             }
