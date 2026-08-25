@@ -130,6 +130,20 @@ export const COMMAND_REGISTRY = [
         help: 'Cancel an ongoing Telegram sticker import (admins)',
     },
     {
+        names: ['/tgstickeron'],
+        key: 'tgstickeron',
+        scope: 'group_only',
+        role: 'staff',
+        help: 'Enable /tgstickers import in this group',
+    },
+    {
+        names: ['/tgstickeroff'],
+        key: 'tgstickeroff',
+        scope: 'group_only',
+        role: 'staff',
+        help: 'Disable /tgstickers import in this group',
+    },
+    {
         names: ['/news'],
         key: 'news',
         scope: 'any',
@@ -551,6 +565,22 @@ export const COMMAND_REGISTRY = [
         category: 'trade',
     },
     {
+        names: ['/scalpon'],
+        key: 'scalpon',
+        scope: 'group_only',
+        role: 'staff',
+        help: 'Enable /scalp NIFTY micro scalp in this group',
+        category: 'trade',
+    },
+    {
+        names: ['/scalpoff'],
+        key: 'scalpoff',
+        scope: 'group_only',
+        role: 'staff',
+        help: 'Disable /scalp in this group',
+        category: 'trade',
+    },
+    {
         names: ['/addpremium'],
         key: 'addpremium',
         scope: 'any',
@@ -791,7 +821,7 @@ export const HELP_CATEGORY = {
     insta: 'media', tw: 'media', toimg: 'media',
 
     // Stickers
-    sticker: 'sticker', steal: 'sticker', rgb: 'sticker', tgstickers: 'sticker', tgstop: 'sticker',
+    sticker: 'sticker', steal: 'sticker', rgb: 'sticker', tgstickers: 'sticker', tgstop: 'sticker', tgstickeron: 'sticker', tgstickeroff: 'sticker',
 
     // Markets
     tradenow: 'trade', swing: 'trade', expiry: 'trade', tradelert: 'trade', index: 'trade', scalp: 'trade',

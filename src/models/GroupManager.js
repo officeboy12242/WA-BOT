@@ -1235,6 +1235,74 @@ class GroupManager {
             .toArray();
     }
 
+    // ── Scalp (NIFTY micro scalp) ────────────────────────────────────────
+
+    async setScalpEnabled(groupId, groupName, enabled, setBy) {
+        await this.groups.updateOne(
+            { group_id: groupId },
+            {
+                $set: {
+                    group_name: groupName,
+                    scalp_enabled: enabled,
+                    scalp_by: setBy,
+                    scalp_at: new Date(),
+                },
+                $setOnInsert: { group_id: groupId, is_active: false },
+            },
+            { upsert: true }
+        );
+        logger.info(`⚡ Scalp ${enabled ? 'enabled' : 'disabled'} for ${groupName || groupId} by ${setBy}`);
+    }
+
+    async isScalpEnabled(groupId) {
+        const row = await this.groups.findOne(
+            { group_id: groupId },
+            { projection: { scalp_enabled: 1, is_active: 1 } }
+        );
+        if (!row?.is_active) return false;
+        return row.scalp_enabled === true;
+    }
+
+    async getScalpGroups() {
+        return this.groups
+            .find({ is_active: true, scalp_enabled: true }, { projection: { _id: 0 } })
+            .toArray();
+    }
+
+    // ── Telegram Sticker Import ──────────────────────────────────────────
+
+    async setTgStickerEnabled(groupId, groupName, enabled, setBy) {
+        await this.groups.updateOne(
+            { group_id: groupId },
+            {
+                $set: {
+                    group_name: groupName,
+                    tg_sticker_enabled: enabled,
+                    tg_sticker_by: setBy,
+                    tg_sticker_at: new Date(),
+                },
+                $setOnInsert: { group_id: groupId, is_active: false },
+            },
+            { upsert: true }
+        );
+        logger.info(`🎭 TG Sticker ${enabled ? 'enabled' : 'disabled'} for ${groupName || groupId} by ${setBy}`);
+    }
+
+    async isTgStickerEnabled(groupId) {
+        const row = await this.groups.findOne(
+            { group_id: groupId },
+            { projection: { tg_sticker_enabled: 1, is_active: 1 } }
+        );
+        if (!row?.is_active) return false;
+        return row.tg_sticker_enabled === true;
+    }
+
+    async getTgStickerGroups() {
+        return this.groups
+            .find({ is_active: true, tg_sticker_enabled: true }, { projection: { _id: 0 } })
+            .toArray();
+    }
+
     /**
      * SVMKR live alerts are opted into per group, separately from the daily trade
      * alert. They are a different product: unlimited intraday CE/PE cards plus

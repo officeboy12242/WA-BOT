@@ -561,6 +561,14 @@ export const COMMAND_HANDLERS = {
         return ctx.backtestController.handleCommand(chatId, `/backtest${args?.length ? ' ' + args.join(' ') : ''}`, sock);
     },
     scalp: async ({ sock, chatId, ctx }) => {
+        const groupManager = ctx?.groupManager;
+        if (groupManager && isGroupMessage(chatId)) {
+            const enabled = await groupManager.isScalpEnabled(chatId);
+            if (!enabled) {
+                await safeSendMessage(sock, chatId, { text: '⚠️ Scalp is not enabled here.\nUse `/scalpon` to enable it.' });
+                return;
+            }
+        }
         try {
             const svc = new ScalpService();
             const card = await svc.buildScalpCard('NIFTY');
@@ -687,7 +695,15 @@ export const COMMAND_HANDLERS = {
             void safeSendMessage(sock, chatId, { text: '⚠️ Failed to generate RGB sticker.' }, originalMsg);
         });
     },
-    tgstickers: ({ sock, chatId, args, originalMsg, ctx }) => {
+    tgstickers: async ({ sock, chatId, args, originalMsg, ctx }) => {
+        const groupManager = ctx?.groupManager;
+        if (groupManager && isGroupMessage(chatId)) {
+            const enabled = await groupManager.isTgStickerEnabled(chatId);
+            if (!enabled) {
+                await safeSendMessage(sock, chatId, { text: '⚠️ Telegram sticker import is not enabled here.\nUse `/tgstickeron` to enable it.' }, originalMsg);
+                return;
+            }
+        }
         void handleTgStickers(sock, chatId, args, originalMsg, ctx?.stickerForwarder, ctx?.getSock).catch((err) => {
             logger.error('TG stickers command error:', err);
             void safeSendMessage(sock, chatId, { text: `⚠️ ${err.message || 'Failed to import stickers.'}` }, originalMsg);
@@ -698,6 +714,102 @@ export const COMMAND_HANDLERS = {
         void safeSendMessage(sock, chatId, {
             text: stopped ? '🛑 *Import cancelled.*' : 'ℹ️ No active import to cancel.',
         }, originalMsg);
+    },
+    tgstickeron: async ({ sock, chatId, senderJid, ctx }) => {
+        const groupManager = ctx?.groupManager;
+        if (!isGroupMessage(chatId)) {
+            await safeSendMessage(sock, chatId, { text: 'Use `/tgstickeron` in a group.' });
+            return;
+        }
+        if (!groupManager) {
+            await safeSendMessage(sock, chatId, { text: '⚠️ Group manager not available.' });
+            return;
+        }
+        const isActive = await groupManager.isGroupActive(chatId);
+        if (!isActive) {
+            await safeSendMessage(sock, chatId, { text: '⚠️ Group not activated. Use `/activate` first.' });
+            return;
+        }
+        let groupName = 'Unknown Group';
+        try { groupName = (await sock.groupMetadata(chatId)).subject; } catch {}
+        const senderPhone = extractPhoneNumber(senderJid);
+        await groupManager.setTgStickerEnabled(chatId, groupName, true, senderPhone);
+        await safeSendMessage(sock, chatId, {
+            text: '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n✅ *TG STICKER ON*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                `📢 *Group:* ${groupName}\n\n` +
+                '🎭 Telegram sticker import enabled.\n' +
+                'Usage: `/tgstickers <pack-name-or-url>`\n\n' +
+                '💡 `/tgstickeroff` to disable',
+        });
+    },
+    tgstickeroff: async ({ sock, chatId, senderJid, ctx }) => {
+        const groupManager = ctx?.groupManager;
+        if (!isGroupMessage(chatId)) {
+            await safeSendMessage(sock, chatId, { text: 'Use `/tgstickeroff` in a group.' });
+            return;
+        }
+        if (!groupManager) {
+            await safeSendMessage(sock, chatId, { text: '⚠️ Group manager not available.' });
+            return;
+        }
+        let groupName = 'Unknown Group';
+        try { groupName = (await sock.groupMetadata(chatId)).subject; } catch {}
+        const senderPhone = extractPhoneNumber(senderJid);
+        await groupManager.setTgStickerEnabled(chatId, groupName, false, senderPhone);
+        await safeSendMessage(sock, chatId, {
+            text: '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🛑 *TG STICKER OFF*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                `📢 *Group:* ${groupName}\n\n` +
+                '🎭 Telegram sticker import disabled.\n' +
+                '💡 `/tgstickeron` to enable again',
+        });
+    },
+    scalpon: async ({ sock, chatId, senderJid, ctx }) => {
+        const groupManager = ctx?.groupManager;
+        if (!isGroupMessage(chatId)) {
+            await safeSendMessage(sock, chatId, { text: 'Use `/scalpon` in a group.' });
+            return;
+        }
+        if (!groupManager) {
+            await safeSendMessage(sock, chatId, { text: '⚠️ Group manager not available.' });
+            return;
+        }
+        const isActive = await groupManager.isGroupActive(chatId);
+        if (!isActive) {
+            await safeSendMessage(sock, chatId, { text: '⚠️ Group not activated. Use `/activate` first.' });
+            return;
+        }
+        let groupName = 'Unknown Group';
+        try { groupName = (await sock.groupMetadata(chatId)).subject; } catch {}
+        const senderPhone = extractPhoneNumber(senderJid);
+        await groupManager.setScalpEnabled(chatId, groupName, true, senderPhone);
+        await safeSendMessage(sock, chatId, {
+            text: '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n✅ *SCALP ON*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                `📢 *Group:* ${groupName}\n\n` +
+                '⚡ NIFTY micro scalp enabled.\n' +
+                'Usage: `/scalp` for live scalp card\n\n' +
+                '💡 `/scalpoff` to disable',
+        });
+    },
+    scalpoff: async ({ sock, chatId, senderJid, ctx }) => {
+        const groupManager = ctx?.groupManager;
+        if (!isGroupMessage(chatId)) {
+            await safeSendMessage(sock, chatId, { text: 'Use `/scalpoff` in a group.' });
+            return;
+        }
+        if (!groupManager) {
+            await safeSendMessage(sock, chatId, { text: '⚠️ Group manager not available.' });
+            return;
+        }
+        let groupName = 'Unknown Group';
+        try { groupName = (await sock.groupMetadata(chatId)).subject; } catch {}
+        const senderPhone = extractPhoneNumber(senderJid);
+        await groupManager.setScalpEnabled(chatId, groupName, false, senderPhone);
+        await safeSendMessage(sock, chatId, {
+            text: '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🛑 *SCALP OFF*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                `📢 *Group:* ${groupName}\n\n` +
+                '⚡ NIFTY micro scalp disabled.\n' +
+                '💡 `/scalpon` to enable again',
+        });
     },
 };
 
