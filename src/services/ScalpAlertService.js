@@ -3,14 +3,17 @@
  *
  * Scans NIFTY option chain every 3 minutes during market hours (9:15–15:30 IST).
  * When a setup hits 75%+ confidence, sends an alert to enabled groups.
- * Cooldown: same setup type won't re-alert within 30 minutes.
+ *
+ * Cooldown logic: tracks setup fingerprint (strike + entry price).
+ * - Same setup (same strike/entry): 10 min cooldown
+ * - Different setup (new strike or entry): alerts immediately
  */
 
 import { logger } from '../utils/logger.js';
 import ScalpService from './ScalpService.js';
 
 const SCAN_INTERVAL_MS = 3 * 60 * 1000; // 3 minutes
-const COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes per setup type
+const COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes per unique setup
 const MARKET_OPEN_HOUR = 9;
 const MARKET_OPEN_MIN = 15;
 const MARKET_CLOSE_HOUR = 15;
@@ -20,18 +23,15 @@ class ScalpAlertService {
     constructor() {
         this.scalpSvc = new ScalpService();
         this._timer = null;
-        this._lastAlerts = {}; // { setupType: timestamp }
+        this._lastAlerts = {}; // { fingerprint: { timestamp, strike, entry } }
         this._sock = null;
         this._getGroups = null;
+        this._sendMessage = null;
         this._enabled = false;
     }
 
     /**
      * Start the scanner.
-     * @param {object} opts
-     * @param {object} opts.sock - WhatsApp socket
-     * @param {Function} opts.getGroups - async () => [{ group_id, scalp_enabled }]
-     * @param {Function} opts.sendMessage - async (chatId, msg) => void
      */
     start({ sock, getGroups, sendMessage }) {
         if (this._timer) return;
@@ -61,39 +61,41 @@ class ScalpAlertService {
 
     async _scan() {
         if (!this._enabled) return;
-
-        // Check if market is open
         if (!this._isMarketOpen()) return;
 
         try {
             const card = await this.scalpSvc.buildScalpCard('NIFTY');
             if (!card || card.includes('NO CLEAR SETUP') || card.includes('Could not fetch')) {
-                return; // No setup or market closed
+                return;
             }
 
-            // Check if card has any PRIMARY setups (75%+ confidence)
+            // Only trigger on PRIMARY setups (75%+ confidence)
             if (!card.includes('PRIMARY')) return;
 
-            // Extract setup types from card
+            // Extract setup details
             const setups = this._extractSetups(card);
             if (!setups.length) return;
 
-            // Filter out setups on cooldown
+            // Filter: alert if setup is new OR details changed (strike/entry)
             const now = Date.now();
             const freshSetups = setups.filter((s) => {
-                const lastAlert = this._lastAlerts[s.type] || 0;
-                return (now - lastAlert) >= COOLDOWN_MS;
+                const last = this._lastAlerts[s.fingerprint];
+                if (!last) return true; // never alerted — send
+                // On cooldown? Check if details actually changed
+                if ((now - last.timestamp) < COOLDOWN_MS) {
+                    // Same fingerprint on cooldown — skip
+                    return false;
+                }
+                return true; // cooldown expired — send
             });
 
-            if (!freshSetups.length) return; // All on cooldown
+            if (!freshSetups.length) return;
 
             // Send alert to enabled groups
             const groups = this._getGroups ? await this._getGroups() : [];
             const scalpGroups = groups.filter((g) => g.scalp_enabled);
-
             if (!scalpGroups.length) return;
 
-            // Build alert message
             const alertMsg = this._buildAlertMsg(card, freshSetups);
 
             for (const group of scalpGroups) {
@@ -105,9 +107,9 @@ class ScalpAlertService {
                 }
             }
 
-            // Mark setups as alerted
+            // Mark as alerted
             for (const s of freshSetups) {
-                this._lastAlerts[s.type] = now;
+                this._lastAlerts[s.fingerprint] = { timestamp: now, strike: s.strike, entry: s.entry };
             }
 
         } catch (err) {
@@ -140,16 +142,48 @@ class ScalpAlertService {
         return timeMinutes >= openMinutes && timeMinutes <= closeMinutes;
     }
 
+    /**
+     * Extract setup details from card text.
+     * Fingerprint = type:strike:entry — if any changes, it's a "new" setup.
+     */
     _extractSetups(card) {
         const setups = [];
-        // Look for PRIMARY setups in the card
-        if (card.includes('BUY CE')) setups.push({ type: 'BUY CE', emoji: '🟢' });
-        if (card.includes('BUY PE')) setups.push({ type: 'BUY PE', emoji: '🔴' });
+
+        // Extract CE details
+        if (card.includes('BUY CE')) {
+            const strikeMatch = card.match(/Buy CE ([\d,]+)/);
+            const entryMatch = card.match(/Entry: ₹([\d.]+)/);
+            const strike = strikeMatch ? strikeMatch[1] : '?';
+            const entry = entryMatch ? entryMatch[1] : '0';
+            setups.push({
+                type: 'BUY CE',
+                emoji: '🟢',
+                strike,
+                entry,
+                fingerprint: `BUY CE:${strike}:${entry}`,
+            });
+        }
+
+        // Extract PE details
+        if (card.includes('BUY PE')) {
+            const strikeMatch = card.match(/Buy PE ([\d,]+)/);
+            const entryMatch = card.match(/Entry: ₹([\d.]+)/);
+            const strike = strikeMatch ? strikeMatch[1] : '?';
+            const entry = entryMatch ? entryMatch[1] : '0';
+            setups.push({
+                type: 'BUY PE',
+                emoji: '🔴',
+                strike,
+                entry,
+                fingerprint: `BUY PE:${strike}:${entry}`,
+            });
+        }
+
         return setups;
     }
 
     _buildAlertMsg(card, setups) {
-        const setupLabels = setups.map((s) => `${s.emoji} ${s.type}`).join(' & ');
+        const setupLabels = setups.map((s) => `${s.emoji} ${s.type} ${s.strike} @ ₹${s.entry}`).join(' & ');
         const now = new Date();
         const timeStr = new Intl.DateTimeFormat('en-IN', {
             timeZone: 'Asia/Kolkata',
@@ -161,7 +195,7 @@ class ScalpAlertService {
         return [
             `⚡ *SCALP ALERT* — ${timeStr} IST`,
             '',
-            `${setupLabels} setup triggered with 75%+ confidence!`,
+            `${setupLabels} triggered with 75%+ confidence!`,
             '',
             '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
             '',
