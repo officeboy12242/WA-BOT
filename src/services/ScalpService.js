@@ -391,9 +391,16 @@ class ScalpService {
                 L.push('');
                 for (const s of secondary) {
                     const pick = s.topPick ? ' \u2B50' : '';
+                    const isShort = s.type.startsWith('SHORT');
                     L.push(`*${s.emoji} ${s.type}${pick}*`);
                     if (s.trigger) L.push(`  Trigger: ${s.trigger}`);
-                    L.push(`  Entry: \u20B9${s.entry} \u00B7 Target: \u20B9${s.target} \u00B7 Stop: \u20B9${s.stop}`);
+                    if (isShort) {
+                        // Short/Sell positions: profit when price goes DOWN
+                        L.push(`  SELL at \u20B9${s.entry} \u2192 BUY BACK at \u20B9${s.target} (profit \u20B9${Math.round(s.entry - s.target)})`);
+                        L.push(`  Stop: \u20B9${s.stop} (loss \u20B9${Math.round(s.stop - s.entry)})`);
+                    } else {
+                        L.push(`  Entry: \u20B9${s.entry} \u00B7 Target: \u20B9${s.target} \u00B7 Stop: \u20B9${s.stop}`);
+                    }
                     L.push(`  Conf: ${s.confidence}% ${confBar(s.confidence)} ${confLabel(s.confidence)}`);
                     L.push('');
                 }
