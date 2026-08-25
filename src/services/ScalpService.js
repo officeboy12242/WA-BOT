@@ -61,34 +61,26 @@ function round5(n) {
 function confBar(pct) {
     const filled = Math.round(pct / 10);
     const empty = 10 - filled;
-    return '█'.repeat(filled) + '░'.repeat(empty);
+    return '\u2588'.repeat(filled) + '\u2591'.repeat(empty);
 }
 
 function confLabel(pct) {
-    if (pct >= 70) return '✅✅';
-    if (pct >= 55) return '✅';
-    if (pct >= 40) return '⚠️';
-    return '❌';
+    if (pct >= 70) return '\u2705\u2705';
+    if (pct >= 55) return '\u2705';
+    if (pct >= 40) return '\u26A0\uFE0F';
+    return '\u274C';
 }
 
 // ── Confidence calculation ─────────────────────────────────────────────────
 
 function calcConfidence({ oiWallQty, totalOi, pcr, vix, spotDistance, regime }) {
-    // OI wall strength: higher wall = higher confidence
-    const oiScore = Math.min(100, (oiWallQty / 80) * 100); // 80L = max score
-
-    // PCR alignment: PCR > 1 = bullish bias favors CE buys, < 1 = PE
+    const oiScore = Math.min(100, (oiWallQty / 80) * 100);
     const pcrScore = Math.min(100, Math.abs(pcr - 1) * 200 + 50);
-
-    // VIX: low VIX = higher confidence for theta, lower for directional
     const vixScore = regime === 'theta'
         ? Math.max(0, 100 - (vix - LOW_VIX_THRESHOLD) * 5)
         : Math.min(100, (vix - 10) * 8);
-
-    // Distance to wall: closer = higher confidence
     const distScore = Math.max(0, 100 - spotDistance * 0.5);
 
-    // Time of day: 10:30-12:30 = peak
     const { hour, minute } = istTime();
     const timeDecimal = hour + minute / 60;
     let timeScore = 50;
@@ -124,15 +116,10 @@ class ScalpService {
         this.nse = nseOptionChainService;
     }
 
-    /**
-     * Build the full scalp card for NIFTY.
-     * @param {string} symbol default 'NIFTY'
-     * @returns {Promise<string|null>} formatted card text
-     */
     async buildScalpCard(symbol = 'NIFTY') {
         const ctx = await this.nse.fetchOptionContext(symbol);
         if (!ctx?.snapshot) {
-            return '⚠️ Could not fetch NSE option chain. Market may be closed or NSE is unreachable.';
+            return '\u26A0\uFE0F Could not fetch NSE option chain. Market may be closed or NSE is unreachable.';
         }
 
         const snap = ctx.snapshot;
@@ -144,18 +131,16 @@ class ScalpService {
         const atmPe = snap.atmPe;
 
         if (!spot || !strikes.length) {
-            return '⚠️ Incomplete option chain data — cannot build scalp card.';
+            return '\u26A0\uFE0F Incomplete option chain data \u2014 cannot build scalp card.';
         }
 
-        // ── Near-spot strike universe (±600 pts) ────────────────────────
-        // Far OTM rows from weekly+monthly chains pollute max pain and OI
-        // walls. Restrict to the tradeable window around spot.
+        // Near-spot strike universe (+-600 pts)
         const nearStrikes = strikes.filter(
             (s) => Math.abs(Number(s.strike) - spot) <= 600
         );
         const chain = nearStrikes.length >= 5 ? nearStrikes : strikes;
 
-        // ── Calculate max pain ──────────────────────────────────────────
+        // Max pain
         const mpRows = chain
             .filter((s) => s.ce && s.pe)
             .map((s) => ({
@@ -165,7 +150,7 @@ class ScalpService {
             }));
         const mpVal = maxPain(mpRows);
 
-        // ── Find OI walls (highest CE and PE OI near spot) ─────────────
+        // OI walls
         const sortedByCe = [...chain].filter((s) => s.ce?.oi).sort((a, b) => b.ce.oi - a.ce.oi);
         const sortedByPe = [...chain].filter((s) => s.pe?.oi).sort((a, b) => b.pe.oi - a.pe.oi);
 
@@ -176,113 +161,88 @@ class ScalpService {
         const support = topPeWall?.strike || round5(spot - 100);
         const rangeWidth = resistance - support;
 
-        // ── Spot position in range (0% = at support, 100% = at resistance) ──
         const spotPct = rangeWidth > 0
             ? Math.round(((spot - support) / rangeWidth) * 100)
             : 50;
 
-        // ── Regime ──────────────────────────────────────────────────────
         const regime = detectRegime({
-            spot,
-            maxPainVal: mpVal,
-            rangeWidth,
-            vix: 13, // placeholder — NSE chain doesn't provide VIX directly
-            pcr: pcr || 1,
+            spot, maxPainVal: mpVal, rangeWidth, vix: 13, pcr: pcr || 1,
         });
 
-        // ── Build setups ───────────────────────────────────────────────
+        // ── Build 5 setups (target +5 / stop -5) ─────────────────────
         const setups = [];
 
-        // Support bounce — Buy CE
+        // 1) Support bounce — Buy CE
         if (spot - support < rangeWidth * 0.4) {
             const ceNearSupport = findStrikeLeg({ strikes }, support, 'CE');
             const entryPrem = ceNearSupport?.ltp || (atmCe?.ltp ? atmCe.ltp - 20 : null);
             if (entryPrem) {
-                const target = entryPrem + 3;
-                const stop = entryPrem - 4;
+                const target = entryPrem + 5;
+                const stop = entryPrem - 5;
                 const conf = calcConfidence({
                     oiWallQty: topPeWall?.pe?.oi || 0,
-                    totalOi: snap.totalPeOi || 0,
-                    pcr: pcr || 1,
-                    vix: 13,
-                    spotDistance: spot - support,
-                    regime: 'directional',
+                    totalOi: snap.totalPeOi || 0, pcr: pcr || 1, vix: 13,
+                    spotDistance: spot - support, regime: 'directional',
                 });
                 setups.push({
-                    type: 'BUY CE',
-                    emoji: '🟢',
+                    type: 'BUY CE', emoji: '\uD83D\uDFE2',
                     trigger: `Spot touches ${support}`,
-                    entry: entryPrem,
-                    target,
-                    stop,
-                    speed: '2-5 min',
+                    entry: entryPrem, target, stop, speed: '2-5 min',
                     confidence: conf,
-                    why: `PE OI wall ${formatOi(topPeWall?.pe?.oi)} at ${support}, spot near support`,
+                    why: `PE OI wall ${formatOi(topPeWall?.pe?.oi)} at ${support}`,
                     topPick: conf >= 65,
                 });
             }
         }
 
-        // Resistance rejection — Buy PE
+        // 2) Resistance rejection — Buy PE
         if (resistance - spot < rangeWidth * 0.4) {
             const peNearResistance = findStrikeLeg({ strikes }, resistance, 'PE');
             const entryPrem = peNearResistance?.ltp || (atmPe?.ltp ? atmPe.ltp - 20 : null);
             if (entryPrem) {
-                const target = entryPrem + 3;
-                const stop = entryPrem - 4;
+                const target = entryPrem + 5;
+                const stop = entryPrem - 5;
                 const conf = calcConfidence({
                     oiWallQty: topCeWall?.ce?.oi || 0,
-                    totalOi: snap.totalCeOi || 0,
-                    pcr: pcr || 1,
-                    vix: 13,
-                    spotDistance: resistance - spot,
-                    regime: 'directional',
+                    totalOi: snap.totalCeOi || 0, pcr: pcr || 1, vix: 13,
+                    spotDistance: resistance - spot, regime: 'directional',
                 });
                 setups.push({
-                    type: 'BUY PE',
-                    emoji: '🔴',
+                    type: 'BUY PE', emoji: '\uD83D\uDD34',
                     trigger: `Spot touches ${resistance}`,
-                    entry: entryPrem,
-                    target,
-                    stop,
-                    speed: '2-5 min',
+                    entry: entryPrem, target, stop, speed: '2-5 min',
                     confidence: conf,
-                    why: `CE OI wall ${formatOi(topCeWall?.ce?.oi)} at ${resistance}, spot near resistance`,
+                    why: `CE OI wall ${formatOi(topCeWall?.ce?.oi)} at ${resistance}`,
                     topPick: conf >= 65,
                 });
             }
         }
 
-        // Theta scalp — Short Straddle (only when mid-range or tight)
+        // 3) Short Straddle
         if (spotPct >= 30 && spotPct <= 70) {
             const straddle = (atmCe?.ltp || 0) + (atmPe?.ltp || 0);
-            if (straddle > 100) {
+            if (straddle > 50) {
                 const target = straddle - 5;
                 const stop = straddle + 6;
                 const conf = calcConfidence({
                     oiWallQty: Math.max(topCeWall?.ce?.oi || 0, topPeWall?.pe?.oi || 0),
                     totalOi: (snap.totalCeOi || 0) + (snap.totalPeOi || 0),
-                    pcr: pcr || 1,
-                    vix: 13,
+                    pcr: pcr || 1, vix: 13,
                     spotDistance: Math.min(spot - support, resistance - spot),
                     regime: 'theta',
                 });
                 setups.push({
-                    type: 'SHORT STRADDLE',
-                    emoji: '⚡',
+                    type: 'SHORT STRADDLE', emoji: '\u26A1',
                     trigger: `Spot mid-range (${spotPct}%)`,
-                    entry: straddle,
-                    target,
-                    stop,
-                    speed: '5-15 min',
+                    entry: straddle, target, stop, speed: '5-15 min',
                     confidence: conf,
-                    why: `ATM straddle ₹${straddle}, theta decay working, range-bound`,
+                    why: `ATM straddle \u20B9${straddle}, theta decay working`,
                     topPick: regime === 'low_vol' && conf >= 60,
                 });
             }
         }
 
-        // Theta scalp — Short Strangle (wider wings, cheaper risk)
+        // 4) Short Strangle
         if (spotPct >= 25 && spotPct <= 75 && rangeWidth >= TIGHT_RANGE_PTS) {
             const wingStep = Math.max(50, round5(rangeWidth / 4));
             const otmCeStrike = round5(atmStrike + wingStep);
@@ -296,27 +256,22 @@ class ScalpService {
                 const conf = calcConfidence({
                     oiWallQty: Math.max(topCeWall?.ce?.oi || 0, topPeWall?.pe?.oi || 0),
                     totalOi: (snap.totalCeOi || 0) + (snap.totalPeOi || 0),
-                    pcr: pcr || 1,
-                    vix: 13,
+                    pcr: pcr || 1, vix: 13,
                     spotDistance: Math.min(spot - support, resistance - spot),
                     regime: 'theta',
                 });
                 setups.push({
-                    type: 'SHORT STRANGLE',
-                    emoji: '🪁',
+                    type: 'SHORT STRANGLE', emoji: '\uD83E\uDE81',
                     trigger: `Sell ${otmCeStrike} CE + ${otmPeStrike} PE`,
-                    entry: strangle,
-                    target,
-                    stop,
-                    speed: '10-30 min',
+                    entry: strangle, target, stop, speed: '10-30 min',
                     confidence: conf,
-                    why: `OTM wings collect ₹${strangle}, spot mid-range keeps both legs safe`,
+                    why: `OTM wings collect \u20B9${strangle}, both legs safe`,
                     topPick: false,
                 });
             }
         }
 
-        // Breakout scalp — momentum continuation past the wall
+        // 5) Breakout/Breakdown scalp
         if (regime === 'trending') {
             const bullBreak = spot > resistance;
             const bearBreak = spot < support;
@@ -324,55 +279,35 @@ class ScalpService {
                 const leg = findStrikeLeg({ strikes }, atmStrike, bullBreak ? 'CE' : 'PE');
                 const entryPrem = leg?.ltp || (bullBreak ? atmCe?.ltp : atmPe?.ltp);
                 if (entryPrem && entryPrem > 10) {
-                    const target = entryPrem + 3;
-                    const stop = entryPrem - 4;
+                    const target = entryPrem + 5;
+                    const stop = entryPrem - 5;
                     const conf = calcConfidence({
                         oiWallQty: bullBreak ? topCeWall?.ce?.oi || 0 : topPeWall?.pe?.oi || 0,
                         totalOi: (snap.totalCeOi || 0) + (snap.totalPeOi || 0),
-                        pcr: pcr || 1,
-                        vix: 13,
-                        spotDistance: 20,
-                        regime: 'directional',
+                        pcr: pcr || 1, vix: 13, spotDistance: 20, regime: 'directional',
                     });
                     setups.push({
                         type: bullBreak ? 'BREAKOUT CE' : 'BREAKDOWN PE',
-                        emoji: bullBreak ? '🚀' : '🩸',
+                        emoji: bullBreak ? '\uD83D\uDE80' : '\uD83E\uDE79',
                         trigger: `Spot broke ${bullBreak ? 'above resistance' : 'below support'} ${bullBreak ? resistance : support}`,
-                        entry: entryPrem,
-                        target,
-                        stop,
-                        speed: '1-3 min',
+                        entry: entryPrem, target, stop, speed: '1-3 min',
                         confidence: conf,
-                        why: `Spot beyond the wall — momentum trade, exit fast`,
+                        why: 'Spot beyond the wall \u2014 momentum trade, exit fast',
                         topPick: conf >= 65,
                     });
                 }
             }
         }
 
-        // Sort: top picks first, then by confidence
         setups.sort((a, b) => {
             if (a.topPick && !b.topPick) return -1;
             if (!a.topPick && b.topPick) return 1;
             return b.confidence - a.confidence;
         });
 
-        // ── Format card ─────────────────────────────────────────────────
         return this._formatCard({
-            spot,
-            pcr,
-            mpVal,
-            resistance,
-            support,
-            rangeWidth,
-            spotPct,
-            atmStrike,
-            atmCe,
-            atmPe,
-            topCeWall,
-            topPeWall,
-            regime,
-            setups,
+            spot, pcr, mpVal, resistance, support, rangeWidth, spotPct,
+            atmStrike, atmCe, atmPe, topCeWall, topPeWall, regime, setups,
         });
     }
 
@@ -382,98 +317,92 @@ class ScalpService {
         const timeLabel = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
         const dateLabel = istDateLabel();
 
-        // Regime badge
         const regimeBadge = {
-            low_vol: '⚠️ LOW VOL',
-            trending: '🔥 TRENDING',
-            normal: '📊 NORMAL',
-        }[regime] || '📊 NORMAL';
+            low_vol: '\u26A0\uFE0F LOW VOL',
+            trending: '\uD83D\uDD25 TRENDING',
+            normal: '\uD83D\uDCCA NORMAL',
+        }[regime] || '\uD83D\uDCCA NORMAL';
 
-        // Build price ladder rows
         const ladder = buildPriceLadder({ spot, resistance, support, mpVal, atmStrike, atmCe, atmPe, topCeWall, topPeWall });
 
-        L.push('╔══════════════════════════════════════╗');
-        L.push('║  ⚡ /scalp · NIFTY MICRO SCALP       ║');
-        L.push('╚══════════════════════════════════════╝');
+        L.push('\u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557');
+        L.push('\u2551  \u26A1 /scalp \u00B7 NIFTY MICRO SCALP       \u2551');
+        L.push('\u255A\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255D');
         L.push('');
-        L.push(`📅 ${dateLabel} · ${timeLabel} IST`);
-        L.push(`📍 Spot: ${fmtNum(spot)} · ${regimeBadge}`);
+        L.push(`\uD83D\uDCC5 ${dateLabel} \u00B7 ${timeLabel} IST`);
+        L.push(`\uD83D\uDCCD Spot: ${fmtNum(spot)} \u00B7 ${regimeBadge}`);
         L.push('');
-        L.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        L.push('\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501');
         L.push('');
-        L.push('📊 *SCALP MAP*');
+        L.push('\uD83D\uDCCA *SCALP MAP*');
         L.push('');
         for (const row of ladder) {
             L.push(row);
         }
         L.push('');
-        L.push(`  Max Pain: ${fmtNum(mpVal)} · Range: ${rangeWidth} pts`);
+        L.push(`  Max Pain: ${fmtNum(mpVal)} \u00B7 Range: ${rangeWidth} pts`);
         L.push('');
-        L.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        L.push('\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501');
         L.push('');
 
-        // Premium snapshot
-        L.push('💎 *PREMIUM LIVE*');
+        L.push('\uD83D\uDC8E *PREMIUM LIVE*');
         L.push('');
-        L.push('┌────────────────────────────────┐');
+        L.push('\u250C\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510');
         if (atmCe) {
-            L.push(`│ CE ${fmtNum(atmStrike)} │ ₹${atmCe.ltp ?? '–'} │ LTP`);
+            L.push(`\u2502 CE ${fmtNum(atmStrike)} \u2502 \u20B9${atmCe.ltp ?? '\u2013'} \u2502 LTP`);
         }
         if (atmPe) {
-            L.push(`│ PE ${fmtNum(atmStrike)} │ ₹${atmPe.ltp ?? '–'} │ LTP`);
+            L.push(`\u2502 PE ${fmtNum(atmStrike)} \u2502 \u20B9${atmPe.ltp ?? '\u2013'} \u2502 LTP`);
         }
         const straddle = (atmCe?.ltp || 0) + (atmPe?.ltp || 0);
         if (straddle > 0) {
-            L.push(`│ Straddle  │ ₹${straddle} │ Total`);
+            L.push(`\u2502 Straddle  \u2502 \u20B9${straddle} \u2502 Total`);
         }
-        L.push('└────────────────────────────────┘');
+        L.push('\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518');
         L.push('');
-        L.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        L.push('\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501');
         L.push('');
 
-        // Setups
         if (setups.length) {
-            L.push('🎯 *TRIGGER SCALPS*');
+            L.push('\uD83C\uDFAF *TRIGGER SCALPS*');
             L.push('');
             for (const s of setups) {
-                const pick = s.topPick ? ' ⭐ TOP PICK' : '';
+                const pick = s.topPick ? ' \u2B50 TOP PICK' : '';
                 L.push(`*${s.emoji} ${s.type}${pick}*`);
                 if (s.trigger) L.push(`  Trigger: ${s.trigger}`);
-                L.push(`  Entry: ₹${s.entry} · Target: ₹${s.target} · Stop: ₹${s.stop}`);
+                L.push(`  Entry: \u20B9${s.entry} \u00B7 Target: \u20B9${s.target} \u00B7 Stop: \u20B9${s.stop}`);
                 L.push(`  Conf: ${s.confidence}% ${confBar(s.confidence)} ${confLabel(s.confidence)}`);
-                if (s.why) L.push(`  📊 ${s.why}`);
+                if (s.why) L.push(`  \uD83D\uDCCA ${s.why}`);
                 L.push('');
             }
         } else {
-            L.push('⚠️ *NO CLEAR SETUP NOW*');
-            L.push('  Spot is mid-range — wait for trigger');
+            L.push('\u26A0\uFE0F *NO CLEAR SETUP NOW*');
+            L.push('  Spot is mid-range \u2014 wait for trigger');
             L.push('');
         }
 
-        L.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        L.push('\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501');
         L.push('');
 
-        // Mid-range warning
         if (spotPct >= 30 && spotPct <= 70 && !setups.some((s) => s.topPick)) {
-            L.push('⚠️ *SPOT IS MID-RANGE — NO TRADE NOW*');
+            L.push('\u26A0\uFE0F *SPOT IS MID-RANGE \u2014 NO TRADE NOW*');
             L.push('  Wait for spot to hit support or resistance');
             L.push('');
         }
 
-        // Rules
         const isLowVol = regime === 'low_vol';
         const isTrending = regime === 'trending';
-        L.push('⚡ *SCALP RULES*');
-        L.push('  🎯 +₹2-3 exit · 🛑 −₹3-4 stop');
-        L.push(`  ⏰ 2-5 min hold · 📦 ${isLowVol ? '1 lot' : '2-3 lots'}`);
-        L.push(`  🔁 Max ${isLowVol ? '3' : '4'} trades/day`);
-        if (isLowVol) L.push('  ⚠️ Low vol — tighter stops, faster exits');
-        if (isTrending) L.push('  ⚠️ Trending — only trade in trend direction');
-        L.push('  ❌ Skip if range < 50 pts');
+        L.push('\u26A1 *SCALP RULES*');
+        L.push('  \uD83C\uDFAF +5 pt exit \u00B7 \uD83D\uDED1 \u22125 pt stop');
+        L.push(`  \u23F0 2-5 min hold \u00B7 \uD83D\uDCE6 ${isLowVol ? '1 lot' : '2-3 lots'}`);
+        L.push(`  \u25BB Max ${isLowVol ? '3' : '4'} trades/day`);
+        if (isLowVol) L.push('  \u26A0\uFE0F Low vol \u2014 tighter stops, faster exits');
+        if (isTrending) L.push('  \u26A0\uFE0F Trending \u2014 only trade in trend direction');
+        L.push('  \u274C Skip if range < 50 pts');
         L.push('');
-        L.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        L.push('\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501');
         L.push('');
-        L.push('🔄 _Refresh: /scalp_');
+        L.push('\uD83D\uDD04 _Refresh: /scalp_');
 
         return L.join('\n');
     }
@@ -482,7 +411,7 @@ class ScalpService {
 // ── Formatting helpers ─────────────────────────────────────────────────────
 
 function fmtNum(n) {
-    if (n == null || !Number.isFinite(n)) return '–';
+    if (n == null || !Number.isFinite(n)) return '\u2013';
     return Number(n).toLocaleString('en-IN');
 }
 
@@ -496,63 +425,98 @@ function formatOi(oi) {
 
 /**
  * Build a TradingView-style price ladder.
- * Shows key levels from resistance to support with OI walls, ATM, spot, max pain.
+ * Always includes: CE OI wall (+RESISTANCE), PE OI wall (+SUPPORT),
+ * ATM, YOU, MAX PAIN.  Ladder extends at most 1 step beyond the
+ * outermost key level so blank rows don't dominate.
  */
 function buildPriceLadder({ spot, resistance, support, mpVal, atmStrike, atmCe, atmPe, topCeWall, topPeWall }) {
     const rows = [];
     const pad = (s, len) => String(s).padStart(len);
 
-    // Build list of key price levels (descending)
-    const levels = [];
-    const step = Math.max(20, Math.round((resistance - support) / 10 / 5) * 5);
+    // 1. Collect key levels (deduplicated)
+    const keySet = new Set();
+    const addKey = (v) => { if (v != null && Number.isFinite(v)) keySet.add(v); };
 
-    // Start from resistance + buffer, go down to support - buffer
-    const top = round5(resistance + 20);
-    const bottom = round5(support - 20);
+    addKey(topCeWall?.strike);
+    addKey(topPeWall?.strike);
+    addKey(resistance);
+    addKey(support);
+    addKey(atmStrike);
+    addKey(mpVal);
+    addKey(Math.round(spot));
 
-    for (let p = top; p >= bottom; p -= step) {
-        levels.push(p);
+    const keyArr = [...keySet].sort((a, b) => b - a);
+    const rangeHigh = Math.max(...keyArr);
+    const rangeLow  = Math.min(...keyArr);
+    const range = rangeHigh - rangeLow || 100;
+    const step = Math.max(10, Math.round(range / 8 / 5) * 5);
+
+    // 2. Cap max pain / outermost key to 1 step beyond the visible wall range
+    //    so the ladder doesn't stretch to 23,750 when spot is 24,300.
+    const wallHigh = Math.max(topCeWall?.strike || resistance, resistance);
+    const wallLow  = Math.min(topPeWall?.strike || support, support);
+    const cappedHigh = wallHigh + step;
+    const cappedLow  = wallLow - step;
+
+    const allLevels = new Set();
+    // Add key levels only if within capped range
+    for (const k of keySet) {
+        if (k >= cappedLow && k <= cappedHigh) allLevels.add(k);
     }
+    // Always include spot itself
+    const spotRound = Math.round(spot);
+    if (spotRound >= cappedLow && spotRound <= cappedHigh) allLevels.add(spotRound);
 
-    // Determine nearest round number to spot for "YOU" marker
-    const nearestLevel = levels.reduce((prev, curr) =>
-        Math.abs(curr - spot) < Math.abs(prev - spot) ? curr : prev
-    );
+    // Fill between with step lines
+    for (let p = cappedHigh; p >= cappedLow; p -= step) allLevels.add(p);
+    const levels = [...allLevels].sort((a, b) => b - a);
 
+    // 3. Nearest level to spot for YOU marker
+    const nearestToSpot = levels.reduce((best, v) =>
+        Math.abs(v - spot) < Math.abs(best - spot) ? v : best, levels[0]);
+
+    // 4. Premium strings
+    const ce = atmCe?.ltp != null ? 'CE \u20B9' + atmCe.ltp : '';
+    const pe = atmPe?.ltp != null ? 'PE \u20B9' + atmPe.ltp : '';
+    const premStr = ce && pe ? ce + ' / ' + pe : ce || pe || '';
+
+    const oiWall = (wall, side) => {
+        const label = side === 'CE' ? 'CE OI WALL' : 'PE OI WALL';
+        const zone  = side === 'CE' ? 'SELL ZONE'  : 'BUY ZONE';
+        const isAlsoResist = side === 'CE' && wall?.strike === resistance;
+        const isAlsoSup    = side === 'PE' && wall?.strike === support;
+        let extra = '';
+        if (isAlsoResist) extra = ' \u00B7 RESISTANCE';
+        if (isAlsoSup)    extra = ' \u00B7 SUPPORT';
+        return `\u2593\u2593\u2593 ${label} (${formatOi(wall?.ce?.oi || wall?.pe?.oi)}) \u2190 ${zone}${extra}`;
+    };
+
+    // 5. Render rows
     for (const price of levels) {
-        let line = '';
         const p = pad(fmtNum(price), 8);
-        // OI wall marker
         const isCeWall = topCeWall?.strike === price;
         const isPeWall = topPeWall?.strike === price;
+        const isSpot   = price === nearestToSpot;
+        const isAtm    = price === atmStrike && !isSpot;
+        const isMp     = price === mpVal && !isSpot && !isAtm;
 
+        let line;
         if (isCeWall) {
-            line = `${p} ┤ ▓▓▓ CE OI WALL (${formatOi(topCeWall?.ce?.oi)}) ← SELL ZONE`;
+            line = p + ' \u2524 ' + oiWall(topCeWall, 'CE');
         } else if (isPeWall) {
-            line = `${p} ┤ ▓▓▓ PE OI WALL (${formatOi(topPeWall?.pe?.oi)}) ← BUY ZONE`;
-        } else if (price === resistance) {
-            line = `${p} ┤ ░░░ ·····RESISTANCE·····`;
-        } else if (price === support) {
-            line = `${p} ┤ ░░░ ······SUPPORT······`;
-        } else if (price === nearestLevel) {
-            // Spot line — show CE/PE premiums inline
-            const ceStr = atmCe?.ltp != null ? `CE ₹${atmCe.ltp}` : '';
-            const peStr = atmPe?.ltp != null ? `PE ₹${atmPe.ltp}` : '';
-            const premStr = ceStr && peStr ? `${ceStr} / ${peStr}` : ceStr || peStr || '';
-            line = `${p} ┤ ◄◄◄ YOU ARE HERE ◄◄◄${premStr ? ' ─── ' + premStr : ''}`;
-        } else if (price === mpVal) {
-            line = `${p} ┤ ······MAX PAIN ${fmtNum(mpVal)}······`;
-        } else if (price === atmStrike) {
-            const ceStr = atmCe?.ltp != null ? `CE ₹${atmCe.ltp}` : '';
-            const peStr = atmPe?.ltp != null ? `PE ₹${atmPe.ltp}` : '';
-            const premStr = ceStr && peStr ? `${ceStr} / ${peStr}` : ceStr || peStr || '';
-            line = `${p} ┤ ─── ATM${premStr ? ' ' + premStr : ''} ───`;
-        } else if (price > resistance - step && price < resistance) {
-            line = `${p} ┤`;
-        } else if (price < support + step && price > support) {
-            line = `${p} ┤`;
+            line = p + ' \u2524 ' + oiWall(topPeWall, 'PE');
+        } else if (price === resistance && !isCeWall) {
+            line = p + ' \u2524 \u2591\u2591\u2591 \u00B7\u00B7\u00B7\u00B7\u00B7RESISTANCE\u00B7\u00B7\u00B7\u00B7\u00B7';
+        } else if (price === support && !isPeWall) {
+            line = p + ' \u2524 \u2591\u2591\u2591 \u00B7\u00B7\u00B7\u00B7\u00B7\u00B7SUPPORT\u00B7\u00B7\u00B7\u00B7\u00B7\u00B7';
+        } else if (isAtm) {
+            line = p + ' \u2524 \u2500\u2500\u2500 ATM' + (premStr ? ' ' + premStr : '') + ' \u2500\u2500\u2500';
+        } else if (isMp) {
+            line = p + ' \u2524 \u00B7\u00B7\u00B7\u00B7\u00B7\u00B7MAX PAIN ' + fmtNum(mpVal) + '\u00B7\u00B7\u00B7\u00B7\u00B7\u00B7';
+        } else if (isSpot) {
+            line = p + ' \u2524 \u25C4\u25C4\u25C4 YOU ARE HERE \u25BA\u25BA\u25BA' + (premStr ? ' \u2500\u2500\u2500 ' + premStr : '');
         } else {
-            line = `${p} ┤`;
+            line = p + ' \u2524';
         }
 
         rows.push(line);
