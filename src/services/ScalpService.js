@@ -109,6 +109,66 @@ function detectRegime({ spot, maxPainVal, rangeWidth, vix, pcr }) {
     return 'normal';
 }
 
+// ── Best strike selection for 5pt scalps ──────────────────────────────────
+
+/**
+ * Score a strike for scalping based on IV, OI, and proximity to ATM.
+ * Higher score = better for capturing 5pt moves.
+ */
+function scoreStrikeForScalp(strike, side, spot, atmStrike, allStrikes) {
+    const row = allStrikes.find((s) => s.strike === strike);
+    if (!row) return 0;
+    const leg = side === 'CE' ? row.ce : row.pe;
+    if (!leg) return 0;
+
+    // IV score (0-40): higher IV = more premium movement
+    const iv = leg.iv || 0;
+    const maxIv = 10; // NIFTY typical max IV
+    const ivScore = Math.min(40, (iv / maxIv) * 40);
+
+    // OI score (0-30): higher OI = better liquidity
+    const oi = leg.oi || 0;
+    const maxOi = 300000; // 3L = max score
+    const oiScore = Math.min(30, (oi / maxOi) * 30);
+
+    // Proximity to ATM (0-30): closer to ATM = higher delta = 1:1 movement
+    const dist = Math.abs(strike - atmStrike);
+    const maxDist = 200; // 200pts away = 0 score
+    const proxScore = Math.max(0, 30 - (dist / maxDist) * 30);
+
+    return Math.round(ivScore + oiScore + proxScore);
+}
+
+/**
+ * Find the best strike for a given side (CE/PE) near a target level.
+ * Returns the strike with highest momentum score.
+ */
+function findBestStrike(strikes, targetLevel, side, spot, atmStrike) {
+    // Consider strikes within 100pts of target level
+    const candidates = strikes
+        .filter((s) => Math.abs(s.strike - targetLevel) <= 100)
+        .filter((s) => { const leg = side === 'CE' ? s.ce : s.pe; return leg?.ltp > 0; });
+
+    if (!candidates.length) return null;
+
+    let bestStrike = null;
+    let bestScore = -1;
+    let bestLtp = 0;
+
+    for (const s of candidates) {
+        const score = scoreStrikeForScalp(s.strike, side, spot, atmStrike, strikes);
+        const ltp = (side === 'CE' ? s.ce : s.pe)?.ltp || 0;
+        // Prefer higher score; break ties by lower premium (cheaper entry)
+        if (score > bestScore || (score === bestScore && ltp < bestLtp)) {
+            bestScore = score;
+            bestStrike = s.strike;
+            bestLtp = ltp;
+        }
+    }
+
+    return { strike: bestStrike, score: bestScore, ltp: bestLtp };
+}
+
 // ── Main function ──────────────────────────────────────────────────────────
 
 class ScalpService {
@@ -172,11 +232,11 @@ class ScalpService {
         // ── Build 5 setups (target +5 / stop -5) ─────────────────────
         const setups = [];
 
-        // 1) Support bounce — Buy CE
+        // 1) Support bounce — Buy CE (best momentum strike)
         if (spot - support < rangeWidth * 0.4) {
-            const ceNearSupport = findStrikeLeg({ strikes }, support, 'CE');
-            const entryPrem = ceNearSupport?.ltp || (atmCe?.ltp ? atmCe.ltp - 20 : null);
-            if (entryPrem) {
+            const bestCe = findBestStrike(chain, support, 'CE', spot, atmStrike);
+            const entryPrem = bestCe?.ltp || (atmCe?.ltp ? atmCe.ltp - 20 : null);
+            if (entryPrem && entryPrem >= 5) {
                 const target = entryPrem + 5;
                 const stop = entryPrem - 5;
                 const conf = calcConfidence({
@@ -187,22 +247,23 @@ class ScalpService {
                 setups.push({
                     type: 'BUY CE', emoji: '\uD83D\uDFE2',
                     rank: 'primary',
-                    strike: ceNearSupport?.strike || support,
+                    strike: bestCe?.strike || support,
                     optionType: 'CE',
+                    momentumScore: bestCe?.score || 0,
                     trigger: `Spot touches ${support}`,
                     entry: entryPrem, target, stop, speed: '2-5 min',
                     confidence: conf,
-                    why: `PE OI wall ${formatOi(topPeWall?.pe?.oi)} at ${support}`,
+                    why: `PE OI wall ${formatOi(topPeWall?.pe?.oi)} at ${support} · Momentum: ${bestCe?.score || 0}/100`,
                     topPick: conf >= 65,
                 });
             }
         }
 
-        // 2) Resistance rejection — Buy PE
+        // 2) Resistance rejection — Buy PE (best momentum strike)
         if (resistance - spot < rangeWidth * 0.4) {
-            const peNearResistance = findStrikeLeg({ strikes }, resistance, 'PE');
-            const entryPrem = peNearResistance?.ltp || (atmPe?.ltp ? atmPe.ltp - 20 : null);
-            if (entryPrem) {
+            const bestPe = findBestStrike(chain, resistance, 'PE', spot, atmStrike);
+            const entryPrem = bestPe?.ltp || (atmPe?.ltp ? atmPe.ltp - 20 : null);
+            if (entryPrem && entryPrem >= 5) {
                 const target = entryPrem + 5;
                 const stop = entryPrem - 5;
                 const conf = calcConfidence({
@@ -213,12 +274,13 @@ class ScalpService {
                 setups.push({
                     type: 'BUY PE', emoji: '\uD83D\uDD34',
                     rank: 'primary',
-                    strike: peNearResistance?.strike || resistance,
+                    strike: bestPe?.strike || resistance,
                     optionType: 'PE',
+                    momentumScore: bestPe?.score || 0,
                     trigger: `Spot touches ${resistance}`,
                     entry: entryPrem, target, stop, speed: '2-5 min',
                     confidence: conf,
-                    why: `CE OI wall ${formatOi(topCeWall?.ce?.oi)} at ${resistance}`,
+                    why: `CE OI wall ${formatOi(topCeWall?.ce?.oi)} at ${resistance} · Momentum: ${bestPe?.score || 0}/100`,
                     topPick: conf >= 65,
                 });
             }
