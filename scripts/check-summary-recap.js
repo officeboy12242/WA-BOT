@@ -56,7 +56,6 @@ ok(router.nvidiaModels.length > 0, 'nvidia chain is non-empty');
 for (const [name, chain] of [
     ['GEMINI_TRADE_MODELS', config.GEMINI_TRADE_MODELS],
     ['ASSIST_GEMINI_MODELS', config.ASSIST_GEMINI_MODELS],
-    ['GEMINI_HEAL_MODELS', config.GEMINI_HEAL_MODELS],
 ]) {
     ok(!String(chain).split(',').map((s) => s.trim()).includes('gemini-2.0-flash'),
         `${name} no longer lists the retired gemini-2.0-flash`);

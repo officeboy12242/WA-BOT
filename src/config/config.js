@@ -179,15 +179,8 @@ export const config = {
     EXPIRY_LOT_SIZES: (process.env.EXPIRY_LOT_SIZES || '').trim(),
     /** @deprecated Trade alerts use Gemini; kept for group summaries only */
     NVIDIA_TRADE_MODEL: process.env.NVIDIA_TRADE_MODEL?.trim() || 'nvidia/nemotron-3-super-120b-a12b',
-    /** Summary self-heal model (code fix proposals) */
-    NVIDIA_HEAL_MODEL: process.env.NVIDIA_HEAL_MODEL?.trim() || 'nvidia/nemotron-3-ultra-550b-a55b',
-    /** Try Nemotron first (often 503); default false = GLM → DeepSeek → Nemotron */
-    NVIDIA_HEAL_PREFER_NEMOTRON: process.env.NVIDIA_HEAL_PREFER_NEMOTRON === 'true',
-    /** Google Gemini API key — preferred for /fix heal (better JSON + replacements) */
+    /** Google Gemini API key — used by trade router, assist, and other LLM services */
     GEMINI_API_KEY: process.env.GEMINI_API_KEY?.trim() || '',
-    /** Primary Gemini model for heal (comma-separated chain in GEMINI_HEAL_MODELS) */
-    GEMINI_HEAL_MODEL: process.env.GEMINI_HEAL_MODEL?.trim() || 'gemini-2.5-flash',
-    GEMINI_HEAL_MODELS: process.env.GEMINI_HEAL_MODELS?.trim() || 'gemini-2.5-flash,gemini-flash-latest,gemini-flash-lite-latest,gemini-2.5-pro',
     /** Owner DM assistant — replies as ASSIST_OWNER_NAME in personal chats when /assist on */
     ASSIST_OWNER_NAME: process.env.ASSIST_OWNER_NAME?.trim() || 'Jacky',
     /** Short bio the AI shares when people ask about the owner (optional override) */
@@ -214,16 +207,6 @@ export const config = {
     ASSIST_MAX_HISTORY: Math.max(4, parseInt(process.env.ASSIST_MAX_HISTORY, 10) || 12),
     ASSIST_REPLY_COOLDOWN_MS: Math.max(1500, parseInt(process.env.ASSIST_REPLY_COOLDOWN_MS, 10) || 3500),
     ASSIST_TIMEOUT_MS: Math.min(60_000, Math.max(15_000, parseInt(process.env.ASSIST_TIMEOUT_MS, 10) || 45_000)),
-    /** Auto-propose summary code fixes (owner must approve push) */
-    SUMMARY_SELF_HEAL_ENABLED: process.env.SUMMARY_SELF_HEAL_ENABLED === 'true',
-    /** Auto-propose /horo fixes when all horoscope APIs fail (owner must approve push) */
-    HOROSCOPE_SELF_HEAL_ENABLED: process.env.HOROSCOPE_SELF_HEAL_ENABLED !== 'false',
-    /** GitHub PAT with contents:write for self-heal push */
-    GITHUB_TOKEN: process.env.GITHUB_TOKEN?.trim() || '',
-    GITHUB_REPO: process.env.GITHUB_REPO?.trim() || 'officeboy12242/WA-BOT',
-    GITHUB_BRANCH: process.env.GITHUB_BRANCH?.trim() || 'main',
-    /** WhatsApp notify number for heal status (default logs number) */
-    SUMMARY_SELF_HEAL_NOTIFY: process.env.SUMMARY_SELF_HEAL_NOTIFY?.trim() || '917887499710',
     NVIDIA_API_BASE_URL: process.env.NVIDIA_API_BASE_URL?.trim() || 'https://integrate.api.nvidia.com/v1/chat/completions',
     /** Capped at 120s — avoid huge env values (e.g. 900000) that hang recaps. */
     NVIDIA_TIMEOUT_MS: (() => {

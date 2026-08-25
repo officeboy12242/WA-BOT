@@ -6,7 +6,6 @@ import { logger } from '../utils/logger.js';
 import { formatDateLabelIST, getRecapDateStrIST } from '../utils/dateIST.js';
 import NvidiaDeepSeekService, { SUMMARY_SYSTEM_PROMPT } from '../services/NvidiaDeepSeekService.js';
 import OpenRouterLlmService from '../services/OpenRouterLlmService.js';
-import SummarySelfHealService from '../services/SummarySelfHealService.js';
 import { RECAP_STYLES, DEFAULT_RECAP_STYLE, pickRecapStyle } from '../prompts/recapStyles.js';
 
 /** Extra nudge for free/fallback models that otherwise emit vague "general chat" JSON. */
@@ -171,7 +170,6 @@ class GroupSummaryController {
         this.mongoDb = mongoDb;
         this.nvidia = new NvidiaDeepSeekService(config);
         this.openrouter = new OpenRouterLlmService(config);
-        this.selfHeal = new SummarySelfHealService(config, mongoDb);
         this.minMessages = Math.max(1, Number(config.GROUP_SUMMARY_MIN_MESSAGES) || 3);
         this.enabled = config.GROUP_SUMMARY_ENABLED !== false;
         this.timezone = config.GROUP_SUMMARY_TIMEZONE || 'Asia/Kolkata';
@@ -380,12 +378,10 @@ class GroupSummaryController {
             { group_id: 1, recap_date: 1 },
             { unique: true, name: 'group_summary_sent_unique' }
         );
-        await this.selfHeal.init();
     }
 
     setSock(sock) {
         this._sock = sock;
-        this.selfHeal.setSock(sock);
     }
 
     async wasRecapSent(groupId, dateStr) {
@@ -544,7 +540,6 @@ class GroupSummaryController {
     }
 
     async postSummaryForGroup(sock, group, dateStr, dateLabel, timeLabel, { force = false } = {}) {
-        this.selfHeal.setSock(sock);
         const groupId = group.group_id;
         const groupName = group.group_name || groupId;
         const messages = await this.chatLog.getMessagesForDay(groupId, dateStr);
@@ -590,13 +585,6 @@ class GroupSummaryController {
         } catch (err) {
             logger.error(`Recap LLM failed for ${groupName}: ${err.message}`);
             summary = null;
-            this.selfHeal.triggerFromSummaryFailure({
-                groupName,
-                dateStr,
-                errorMessage: err.message,
-                messageCount: messages.length,
-                useChunks: this.chatLog.shouldUseChunkedSummary(messages),
-            });
         }
 
         // Always show topics — fill gaps from chat activity if LLM timed out or returned empty

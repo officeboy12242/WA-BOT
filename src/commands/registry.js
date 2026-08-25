@@ -463,22 +463,6 @@ export const COMMAND_REGISTRY = [
         category: 'movie',
     },
     {
-        names: ['/fix'],
-        key: 'fix',
-        scope: 'any',
-        role: 'owner',
-        help: 'AI code fix — `/fix remove testing thing` (confirm with /heal approve)',
-        category: 'owner',
-    },
-    {
-        names: ['/heal'],
-        key: 'heal',
-        scope: 'any',
-        role: 'owner',
-        help: 'Approve/reject AI fix — `/heal approve ID` or `/heal reject ID`',
-        category: 'owner',
-    },
-    {
         names: ['/assist'],
         key: 'assist',
         scope: 'any',
@@ -833,7 +817,7 @@ export const HELP_CATEGORY = {
     removeadmin: 'admin', increaselimit: 'admin', summarynow: 'admin',
 
     // Owner
-    fix: 'owner', heal: 'owner', assist: 'owner', deploy: 'owner',
+    fix: 'owner', assist: 'owner', deploy: 'owner',
     addpremium: 'owner', removepremium: 'owner', premium: 'owner',
     addmod: 'owner', removemod: 'owner', addchannel: 'owner',
     removechannel: 'owner', channels: 'owner', grouppost: 'owner',
@@ -859,7 +843,7 @@ export const HELP_CATEGORIES = [
     { key: 'group', emoji: '⚙️', title: 'GROUP SETUP', blurb: 'Staff — enable features per group' },
     { key: 'moderation', emoji: '🛡️', title: 'MODERATION', blurb: 'Warnings & message cleanup' },
     { key: 'admin', emoji: '🔧', title: 'BOT ADMIN', blurb: 'Manage the bot & its admins' },
-    { key: 'owner', emoji: '👑', title: 'OWNER TOOLS', blurb: 'Premium, deploy, self-heal' },
+    { key: 'owner', emoji: '👑', title: 'OWNER TOOLS', blurb: 'Premium, deploy, assist' },
 ];
 
 /** Display bucket for a command, defaulting to Essentials. */

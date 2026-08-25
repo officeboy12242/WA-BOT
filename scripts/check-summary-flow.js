@@ -46,7 +46,7 @@ function makeSock() {
     };
 }
 
-function makeController({ llmThrows = false, selfHealSpy = null } = {}) {
+function makeController({ llmThrows = false } = {}) {
     const ctrl = new GroupSummaryController({}, {}, {}, null);
     ctrl.chatLog = {
         getMessagesForDay: async () => days,
@@ -73,9 +73,6 @@ function makeController({ llmThrows = false, selfHealSpy = null } = {}) {
         summarizeGroupChatChunks: async (chunks) => goodSummary,
     };
     ctrl.openrouter = { isConfigured: () => false, models: [] };
-    if (selfHealSpy) {
-        ctrl.selfHeal = selfHealSpy;
-    }
     return ctrl;
 }
 
@@ -95,22 +92,12 @@ assert.ok(text.includes('bullish and chatty'), 'the vibe line is present');
 assert.ok(text.includes('The group read the market well today'), 'the verdict is present');
 assert.ok(!/Members talked about/i.test(text), 'no heuristic filler when the LLM worked');
 
-/* ── failure path: self-heal gets a well-formed context object ─────────────── */
+/* ── failure path: heuristic fallback when LLM throws ─────────────────────── */
 
-let healCtx = null;
-const spy = {
-    setSock: () => {},
-    triggerFromSummaryFailure: (ctx) => { healCtx = ctx; },
-};
 const sock2 = makeSock();
-const ctrl2 = makeController({ llmThrows: true, selfHealSpy: spy });
+const ctrl2 = makeController({ llmThrows: true });
 await ctrl2.postSummaryForGroup(sock2, group, '2026-08-12', 'Wednesday, 12 Aug', '23:30', { force: true });
 
-assert.ok(healCtx && typeof healCtx === 'object', 'self-heal receives an object, not a bare string');
-assert.strictEqual(healCtx.groupName, 'Test Group', 'self-heal knows which group failed');
-assert.ok(/503/.test(healCtx.errorMessage || ''), 'self-heal gets the real error message');
-assert.ok(Number.isFinite(healCtx.messageCount) && healCtx.messageCount > 0, 'self-heal gets the message count');
-assert.strictEqual(typeof healCtx.useChunks, 'boolean', 'self-heal knows whether chunks were used');
 assert.strictEqual(sock2.sent.length, 1, 'a failed LLM recap still posts a fallback recap');
 
 console.log('summary flow check ok');

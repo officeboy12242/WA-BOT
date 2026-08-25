@@ -56,7 +56,6 @@ import {
 } from './handlers/groupHandlers.js';
 
 import { handleTradelert, handleTradenow, handleSwing, handleExpiry, handleIndex, handleSvmkr, handleChainAi } from './handlers/tradeHandlers.js';
-import { handleHeal, handleFix } from './handlers/healHandlers.js';
 import { handleAssist } from './handlers/assistHandlers.js';
 import IpoController from './IpoController.js';
 import BacktestController from './BacktestController.js';
@@ -536,8 +535,6 @@ export const COMMAND_HANDLERS = {
     summaryon: ({ sock, chatId, senderJid, ctx }) => handleSummaryOn(sock, chatId, senderJid, ctx),
     summaryoff: ({ sock, chatId, senderJid, ctx }) => handleSummaryOff(sock, chatId, senderJid, ctx),
     summarynow: ({ sock, chatId, senderJid, ctx }) => handleSummaryNow(sock, chatId, senderJid, ctx),
-    fix: ({ sock, chatId, senderJid, args, ctx }) => handleFix(sock, chatId, senderJid, args, ctx),
-    heal: ({ sock, chatId, senderJid, args, ctx }) => handleHeal(sock, chatId, senderJid, args, ctx),
     assist: ({ sock, chatId, senderJid, args, ctx }) => handleAssist(sock, chatId, senderJid, args, ctx),
     resume: ({ sock, chatId, senderJid, args, ctx }) => handleCv(sock, chatId, senderJid, args, ctx),
     tailor: ({ sock, chatId, senderJid, args, ctx }) => handleTailor(sock, chatId, senderJid, args, ctx),
@@ -599,23 +596,12 @@ export const COMMAND_HANDLERS = {
             } else {
                 const data = await horoscopeService.fetchHoroscope(sign);
                 if (data.error === 'api_error') {
-                    ctx.groupSummaryController?.selfHeal?.triggerFromHoroscopeFailure({
-                        sign,
-                        errorMessage: 'All horoscope API sources failed',
-                        chatId,
-                        diagnostics: data.diagnostics,
-                    });
                 }
                 const msg = horoscopeService.formatMessage(data);
                 await safeSendMessage(sock, chatId, { text: msg }, originalMsg);
             }
         } catch (err) {
             logger.error('Horoscope command error:', err);
-            ctx.groupSummaryController?.selfHeal?.triggerFromHoroscopeFailure({
-                sign: args[0],
-                errorMessage: err.message,
-                chatId,
-            });
             await safeSendMessage(sock, chatId, { text: '⚠️ Failed to fetch horoscope. Please try again.' }, originalMsg);
         }
     },

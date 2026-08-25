@@ -12,8 +12,7 @@ export function getPrimaryOwnerPhone() {
         .map((n) => String(n || '').replace(/\D/g, ''))
         .filter((n) => /^\d{10,15}$/.test(n));
     if (phones[0]) return phones[0];
-    const notify = String(config.SUMMARY_SELF_HEAL_NOTIFY || '').replace(/\D/g, '');
-    return /^\d{10,15}$/.test(notify) ? notify : '917887499710';
+    return '917887499710';
 }
 
 export function getOwnerDisplayName() {
