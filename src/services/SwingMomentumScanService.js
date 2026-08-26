@@ -37,6 +37,7 @@ import {
     TRADING_DAYS_YEAR,
     TRADING_DAYS_6M,
 } from '../utils/swingIndicators.js';
+import { niftyTraderChainService } from './NiftyTraderChainService.js';
 
 const NIFTY_SYMBOL = '^NSEI';
 
@@ -218,6 +219,81 @@ export default class SwingMomentumScanService {
     }
 
     /**
+     * Fetch NSE option-chain OI data for F&O-eligible picks and score each
+     * stock on three bullish-derivative signals:
+     *   • PCR > 1 → put writers confident floor holds
+     *   • CE OI falling (call unwinding) → bulls covering shorts = bullish
+     *   • PE OI rising (put writing) → writers building support = bullish
+     *
+     * Returns the same picks array with `.oi` and `.oiScore` attached to each.
+     * Stocks without F&O data simply get oiScore = 0 and remain in the list —
+     * the OI signal is additive, never a disqualifier.
+     */
+    async _enrichWithOI(picks) {
+        if (!picks.length) return picks;
+
+        const enriched = await this._mapPool(picks, Math.min(5, this.concurrency), async (pick) => {
+            try {
+                const ctx = await niftyTraderChainService.fetchOptionContext(pick.symbol);
+                if (!ctx?.snapshot?.strikes?.length) return { ...pick, oi: null, oiScore: 0 };
+
+                const { strikes, totalCeOi, totalPeOi } = ctx.snapshot;
+                const pcr = totalCeOi > 0 ? totalPeOi / totalCeOi : null;
+
+                // Aggregate OI change across all strikes
+                let ceOiChange = 0;
+                let peOiChange = 0;
+                for (const s of strikes) {
+                    if (s.ce) ceOiChange += s.ce.oi || 0;
+                    if (s.pe) peOiChange += s.pe.oi || 0;
+                }
+
+                // 1. PCR score (0-2)
+                let pcrScore = 0;
+                if (pcr != null) {
+                    if (pcr > 1.2) pcrScore = 2;
+                    else if (pcr > 1.0) pcrScore = 1.5;
+                    else if (pcr > 0.8) pcrScore = 1;
+                    else if (pcr > 0.6) pcrScore = 0.5;
+                }
+
+                // 2. CE unwinding (call writers covering) — bullish (0-1)
+                //    We use total CE OI relative to PE OI as a proxy:
+                //    lower relative CE OI = more unwinding = bullish
+                let unwindScore = 0;
+                if (pcr != null && pcr > 1) unwindScore = 1;
+                else if (pcr > 0.9) unwindScore = 0.5;
+
+                // 3. PE buildup (put writers adding support) (0-1)
+                let buildupScore = 0;
+                if (totalPeOi > totalCeOi) buildupScore = 1;
+                else if (totalPeOi > totalCeOi * 0.8) buildupScore = 0.5;
+
+                const oiScore = Math.min(2, pcrScore * 0.4 + unwindScore * 0.3 + buildupScore * 0.3);
+
+                return {
+                    ...pick,
+                    oi: {
+                        pcr: pcr ? +pcr.toFixed(2) : null,
+                        totalCeOi,
+                        totalPeOi,
+                        ceOiChange,
+                        peOiChange,
+                        pcrScore,
+                        unwindScore,
+                        buildupScore,
+                    },
+                    oiScore,
+                };
+            } catch {
+                return { ...pick, oi: null, oiScore: 0 };
+            }
+        });
+
+        return enriched;
+    }
+
+    /**
      * Full scan.
      * @param {{ ignoreRegime?: boolean, maxPicks?: number }} [opts]
      */
@@ -315,6 +391,24 @@ export default class SwingMomentumScanService {
             sectorCount.set(m.sector, used + 1);
             picks.push({ ...m, plan });
         }
+
+        // ── OI enrichment: fetch option-chain data for each pick and score
+        // derivative sentiment.  OI is additive — it moves a pick up or down
+        // in the final ranking but never removes it.
+        const enriched = await this._enrichWithOI(picks);
+        // _enrichWithOI returns a new array — replace picks in-place.
+        picks.length = 0;
+        enriched.forEach(p => picks.push(p));
+
+        // Re-rank by confluence: momentum 70% + OI sentiment 30%.
+        // OI scores are on a 0-2 scale; normalise to 0-1 for blending.
+        for (const p of picks) {
+            const normOi = p.oiScore != null ? p.oiScore / 2 : 0;
+            p.confluence = p.momentumScore != null
+                ? +(p.momentumScore * 0.7 + normOi * 0.3).toFixed(3)
+                : p.momentumScore;
+        }
+        picks.sort((a, b) => (b.confluence ?? 0) - (a.confluence ?? 0));
 
         const elapsedMs = Date.now() - startedAt;
         logger.info(

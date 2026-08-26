@@ -18,6 +18,15 @@ function sectorLabel(s) {
     return String(s || 'OTHER').replace(/_/g, '/').toLowerCase();
 }
 
+function oiScoreBar(score) {
+    if (score == null) return '';
+    const pct = Math.round((score / 2) * 100);
+    const filled = Math.round(pct / 10);
+    const empty = 10 - filled;
+    const bar = '\u2588'.repeat(filled) + '\u2591'.repeat(empty);
+    return bar + ' ' + pct + '%';
+}
+
 function formatPick(p, idx) {
     const { plan } = p;
     const rr2 = ((plan.target1 - plan.entry) / plan.risk).toFixed(1);
@@ -26,7 +35,19 @@ function formatPick(p, idx) {
     let s = `*${idx + 1}. ${p.symbol}* ${p.isNewHigh ? '🚀 new 52w high' : '📈 near high'}\n`;
     s += `_${p.displayName}_\n`;
     s += `💰 CMP *₹${inr2(p.price)}*  ·  ${p.pctFromHigh.toFixed(1)}% off 52w high\n`;
-    s += `🏅 Rank *#${p.rank}* (top ${p.topPct}%)  ·  vol *${p.volRatio.toFixed(1)}×*  ·  ${sectorLabel(p.sector)}\n`;
+    s += `🏅 Momentum *#${p.rank}* (top ${p.topPct}%)  ·  vol *${p.volRatio.toFixed(1)}×*  ·  ${sectorLabel(p.sector)}\n`;
+    if (p.oiScore != null) {
+        s += `📊 OI *${oiScoreBar(p.oiScore)}*  ·  PCR ${p.oi?.pcr ?? '—'}\n`;
+        if (p.oi) {
+            const ceLabel = p.oi.ceOiChange > 0
+                ? `CE OI ▲${inr(p.oi.ceOiChange)}`
+                : (p.oi.ceOiChange < 0 ? `CE unwind ▼${inr(Math.abs(p.oi.ceOiChange))}` : 'CE flat');
+            const peLabel = p.oi.peOiChange > 0
+                ? `PE OI ▲${inr(p.oi.peOiChange)}`
+                : (p.oi.peOiChange < 0 ? `PE unwind ▼${inr(Math.abs(p.oi.peOiChange))}` : 'PE flat');
+            s += `   ${ceLabel} · ${peLabel}\n`;
+        }
+    }
     s += `\n`;
     s += `🎯 Entry: *₹${inr2(plan.entry)}*\n`;
     s += `🛑 Stop: *₹${inr2(plan.stop)}*  (−${plan.riskPct.toFixed(1)}%, 2×ATR)\n`;
@@ -59,8 +80,8 @@ export function formatSwingScan(result) {
         r += 'The ranking and breakout filters both fail in downtrends — ';
         r += '90% of momentum gains come in confirmed uptrends, so the scan ';
         r += 'stands down rather than handing you setups with the odds inverted.\n\n';
-        r += '_Force it anyway with_ `/swing force` _(not advised)._\n';
-        r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━';
+        r += '_Force it anyway with_ `/swing force` _(not advised)._';
+        r += '\n━━━━━━━━━━━━━━━━━━━━━━━━━━━';
         return r;
     }
 
@@ -129,8 +150,8 @@ export function formatSwingScan(result) {
     r += '• Trail to breakeven once T1 hits\n';
     r += '• Exit all longs if NIFTY loses its 200 DMA\n';
     r += `• Never risk more than ${riskPctPerTrade}% on one name\n\n`;
-    r += '_Ranking is deterministic (6M+12M vol-adjusted momentum, NSE Momentum-30 method). ';
-    r += 'Not investment advice — you carry the risk._\n';
+    r += '_Ranking: 70% momentum (6M+12M vol-adjusted) + 30% OI confluence (PCR, CE unwind, PE buildup)_\n';
+    r += '_Not investment advice — you carry the risk._\n';
     r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━';
     return r;
 }
