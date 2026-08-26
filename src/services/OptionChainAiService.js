@@ -19,13 +19,26 @@ import { logger } from '../utils/logger.js';
  * like a live one. Anything built on this snapshot has to say so up front.
  */
 export function staleBanner(snapshot) {
-    if (!snapshot?.stale) return '';
-    const age = Number(snapshot.ageSec) || 0;
-    const mins = Math.floor(age / 60);
-    const label = mins >= 1 ? `${mins} min` : `${age}s`;
-    return `⚠️ *STALE DATA — ${label} old*\n`
-        + `_NSE is unreachable right now; this is the last chain we fetched._\n`
-        + `_Do not treat these premiums as live._\n\n`;
+    if (!snapshot) return '';
+
+    if (snapshot.stale) {
+        const age = Number(snapshot.ageSec) || 0;
+        const mins = Math.floor(age / 60);
+        const label = mins >= 1 ? `${mins} min` : `${age}s`;
+        return `⚠️ *STALE DATA — ${label} old*\n`
+            + `_NSE is unreachable right now; this is the last chain we fetched._\n`
+            + `_Do not treat these premiums as live._\n\n`;
+    }
+
+    // Live, but from the backup feed rather than NSE. Measured against NSE in
+    // session the premiums track within about a rupee, but say so anyway —
+    // silently swapping the source behind a premium is how you get a wrong
+    // entry nobody can explain.
+    if (snapshot.source && snapshot.source !== 'nse') {
+        return `ℹ️ _NSE unreachable — chain via ${snapshot.source} (live). `
+            + `Premiums may differ by ~₹1; verify before entering._\n\n`;
+    }
+    return '';
 }
 
 /**

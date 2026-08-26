@@ -5,6 +5,7 @@
 import axios from 'axios';
 import { logger } from '../utils/logger.js';
 import { stockSymbolResolverService } from './StockSymbolResolverService.js';
+import { niftyTraderChainService } from './NiftyTraderChainService.js';
 import {
     DIRECT,
     egressOrder,
@@ -446,9 +447,28 @@ class NseOptionChainService {
             logger.warn(`NSE option chain failed for ${rawSymbol}: ${scrubSecrets(err.message)}`);
         }
 
-        // Live fetch failed. Only advisory callers that display the staleness
-        // may fall back to cache; pricing callers get null and skip, exactly as
-        // they did before caching existed. A wrong premium is worse than none.
+        // NSE refused us on every egress. Try the second source before giving
+        // up: it is live data (not cache), so pricing callers may use it — but
+        // it is tagged source:'niftytrader' and its premiums can differ from
+        // NSE's by a couple of rupees, so cards are expected to say where it
+        // came from.
+        try {
+            const alt = await niftyTraderChainService.fetchOptionContext(userSymbol);
+            if (alt?.snapshot?.strikes?.length) {
+                logger.warn(
+                    `NSE unreachable for ${userSymbol} — using niftytrader fallback `
+                    + `(spot ${alt.snapshot.spot}, expiry ${alt.snapshot.expiry})`
+                );
+                return this._cachePut(userSymbol, alt, { source: 'niftytrader' });
+            }
+        } catch (err) {
+            logger.warn(`niftytrader fallback failed for ${userSymbol}: ${scrubSecrets(err.message)}`);
+        }
+
+        // Both sources are down. Only advisory callers that display the
+        // staleness may fall back to cache; pricing callers get null and skip,
+        // exactly as they did before caching existed — a wrong premium is
+        // worse than none.
         if (allowStale) {
             const stale = this._cacheGet(userSymbol, CHAIN_STALE_MS, { markStale: true });
             if (stale) {
@@ -477,14 +497,17 @@ class NseOptionChainService {
         return { context, snapshot };
     }
 
-    _cachePut(symbol, result) {
+    _cachePut(symbol, result, { source = 'nse' } = {}) {
         _chainCache.set(symbol, { at: Date.now(), result });
         // Bound the cache; the bot scans a lot of symbols over a session.
         if (_chainCache.size > CHAIN_CACHE_MAX) {
             const oldest = [..._chainCache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
             if (oldest) _chainCache.delete(oldest[0]);
         }
-        return { context: result.context, snapshot: { ...result.snapshot, ageSec: 0, stale: false } };
+        return {
+            context: result.context,
+            snapshot: { ...result.snapshot, ageSec: 0, stale: false, source: result.snapshot.source || source },
+        };
     }
 }
 

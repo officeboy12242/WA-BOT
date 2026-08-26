@@ -191,6 +191,23 @@ await test('the ScraperAPI key never reaches the logs', async () => {
     return 'redacted';
 });
 
+/* ── fallback source labelling ───────────────────────────────────────────── */
+
+await test('a live chain from the backup feed is labelled, not hidden', async () => {
+    const banner = staleBanner({ stale: false, source: 'niftytrader' });
+    assert.ok(banner, 'a non-NSE source must be disclosed');
+    assert.ok(/niftytrader/.test(banner), 'should name the source');
+    assert.ok(!/STALE/i.test(banner), 'live fallback is not stale data');
+    // NSE itself gets no banner at all.
+    assert.strictEqual(staleBanner({ stale: false, source: 'nse' }), '');
+    return 'disclosed';
+});
+
+await test('stale still outranks source — cache warning wins', async () => {
+    const banner = staleBanner({ stale: true, ageSec: 600, source: 'niftytrader' });
+    assert.ok(/STALE/i.test(banner), 'staleness is the more serious warning');
+});
+
 /* ── stale data must never reach trade pricing ───────────────────────────── */
 
 /**
@@ -200,6 +217,7 @@ await test('the ScraperAPI key never reaches the logs', async () => {
  * only for advisory surfaces that display the age.
  */
 await test('pricing callers get null on failure — never a stale premium', async () => {
+    let restoreAlt = () => {};
     const { default: NseOptionChainService } = await import('../src/services/NseOptionChainService.js');
     const svc = new NseOptionChainService();
 
@@ -219,6 +237,12 @@ await test('pricing callers get null on failure — never a stale premium', asyn
     assert.strictEqual(first.snapshot.stale, false);
 
     live = false;
+    // Take the backup feed out too — this test is about the last resort, and it
+    // must not touch the network.
+    const { niftyTraderChainService } = await import('../src/services/NiftyTraderChainService.js');
+    const realAlt = niftyTraderChainService.fetchOptionContext;
+    niftyTraderChainService.fetchOptionContext = async () => null;
+    restoreAlt = () => { niftyTraderChainService.fetchOptionContext = realAlt; };
 
     // Default (pricing: position tracker, scans, morning pick, entry premiums)
     const pricing = await svc.fetchOptionContext('NIFTY');
@@ -233,6 +257,7 @@ await test('pricing callers get null on failure — never a stale premium', asyn
     assert.strictEqual(advisory.snapshot.stale, true, 'must be flagged stale');
     assert.ok(staleBanner(advisory.snapshot).includes('STALE'), 'must render the warning');
 
+    restoreAlt();
     return 'pricing → null, advisory → labelled';
 });
 
