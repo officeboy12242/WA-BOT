@@ -236,16 +236,32 @@ class ScalpService {
             }));
         const mpVal = maxPain(mpRows);
 
-        // OI walls
-        const sortedByCe = [...chain].filter((s) => s.ce?.oi).sort((a, b) => b.ce.oi - a.ce.oi);
-        const sortedByPe = [...chain].filter((s) => s.pe?.oi).sort((a, b) => b.pe.oi - a.pe.oi);
+        // OI walls — OTM only relative to spot:
+        // resistance = biggest CE wall ABOVE spot, support = biggest PE wall BELOW spot.
+        // Without this filter both walls can collapse onto one crowded ATM strike
+        // (expiry week), giving range = 0 and a degenerate directional bias.
+        const sortedByCe = [...chain].filter((s) => s.ce?.oi && s.strike > spot).sort((a, b) => b.ce.oi - a.ce.oi);
+        const sortedByPe = [...chain].filter((s) => s.pe?.oi && s.strike < spot).sort((a, b) => b.pe.oi - a.pe.oi);
 
-        const topCeWall = sortedByCe[0];
-        const topPeWall = sortedByPe[0];
+        let topCeWall = sortedByCe[0] || null;
+        let topPeWall = sortedByPe[0] || null;
+
+        // Fallbacks: if no OTM wall on one side, use the nearest strike on that side
+        // that still has OI; otherwise the synthetic round5 level kicks in below.
+        if (!topCeWall) {
+            topCeWall = [...chain].filter((s) => s.strike > spot && s.ce?.oi > 0).sort((a, b) => a.strike - b.strike)[0] || null;
+        }
+        if (!topPeWall) {
+            topPeWall = [...chain].filter((s) => s.strike < spot && s.pe?.oi > 0).sort((a, b) => b.strike - a.strike)[0] || null;
+        }
 
         const resistance = topCeWall?.strike || round5(spot + 100);
         const support = topPeWall?.strike || round5(spot - 100);
         const rangeWidth = resistance - support;
+
+        // Guard: never fire directional setups inside a degenerate/too-tight range
+        const MIN_RANGE_PTS = 50;
+        const rangeValid = rangeWidth >= MIN_RANGE_PTS;
 
         const spotPct = rangeWidth > 0
             ? Math.round(((spot - support) / rangeWidth) * 100)
@@ -262,7 +278,7 @@ class ScalpService {
         const setups = [];
 
         // 1) Support bounce — Buy CE (best momentum strike)
-        if (spot - support < rangeWidth * 0.4) {
+        if (rangeValid && spot - support < rangeWidth * 0.4) {
             const bestCe = findBestStrike(chain, support, 'CE', spot, atmStrike);
             const entryPrem = round2(bestCe?.ltp || (atmCe?.ltp ? atmCe.ltp - 20 : null));
             if (entryPrem && entryPrem >= 5) {
@@ -280,10 +296,10 @@ class ScalpService {
                     strike: bestCe?.strike || support,
                     optionType: 'CE',
                     momentumScore: bestCe?.score || 0,
-                    trigger: `Spot touches ${support}`,
+                    trigger: `Spot touches ${fmtNum(support)}`,
                     entry: entryPrem, target, stop, speed: '2-5 min',
                     confidence: conf,
-                    why: `PE OI wall ${formatOi(topPeWall?.pe?.oi)} at ${support} · Momentum: ${bestCe?.score || 0}/100`,
+                    why: `PE OI wall ${formatOi(topPeWall?.pe?.oi)} at ${fmtNum(support)} · Momentum: ${bestCe?.score || 0}/100`,
                     topPick: conf >= 80,
                     });
                 }
@@ -291,7 +307,7 @@ class ScalpService {
         }
 
         // 2) Resistance rejection — Buy PE (best momentum strike)
-        if (resistance - spot < rangeWidth * 0.4) {
+        if (rangeValid && resistance - spot < rangeWidth * 0.4) {
             const bestPe = findBestStrike(chain, resistance, 'PE', spot, atmStrike);
             const entryPrem = round2(bestPe?.ltp || (atmPe?.ltp ? atmPe.ltp - 20 : null));
             if (entryPrem && entryPrem >= 5) {
@@ -309,10 +325,10 @@ class ScalpService {
                     strike: bestPe?.strike || resistance,
                     optionType: 'PE',
                     momentumScore: bestPe?.score || 0,
-                    trigger: `Spot touches ${resistance}`,
+                    trigger: `Spot touches ${fmtNum(resistance)}`,
                     entry: entryPrem, target, stop, speed: '2-5 min',
                     confidence: conf,
-                    why: `CE OI wall ${formatOi(topCeWall?.ce?.oi)} at ${resistance} · Momentum: ${bestPe?.score || 0}/100`,
+                    why: `CE OI wall ${formatOi(topCeWall?.ce?.oi)} at ${fmtNum(resistance)} · Momentum: ${bestPe?.score || 0}/100`,
                     topPick: conf >= 80,
                     });
                 }
@@ -411,7 +427,7 @@ class ScalpService {
                         type: bullBreak ? 'BREAKOUT CE' : 'BREAKDOWN PE',
                         emoji: bullBreak ? '\uD83D\uDE80' : '\uD83E\uDE79',
                         rank: 'secondary',
-                        trigger: `Spot broke ${bullBreak ? 'above resistance' : 'below support'} ${bullBreak ? resistance : support}`,
+                        trigger: `Spot broke ${bullBreak ? 'above resistance' : 'below support'} ${fmtNum(bullBreak ? resistance : support)}`,
                         entry: entryPrem, target, stop, speed: '1-3 min',
                         confidence: conf,
                         why: 'Spot beyond the wall \u2014 momentum trade, exit fast',
