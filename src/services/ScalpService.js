@@ -58,6 +58,10 @@ function round5(n) {
     return Math.round(n / 5) * 5;
 }
 
+function round2(n) {
+    return Math.round(n * 100) / 100;
+}
+
 function confBar(pct) {
     const filled = Math.round(pct / 10);
     const empty = 10 - filled;
@@ -260,10 +264,10 @@ class ScalpService {
         // 1) Support bounce — Buy CE (best momentum strike)
         if (spot - support < rangeWidth * 0.4) {
             const bestCe = findBestStrike(chain, support, 'CE', spot, atmStrike);
-            const entryPrem = bestCe?.ltp || (atmCe?.ltp ? atmCe.ltp - 20 : null);
+            const entryPrem = round2(bestCe?.ltp || (atmCe?.ltp ? atmCe.ltp - 20 : null));
             if (entryPrem && entryPrem >= 5) {
-                const target = entryPrem + TARGET_PTS;
-                const stop = entryPrem - STOP_PTS;
+                const target = round2(entryPrem + TARGET_PTS);
+                const stop = round2(entryPrem - STOP_PTS);
                 const conf = calcConfidence({
                     oiWallQty: topPeWall?.pe?.oi || 0,
                     totalOi: snap.totalPeOi || 0, pcr: pcr || 1, vix: 13,
@@ -289,10 +293,10 @@ class ScalpService {
         // 2) Resistance rejection — Buy PE (best momentum strike)
         if (resistance - spot < rangeWidth * 0.4) {
             const bestPe = findBestStrike(chain, resistance, 'PE', spot, atmStrike);
-            const entryPrem = bestPe?.ltp || (atmPe?.ltp ? atmPe.ltp - 20 : null);
+            const entryPrem = round2(bestPe?.ltp || (atmPe?.ltp ? atmPe.ltp - 20 : null));
             if (entryPrem && entryPrem >= 5) {
-                const target = entryPrem + TARGET_PTS;
-                const stop = entryPrem - STOP_PTS;
+                const target = round2(entryPrem + TARGET_PTS);
+                const stop = round2(entryPrem - STOP_PTS);
                 const conf = calcConfidence({
                     oiWallQty: topCeWall?.ce?.oi || 0,
                     totalOi: snap.totalCeOi || 0, pcr: pcr || 1, vix: 13,
@@ -317,10 +321,12 @@ class ScalpService {
 
         // 3) Short Straddle
         if (spotPct >= 30 && spotPct <= 70) {
-            const straddle = (atmCe?.ltp || 0) + (atmPe?.ltp || 0);
+            const straddle = round2((atmCe?.ltp || 0) + (atmPe?.ltp || 0));
             if (straddle > 50) {
-                const target = straddle - 8;
-                const stop = straddle + 6;
+                const target = round2(straddle - 8);
+                const stop = round2(straddle + 6);
+                const profit = round2(straddle - target);
+                const loss = round2(stop - straddle);
                 const conf = calcConfidence({
                     oiWallQty: Math.max(topCeWall?.ce?.oi || 0, topPeWall?.pe?.oi || 0),
                     totalOi: (snap.totalCeOi || 0) + (snap.totalPeOi || 0),
@@ -332,6 +338,11 @@ class ScalpService {
                     setups.push({
                     type: 'SHORT STRADDLE', emoji: '\u26A1',
                     rank: 'secondary',
+                    strike: atmStrike,
+                    legs: [
+                        { action: 'SELL', optionType: 'CE', strike: atmStrike, price: atmCe?.ltp || 0 },
+                        { action: 'SELL', optionType: 'PE', strike: atmStrike, price: atmPe?.ltp || 0 },
+                    ],
                     trigger: `Spot mid-range (${spotPct}%)`,
                     entry: straddle, target, stop, speed: '5-15 min',
                     confidence: conf,
@@ -349,10 +360,12 @@ class ScalpService {
             const otmPeStrike = round5(atmStrike - wingStep);
             const otmCe = findStrikeLeg({ strikes }, otmCeStrike, 'CE');
             const otmPe = findStrikeLeg({ strikes }, otmPeStrike, 'PE');
-            const strangle = (otmCe?.ltp || 0) + (otmPe?.ltp || 0);
+            const strangle = round2((otmCe?.ltp || 0) + (otmPe?.ltp || 0));
             if (strangle > 20) {
-                const target = strangle - Math.max(5, Math.round(strangle * 0.2));
-                const stop = strangle + Math.max(4, Math.round(strangle * 0.2));
+                const target = round2(strangle - Math.max(5, Math.round(strangle * 0.2)));
+                const stop = round2(strangle + Math.max(4, Math.round(strangle * 0.2)));
+                const profit = round2(strangle - target);
+                const loss = round2(stop - strangle);
                 const conf = calcConfidence({
                     oiWallQty: Math.max(topCeWall?.ce?.oi || 0, topPeWall?.pe?.oi || 0),
                     totalOi: (snap.totalCeOi || 0) + (snap.totalPeOi || 0),
@@ -364,7 +377,11 @@ class ScalpService {
                     setups.push({
                     type: 'SHORT STRANGLE', emoji: '\uD83E\uDE81',
                     rank: 'secondary',
-                    trigger: `Sell ${otmCeStrike} CE + ${otmPeStrike} PE`,
+                    legs: [
+                        { action: 'SELL', optionType: 'CE', strike: otmCeStrike, price: otmCe?.ltp || 0 },
+                        { action: 'SELL', optionType: 'PE', strike: otmPeStrike, price: otmPe?.ltp || 0 },
+                    ],
+                    trigger: `Sell ${fmtNum(otmCeStrike)} CE + ${fmtNum(otmPeStrike)} PE`,
                     entry: strangle, target, stop, speed: '10-30 min',
                     confidence: conf,
                     why: `OTM wings collect \u20B9${strangle}, both legs safe`,
@@ -380,10 +397,10 @@ class ScalpService {
             const bearBreak = spot < support;
             if (bullBreak || bearBreak) {
                 const leg = findStrikeLeg({ strikes }, atmStrike, bullBreak ? 'CE' : 'PE');
-                const entryPrem = leg?.ltp || (bullBreak ? atmCe?.ltp : atmPe?.ltp);
+                const entryPrem = round2(leg?.ltp || (bullBreak ? atmCe?.ltp : atmPe?.ltp));
                 if (entryPrem && entryPrem > 10) {
-                    const target = entryPrem + TARGET_PTS;
-                    const stop = entryPrem - STOP_PTS;
+                    const target = round2(entryPrem + TARGET_PTS);
+                    const stop = round2(entryPrem - STOP_PTS);
                     const conf = calcConfidence({
                         oiWallQty: bullBreak ? topCeWall?.ce?.oi || 0 : topPeWall?.pe?.oi || 0,
                         totalOi: (snap.totalCeOi || 0) + (snap.totalPeOi || 0),
@@ -469,7 +486,7 @@ class ScalpService {
         if (atmPe) {
             L.push(`\u2502 PE ${fmtNum(atmStrike)} \u2502 \u20B9${atmPe.ltp ?? '\u2013'} \u2502 LTP`);
         }
-        const straddle = (atmCe?.ltp || 0) + (atmPe?.ltp || 0);
+        const straddle = round2((atmCe?.ltp || 0) + (atmPe?.ltp || 0));
         if (straddle > 0) {
             L.push(`\u2502 Straddle  \u2502 \u20B9${straddle} \u2502 Total`);
         }
@@ -534,10 +551,17 @@ class ScalpService {
                     const isShort = s.type.startsWith('SHORT');
                     L.push(`*${s.emoji} ${s.type}${pick}*`);
                     if (s.trigger) L.push(`  Trigger: ${s.trigger}`);
-                    if (isShort) {
-                        // Short/Sell positions: profit when price goes DOWN
-                        L.push(`  SELL at \u20B9${s.entry} \u2192 BUY BACK at \u20B9${s.target} (profit \u20B9${Math.round(s.entry - s.target)})`);
-                        L.push(`  Stop: \u20B9${s.stop} (loss \u20B9${Math.round(s.stop - s.entry)})`);
+                    if (isShort && s.legs && s.legs.length) {
+                        for (const leg of s.legs) {
+                            L.push(`  ${leg.action} ${fmtNum(leg.strike)} ${leg.optionType} \u20B9${round2(leg.price)}`);
+                        }
+                        const profit = round2(s.entry - s.target);
+                        const loss = round2(s.stop - s.entry);
+                        L.push(`  Premium: \u20B9${s.entry} \u2192 Target \u20B9${s.target} \u00B7 Profit \u20B9${profit}`);
+                        L.push(`  Stop: \u20B9${s.stop} \u00B7 Loss \u20B9${loss}`);
+                    } else if (isShort) {
+                        L.push(`  Premium: \u20B9${s.entry} \u2192 Target \u20B9${s.target}`);
+                        L.push(`  Stop: \u20B9${s.stop}`);
                     } else {
                         L.push(`  Entry: \u20B9${s.entry} \u00B7 Target: \u20B9${s.target} \u00B7 Stop: \u20B9${s.stop}`);
                     }
@@ -545,7 +569,8 @@ class ScalpService {
                     L.push('');
                 }
             }
-        } else {
+        }
+        if (setups.length === 0) {
             L.push('\u26A0\uFE0F *NO CLEAR SETUP NOW*');
             L.push('  Spot is mid-range \u2014 wait for trigger');
             L.push('');
@@ -554,9 +579,10 @@ class ScalpService {
         L.push('\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501');
         L.push('');
 
-        if (spotPct >= 30 && spotPct <= 70 && !setups.some((s) => s.topPick)) {
-            L.push('\u26A0\uFE0F *SPOT IS MID-RANGE \u2014 NO TRADE NOW*');
-            L.push('  Wait for spot to hit support or resistance');
+        const hasPrimary = setups.some((s) => s.rank === 'primary');
+        if (!hasPrimary && spotPct >= 30 && spotPct <= 70) {
+            L.push('\u26A0\uFE0F *WAIT FOR SPOT TO HIT SUPPORT OR RESISTANCE*');
+            L.push('  Primary scalp setups trigger near OI walls');
             L.push('');
         }
 
