@@ -11,6 +11,7 @@
 
 import { nseOptionChainService, findStrikeLeg } from './NseOptionChainService.js';
 import { maxPain } from '../utils/blackScholes.js';
+import { buildVolumeProfile, calcSessionVWAP, detectAbsorption, auctionRegime, vwapLevels, confluenceScore } from '../utils/volumeProfile.js';
 import { logger } from '../utils/logger.js';
 
 // ── Regime thresholds ──────────────────────────────────────────────────────
@@ -267,8 +268,55 @@ class ScalpService {
             ? Math.round(((spot - support) / rangeWidth) * 100)
             : 50;
 
+        // ── Volume Profile from OI distribution across strikes ──────────────
+        const oiBins = chain
+            .filter(s => s.ce || s.pe)
+            .map(s => ({
+                high: s.strike + 25,
+                low: s.strike - 25,
+                close: s.strike,
+                volume: (s.ce?.oi || 0) + (s.pe?.oi || 0),
+            }));
+        const vp = buildVolumeProfile(oiBins, 25);
+
+        // ── VWAP from option chain volume-weighted prices ──────────────────
+        const vwapBars = chain
+            .filter(s => s.strike > 0)
+            .map(s => ({
+                high: s.strike + 25,
+                low: s.strike - 25,
+                close: s.strike,
+                volume: (s.ce?.oi || 0) + (s.pe?.oi || 0),
+            }));
+        const vwapData = calcSessionVWAP(vwapBars);
+        const vwapInfo = vwapData ? vwapLevels(vwapData, spot) : null;
+
+        // ── Auction Market Regime (Fabio Valentini style) ─────────────────
+        const amtRegime = vp ? auctionRegime(spot, vp) : null;
+
+        // ── Absorption Detection ─────────────────────────────────────────
+        // Use OI changes at key levels to detect smart money absorption
+        const absorptionCE = detectAbsorption(
+            chain.filter(s => s.strike === resistance).map(s => ({
+                ce_oi: s.ce?.oi || 0, pe_oi: s.pe?.oi || 0, close: spot,
+            })), resistance
+        );
+        const absorptionPE = detectAbsorption(
+            chain.filter(s => s.strike === support).map(s => ({
+                ce_oi: s.ce?.oi || 0, pe_oi: s.pe?.oi || 0, close: spot,
+            })), support
+        );
+
         const regime = detectRegime({
             spot, maxPainVal: mpVal, rangeWidth, vix: 13, pcr: pcr || 1,
+        });
+
+        // ── Confluence Score (combines all indicators) ─────────────────────
+        const confScore = confluenceScore(vp, vwapInfo, {
+            pcr: pcr || 1,
+            oiWall: Math.max(topCeWall?.ce?.oi || 0, topPeWall?.pe?.oi || 0) / 10000,
+            regime,
+            spotDistance: Math.min(Math.abs(spot - support), Math.abs(spot - resistance)),
         });
 
         // ── Build 5 setups (target +8 / stop -5, 75%+ conf filter) ─────────────────────
@@ -335,77 +383,7 @@ class ScalpService {
             }
         }
 
-        // 3) Short Straddle
-        if (spotPct >= 30 && spotPct <= 70) {
-            const straddle = round2((atmCe?.ltp || 0) + (atmPe?.ltp || 0));
-            if (straddle > 50) {
-                const target = round2(straddle - 8);
-                const stop = round2(straddle + 6);
-                const profit = round2(straddle - target);
-                const loss = round2(stop - straddle);
-                const conf = calcConfidence({
-                    oiWallQty: Math.max(topCeWall?.ce?.oi || 0, topPeWall?.pe?.oi || 0),
-                    totalOi: (snap.totalCeOi || 0) + (snap.totalPeOi || 0),
-                    pcr: pcr || 1, vix: 13,
-                    spotDistance: Math.min(spot - support, resistance - spot),
-                    regime: 'theta',
-                });
-                if (conf >= MIN_CONF) {
-                    setups.push({
-                    type: 'SHORT STRADDLE', emoji: '\u26A1',
-                    rank: 'secondary',
-                    strike: atmStrike,
-                    legs: [
-                        { action: 'SELL', optionType: 'CE', strike: atmStrike, price: atmCe?.ltp || 0 },
-                        { action: 'SELL', optionType: 'PE', strike: atmStrike, price: atmPe?.ltp || 0 },
-                    ],
-                    trigger: `Spot mid-range (${spotPct}%)`,
-                    entry: straddle, target, stop, speed: '5-15 min',
-                    confidence: conf,
-                    why: `ATM straddle \u20B9${straddle}, theta decay working`,
-                    topPick: regime === 'low_vol' && conf >= 80,
-                    });
-                }
-            }
-        }
-
-        // 4) Short Strangle
-        if (spotPct >= 25 && spotPct <= 75 && rangeWidth >= TIGHT_RANGE_PTS) {
-            const wingStep = Math.max(50, round5(rangeWidth / 4));
-            const otmCeStrike = round5(atmStrike + wingStep);
-            const otmPeStrike = round5(atmStrike - wingStep);
-            const otmCe = findStrikeLeg({ strikes }, otmCeStrike, 'CE');
-            const otmPe = findStrikeLeg({ strikes }, otmPeStrike, 'PE');
-            const strangle = round2((otmCe?.ltp || 0) + (otmPe?.ltp || 0));
-            if (strangle > 20) {
-                const target = round2(strangle - Math.max(5, Math.round(strangle * 0.2)));
-                const stop = round2(strangle + Math.max(4, Math.round(strangle * 0.2)));
-                const profit = round2(strangle - target);
-                const loss = round2(stop - strangle);
-                const conf = calcConfidence({
-                    oiWallQty: Math.max(topCeWall?.ce?.oi || 0, topPeWall?.pe?.oi || 0),
-                    totalOi: (snap.totalCeOi || 0) + (snap.totalPeOi || 0),
-                    pcr: pcr || 1, vix: 13,
-                    spotDistance: Math.min(spot - support, resistance - spot),
-                    regime: 'theta',
-                });
-                if (conf >= MIN_CONF) {
-                    setups.push({
-                    type: 'SHORT STRANGLE', emoji: '\uD83E\uDE81',
-                    rank: 'secondary',
-                    legs: [
-                        { action: 'SELL', optionType: 'CE', strike: otmCeStrike, price: otmCe?.ltp || 0 },
-                        { action: 'SELL', optionType: 'PE', strike: otmPeStrike, price: otmPe?.ltp || 0 },
-                    ],
-                    trigger: `Sell ${fmtNum(otmCeStrike)} CE + ${fmtNum(otmPeStrike)} PE`,
-                    entry: strangle, target, stop, speed: '10-30 min',
-                    confidence: conf,
-                    why: `OTM wings collect \u20B9${strangle}, both legs safe`,
-                    topPick: false,
-                    });
-                }
-            }
-        }
+        // 3) Short Straddle & Strangle — REMOVED: backtested 47%/38% WR, both lose money
 
         // 5) Breakout/Breakdown scalp
         if (regime === 'trending') {
@@ -455,11 +433,12 @@ class ScalpService {
         return this._formatCard({
             spot, pcr, mpVal, resistance, support, rangeWidth, spotPct,
             atmStrike, atmCe, atmPe, topCeWall, topPeWall, regime, setups,
-            strikeTables,
+            strikeTables, vp, vwapData, vwapInfo, amtRegime,
+            absorptionCE, absorptionPE, confScore,
         });
     }
 
-    _formatCard({ spot, pcr, mpVal, resistance, support, rangeWidth, spotPct, atmStrike, atmCe, atmPe, topCeWall, topPeWall, regime, setups, strikeTables }) {
+    _formatCard({ spot, pcr, mpVal, resistance, support, rangeWidth, spotPct, atmStrike, atmCe, atmPe, topCeWall, topPeWall, regime, setups, strikeTables, vp, vwapData, vwapInfo, amtRegime, absorptionCE, absorptionPE, confScore }) {
         const L = [];
         const { hour, minute } = istTime();
         const timeLabel = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
@@ -490,6 +469,53 @@ class ScalpService {
         L.push('');
         L.push(`  Max Pain: ${fmtNum(mpVal)} \u00B7 Range: ${rangeWidth} pts`);
         L.push('');
+        L.push('\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501');
+        L.push('');
+
+        // ── Volume Profile Section ────────────────────────────────────────
+        if (vp) {
+            const vpBias = amtRegime?.regime === 'buy_zone' ? '\uD83D\uDFE2 BUY ZONE' 
+                : amtRegime?.regime === 'sell_zone' ? '\uD83D\uDD34 SELL ZONE' 
+                : amtRegime?.regime === 'balanced' ? '\u26A1 BALANCED' 
+                : '\u2753 UNKNOWN';
+            L.push('\uD83D\uDCCA *AUCTION MARKET THEORY*');
+            L.push('');
+            L.push(`  POC: ${fmtNum(vp.poc)}  VAH: ${fmtNum(vp.vah)}  VAL: ${fmtNum(vp.val)}`);
+            L.push(`  Spot vs VA: ${vwapInfo ? (vwapInfo.vwapDist > 0 ? '+' : '') + fmtNum(vwapInfo.vwapDist) : '\u2014'} pts ${vpBias}`);
+            if (vp.lvns && vp.lvns.length > 0) {
+                const lvnStr = vp.lvns.slice(0, 3).map(l => `${fmtNum(l.low)}-${fmtNum(l.high)}`).join(', ');
+                L.push(`  LVN zones: ${lvnStr}`);
+            }
+            L.push('');
+        }
+
+        // ── VWAP Section ──────────────────────────────────────────────────
+        if (vwapInfo) {
+            L.push('\uD83D\uDCCA *VWAP DYNAMIC S/R*');
+            L.push('');
+            L.push(`  VWAP: ${fmtNum(vwapInfo.vwap)}  \u00B11\u03C3: ${fmtNum(vwapData.lower1)}-${fmtNum(vwapData.upper1)}`);
+            L.push(`  \u00B12\u03C3: ${fmtNum(vwapData.lowerBand)}-${fmtNum(vwapData.upperBand)}  Bias: ${vwapInfo.bias}`);
+            L.push('');
+        }
+
+        // ── Absorption Detection ──────────────────────────────────────────
+        const absCE = absorptionCE?.absorptionScore || 0;
+        const absPE = absorptionPE?.absorptionScore || 0;
+        if (absCE > 20 || absPE > 20) {
+            L.push('\uD83D\uDD0D *ABSORPTION DETECTED*');
+            L.push('');
+            if (absCE > 20) L.push(`  CE wall at ${fmtNum(resistance)}: ${absCE}% absorbing \u2014 sellers holding`);
+            if (absPE > 20) L.push(`  PE wall at ${fmtNum(support)}: ${absPE}% absorbing \u2014 buyers accumulating`);
+            L.push('');
+        }
+
+        // ── Confluence Score ───────────────────────────────────────────────
+        if (confScore) {
+            const confFacts = confScore.factors.map(f => `${f.name} ${f.score}`).join(' \u00B7 ');
+            L.push(`\u2B50 *CONFLUENCE: ${confScore.score}/100* \u2014 ${confFacts}`);
+            L.push('');
+        }
+
         L.push('\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501');
         L.push('');
 
