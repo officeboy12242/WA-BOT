@@ -11,7 +11,8 @@
 
 import { nseOptionChainService, findStrikeLeg } from './NseOptionChainService.js';
 import { maxPain } from '../utils/blackScholes.js';
-import { buildVolumeProfile, calcSessionVWAP, detectAbsorption, auctionRegime, vwapLevels, confluenceScore } from '../utils/volumeProfile.js';
+import { buildVolumeProfile, calcSessionVWAP, detectBarAbsorption, auctionRegime, vwapLevels, confluenceScore } from '../utils/volumeProfile.js';
+import { fetchNiftySessionBars } from '../utils/niftyIntradayProfile.js';
 import { logger } from '../utils/logger.js';
 
 // ── Regime thresholds ──────────────────────────────────────────────────────
@@ -57,6 +58,25 @@ function istDateLabel(date = new Date()) {
 
 function round5(n) {
     return Math.round(n / 5) * 5;
+}
+
+/**
+ * Nearest strike that actually exists in the chain.
+ *
+ * findStrikeLeg() matches strikes EXACTLY, but the strangle wings were built with
+ * round5() — rounding to the nearest 5 while NIFTY strikes step in 50s. So a wing
+ * at 24,425 matched nothing, both legs priced 0, and the setup failed its
+ * `strangle > 20` check without any error. Measured across typical range widths,
+ * 5 of 9 produced a non-existent wing, so SHORT STRANGLE was silently dead in
+ * most sessions. Snapping to a real strike is what makes it reachable.
+ */
+function nearestStrike(chain, target) {
+    let best = null;
+    for (const s of chain) {
+        if (!Number.isFinite(s?.strike)) continue;
+        if (best === null || Math.abs(s.strike - target) < Math.abs(best - target)) best = s.strike;
+    }
+    return best;
 }
 
 function round2(n) {
@@ -268,44 +288,41 @@ class ScalpService {
             ? Math.round(((spot - support) / rangeWidth) * 100)
             : 50;
 
-        // ── Volume Profile from OI distribution across strikes ──────────────
-        const oiBins = chain
-            .filter(s => s.ce || s.pe)
-            .map(s => ({
-                high: s.strike + 25,
-                low: s.strike - 25,
-                close: s.strike,
-                volume: (s.ce?.oi || 0) + (s.pe?.oi || 0),
-            }));
-        const vp = buildVolumeProfile(oiBins, 25);
-
-        // ── VWAP from option chain volume-weighted prices ──────────────────
-        const vwapBars = chain
-            .filter(s => s.strike > 0)
-            .map(s => ({
-                high: s.strike + 25,
-                low: s.strike - 25,
-                close: s.strike,
-                volume: (s.ce?.oi || 0) + (s.pe?.oi || 0),
-            }));
-        const vwapData = calcSessionVWAP(vwapBars);
-        const vwapInfo = vwapData ? vwapLevels(vwapData, spot) : null;
-
-        // ── Auction Market Regime (Fabio Valentini style) ─────────────────
-        const amtRegime = vp ? auctionRegime(spot, vp) : null;
-
-        // ── Absorption Detection ─────────────────────────────────────────
-        // Use OI changes at key levels to detect smart money absorption
-        const absorptionCE = detectAbsorption(
-            chain.filter(s => s.strike === resistance).map(s => ({
-                ce_oi: s.ce?.oi || 0, pe_oi: s.pe?.oi || 0, close: spot,
-            })), resistance
-        );
-        const absorptionPE = detectAbsorption(
-            chain.filter(s => s.strike === support).map(s => ({
-                ce_oi: s.ce?.oi || 0, pe_oi: s.pe?.oi || 0, close: spot,
-            })), support
-        );
+        // ── Auction Market Theory, on REAL intraday bars ────────────────────
+        //
+        // POC/VAH/VAL/VWAP describe where the market transacted over time, so they
+        // need session candles. These were previously fed option-chain rows dressed
+        // as candles (`{ close: strike, volume: OI }`), which measures where options
+        // are HELD rather than where price traded: the "VWAP" was really the
+        // OI-weighted average strike, and it shared its input with the profile, so
+        // the confluence score was counting one signal twice.
+        //
+        // Best-effort by design — /scalp must still produce setups when Yahoo is
+        // unreachable, so these stay null and their card sections are omitted
+        // rather than failing the card.
+        let vp = null;
+        let vwapData = null;
+        let vwapInfo = null;
+        let amtRegime = null;
+        let absorption = null;
+        let profileMeta = null;
+        try {
+            const session = await fetchNiftySessionBars();
+            if (session?.bars?.length >= 10) {
+                profileMeta = {
+                    sessionDate: session.sessionDate,
+                    volumeSource: session.volumeSource,
+                    barCount: session.barCount,
+                };
+                vp = buildVolumeProfile(session.bars, 5);
+                vwapData = calcSessionVWAP(session.bars);
+                vwapInfo = vwapData ? vwapLevels(vwapData, spot) : null;
+                amtRegime = vp ? auctionRegime(spot, vp) : null;
+                absorption = detectBarAbsorption(session.bars);
+            }
+        } catch (err) {
+            logger.debug(`Scalp AMT layer unavailable: ${err.message}`);
+        }
 
         const regime = detectRegime({
             spot, maxPainVal: mpVal, rangeWidth, vix: 13, pcr: pcr || 1,
@@ -314,7 +331,7 @@ class ScalpService {
         // ── Confluence Score (combines all indicators) ─────────────────────
         const confScore = confluenceScore(vp, vwapInfo, {
             pcr: pcr || 1,
-            oiWall: Math.max(topCeWall?.ce?.oi || 0, topPeWall?.pe?.oi || 0) / 10000,
+            oiWall: Math.max(topCeWall?.ce?.oi || 0, topPeWall?.pe?.oi || 0),
             regime,
             spotDistance: Math.min(Math.abs(spot - support), Math.abs(spot - resistance)),
         });
@@ -383,7 +400,84 @@ class ScalpService {
             }
         }
 
-        // 3) Short Straddle & Strangle — REMOVED: backtested 47%/38% WR, both lose money
+        // 3) & 4) Short Straddle / Strangle.
+        //
+        // These were removed citing a backtest showing 47%/38% win rates. That
+        // backtest priced a straddle as CALL + CALL — its pricer only ever returned
+        // a call value, and its "mirror strike" 2*atm - atm is just atm — and it
+        // pinned T at 1/365 at both entry and exit, so there was no theta decay at
+        // all. That deletes the only profit source a short-premium setup has. The
+        // numbers measured a bug, not these setups, so they are restored here.
+        // If they should go, cut them on real option data.
+
+        // 3) Short Straddle
+        if (spotPct >= 30 && spotPct <= 70) {
+            const straddle = round2((atmCe?.ltp || 0) + (atmPe?.ltp || 0));
+            if (straddle > 50) {
+                const target = round2(straddle - 8);
+                const stop = round2(straddle + 6);
+                const conf = calcConfidence({
+                    oiWallQty: Math.max(topCeWall?.ce?.oi || 0, topPeWall?.pe?.oi || 0),
+                    totalOi: (snap.totalCeOi || 0) + (snap.totalPeOi || 0),
+                    pcr: pcr || 1, vix: 13,
+                    spotDistance: Math.min(spot - support, resistance - spot),
+                    regime: 'theta',
+                });
+                if (conf >= MIN_CONF) {
+                    setups.push({
+                    type: 'SHORT STRADDLE', emoji: '⚡',
+                    rank: 'secondary',
+                    strike: atmStrike,
+                    legs: [
+                        { action: 'SELL', optionType: 'CE', strike: atmStrike, price: atmCe?.ltp || 0 },
+                        { action: 'SELL', optionType: 'PE', strike: atmStrike, price: atmPe?.ltp || 0 },
+                    ],
+                    trigger: `Spot mid-range (${spotPct}%)`,
+                    entry: straddle, target, stop, speed: '5-15 min',
+                    confidence: conf,
+                    why: `ATM straddle ₹${straddle}, theta decay working`,
+                    topPick: regime === 'low_vol' && conf >= 80,
+                    });
+                }
+            }
+        }
+
+        // 4) Short Strangle
+        if (spotPct >= 25 && spotPct <= 75 && rangeWidth >= TIGHT_RANGE_PTS) {
+            const wingStep = Math.max(50, round5(rangeWidth / 4));
+            // Snap to strikes the chain actually lists — see nearestStrike().
+            const otmCeStrike = nearestStrike(chain, atmStrike + wingStep);
+            const otmPeStrike = nearestStrike(chain, atmStrike - wingStep);
+            const otmCe = findStrikeLeg({ strikes }, otmCeStrike, 'CE');
+            const otmPe = findStrikeLeg({ strikes }, otmPeStrike, 'PE');
+            const strangle = round2((otmCe?.ltp || 0) + (otmPe?.ltp || 0));
+            if (strangle > 20) {
+                const target = round2(strangle - Math.max(5, Math.round(strangle * 0.2)));
+                const stop = round2(strangle + Math.max(4, Math.round(strangle * 0.2)));
+                const conf = calcConfidence({
+                    oiWallQty: Math.max(topCeWall?.ce?.oi || 0, topPeWall?.pe?.oi || 0),
+                    totalOi: (snap.totalCeOi || 0) + (snap.totalPeOi || 0),
+                    pcr: pcr || 1, vix: 13,
+                    spotDistance: Math.min(spot - support, resistance - spot),
+                    regime: 'theta',
+                });
+                if (conf >= MIN_CONF) {
+                    setups.push({
+                    type: 'SHORT STRANGLE', emoji: '🪁',
+                    rank: 'secondary',
+                    legs: [
+                        { action: 'SELL', optionType: 'CE', strike: otmCeStrike, price: otmCe?.ltp || 0 },
+                        { action: 'SELL', optionType: 'PE', strike: otmPeStrike, price: otmPe?.ltp || 0 },
+                    ],
+                    trigger: `Sell ${fmtNum(otmCeStrike)} CE + ${fmtNum(otmPeStrike)} PE`,
+                    entry: strangle, target, stop, speed: '10-30 min',
+                    confidence: conf,
+                    why: `OTM wings collect ₹${strangle}, both legs safe`,
+                    topPick: false,
+                    });
+                }
+            }
+        }
 
         // 5) Breakout/Breakdown scalp
         if (regime === 'trending') {
@@ -434,11 +528,11 @@ class ScalpService {
             spot, pcr, mpVal, resistance, support, rangeWidth, spotPct,
             atmStrike, atmCe, atmPe, topCeWall, topPeWall, regime, setups,
             strikeTables, vp, vwapData, vwapInfo, amtRegime,
-            absorptionCE, absorptionPE, confScore,
+            absorption, profileMeta, confScore,
         });
     }
 
-    _formatCard({ spot, pcr, mpVal, resistance, support, rangeWidth, spotPct, atmStrike, atmCe, atmPe, topCeWall, topPeWall, regime, setups, strikeTables, vp, vwapData, vwapInfo, amtRegime, absorptionCE, absorptionPE, confScore }) {
+    _formatCard({ spot, pcr, mpVal, resistance, support, rangeWidth, spotPct, atmStrike, atmCe, atmPe, topCeWall, topPeWall, regime, setups, strikeTables, vp, vwapData, vwapInfo, amtRegime, absorption, profileMeta, confScore }) {
         const L = [];
         const { hour, minute } = istTime();
         const timeLabel = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
@@ -477,11 +571,22 @@ class ScalpService {
             const vpBias = amtRegime?.regime === 'buy_zone' ? '\uD83D\uDFE2 BUY ZONE' 
                 : amtRegime?.regime === 'sell_zone' ? '\uD83D\uDD34 SELL ZONE' 
                 : amtRegime?.regime === 'balanced' ? '\u26A1 BALANCED' 
+                : amtRegime?.regime === 'breakout' ? '\uD83D\uDE80 OUT OF VALUE'
                 : '\u2753 UNKNOWN';
-            L.push('\uD83D\uDCCA *AUCTION MARKET THEORY*');
+            // Name the construction. With ETF volume this is a volume profile;
+            // without it buildVolumeProfile weights every bar equally, which is a
+            // time-at-price (TPO) profile \u2014 related, but not the same thing.
+            const kind = profileMeta?.volumeSource === 'etf-proxy' ? 'volume' : 'time-at-price';
+            L.push(`\uD83D\uDCCA *AUCTION MARKET THEORY* (${kind})`);
             L.push('');
             L.push(`  POC: ${fmtNum(vp.poc)}  VAH: ${fmtNum(vp.vah)}  VAL: ${fmtNum(vp.val)}`);
-            L.push(`  Spot vs VA: ${vwapInfo ? (vwapInfo.vwapDist > 0 ? '+' : '') + fmtNum(vwapInfo.vwapDist) : '\u2014'} pts ${vpBias}`);
+            // Gap to the value area itself. The old card printed the distance from
+            // VWAP under a "vs VA" label, which is a different measurement.
+            const vaGap = spot > vp.vah ? spot - vp.vah : spot < vp.val ? spot - vp.val : 0;
+            const vaTxt = vaGap === 0
+                ? 'inside value'
+                : `${vaGap > 0 ? '+' : ''}${fmtNum(round2(vaGap))} pts`;
+            L.push(`  Spot vs VA: ${vaTxt} ${vpBias}`);
             if (vp.lvns && vp.lvns.length > 0) {
                 const lvnStr = vp.lvns.slice(0, 3).map(l => `${fmtNum(l.low)}-${fmtNum(l.high)}`).join(', ');
                 L.push(`  LVN zones: ${lvnStr}`);
@@ -490,7 +595,10 @@ class ScalpService {
         }
 
         // ── VWAP Section ──────────────────────────────────────────────────
-        if (vwapInfo) {
+        // Printed only when real volume backed it. Without volume every bar
+        // weighs the same, making this a mean of typical prices rather than a
+        // VWAP — printing that under this heading would be a false label.
+        if (vwapInfo && profileMeta?.volumeSource === 'etf-proxy') {
             L.push('\uD83D\uDCCA *VWAP DYNAMIC S/R*');
             L.push('');
             L.push(`  VWAP: ${fmtNum(vwapInfo.vwap)}  \u00B11\u03C3: ${fmtNum(vwapData.lower1)}-${fmtNum(vwapData.upper1)}`);
@@ -499,13 +607,16 @@ class ScalpService {
         }
 
         // ── Absorption Detection ──────────────────────────────────────────
-        const absCE = absorptionCE?.absorptionScore || 0;
-        const absPE = absorptionPE?.absorptionScore || 0;
-        if (absCE > 20 || absPE > 20) {
+        if (absorption?.isAbsorbing) {
+            const who = absorption.side === 'buyers'
+                ? 'buyers absorbing the selling'
+                : absorption.side === 'sellers'
+                    ? 'sellers capping the buying'
+                    : 'two-sided, no clear winner';
             L.push('\uD83D\uDD0D *ABSORPTION DETECTED*');
             L.push('');
-            if (absCE > 20) L.push(`  CE wall at ${fmtNum(resistance)}: ${absCE}% absorbing \u2014 sellers holding`);
-            if (absPE > 20) L.push(`  PE wall at ${fmtNum(support)}: ${absPE}% absorbing \u2014 buyers accumulating`);
+            L.push(`  ${fmtNum(absorption.level)} \u00B7 score ${absorption.score} \u2014 ${who}`);
+            L.push(`  ${absorption.volRatio}\u00D7 volume on ${absorption.rangeRatio}\u00D7 range`);
             L.push('');
         }
 

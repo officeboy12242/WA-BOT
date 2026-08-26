@@ -170,7 +170,66 @@ export function calcSessionVWAP(bars, bandMultiplier = 2) {
 }
 
 /**
- * Detect absorption at a price level.
+ * Absorption on real intraday bars: effort without result.
+ *
+ * A bar that trades far above average volume but covers far less than its
+ * average range means someone sized absorbed everything thrown at that price.
+ * Where the bar CLOSES inside its own range says which side did the absorbing:
+ * closing near the high means buyers soaked up the selling (bullish), near the
+ * low means sellers capped the buying (bearish).
+ *
+ * This replaces the OI-delta version below for live use. That one needs
+ * consecutive chain snapshots of a single strike over time, and nothing in this
+ * bot stores chain history — it was being handed one strike row from a single
+ * instant, so it returned zero every time and its card section never rendered.
+ *
+ * @param {Array<{high:number, low:number, close:number, volume:number}>} bars
+ * @param {number} [lookback=12] bars to consider (12 x 5m = last hour)
+ * @returns {{ level, score, side, isAbsorbing, volRatio, rangeRatio }|null}
+ */
+export function detectBarAbsorption(bars, lookback = 12) {
+    if (!Array.isArray(bars) || bars.length < lookback + 5) return null;
+
+    const baseline = bars.slice(0, -lookback);
+    const recent = bars.slice(-lookback);
+
+    const avgVol = baseline.reduce((s, b) => s + (b.volume || 0), 0) / baseline.length;
+    const avgRange = baseline.reduce((s, b) => s + (b.high - b.low), 0) / baseline.length;
+    // Without volume every bar looks identical on the effort axis, so there is
+    // no absorption to find. Say so rather than reporting a fabricated score.
+    if (!(avgVol > 0) || !(avgRange > 0)) return null;
+
+    let best = null;
+    for (const b of recent) {
+        const range = b.high - b.low;
+        const volRatio = (b.volume || 0) / avgVol;
+        const rangeRatio = range / avgRange;
+        if (!(volRatio > 1.5) || !(rangeRatio < 0.8) || !(range > 0)) continue;
+
+        // Effort (volume) divided by result (range) — higher means more absorbed.
+        const score = Math.min(100, Math.round((volRatio / Math.max(0.15, rangeRatio)) * 20));
+        const closePos = (b.close - b.low) / range;   // 0 = at low, 1 = at high
+        if (!best || score > best.score) {
+            best = {
+                level: Math.round(((b.high + b.low + b.close) / 3) * 20) / 20,
+                score,
+                side: closePos >= 0.6 ? 'buyers' : closePos <= 0.4 ? 'sellers' : 'balanced',
+                isAbsorbing: score >= 40,
+                volRatio: Math.round(volRatio * 100) / 100,
+                rangeRatio: Math.round(rangeRatio * 100) / 100,
+            };
+        }
+    }
+    return best;
+}
+
+/**
+ * Detect absorption at a price level from OI deltas.
+ *
+ * NOTE: requires >= 3 CONSECUTIVE snapshots of the same strike over time. This
+ * bot does not persist option-chain history, so there is currently no caller —
+ * prefer detectBarAbsorption() above. Kept for when chain snapshots are stored.
+ *
  * Absorption = large OI buildup + small price movement
  * = "smart money is absorbing all selling/buying at this level"
  *
@@ -290,10 +349,14 @@ export function vwapLevels(vwapData, spot) {
     const { vwap, upperBand, lowerBand, upper1, lower1 } = vwapData;
     const vwapDist = spot - vwap;
 
+    // Compare spot against the band LEVELS. Comparing the distance (spot - vwap,
+    // tens of points) against upper1 (an absolute price, ~24,000) made the
+    // overbought/oversold branches unreachable — NIFTY would have had to trade
+    // ~24,000 points above its own VWAP to register as overbought.
     let bias;
-    if (vwapDist > upper1) bias = 'overbought';
-    else if (vwapDist > 0) bias = 'bullish';
-    else if (vwapDist < -lower1) bias = 'oversold';
+    if (spot > upper1) bias = 'overbought';
+    else if (spot > vwap) bias = 'bullish';
+    else if (spot < lower1) bias = 'oversold';
     else bias = 'bearish';
 
     // Dynamic support = VWAP or lower band depending on position
@@ -348,8 +411,11 @@ export function confluenceScore(vp, vwapInfo, oiData) {
     }
 
     // 3. OI wall strength (weight: 0.25)
+    // Takes RAW open interest. This previously received OI pre-divided by 10,000
+    // and then divided again by 100, so "1L OI = full score" actually needed 10L
+    // and every real wall scored around 16/100.
     if (oiData?.oiWall) {
-        const oiScore = Math.min(100, (oiData.oiWall / 100) * 100); // 1L OI = full score
+        const oiScore = Math.min(100, (oiData.oiWall / 100_000) * 100); // 1L OI = full score
         factors.push({ name: 'OI Wall', score: Math.round(oiScore), weight: 0.25 });
         total += oiScore * 0.25;
         weightSum += 0.25;
