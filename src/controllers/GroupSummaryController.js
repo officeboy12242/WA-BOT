@@ -196,8 +196,8 @@ class GroupSummaryController {
     }
 
     _hasLlm() {
-        return this._orcaConfigured()
-            || this.gemini.isConfigured()
+        return this.gemini.isConfigured()
+            || this._orcaConfigured()
             || this.nvidia.isConfigured()
             || this.openrouter.isConfigured();
     }
@@ -211,11 +211,12 @@ class GroupSummaryController {
     }
 
     /**
-     * OrcaRouter — free DeepSeek V4 Flash. Primary summary path when configured.
-     * OrcaRouter retired the `pro-free` slug we originally wired up; `flash-free`
-     * is what's actually available now, with 128K context — still enough to
-     * single-shot even a busy group day, so we skip the Gemini/NVIDIA/OpenRouter
-     * map-reduce merge unless OrcaRouter fails outright.
+     * OrcaRouter — free DeepSeek V4 Flash. Immediate fallback behind Gemini
+     * when the Gemini free-tier quota (250 RPD) is exhausted or Gemini returns
+     * weak topics. OrcaRouter retired the `pro-free` slug we originally wired
+     * up; `flash-free` is what's actually available now, with 128K context.
+     * Single-shot even chunk-sized groups; falls through to NVIDIA / OpenRouter
+     * on failure.
      */
     async _summarizeViaOrcaRouter(prompt, opts = {}) {
         if (!this._orcaConfigured()) throw new Error('OrcaRouter not configured');
@@ -264,17 +265,27 @@ class GroupSummaryController {
     }
 
     /**
-     * Try Gemini for summarization — primary LLM.
+     * Try Gemini for summarization — primary LLM. 1M ctx single-shots even
+     * chunk-sized groups; 8K output tokens covers the full about+vibe+topics+
+     * notable+wrap_up+verdict schema comfortably. The real reason recaps
+     * never actually came from Gemini before was a bad destructure (see
+     * below) — the token bump helps too, but the destructure was the
+     * silent killer.
      */
     async _summarizeViaGemini(prompt, opts = {}) {
         if (!this.gemini.isConfigured()) {
             throw new Error('Gemini not configured');
         }
         try {
-            const { text } = await this.gemini.complete(
+            // GeminiTradeService.complete() returns a plain string, not an object.
+            // The earlier `const { text } = ...` destructure silently left text
+            // undefined, which is why every Gemini recap fell through to
+            // NVIDIA/OpenRouter with a "weak/vague topics" warning — the JSON
+            // was never actually parsed.
+            const text = await this.gemini.complete(
                 opts.system || SUMMARY_FALLBACK_SYSTEM_PROMPT,
                 prompt,
-                { temperature: 0.25, maxTokens: opts.maxTokens ?? 1400, timeoutMs: this._summaryTimeoutMs() }
+                { temperature: 0.25, maxTokens: opts.maxTokens ?? 8000, timeoutMs: this._summaryTimeoutMs() }
             );
             const summary = this.nvidia.parseSummaryJson(text);
             if (!isUsableGroupSummary(summary)) {
@@ -287,30 +298,6 @@ class GroupSummaryController {
             logger.warn('Group summary: Gemini failed: ' + err.message);
             throw err;
         }
-    }
-
-    /**
-     * Try Gemini for chunked summarization.
-     */
-    async _summarizeChunksViaGemini(chunkPrompts, meta = {}) {
-        if (!chunkPrompts.length) {
-            throw new Error('No chunk prompts provided');
-        }
-        if (chunkPrompts.length === 1) {
-            return this._summarizeViaGemini(chunkPrompts[0]);
-        }
-        const partials = [];
-        for (let i = 0; i < chunkPrompts.length; i++) {
-            const partial = await this._summarizeViaGemini(chunkPrompts[i]);
-            if (partial?.topics?.length) partials.push(partial);
-        }
-        if (!partials.length) return null;
-        if (partials.length === 1) return partials[0];
-        const merged = this.nvidia.mergeSummaries(partials);
-        if (isUsableGroupSummary(merged) || merged.topics?.length) {
-            return merged;
-        }
-        return null;
     }
 
     /**
@@ -444,13 +431,34 @@ class GroupSummaryController {
             totalMessages: messages.length,
         };
 
-        // OrcaRouter DeepSeek V4 Pro (1M context) is tried first when configured:
-        // it single-shots even chunk-sized groups so we skip the map-reduce merge
-        // artefacts. Any failure falls through to the Gemini/NVIDIA/OpenRouter chain.
+        // Gemini 2.5 Flash (1M ctx, 250 RPD, 10 RPM free) is the primary
+        // summary path: strongest instruction-following on the JSON schema of
+        // any free provider, single-shots even chunk-sized groups on a 1M
+        // window. OrcaRouter DeepSeek Flash is the immediate fallback for
+        // quota-exhaustion days; the NVIDIA/OpenRouter chunk chain only runs
+        // if both free single-shot routes are down.
+        const basePromptCached = () => {
+            const bp = this.chatLog.buildPrompt(messages, groupName, dateLabel);
+            return style?.persona ? `${bp}\n\n${style.persona}` : bp;
+        };
+
+        if (this.gemini.isConfigured()) {
+            try {
+                const prompt = basePromptCached();
+                logger.info(
+                    `Group summary via Gemini: ${groupName} — ${messages.length} msgs, ` +
+                        `prompt ${prompt.length} chars${useChunks ? ' [chunk threshold reached — bypassing]' : ''}`
+                );
+                const result = await this._summarizeViaGemini(prompt);
+                if (result) return result;
+            } catch (err) {
+                logger.warn(`Group summary: Gemini failed for ${groupName}: ${err.message}`);
+            }
+        }
+
         if (this._orcaConfigured()) {
             try {
-                const basePrompt = this.chatLog.buildPrompt(messages, groupName, dateLabel);
-                const prompt = style?.persona ? `${basePrompt}\n\n${style.persona}` : basePrompt;
+                const prompt = basePromptCached();
                 logger.info(
                     `Group summary via OrcaRouter DeepSeek: ${groupName} — ${messages.length} msgs, ` +
                         `prompt ${prompt.length} chars${useChunks ? ' [chunk threshold reached — bypassing]' : ''}`
@@ -473,14 +481,9 @@ class GroupSummaryController {
                 `Group summary: ${groupName} — ${messages.length} msgs, ` +
                     `${chunkPrompts.length} chunk(s) for map-reduce`
             );
-            if (this.gemini.isConfigured()) {
-                try {
-                    const geminiResult = await this._summarizeChunksViaGemini(chunkPrompts, chunkMeta);
-                    if (geminiResult) return geminiResult;
-                } catch (err) {
-                    logger.warn(`Gemini chunk recap failed for ${groupName}: ${err.message}`);
-                }
-            }
+            // Gemini already tried single-shot above (1M ctx handles everything);
+            // if we're here it either 429'd or returned weak, so skip straight to
+            // NVIDIA/OpenRouter map-reduce rather than burning another Gemini call.
             if (this.nvidia.isConfigured()) {
                 try {
                     return await this.nvidia.summarizeGroupChatChunks(chunkPrompts, chunkMeta);
@@ -502,14 +505,7 @@ class GroupSummaryController {
             `Group summary: ${groupName} — ${messages.length} msgs, prompt ${prompt.length} chars` +
                 (style ? `, style ${style.key}` : '')
         );
-        if (this.gemini.isConfigured()) {
-            try {
-                const geminiResult = await this._summarizeViaGemini(prompt);
-                if (geminiResult) return geminiResult;
-            } catch (err) {
-                logger.warn(`Gemini recap failed for ${groupName}: ${err.message}`);
-            }
-        }
+        // Gemini already ran in the primary bypass above; go straight to NVIDIA.
         if (this.nvidia.isConfigured()) {
             try {
                 const summary = await this.nvidia.summarizeGroupChat(prompt);
@@ -600,7 +596,7 @@ class GroupSummaryController {
             throw new Error('Recap service not ready');
         }
         if (!this._hasLlm()) {
-            throw new Error('No summary LLM configured (set ORCAROUTER_API_KEY, GEMINI_API_KEY, NVIDIA_API_KEY, or OPENROUTER_API_KEY)');
+            throw new Error('No summary LLM configured (set GEMINI_API_KEY, ORCAROUTER_API_KEY, NVIDIA_API_KEY, or OPENROUTER_API_KEY)');
         }
 
         const groups = await this.groupManager.getSummaryEnabledGroups();
@@ -653,7 +649,7 @@ class GroupSummaryController {
             return;
         }
         if (!this._hasLlm()) {
-            logger.warn('Group summary: no OrcaRouter/Gemini/NVIDIA/OpenRouter key, skipping');
+            logger.warn('Group summary: no Gemini/OrcaRouter/NVIDIA/OpenRouter key, skipping');
             return;
         }
 
