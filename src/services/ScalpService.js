@@ -782,11 +782,11 @@ class ScalpService {
                         }
                         const profit = round2(s.entry - s.target);
                         const loss = round2(s.stop - s.entry);
-                        L.push(`  Premium: \u20B9${s.entry} \u2192 Target \u20B9${s.target} \u00B7 Profit \u20B9${profit}`);
-                        L.push(`  Stop: \u20B9${s.stop} \u00B7 Loss \u20B9${loss}`);
+                        L.push(`  Entry: \u20B9${s.entry} (collect) \u2192 Target: \u20B9${s.target} (buy back) \u00B7 +\u20B9${profit}`);
+                        L.push(`  Stop: \u20B9${s.stop} (buy back) \u00B7 \u2212\u20B9${loss}`);
                     } else if (isShort) {
-                        L.push(`  Premium: \u20B9${s.entry} \u2192 Target \u20B9${s.target}`);
-                        L.push(`  Stop: \u20B9${s.stop}`);
+                        L.push(`  Entry: \u20B9${s.entry} (collect) \u2192 Target: \u20B9${s.target} (buy back)`);
+                        L.push(`  Stop: \u20B9${s.stop} (buy back)`);
                     } else {
                         L.push(`  Entry: \u20B9${s.entry} \u00B7 Target: \u20B9${s.target} \u00B7 Stop: \u20B9${s.stop}`);
                     }
