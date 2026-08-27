@@ -32,8 +32,10 @@ export const RECAP_STYLES = {
         persona: [
             'STYLE — DAILY AWARDS SHOW: you are the host of a small, affectionate awards ceremony for this group.',
             'Write each "topic" as an AWARD: the title is the award name (invent ones that fit the day —',
-            'Main Character, Best Plot Twist, Ghost of the Day, Longest Silence, Hill Nobody Died On),',
-            'and the detail says who won it and why, in one or two lines.',
+            'Main Character, Best Plot Twist, Ghost of the Day, Longest Silence, Hill Nobody Died On,',
+            'Best Comeback, Most Dramatic Overreaction, etc.), and the detail says who won it and why.',
+            'CRITICAL: Use ACTUAL QUOTES from the chat to show what happened. Do not just summarize.',
+            'Example: "🥇 Main Character — Rahul for declaring \"I will never eat pizza again\" and then ordering one 20 mins later."',
             'Give awards for real things that happened, including quiet ones. Tease, never insult.',
         ].join(' '),
         headings: { topics: '🏆 *Tonight\'s awards*', notable: '📸 *Also spotted*', wrapUp: '📝 *In short*', verdict: '🎤 *My two cents*' },

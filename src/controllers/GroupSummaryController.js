@@ -337,7 +337,8 @@ class GroupSummaryController {
             meta.dateLabel ? `Date: ${meta.dateLabel}` : '',
             meta.totalMessages ? `Total messages that day: ${meta.totalMessages}` : '',
             'Combine overlapping topics, keep 3-5 topics total, 0-3 notable items, one wrap_up.',
-            'Keep concrete details (names, subjects) — drop vague fillers.',
+            'PRESERVE ACTUAL QUOTES from the chat — these are the most valuable part.',
+            'Keep concrete details (names, subjects, quotes) — drop vague fillers like "talked about various things".',
             'Also produce ONE about / vibe / verdict for the whole day, not per part:',
             'about = what this group is for, judged across every part;',
             'vibe = a 3-6 word mood tag; verdict = 2-4 sentences of your own opinion on the day, in character.',
@@ -353,7 +354,8 @@ class GroupSummaryController {
             '{"about":"one line on what this group is for","vibe":"3-6 word mood tag",',
             '"topics":[{"title":"short title","detail":"1-2 sentences"}],"notable":["bullet strings"],',
             '"wrap_up":"2-4 sentence paragraph","verdict":"2-4 sentences of your own opinion, in character"}',
-            'Deduplicate topics; preserve the most important concrete details from each part.',
+            'Deduplicate topics; preserve the most important concrete details and ACTUAL QUOTES from each part.',
+            'Each topic detail should include at least one real quote or paraphrase from the chat.',
             'about/vibe/verdict describe the WHOLE day — write them fresh, do not concatenate the parts.',
         ].join(' ');
 

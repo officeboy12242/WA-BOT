@@ -404,7 +404,7 @@ class GroupChatLogService {
 
     buildPrompt(messages, groupName, dateLabel) {
         const maxLines = this.getLlmSampleLimit(messages.length);
-        const textLimit = messages.length > 150 ? 80 : messages.length > 80 ? 100 : 140;
+        const textLimit = messages.length > 150 ? 150 : messages.length > 80 ? 200 : 250;
         const sampled = this.sampleMessages(messages, maxLines);
         const lines = this.formatMessageLines(sampled, textLimit);
 
@@ -415,10 +415,14 @@ class GroupChatLogService {
         const narrativeLines = this.narrative
             ? [
                   'Below is the actual member conversation for the day (name: message).',
-                  'Walk through it like a narrator. For each topic tell: WHO started it, WHO replied, WHAT was said, and HOW it evolved.',
-                  'Capture the back-and-forth: questions and answers, jokes that built on each other, debates, claps, roasts.',
-                  'Use actual quotes or close paraphrases from the chat. Show the conversation, do not just summarize it.',
-                  'Extract 3-5 topics with WHO + WHAT + HOW detail for each.',
+                  'Walk through it like a narrator reading the chat log. For each topic:',
+                  '  - WHO started it and WHO replied',
+                  '  - WHAT was actually said (use exact quotes or close paraphrases)',
+                  '  - HOW the conversation evolved (questions → answers, jokes → roasts, debates → conclusions)',
+                  '  - The FUNNY or MEMORABLE moments — punchlines, comebacks, hot takes, random tangents',
+                  'Do NOT just list random words from the chat. Show the ACTUAL conversations and interactions.',
+                  'For each topic, include at least 2-3 actual quotes from different people.',
+                  'Extract 3-5 topics with WHO + WHAT + HOW + QUOTES detail for each.',
               ]
             : ['Extract 3-5 concrete topics with short details from the chat lines below.'];
 
