@@ -10,7 +10,7 @@ import { ImportProgressStore } from '../utils/importProgress.js';
 import { logger } from '../utils/logger.js';
 import { sendAndDelete } from '../utils/autoDelete.js';
 import { extractPhoneNumber, isGroupMessage } from '../utils/permissions.js';
-import { getSafeSendOptions, safeSendMessage, plainSendMessage } from '../utils/waMessage.js';
+import { getSafeSendOptions, safeSendMessage, plainSendMessage, editMessageText } from '../utils/waMessage.js';
 import { botTelemetry } from '../utils/botTelemetry.js';
 
 import {
@@ -569,14 +569,28 @@ export const COMMAND_HANDLERS = {
                 return;
             }
         }
+        // Send loading message, then edit with result
+        let loadingMsg = null;
+        try {
+            loadingMsg = await sock.sendMessage(chatId, { text: '⚡ _Fetching NIFTY scalp data..._' });
+        } catch (_) { /* ignore */ }
         try {
             const svc = new ScalpService();
             const card = await svc.buildScalpCard('NIFTY');
-            if (card) await safeSendMessage(sock, chatId, { text: card });
-            else await safeSendMessage(sock, chatId, { text: '⚠️ Could not build scalp card.' });
+            if (card && loadingMsg?.key) {
+                await editMessageText(sock, chatId, loadingMsg.key, card);
+            } else if (card) {
+                await safeSendMessage(sock, chatId, { text: card });
+            } else {
+                const errText = '⚠️ Could not build scalp card.';
+                if (loadingMsg?.key) await editMessageText(sock, chatId, loadingMsg.key, errText);
+                else await safeSendMessage(sock, chatId, { text: errText });
+            }
         } catch (err) {
             logger.error(`Scalp command failed: ${err.message}`);
-            await safeSendMessage(sock, chatId, { text: `❌ Scalp error: ${err.message}` });
+            const errText = `❌ Scalp error: ${err.message}`;
+            if (loadingMsg?.key) await editMessageText(sock, chatId, loadingMsg.key, errText);
+            else await safeSendMessage(sock, chatId, { text: errText });
         }
     },
 
