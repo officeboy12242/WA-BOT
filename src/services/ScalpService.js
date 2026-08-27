@@ -104,7 +104,11 @@ function calcConfidence({ oiWallQty, totalOi, pcr, vix, spotDistance, regime }) 
     const vixScore = regime === 'theta'
         ? Math.max(0, 100 - (vix - LOW_VIX_THRESHOLD) * 5)
         : Math.min(100, (vix - 10) * 8);
-    const distScore = Math.max(0, 100 - spotDistance * 0.5);
+    // distScore is zone-relative: being near the edge of the trigger zone (early
+    // entry, more room to capture 8pt) scores higher than being right at the wall
+    // (late entry, less room). zonePct: 0 = at wall, 1 = at zone edge.
+    const zonePct = Math.min(1, spotDistance / 200);
+    const distScore = Math.max(40, Math.min(90, 40 + zonePct * 50));
 
     const { hour, minute } = istTime();
     const timeDecimal = hour + minute / 60;
@@ -409,11 +413,11 @@ class ScalpService {
         const setups = [];
 
         // 1) Support bounce — Buy CE (cheap OTM strike near support)
-        if (rangeValid && spot - support < rangeWidth * 0.4) {
+        if (rangeValid && spot - support < rangeWidth * 0.6) {
             const bestCe = findBestStrike(chain, support, 'CE', spot, atmStrike);
             // Only use strike from findBestStrike (no ATM fallback — it picks ITM)
             const entryPrem = bestCe?.ltp ? round2(bestCe.ltp) : null;
-            if (entryPrem && entryPrem >= 15 && entryPrem <= 150) {
+            if (entryPrem && entryPrem >= 15 && entryPrem <= 200) {
                 const target = round2(entryPrem + TARGET_PTS);
                 const stop = round2(entryPrem - STOP_PTS);
                 const conf = calcConfidence({
@@ -439,11 +443,11 @@ class ScalpService {
         }
 
         // 2) Resistance rejection — Buy PE (cheap OTM strike near resistance)
-        if (rangeValid && resistance - spot < rangeWidth * 0.4) {
+        if (rangeValid && resistance - spot < rangeWidth * 0.6) {
             const bestPe = findBestStrike(chain, resistance, 'PE', spot, atmStrike);
             // Only use strike from findBestStrike (no ATM fallback — it picks ITM)
             const entryPrem = bestPe?.ltp ? round2(bestPe.ltp) : null;
-            if (entryPrem && entryPrem >= 15 && entryPrem <= 150) {
+            if (entryPrem && entryPrem >= 15 && entryPrem <= 200) {
                 const target = round2(entryPrem + TARGET_PTS);
                 const stop = round2(entryPrem - STOP_PTS);
                 const conf = calcConfidence({

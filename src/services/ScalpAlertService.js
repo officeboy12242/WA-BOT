@@ -69,8 +69,8 @@ class ScalpAlertService {
                 return;
             }
 
-            // Only trigger on PRIMARY setups (75%+ confidence)
-            if (!card.includes('PRIMARY')) return;
+            // Trigger on any setup with 75%+ confidence (PRIMARY or SECONDARY)
+            if (!card.includes('✅')) return;
 
             // Extract setup details
             const setups = this._extractSetups(card);
@@ -149,7 +149,7 @@ class ScalpAlertService {
     _extractSetups(card) {
         const setups = [];
 
-        // Extract CE details
+        // Extract directional setups (BUY CE / BUY PE)
         if (card.includes('BUY CE')) {
             const strikeMatch = card.match(/Buy CE ([\d,]+)/);
             const entryMatch = card.match(/Entry: ₹([\d.]+)/);
@@ -164,7 +164,6 @@ class ScalpAlertService {
             });
         }
 
-        // Extract PE details
         if (card.includes('BUY PE')) {
             const strikeMatch = card.match(/Buy PE ([\d,]+)/);
             const entryMatch = card.match(/Entry: ₹([\d.]+)/);
@@ -176,6 +175,31 @@ class ScalpAlertService {
                 strike,
                 entry,
                 fingerprint: `BUY PE:${strike}:${entry}`,
+            });
+        }
+
+        // Extract theta setups (SHORT STRADDLE / SHORT STRANGLE)
+        if (card.includes('SHORT STRADDLE')) {
+            const entryMatch = card.match(/SELL[\s\S]*?Premium: ₹([\d.]+)/);
+            const entry = entryMatch ? entryMatch[1] : '?';
+            setups.push({
+                type: 'SHORT STRADDLE',
+                emoji: '⚡',
+                strike: 'ATM',
+                entry,
+                fingerprint: `SHORT STRADDLE:${entry}`,
+            });
+        }
+
+        if (card.includes('SHORT STRANGLE')) {
+            const entryMatch = card.match(/SHORT STRANGLE[\s\S]*?Premium: ₹([\d.]+)/);
+            const entry = entryMatch ? entryMatch[1] : '?';
+            setups.push({
+                type: 'SHORT STRANGLE',
+                emoji: '🪁',
+                strike: 'OTM wings',
+                entry,
+                fingerprint: `SHORT STRANGLE:${entry}`,
             });
         }
 
@@ -192,10 +216,18 @@ class ScalpAlertService {
             hour12: true,
         }).format(now);
 
+        const isDirectional = setups.some(s => s.type.startsWith('BUY'));
+        const isTheta = setups.some(s => s.type.startsWith('SHORT'));
+        let trigger = '';
+        if (isDirectional) trigger = 'Directional setup triggered!';
+        if (isTheta) trigger = 'Theta decay setup triggered!';
+        if (isDirectional && isTheta) trigger = 'Multiple setups triggered!';
+
         return [
             `⚡ *SCALP ALERT* — ${timeStr} IST`,
             '',
-            `${setupLabels} triggered with 75%+ confidence!`,
+            `${setupLabels}`,
+            trigger,
             '',
             '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
             '',
