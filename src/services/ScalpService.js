@@ -412,8 +412,25 @@ class ScalpService {
         const STOP_PTS = 5;
         const setups = [];
 
+        // Directional bias: only show the setup that aligns with market direction
+        // Uses VWAP position + spotPct + PCR to pick ONE direction
+        const spotBelowVwap = vwapData && spot < vwapData.vwap;
+        const spotAboveVwap = vwapData && spot > vwapData.vwap;
+        const pcrBearish = (pcr || 1) > 1.1;  // heavy put OI = bearish
+        const pcrBullish = (pcr || 1) < 0.9;  // heavy call OI = bullish
+
+        // Prefer CE if bullish signals dominate, PE if bearish, else skip directional
+        let preferCE = false;
+        let preferPE = false;
+        if (spotBelowVwap || pcrBearish || spotPct < 45) {
+            preferPE = true;  // bearish bias → buy PE at resistance
+        } else if (spotAboveVwap || pcrBullish || spotPct > 55) {
+            preferCE = true;  // bullish bias → buy CE at support
+        }
+        // If perfectly neutral (spotPct 45-55, no VWAP/PCR signal) → no directional
+
         // 1) Support bounce — Buy CE (cheap OTM strike near support)
-        if (rangeValid && spot - support < rangeWidth * 0.6) {
+        if (preferCE && rangeValid && spot - support < rangeWidth * 0.6) {
             const bestCe = findBestStrike(chain, support, 'CE', spot, atmStrike);
             // Only use strike from findBestStrike (no ATM fallback — it picks ITM)
             const entryPrem = bestCe?.ltp ? round2(bestCe.ltp) : null;
@@ -443,7 +460,7 @@ class ScalpService {
         }
 
         // 2) Resistance rejection — Buy PE (cheap OTM strike near resistance)
-        if (rangeValid && resistance - spot < rangeWidth * 0.6) {
+        if (preferPE && rangeValid && resistance - spot < rangeWidth * 0.6) {
             const bestPe = findBestStrike(chain, resistance, 'PE', spot, atmStrike);
             // Only use strike from findBestStrike (no ATM fallback — it picks ITM)
             const entryPrem = bestPe?.ltp ? round2(bestPe.ltp) : null;
