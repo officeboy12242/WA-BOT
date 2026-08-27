@@ -205,7 +205,7 @@ class NvidiaDeepSeekService {
         const progress = typeof opts.onProgress === 'function' ? opts.onProgress : async () => {};
 
         const attempts = [
-            { prompt: userPrompt, maxTokens: opts.maxTokens ?? 2500, timeoutMs: 90_000 },
+            { prompt: userPrompt, maxTokens: opts.maxTokens ?? 4000, timeoutMs: 120_000 },
             {
                 prompt: userPrompt.slice(0, 8_000) + (userPrompt.length > 8_000 ? '\n\n[...truncated...]' : ''),
                 maxTokens: 1600,

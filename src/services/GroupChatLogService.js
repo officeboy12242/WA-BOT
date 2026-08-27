@@ -123,7 +123,7 @@ class GroupChatLogService {
         // chars, so the model saw less than half the conversation — recaps came
         // out "half and not to the points". The sample now fits the ~14k-char
         // first attempt in NvidiaDeepSeekService.completeWithSummaryRetry.
-        this.llmMaxMessages = Math.max(20, Number(config.GROUP_SUMMARY_LLM_MAX_MESSAGES) || 140);
+        this.llmMaxMessages = Math.max(20, Number(config.GROUP_SUMMARY_LLM_MAX_MESSAGES) || 400);
         this.chunkThreshold = Math.max(80, Number(config.GROUP_SUMMARY_CHUNK_THRESHOLD) || 150);
         this.chunkSize = Math.max(30, Math.min(60, Number(config.GROUP_SUMMARY_CHUNK_SIZE) || 50));
         this.narrative = config.GROUP_SUMMARY_NARRATIVE !== false;
@@ -342,17 +342,18 @@ class GroupChatLogService {
 
     /** Scale down LLM input for busier days to avoid API timeouts. */
     getLlmSampleLimit(totalMessages) {
-        if (totalMessages <= 80) {
+        // With 1M context models, we can send many more messages
+        if (totalMessages <= 200) {
             return Math.min(this.llmMaxMessages, totalMessages);
         }
-        if (totalMessages <= 150) {
-            return Math.min(120, this.llmMaxMessages);
+        if (totalMessages <= 500) {
+            return Math.min(400, this.llmMaxMessages);
         }
-        if (totalMessages <= 250) {
-            return Math.min(90, this.llmMaxMessages);
+        if (totalMessages <= 1000) {
+            return Math.min(600, this.llmMaxMessages);
         }
-        // Very busy days: one compact sample beats many sequential chunk calls
-        return Math.min(70, this.llmMaxMessages);
+        // Very busy days: still send a lot for richer context
+        return Math.min(800, this.llmMaxMessages);
     }
 
     /** Keep conversation edges plus evenly spaced middle messages. */
@@ -404,7 +405,7 @@ class GroupChatLogService {
 
     buildPrompt(messages, groupName, dateLabel) {
         const maxLines = this.getLlmSampleLimit(messages.length);
-        const textLimit = messages.length > 150 ? 150 : messages.length > 80 ? 200 : 250;
+        const textLimit = messages.length > 300 ? 300 : messages.length > 150 ? 400 : 500;
         const sampled = this.sampleMessages(messages, maxLines);
         const lines = this.formatMessageLines(sampled, textLimit);
 
@@ -447,8 +448,8 @@ class GroupChatLogService {
         const maxParts = 3;
         const partSize = Math.ceil(total / maxParts);
         const prompts = [];
-        const textLimit = 70;
-        const perChunkSample = 28;
+        const textLimit = 200;  // More context per message in chunks too
+        const perChunkSample = 80;  // With 1M context, send more per chunk
 
         for (let part = 0; part < maxParts; part++) {
             const start = part * partSize;
@@ -468,8 +469,8 @@ class GroupChatLogService {
                 lines.join('\n'),
             ].join('\n\n');
 
-            if (body.length > 3500) {
-                body = `${body.slice(0, 3500)}\n\n[...truncated...]`;
+            if (body.length > 15000) {
+                body = `${body.slice(0, 15000)}\n\n[...truncated...]`;
             }
             prompts.push(body);
         }

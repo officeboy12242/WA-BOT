@@ -316,7 +316,7 @@ class GroupSummaryController {
                     `for ${meta.groupName || 'group'}`
             );
             try {
-                partials.push(await this._summarizeViaOpenRouter(chunkPrompts[i], { maxTokens: 1100 }));
+                partials.push(await this._summarizeViaOpenRouter(chunkPrompts[i], { maxTokens: 3000 }));
             } catch (err) {
                 logger.warn(
                     `Group recap OpenRouter chunk ${i + 1}/${chunkPrompts.length} failed: ${err.message}`
@@ -362,7 +362,7 @@ class GroupSummaryController {
         try {
             const merged = await this._summarizeViaOpenRouter(mergePrompt, {
                 system: mergeSystem,
-                maxTokens: 1200,
+                maxTokens: 3000,
             });
             if (isUsableGroupSummary(merged) || merged.topics?.length) {
                 return merged;
