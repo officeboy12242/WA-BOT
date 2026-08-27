@@ -9,7 +9,7 @@ import { buildKeyPool } from '../utils/apiKeyPool.js';
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const DEFAULT_MODELS = [
-    'deepseek/deepseek-v4-pro-free',  // 1M context, best for recaps
+    'deepseek/deepseek-v4-flash:free',  // 1M context, best for recaps
     'meta-llama/llama-3.3-70b-instruct:free',
     'google/gemma-4-31b-it:free',
     'openai/gpt-oss-20b:free',
@@ -19,7 +19,7 @@ const DEFAULT_MODELS = [
 const SUMMARY_SKIP_MODEL_RE = /coder|code-|devstral|codestral/i;
 
 const DEFAULT_SUMMARY_MODELS = [
-    'deepseek/deepseek-v4-pro-free',  // 1M context, best for recaps
+    'deepseek/deepseek-v4-flash:free',  // 1M context, best for recaps
     'meta-llama/llama-3.3-70b-instruct:free',
     'google/gemma-4-31b-it:free',
     'openai/gpt-oss-20b:free',

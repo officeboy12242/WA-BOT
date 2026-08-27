@@ -462,6 +462,9 @@ export const config = {
     TRADE_ALERT_FORCE_TRADING_DAYS: (process.env.TRADE_ALERT_FORCE_TRADING_DAYS || '').trim(),
     /** OrcaRouter — free DeepSeek V4 Flash for /chainai option-chain AI reads. */
     ORCAROUTER_API_KEY: process.env.ORCAROUTER_API_KEY?.trim() || '',
+    /** Group-summary OrcaRouter model — DeepSeek V4 Pro (1M ctx) is the free
+     *  default because it single-shots big groups without map-reduce merge loss. */
+    SUMMARY_ORCAROUTER_MODEL: (process.env.SUMMARY_ORCAROUTER_MODEL || 'deepseek/deepseek-v4-pro-free').trim(),
     /** IPO auto-alerts: close day (last to apply) and listing day */
     IPO_ALERT_CLOSE_TIME: (process.env.IPO_ALERT_CLOSE_TIME || '08:30').trim(),
     IPO_ALERT_LISTING_TIME: (process.env.IPO_ALERT_LISTING_TIME || '09:45').trim(),
@@ -473,7 +476,7 @@ export const config = {
 
     /** OpenRouter — LLM fallback when Gemini/Groq/NVIDIA fail (summary, trade, assist). */
     OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY?.trim() || '',
-    OPENROUTER_MODEL: process.env.OPENROUTER_MODEL?.trim() || 'deepseek/deepseek-v4-pro-free',
+    OPENROUTER_MODEL: process.env.OPENROUTER_MODEL?.trim() || 'deepseek/deepseek-v4-flash:free',
     OPENROUTER_FALLBACK_MODELS: (process.env.OPENROUTER_FALLBACK_MODELS || '')
         .split(',')
         .map((s) => s.trim())
