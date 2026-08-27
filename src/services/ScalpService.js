@@ -146,22 +146,44 @@ function scoreStrikeForScalp(strike, side, spot, atmStrike, allStrikes) {
     const leg = side === 'CE' ? row.ce : row.pe;
     if (!leg) return 0;
 
-    // IV score (0-40): higher IV = more premium movement
-    const iv = leg.iv || 0;
-    const maxIv = 10; // NIFTY typical max IV
-    const ivScore = Math.min(40, (iv / maxIv) * 40);
+    const ltp = leg.ltp || 0;
+    if (ltp <= 0) return 0;
 
-    // OI score (0-30): higher OI = better liquidity
+    // Moneyness check — OTM strikes are ideal for scalping (cheaper, higher % move)
+    // For CE: OTM = strike > spot. For PE: OTM = strike < spot.
+    const isOTM = side === 'CE' ? strike > spot + 50 : strike < spot - 50;
+    const isATM = strike === atmStrike;
+    const moneynessBonus = isOTM ? 15 : isATM ? 5 : -10; // penalize ITM
+
+    // Premium cost score (0-35): ₹30-₹90 is the sweet spot for 8pt scalps
+    // Below ₹30 = illiquid / too far OTM, above ₹90 = hard to capture 8pts
+    let premScore = 0;
+    if (ltp >= 30 && ltp <= 90) {
+        // Peak score at ₹50 — ideal balance of cost vs movement
+        const distFromSweet = Math.abs(ltp - 50);
+        premScore = Math.max(15, 35 - distFromSweet * 0.35);
+    } else if (ltp > 90) {
+        // Expensive — penalty scales with distance from sweet spot
+        premScore = Math.max(0, 15 - (ltp - 90) * 0.2);
+    } else if (ltp > 10) {
+        // Below sweet spot but still tradeable
+        premScore = Math.max(0, 15 - (30 - ltp) * 0.5);
+    } else {
+        // Very cheap — likely illiquid
+        premScore = 0;
+    }
+
+    // OI score (0-25): higher OI = better liquidity
     const oi = leg.oi || 0;
-    const maxOi = 300000; // 3L = max score
-    const oiScore = Math.min(30, (oi / maxOi) * 30);
+    const maxOi = 300000;
+    const oiScore = Math.min(25, (oi / maxOi) * 25);
 
-    // Proximity to ATM (0-30): closer to ATM = higher delta = 1:1 movement
-    const dist = Math.abs(strike - atmStrike);
-    const maxDist = 200; // 200pts away = 0 score
-    const proxScore = Math.max(0, 30 - (dist / maxDist) * 30);
+    // IV score (0-25): moderate IV preferred (not too high = overpriced)
+    const iv = leg.iv || 0;
+    const ivScore = iv >= 5 && iv <= 10 ? 25 : iv > 10 ? Math.max(0, 25 - (iv - 10) * 3) : iv * 2.5;
 
-    return Math.round(ivScore + oiScore + proxScore);
+    const raw = premScore + oiScore + ivScore + moneynessBonus;
+    return Math.max(0, Math.round(raw));
 }
 
 /**
@@ -169,10 +191,54 @@ function scoreStrikeForScalp(strike, side, spot, atmStrike, allStrikes) {
  * Returns the strike with highest momentum score.
  */
 function findBestStrike(strikes, targetLevel, side, spot, atmStrike) {
-    // Consider strikes within 100pts of target level
-    const candidates = strikes
-        .filter((s) => Math.abs(s.strike - targetLevel) <= 100)
-        .filter((s) => { const leg = side === 'CE' ? s.ce : s.pe; return leg?.ltp > 0; });
+    // For scalping, we want OTM strikes near the trigger price:
+    // - BUY CE triggers when spot touches SUPPORT → OTM CE at support = strike > support + 50
+    // - BUY PE triggers when spot touches RESISTANCE → OTM PE at resistance = strike < resistance - 50
+    // We use targetLevel (support/resistance) as the reference, NOT current spot,
+    // because the setup fires when price reaches that level.
+    // This ensures symmetric premium selection regardless of current spot position.
+
+    const STRIKE_STEP = 50; // NIFTY strike interval
+
+    // OTM at the TRIGGER PRICE (targetLevel), not current spot
+    const isOTM = (s) => side === 'CE'
+        ? s.strike >= targetLevel + STRIKE_STEP    // CE: OTM when spot is at support
+        : s.strike <= targetLevel - STRIKE_STEP;   // PE: OTM when spot is at resistance
+    const isATM = (s) => s.strike === atmStrike;
+
+    // Tier 1: OTM at trigger price, ₹30-₹90 premium (best for 8pt scalps)
+    // Using the same premium range for both CE and PE ensures symmetric selection
+    // regardless of asymmetric support/resistance distances from ATM.
+    const PREM_MIN = 30;
+    const PREM_MAX = 90;
+    let candidates = strikes
+        .filter((s) => Math.abs(s.strike - targetLevel) <= 300)
+        .filter((s) => isOTM(s))
+        .filter((s) => {
+            const leg = side === 'CE' ? s.ce : s.pe;
+            return leg?.ltp > 0 && leg.ltp >= PREM_MIN && leg.ltp <= PREM_MAX;
+        });
+
+    // Tier 2: ATM strike (if OTM candidates are too expensive)
+    if (!candidates.length || candidates.every(s => {
+        const ltp = (side === 'CE' ? s.ce : s.pe)?.ltp || 0;
+        return ltp > 150;
+    })) {
+        const atm = strikes.find((s) => isATM(s));
+        if (atm) {
+            const leg = side === 'CE' ? atm.ce : atm.pe;
+            if (leg?.ltp > 0 && leg.ltp <= 150) {
+                candidates = [atm, ...candidates.filter(s => s.strike !== atm.strike)];
+            }
+        }
+    }
+
+    // Tier 3: Any strike with cheap premium within 150pts of target
+    if (!candidates.length) {
+        candidates = strikes
+            .filter((s) => Math.abs(s.strike - targetLevel) <= 150)
+            .filter((s) => { const leg = side === 'CE' ? s.ce : s.pe; return leg?.ltp > 0 && leg.ltp <= 120; });
+    }
 
     if (!candidates.length) return null;
 
@@ -342,11 +408,12 @@ class ScalpService {
         const STOP_PTS = 5;
         const setups = [];
 
-        // 1) Support bounce — Buy CE (best momentum strike)
+        // 1) Support bounce — Buy CE (cheap OTM strike near support)
         if (rangeValid && spot - support < rangeWidth * 0.4) {
             const bestCe = findBestStrike(chain, support, 'CE', spot, atmStrike);
-            const entryPrem = round2(bestCe?.ltp || (atmCe?.ltp ? atmCe.ltp - 20 : null));
-            if (entryPrem && entryPrem >= 5) {
+            // Only use strike from findBestStrike (no ATM fallback — it picks ITM)
+            const entryPrem = bestCe?.ltp ? round2(bestCe.ltp) : null;
+            if (entryPrem && entryPrem >= 15 && entryPrem <= 150) {
                 const target = round2(entryPrem + TARGET_PTS);
                 const stop = round2(entryPrem - STOP_PTS);
                 const conf = calcConfidence({
@@ -358,24 +425,25 @@ class ScalpService {
                     setups.push({
                     type: 'BUY CE', emoji: '\uD83D\uDFE2',
                     rank: 'primary',
-                    strike: bestCe?.strike || support,
+                    strike: bestCe.strike,
                     optionType: 'CE',
-                    momentumScore: bestCe?.score || 0,
+                    momentumScore: bestCe.score || 0,
                     trigger: `Spot touches ${fmtNum(support)}`,
                     entry: entryPrem, target, stop, speed: '2-5 min',
                     confidence: conf,
-                    why: `PE OI wall ${formatOi(topPeWall?.pe?.oi)} at ${fmtNum(support)} · Momentum: ${bestCe?.score || 0}/100`,
+                    why: `PE OI wall ${formatOi(topPeWall?.pe?.oi)} at ${fmtNum(support)} · Strike ${fmtNum(bestCe.strike)} CE ₹${entryPrem}`,
                     topPick: conf >= 80,
                     });
                 }
             }
         }
 
-        // 2) Resistance rejection — Buy PE (best momentum strike)
+        // 2) Resistance rejection — Buy PE (cheap OTM strike near resistance)
         if (rangeValid && resistance - spot < rangeWidth * 0.4) {
             const bestPe = findBestStrike(chain, resistance, 'PE', spot, atmStrike);
-            const entryPrem = round2(bestPe?.ltp || (atmPe?.ltp ? atmPe.ltp - 20 : null));
-            if (entryPrem && entryPrem >= 5) {
+            // Only use strike from findBestStrike (no ATM fallback — it picks ITM)
+            const entryPrem = bestPe?.ltp ? round2(bestPe.ltp) : null;
+            if (entryPrem && entryPrem >= 15 && entryPrem <= 150) {
                 const target = round2(entryPrem + TARGET_PTS);
                 const stop = round2(entryPrem - STOP_PTS);
                 const conf = calcConfidence({
@@ -387,13 +455,13 @@ class ScalpService {
                     setups.push({
                     type: 'BUY PE', emoji: '\uD83D\uDD34',
                     rank: 'primary',
-                    strike: bestPe?.strike || resistance,
+                    strike: bestPe.strike,
                     optionType: 'PE',
-                    momentumScore: bestPe?.score || 0,
+                    momentumScore: bestPe.score || 0,
                     trigger: `Spot touches ${fmtNum(resistance)}`,
                     entry: entryPrem, target, stop, speed: '2-5 min',
                     confidence: conf,
-                    why: `CE OI wall ${formatOi(topCeWall?.ce?.oi)} at ${fmtNum(resistance)} · Momentum: ${bestPe?.score || 0}/100`,
+                    why: `CE OI wall ${formatOi(topCeWall?.ce?.oi)} at ${fmtNum(resistance)} · Strike ${fmtNum(bestPe.strike)} PE ₹${entryPrem}`,
                     topPick: conf >= 80,
                     });
                 }
