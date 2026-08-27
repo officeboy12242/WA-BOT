@@ -11,16 +11,16 @@
  * Failsoft: every model can fail (429, timeout, unparsable output). When they
  * all do, verdict() returns null and the card renders exactly like today.
  *
- * Model ladder (all free on OrcaRouter):
- *   1. deepseek/deepseek-v4-pro-free   — reasoning-heavy primary, ~15s typical
- *   2. deepseek/deepseek-v4-flash-free — fast non-reasoning backstop, ~9s typical
+ * Model ladder (free on OrcaRouter):
+ *   1. deepseek/deepseek-v4-flash-free — the only free DeepSeek slug that
+ *      OrcaRouter currently hosts (`pro-free` was retired). Non-reasoning,
+ *      ~9s typical.
  *
  * Override via SVMKR_LLM_MODELS env var (comma-separated).
  *
- * IMPORTANT: v4-pro is a reasoning model — its hidden reasoning tokens count
- * against max_tokens. We give it 4000 so the schema-shaped JSON always has
- * room to land AFTER the reasoning burn (measured: ~580 reasoning + ~80
- * content tokens for a compact verdict). Timeout is 30s to cover cold starts.
+ * max_tokens=4000 leaves headroom for the schema-shaped JSON response and
+ * covers any future reasoning-enabled DeepSeek variant we may add back.
+ * Timeout is 30s to cover cold starts.
  */
 
 import axios from 'axios';
@@ -29,12 +29,11 @@ import { config } from '../config/config.js';
 
 const ORCAROUTER_URL = 'https://api.orcarouter.ai/v1/chat/completions';
 const DEFAULT_MODELS = [
-    'deepseek/deepseek-v4-pro-free',
     'deepseek/deepseek-v4-flash-free',
 ];
-/** Per-model timeout: 2 models × 30s = 60s worst-case latency added to a scan. */
+/** Per-model timeout: 30s covers cold starts. */
 const PER_MODEL_TIMEOUT_MS = 30_000;
-/** Big enough to leave content headroom AFTER the reasoning model burns its budget. */
+/** Big enough to leave content headroom AFTER any hidden reasoning token burn. */
 const MAX_TOKENS = 4_000;
 
 const SYSTEM_PROMPT = `You are a disciplined Indian F&O options trader grading ONE specific SVMKR (UT Bot + HMA + slope) setup card.

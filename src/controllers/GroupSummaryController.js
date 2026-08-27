@@ -196,11 +196,71 @@ class GroupSummaryController {
     }
 
     _hasLlm() {
-        return this.gemini.isConfigured() || this.nvidia.isConfigured() || this.openrouter.isConfigured();
+        return this._orcaConfigured()
+            || this.gemini.isConfigured()
+            || this.nvidia.isConfigured()
+            || this.openrouter.isConfigured();
+    }
+
+    _orcaConfigured() {
+        return Boolean(this.config.ORCAROUTER_API_KEY);
     }
 
     _summaryTimeoutMs() {
         return this.config.GROUP_SUMMARY_LLM_TIMEOUT_MS || this.config.OPENROUTER_TIMEOUT_MS || 90_000;
+    }
+
+    /**
+     * OrcaRouter — free DeepSeek V4 Flash. Primary summary path when configured.
+     * OrcaRouter retired the `pro-free` slug we originally wired up; `flash-free`
+     * is what's actually available now, with 128K context — still enough to
+     * single-shot even a busy group day, so we skip the Gemini/NVIDIA/OpenRouter
+     * map-reduce merge unless OrcaRouter fails outright.
+     */
+    async _summarizeViaOrcaRouter(prompt, opts = {}) {
+        if (!this._orcaConfigured()) throw new Error('OrcaRouter not configured');
+        const model = String(
+            this.config.SUMMARY_ORCAROUTER_MODEL || 'deepseek/deepseek-v4-flash-free'
+        ).trim();
+        const system = opts.system || SUMMARY_FALLBACK_SYSTEM_PROMPT;
+
+        const res = await fetch('https://api.orcarouter.ai/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${this.config.ORCAROUTER_API_KEY}`,
+            },
+            body: JSON.stringify({
+                model,
+                messages: [
+                    { role: 'system', content: system },
+                    { role: 'user', content: prompt },
+                ],
+                temperature: 0.25,
+                // 8K covers the full about+vibe+4-6 topics with quotes+notable+wrap_up+verdict
+                // schema without mid-JSON truncation on a busy day.
+                max_tokens: opts.maxTokens ?? 8000,
+                // DeepSeek reasoning knob — 'low' keeps latency sane while
+                // still letting the model think through the recap structure.
+                reasoning_effort: 'low',
+            }),
+            signal: AbortSignal.timeout(this._summaryTimeoutMs()),
+        });
+        if (!res.ok) {
+            const detail = await res.text().catch(() => '');
+            throw new Error(`OrcaRouter HTTP ${res.status}${detail ? `: ${detail.slice(0, 200)}` : ''}`);
+        }
+        const data = await res.json();
+        const text = data.choices?.[0]?.message?.content || '';
+        if (!text.trim()) throw new Error('OrcaRouter returned empty content');
+
+        const summary = this.nvidia.parseSummaryJson(text);
+        if (!isUsableGroupSummary(summary)) {
+            logger.warn('Group summary: OrcaRouter returned weak/vague topics');
+            return null;
+        }
+        logger.info(`Group summary: OrcaRouter via ${model}`);
+        return summary;
     }
 
     /**
@@ -384,6 +444,24 @@ class GroupSummaryController {
             totalMessages: messages.length,
         };
 
+        // OrcaRouter DeepSeek V4 Pro (1M context) is tried first when configured:
+        // it single-shots even chunk-sized groups so we skip the map-reduce merge
+        // artefacts. Any failure falls through to the Gemini/NVIDIA/OpenRouter chain.
+        if (this._orcaConfigured()) {
+            try {
+                const basePrompt = this.chatLog.buildPrompt(messages, groupName, dateLabel);
+                const prompt = style?.persona ? `${basePrompt}\n\n${style.persona}` : basePrompt;
+                logger.info(
+                    `Group summary via OrcaRouter DeepSeek: ${groupName} — ${messages.length} msgs, ` +
+                        `prompt ${prompt.length} chars${useChunks ? ' [chunk threshold reached — bypassing]' : ''}`
+                );
+                const result = await this._summarizeViaOrcaRouter(prompt);
+                if (result) return result;
+            } catch (err) {
+                logger.warn(`Group summary: OrcaRouter failed for ${groupName}: ${err.message}`);
+            }
+        }
+
         if (useChunks) {
             const rawChunks = this.chatLog.buildChunkPrompts(messages, groupName, dateLabel);
             // Long chats go down this path — without the persona here, big groups
@@ -522,7 +600,7 @@ class GroupSummaryController {
             throw new Error('Recap service not ready');
         }
         if (!this._hasLlm()) {
-            throw new Error('No summary LLM configured (set GEMINI_API_KEY, NVIDIA_API_KEY, or OPENROUTER_API_KEY)');
+            throw new Error('No summary LLM configured (set ORCAROUTER_API_KEY, GEMINI_API_KEY, NVIDIA_API_KEY, or OPENROUTER_API_KEY)');
         }
 
         const groups = await this.groupManager.getSummaryEnabledGroups();
@@ -575,7 +653,7 @@ class GroupSummaryController {
             return;
         }
         if (!this._hasLlm()) {
-            logger.warn('Group summary: no NVIDIA/OpenRouter key, skipping');
+            logger.warn('Group summary: no OrcaRouter/Gemini/NVIDIA/OpenRouter key, skipping');
             return;
         }
 
