@@ -140,6 +140,91 @@ export default class GeminiTradeService {
             .trim();
     }
 
+    /**
+     * Short vision caption for group-recap logging. Fail-soft caller should
+     * fall back to plain [image] on throw.
+     * @param {Buffer} buffer
+     * @param {{ mimeType?: string, caption?: string, model?: string, timeoutMs?: number }} [opts]
+     * @returns {Promise<string>}
+     */
+    async describeImage(buffer, opts = {}) {
+        if (!this.keyPool.size) {
+            throw new Error('GEMINI_API_KEY is not configured');
+        }
+        if (!Buffer.isBuffer(buffer) || buffer.length < 32) {
+            throw new Error('Gemini describeImage: empty image buffer');
+        }
+        // Keep payloads small — WhatsApp photos are usually fine; skip monsters.
+        if (buffer.length > 4 * 1024 * 1024) {
+            throw new Error('Gemini describeImage: image too large (>4MB)');
+        }
+
+        const mimeType = String(opts.mimeType || 'image/jpeg').split(';')[0].trim() || 'image/jpeg';
+        const caption = String(opts.caption || '').trim().slice(0, 200);
+        const model = opts.model || this.tradeModel;
+        const prompt = [
+            'Describe this WhatsApp group-chat image in 1-2 short sentences for a daily recap.',
+            'Be concrete: readable on-screen text, charts/tickers, memes, products, people, documents.',
+            'No preamble, no markdown — just the description.',
+            caption ? `Sender caption: ${caption}` : '',
+        ]
+            .filter(Boolean)
+            .join(' ');
+
+        const body = {
+            contents: [
+                {
+                    role: 'user',
+                    parts: [
+                        { inlineData: { mimeType, data: buffer.toString('base64') } },
+                        { text: prompt },
+                    ],
+                },
+            ],
+            generationConfig: {
+                temperature: 0.2,
+                maxOutputTokens: 120,
+            },
+        };
+
+        let data;
+        let lastErr;
+        for (let attempt = 0; attempt < this.keyPool.size; attempt++) {
+            const key = this.keyPool.next();
+            const url = `${API_ROOT}/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
+            try {
+                ({ data } = await axios.post(url, body, {
+                    timeout: opts.timeoutMs ?? 20_000,
+                    headers: { 'Content-Type': 'application/json' },
+                    validateStatus: (s) => s >= 200 && s < 300,
+                }));
+                lastErr = null;
+                break;
+            } catch (err) {
+                lastErr = err;
+                if (!isGeminiRateLimitError(err)) throw err;
+                this.keyPool.markRateLimited(key);
+                if (attempt < this.keyPool.size - 1) {
+                    logger.warn(`Gemini vision key ${attempt + 1} rate limited — rotating`);
+                }
+            }
+        }
+        if (lastErr) {
+            throw rateLimitError('Gemini rate limit — image describe skipped', lastErr);
+        }
+
+        const parts = data?.candidates?.[0]?.content?.parts || [];
+        const text = parts
+            .map((p) => p?.text || '')
+            .join('')
+            .trim()
+            .replace(/\s+/g, ' ');
+        if (!text) {
+            throw new Error('Gemini describeImage: empty response');
+        }
+        return text.slice(0, 280);
+    }
+
     async _completeWithFallback(systemPrompt, userPrompt, opts = {}) {
         const chain = [...new Set((opts.models || this.models).filter(Boolean))];
         const attempts = [

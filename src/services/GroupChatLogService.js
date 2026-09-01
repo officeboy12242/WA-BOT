@@ -2,14 +2,36 @@
  * Persist member messages per group/day for end-of-day recap.
  */
 
-import { normalizeMessageContent, jidNormalizedUser } from 'baileys';
+import { normalizeMessageContent, jidNormalizedUser, downloadMediaMessage } from 'baileys';
+import pino from 'pino';
 import { logger } from '../utils/logger.js';
 import { getTextFromWAMessage, resolveConversationChatId } from '../utils/waMessage.js';
 import { extractPhoneNumber } from '../utils/permissions.js';
 import { getTodayDateStrIST } from '../utils/dateIST.js';
 import { clampToSentence } from '../utils/summaryText.js';
+import GeminiTradeService from './GeminiTradeService.js';
 
 const REFRESH_MS = 5 * 60_000;
+const baileysLogger = pino({ level: 'silent' });
+/** Logged text with vision can be longer than plain chat lines. */
+const MAX_LOG_TEXT = 700;
+const MAX_VISION_BYTES = 4 * 1024 * 1024;
+const VISION_DOWNLOAD_MS = 25_000;
+
+/**
+ * Combine optional caption + Gemini vision blurb into the stored log line.
+ * @param {string} caption
+ * @param {string} visionDesc
+ */
+export function formatImageLogText(caption, visionDesc) {
+    const c = String(caption || '').trim();
+    const d = String(visionDesc || '')
+        .trim()
+        .replace(/\s+/g, ' ')
+        .slice(0, 280);
+    if (!d) return c || '[image]';
+    return c ? `${c} — [image: ${d}]` : `[image: ${d}]`;
+}
 
 // Chat filler that would otherwise top every frequency count. Hinglish is in
 // here too — these groups mix English and Hindi in the same sentence.
@@ -117,6 +139,7 @@ class GroupChatLogService {
     constructor(mongoDb, groupManager, config = {}) {
         this.mongoDb = mongoDb;
         this.groupManager = groupManager;
+        this.config = config;
         this.maxPerDay = Math.max(50, Number(config.GROUP_SUMMARY_MAX_MESSAGES) || 400);
         // Raised from 100: the summary LLM used to get at most ~60 sampled lines
         // for a 150-message day AND the call layer sliced the prompt at 5000
@@ -127,10 +150,18 @@ class GroupChatLogService {
         this.chunkThreshold = Math.max(80, Number(config.GROUP_SUMMARY_CHUNK_THRESHOLD) || 150);
         this.chunkSize = Math.max(30, Math.min(60, Number(config.GROUP_SUMMARY_CHUNK_SIZE) || 50));
         this.narrative = config.GROUP_SUMMARY_NARRATIVE !== false;
+        this.imageVisionEnabled = config.GROUP_SUMMARY_IMAGE_VISION !== false;
+        this.imageVisionMaxPerDay = Math.max(
+            0,
+            Number(config.GROUP_SUMMARY_IMAGE_VISION_MAX_PER_DAY) || 40
+        );
+        this.gemini = new GeminiTradeService(config);
         /** @type {Set<string>} */
         this._enabledGroups = new Set();
         /** @type {Map<string, number>} in-memory daily counts — avoid countDocuments on every msg */
         this._dayCounts = new Map();
+        /** @type {Map<string, number>} vision calls per group|date */
+        this._visionCounts = new Map();
         this._refreshTimer = null;
         this.collection = null;
     }
@@ -181,13 +212,14 @@ class GroupChatLogService {
      * @param {import('baileys').proto.IWebMessageInfo} msg
      * @param {string} senderJid
      * @param {string} chatId
+     * @param {import('baileys').WASocket} [sock] — needed to download image bytes for vision
      */
-    async maybeLogMessage(msg, senderJid, chatId) {
+    async maybeLogMessage(msg, senderJid, chatId, sock = null) {
         if (!this.collection || !this.isLoggingEnabled(chatId) || msg.key?.fromMe) {
             return;
         }
 
-        const body = describeMessageContent(msg.message);
+        let body = describeMessageContent(msg.message);
         if (!body) {
             return;
         }
@@ -201,6 +233,11 @@ class GroupChatLogService {
         const messageId = msg.key?.id;
         if (!messageId) {
             return;
+        }
+
+        const content = normalizeMessageContent(msg.message);
+        if (content?.imageMessage && sock) {
+            body = await this._enrichImageBody(msg, sock, content.imageMessage, body, storageGroupId, date);
         }
 
         const senderName = (msg.pushName || '').trim() || 'Member';
@@ -234,7 +271,7 @@ class GroupChatLogService {
                         message_id: messageId,
                         sender_name: senderName.slice(0, 64),
                         sender_phone: senderPhone.slice(0, 20),
-                        text: body.slice(0, 500),
+                        text: body.slice(0, MAX_LOG_TEXT),
                         ts,
                         created_at: new Date(),
                     },
@@ -248,6 +285,56 @@ class GroupChatLogService {
             if (err?.code !== 11000) {
                 logger.debug(`Group chat log skip: ${err.message}`);
             }
+        }
+    }
+
+    /**
+     * Download the image once and ask Gemini what it shows. Fail-soft: returns
+     * the original body ([image] / caption) on any error or quota skip.
+     */
+    async _enrichImageBody(msg, sock, imageMessage, body, storageGroupId, date) {
+        if (!this.imageVisionEnabled || this.imageVisionMaxPerDay <= 0) return body;
+        if (!this.gemini.isConfigured()) return body;
+
+        const visionKey = `${storageGroupId}|${date}`;
+        const used = this._visionCounts.get(visionKey) || 0;
+        if (used >= this.imageVisionMaxPerDay) return body;
+
+        try {
+            const buffer = await Promise.race([
+                downloadMediaMessage(
+                    msg,
+                    'buffer',
+                    {},
+                    {
+                        logger: baileysLogger,
+                        reuploadRequest: sock.updateMediaMessage?.bind(sock),
+                    }
+                ),
+                new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error('image download timeout')), VISION_DOWNLOAD_MS)
+                ),
+            ]);
+            if (!Buffer.isBuffer(buffer) || buffer.length < 32 || buffer.length > MAX_VISION_BYTES) {
+                return body;
+            }
+
+            const caption = getTextFromWAMessage(msg).trim();
+            const mimeType = String(imageMessage.mimetype || 'image/jpeg').split(';')[0];
+            const desc = await this.gemini.describeImage(buffer, {
+                mimeType,
+                caption,
+                timeoutMs: 20_000,
+            });
+            this._visionCounts.set(visionKey, used + 1);
+            if (this._visionCounts.size > 200) {
+                const first = this._visionCounts.keys().next().value;
+                if (first !== undefined) this._visionCounts.delete(first);
+            }
+            return formatImageLogText(caption, desc);
+        } catch (err) {
+            logger.debug(`Group chat image vision skipped: ${err.message}`);
+            return body;
         }
     }
 

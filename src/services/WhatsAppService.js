@@ -790,7 +790,9 @@ class WhatsAppService {
         }
 
         if (chatId.endsWith('@g.us') && this.groupChatLogService) {
-            void this.groupChatLogService.maybeLogMessage(msg, senderJid, chatId).catch(() => {});
+            void this.groupChatLogService
+                .maybeLogMessage(msg, senderJid, chatId, this.sock)
+                .catch(() => {});
         }
 
         if (textForUrls.length > 0) {

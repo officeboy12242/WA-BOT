@@ -93,6 +93,11 @@ export const config = {
     /** Min member messages that day before a full recap; below this = short quiet note or skip. */
     GROUP_SUMMARY_MIN_MESSAGES: parseInt(process.env.GROUP_SUMMARY_MIN_MESSAGES, 10) || 3,
     GROUP_SUMMARY_MAX_MESSAGES: parseInt(process.env.GROUP_SUMMARY_MAX_MESSAGES, 10) || 400,
+    /** Describe image contents with Gemini when logging for /summary (needs GEMINI_API_KEY). */
+    GROUP_SUMMARY_IMAGE_VISION: process.env.GROUP_SUMMARY_IMAGE_VISION !== 'false',
+    /** Cap vision calls per group per day so free-tier Gemini quota isn't burned on meme spam. */
+    GROUP_SUMMARY_IMAGE_VISION_MAX_PER_DAY:
+        parseInt(process.env.GROUP_SUMMARY_IMAGE_VISION_MAX_PER_DAY, 10) || 40,
     NVIDIA_API_KEY: process.env.NVIDIA_API_KEY?.trim() || '',
     /** Group summary / recap model */
     NVIDIA_MODEL: process.env.NVIDIA_MODEL?.trim() || 'nvidia/nemotron-3-super-120b-a12b',
