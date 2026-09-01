@@ -50,4 +50,25 @@ const c = await shortener.shorten('https://host.example/a.mkv');
 assert.equal(mintCount, 2, 'expired cache must remint /d/ + TinyURL');
 assert.notEqual(c, a);
 
+// TinyURL failure must NOT fall back to a permanent drive TinyURL.
+let driveTinyCalls = 0;
+const shortener2 = new UrlShortener();
+shortener2.setService({
+    async shorten(longUrl) {
+        return {
+            url: 'https://bot.koyeb.app/d/expiring1',
+            code: 'expiring1',
+            expiresAt: Date.now() + 60_000,
+        };
+    },
+});
+shortener2._toTinyUrl = async (u) => {
+    if (u.includes('/d/')) return null;
+    driveTinyCalls += 1;
+    return 'https://tinyurl.com/permanent-drive';
+};
+const d = await shortener2.shorten('https://drive.example/file.mkv');
+assert.equal(d, 'https://bot.koyeb.app/d/expiring1', 'TinyURL fail → keep expiring /d/ link');
+assert.equal(driveTinyCalls, 0, 'must never TinyURL the raw drive URL');
+
 console.log('OK vault shortlink cache + sanitize');

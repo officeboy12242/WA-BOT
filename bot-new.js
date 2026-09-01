@@ -7,6 +7,7 @@ import { config } from './src/config/config.js';
 import { closeMongo, connectMongo } from './src/db/mongo.js';
 import { logger } from './src/utils/logger.js';
 import AdminPanel from './src/utils/adminPanel.js';
+import { resolvePublicBaseUrl } from './src/utils/publicBaseUrl.js';
 import { botTelemetry } from './src/utils/botTelemetry.js';
 import DatabaseModel from './src/models/Database.js';
 import AuthDatabase from './src/models/AuthDatabase.js';
@@ -167,6 +168,12 @@ class WhatsAppCourseBot {
 
             await shortLinkService.init(mongoDb);
             urlShortener.setService(shortLinkService);
+            const movieLinkBase = resolvePublicBaseUrl() || shortLinkService.getPublicBaseUrl();
+            logger.info(
+                movieLinkBase
+                    ? `🔗 Movie expiring links: ${movieLinkBase}/d/:code (7h TTL)`
+                    : '⚠️ Movie expiring links disabled — no public URL (need KOYEB_PUBLIC_DOMAIN or PUBLIC_URL)',
+            );
             await botTelemetry.init(mongoDb);
             this.jobQueue = await createJobQueue(mongoDb);
             if (this.adminPanel) {

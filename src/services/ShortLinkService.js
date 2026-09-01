@@ -30,12 +30,24 @@ class ShortLinkService {
         const base =
             resolvePublicBaseUrl() ||
             config.PUBLIC_URL ||
-            `http://localhost:${process.env.PORT || 3000}`;
+            (process.env.NODE_ENV === 'production'
+                ? ''
+                : `http://localhost:${process.env.PORT || 3000}`);
+        if (!base) {
+            if (!this._warnedLocalhost) {
+                this._warnedLocalhost = true;
+                logger.warn(
+                    'Movie /d/ links unavailable — set PUBLIC_URL or deploy as a public web service ' +
+                        '(Koyeb injects KOYEB_PUBLIC_DOMAIN)',
+                );
+            }
+            return '';
+        }
         if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(base) && !this._warnedLocalhost) {
             this._warnedLocalhost = true;
             logger.warn(
                 'Movie short links using localhost — waiting for KOYEB_PUBLIC_DOMAIN / RENDER_EXTERNAL_URL ' +
-                    'or an inbound public request to learn the host'
+                    'or an inbound public request to learn the host',
             );
         }
         return String(base).replace(/\/$/, '');
@@ -54,6 +66,11 @@ class ShortLinkService {
      * @returns {{ url: string, code: string, expiresAt: number }}
      */
     async shorten(longUrl) {
+        const base = this.getPublicBaseUrl();
+        if (!base) {
+            throw new Error('Public base URL not ready for expiring movie links');
+        }
+
         const now = new Date();
         const reuseAfter = new Date(now.getTime() + MIN_REUSE_REMAINING_MS);
         const existing = await this.collection.findOne({
@@ -62,7 +79,7 @@ class ShortLinkService {
         });
         if (existing) {
             return {
-                url: `${this.getPublicBaseUrl()}/d/${existing.code}`,
+                url: `${base}/d/${existing.code}`,
                 code: existing.code,
                 expiresAt: new Date(existing.expires_at).getTime(),
             };
@@ -78,7 +95,7 @@ class ShortLinkService {
         });
 
         return {
-            url: `${this.getPublicBaseUrl()}/d/${code}`,
+            url: `${base}/d/${code}`,
             code,
             expiresAt: expiresAt.getTime(),
         };

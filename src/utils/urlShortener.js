@@ -79,6 +79,10 @@ class UrlShortener {
         return null;
     }
 
+    _isExpiringLink(link, original) {
+        return typeof link === 'string' && link !== original && /\/d\/[A-Za-z0-9_-]+/.test(link);
+    }
+
     async shorten(url) {
         if (!this.needsShortening(url)) return url;
 
@@ -89,41 +93,42 @@ class UrlShortener {
         if (cached) this._cache.delete(url);
 
         let shortMeta = null;
-        const work = (async () => {
-            let expiringLink = url;
-            if (this._service) {
-                try {
-                    const minted = await this._service.shorten(url);
-                    if (typeof minted === 'string') {
-                        expiringLink = minted;
-                    } else if (minted?.url) {
-                        expiringLink = minted.url;
-                        shortMeta = minted;
-                    }
-                } catch (err) {
-                    logger.warn(`Expiring link failed: ${err.message}`);
+        let expiringLink = url;
+        if (this._service) {
+            try {
+                const minted = await this._service.shorten(url);
+                if (typeof minted === 'string') {
+                    expiringLink = minted;
+                } else if (minted?.url) {
+                    expiringLink = minted.url;
+                    shortMeta = minted;
                 }
+            } catch (err) {
+                logger.warn(`Expiring link failed: ${err.message}`);
             }
+        }
 
-            let tiny = await this._toTinyUrl(expiringLink);
-            if (!tiny && expiringLink !== url) {
-                tiny = await this._toTinyUrl(url);
-            }
+        const hasExpiring = this._isExpiringLink(expiringLink, url);
+        if (!hasExpiring) {
+            logger.warn(
+                `No expiring /d/ link for ${url.slice(0, 60)}… — check KOYEB_PUBLIC_DOMAIN / PUBLIC_URL`,
+            );
+            return url;
+        }
 
-            return tiny || expiringLink;
-        })();
-
-        let finalUrl = url;
+        let finalUrl = expiringLink;
         try {
-            finalUrl = await Promise.race([
-                work,
+            const tiny = await Promise.race([
+                this._toTinyUrl(expiringLink),
                 new Promise((_, reject) =>
-                    setTimeout(() => reject(new Error('shorten timeout')), PER_LINK_SHORTEN_MS),
+                    setTimeout(() => reject(new Error('TinyURL timeout')), PER_LINK_SHORTEN_MS),
                 ),
             ]);
+            if (tiny) finalUrl = tiny;
         } catch (err) {
-            logger.warn(`Shorten skipped for ${url.slice(0, 60)}…: ${err.message}`);
-            finalUrl = url;
+            logger.warn(
+                `TinyURL skipped for ${expiringLink.slice(0, 60)}…: ${err.message} — using /d/ link`,
+            );
         }
 
         // Only cache when we actually minted an expiring short link.
