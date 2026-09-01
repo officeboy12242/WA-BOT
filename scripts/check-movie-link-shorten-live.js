@@ -25,8 +25,7 @@ delete process.env.RENDER_EXTERNAL_URL;
 
 const base = await bootstrapMovieLinkPublicBase();
 assert.ok(base, 'movie link base should resolve on Koyeb');
-assert.match(base, /onrender\.com$/i, 'Koyeb should route /d/ through Render for TinyURL');
-assert.doesNotMatch(base, /koyeb\.app$/i, 'must not mint /d/ on blocked koyeb host');
+assert.match(base, /koyeb\.app$/i, 'Koyeb should mint /d/ on native koyeb host');
 
 const db = await connectMongo({ uri: config.MONGODB_URI, dbName: config.MONGODB_DB_NAME });
 await shortLinkService.init(db);

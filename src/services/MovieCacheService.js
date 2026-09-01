@@ -29,7 +29,7 @@ function linkKey(link) {
 /** Display shorts + /d/ codes expire — never persist them in the vault. */
 export function isEphemeralDisplayUrl(url) {
     const u = String(url || '');
-    if (/(?:tinyurl\.com|is\.gd|v\.gd)\//i.test(u)) return true;
+    if (/(?:tinyurl\.com|zip1\.io|clck\.ru|is\.gd|v\.gd)\//i.test(u)) return true;
     if (/\/d\/[A-Za-z0-9_-]+/i.test(u)) return true;
     return false;
 }

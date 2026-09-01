@@ -48,15 +48,22 @@ assert.equal(
 );
 
 _resetLearnedPublicBaseForTests();
-_setRenderMovieLinkBaseForTests('https://whatsappcoursebot.onrender.com');
 assert.equal(
     resolveMovieLinkPublicBase({
         PUBLIC_URL: '',
         RENDER_EXTERNAL_URL: '',
         KOYEB_PUBLIC_DOMAIN: 'my-app-org-hash.koyeb.app',
     }),
+    'https://my-app-org-hash.koyeb.app',
+    'Koyeb movie links use native koyeb host (zip1.io/clck.ru for display)'
+);
+
+_resetLearnedPublicBaseForTests();
+_setRenderMovieLinkBaseForTests('https://whatsappcoursebot.onrender.com');
+assert.equal(
+    resolveMovieLinkPublicBase({ PUBLIC_URL: '', RENDER_EXTERNAL_URL: '', KOYEB_PUBLIC_DOMAIN: '' }),
     'https://whatsappcoursebot.onrender.com',
-    'Koyeb movie links use cached Render base'
+    'Render bootstrap fallback when no public URL yet'
 );
 assert.equal(
     resolveMovieLinkPublicBase({

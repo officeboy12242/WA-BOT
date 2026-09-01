@@ -1,17 +1,17 @@
 /**
  * Expiring movie links: self-hosted /d/:code (7h TTL) → display shortener.
- * TinyURL works for Render /d/ URLs; Koyeb .koyeb.app is blocked (HTTP 400) → is.gd/v.gd fallback.
- * Memory cache must die before /d/ codes — otherwise vault hits reuse dead display shorts.
+ * TinyURL works on Render; Koyeb *.koyeb.app → zip1.io / clck.ru (TinyURL returns 400).
  */
 
 import https from 'https';
 import { logger } from './logger.js';
+import { isTinyUrlBlockedHost } from './publicBaseUrl.js';
 import { LINK_TTL_MS } from '../services/ShortLinkService.js';
 
-const TINYURL_TIMEOUT_MS = 3500;
+const SHORTENER_TIMEOUT_MS = 3500;
 const PER_LINK_SHORTEN_MS = 8000;
 /** Hosts we wrap /d/ links with for WhatsApp display (all still expire via /d/ TTL). */
-export const DISPLAY_SHORT_RE = /(?:tinyurl\.com|is\.gd|v\.gd)\//i;
+export const DISPLAY_SHORT_RE = /(?:tinyurl\.com|zip1\.io|clck\.ru|is\.gd|v\.gd)\//i;
 
 const DISPLAY_SHORTENERS = [
     {
@@ -19,6 +19,27 @@ const DISPLAY_SHORTENERS = [
         build: (u) => `https://tinyurl.com/api-create.php?url=${encodeURIComponent(u)}`,
         ok: (status, data) => status === 200 && data.startsWith('https://tinyurl.com/'),
         attempts: 2,
+    },
+    {
+        name: 'zip1.io',
+        post: true,
+        url: 'https://zip1.io/api/create',
+        parse: (status, raw) => {
+            if (status !== 200) return null;
+            try {
+                const short = JSON.parse(raw)?.short_url;
+                return typeof short === 'string' && short.startsWith('https://zip1.io/') ? short : null;
+            } catch {
+                return null;
+            }
+        },
+        attempts: 1,
+    },
+    {
+        name: 'clck.ru',
+        build: (u) => `https://clck.ru/--?url=${encodeURIComponent(u)}`,
+        ok: (status, data) => status === 200 && /^https:\/\/clck\.ru\/\S+/.test(data),
+        attempts: 1,
     },
     {
         name: 'is.gd',
@@ -71,7 +92,7 @@ class UrlShortener {
                 },
             );
             req.on('error', reject);
-            req.setTimeout(TINYURL_TIMEOUT_MS, () => {
+            req.setTimeout(SHORTENER_TIMEOUT_MS, () => {
                 req.destroy();
                 reject(new Error('shortener timeout'));
             });
@@ -79,16 +100,35 @@ class UrlShortener {
         });
     }
 
+    async _callDisplayShortener(provider, targetUrl) {
+        if (provider.post) {
+            const res = await fetch(provider.url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url: targetUrl }),
+                signal: AbortSignal.timeout(SHORTENER_TIMEOUT_MS),
+            });
+            const raw = (await res.text()).trim();
+            const url = provider.parse(res.status, raw);
+            if (url) return url;
+            throw new Error(`${provider.name} HTTP ${res.status}`);
+        }
+
+        const { status, data } = await this._fetchShortenerApi(provider.build(targetUrl));
+        if (provider.ok(status, data)) return data;
+        throw new Error(`${provider.name} HTTP ${status}`);
+    }
+
     async _toDisplayShortUrl(url) {
+        const chain = isTinyUrlBlockedHost(url)
+            ? DISPLAY_SHORTENERS.filter((p) => p.name !== 'TinyURL')
+            : DISPLAY_SHORTENERS;
+
         let lastErr = null;
-        for (const provider of DISPLAY_SHORTENERS) {
+        for (const provider of chain) {
             for (let i = 0; i < provider.attempts; i++) {
                 try {
-                    const { status, data } = await this._fetchShortenerApi(provider.build(url));
-                    if (provider.ok(status, data)) {
-                        return data;
-                    }
-                    lastErr = new Error(`${provider.name} HTTP ${status}`);
+                    return await this._callDisplayShortener(provider, url);
                 } catch (err) {
                     lastErr = err;
                     if (i < provider.attempts - 1) {
@@ -97,9 +137,7 @@ class UrlShortener {
                 }
             }
             if (lastErr) {
-                logger.warn(
-                    `${provider.name} failed for ${url.slice(0, 60)}…: ${lastErr.message}`,
-                );
+                logger.warn(`${provider.name} failed for ${url.slice(0, 60)}…: ${lastErr.message}`);
             }
         }
         return null;

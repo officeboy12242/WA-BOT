@@ -56,35 +56,24 @@ export function resolvePublicBaseUrl(env = process.env) {
 }
 
 /**
- * Public base for expiring movie /d/:code links.
- * On Koyeb, TinyURL blocks *.koyeb.app — prefer Render URL (same MongoDB /d/ handler).
+ * Public base for expiring movie /d/:code links (native Koyeb/Render host).
+ * Render bootstrap is only a fallback when no public URL is known yet.
  */
 export function resolveMovieLinkPublicBase(env = process.env) {
     const override = stripSlash(env.MOVIE_LINK_PUBLIC_URL || '');
     if (override) return override;
 
-    const render = stripSlash(env.RENDER_EXTERNAL_URL || '');
-    if (render) return render;
-
     const publicBase = resolvePublicBaseUrl(env);
-    if (publicBase && !isTinyUrlBlockedHost(publicBase)) {
-        return publicBase;
-    }
+    if (publicBase) return publicBase;
 
-    if (cachedRenderMovieBase) return cachedRenderMovieBase;
-
-    return publicBase || '';
+    return cachedRenderMovieBase || '';
 }
 
 /**
- * On Koyeb: fetch Render service URL so /d/ + TinyURL work like before.
- * No-op when MOVIE_LINK_PUBLIC_URL / RENDER_EXTERNAL_URL already set.
+ * Fallback: fetch Render service URL when Koyeb has no public domain at boot.
  */
 export async function bootstrapMovieLinkPublicBase(env = process.env) {
-    if (stripSlash(env.MOVIE_LINK_PUBLIC_URL || env.RENDER_EXTERNAL_URL || '')) {
-        return resolveMovieLinkPublicBase(env);
-    }
-    if (!normalizeDomain(env.KOYEB_PUBLIC_DOMAIN)) return resolveMovieLinkPublicBase(env);
+    if (resolveMovieLinkPublicBase(env)) return resolveMovieLinkPublicBase(env);
 
     const apiKey = env.RENDER_API_KEY?.trim();
     const serviceId = env.RENDER_SERVICE_ID?.trim();
