@@ -7,7 +7,7 @@ import { config } from './src/config/config.js';
 import { closeMongo, connectMongo } from './src/db/mongo.js';
 import { logger } from './src/utils/logger.js';
 import AdminPanel from './src/utils/adminPanel.js';
-import { resolvePublicBaseUrl } from './src/utils/publicBaseUrl.js';
+import { bootstrapMovieLinkPublicBase, resolveMovieLinkPublicBase } from './src/utils/publicBaseUrl.js';
 import { botTelemetry } from './src/utils/botTelemetry.js';
 import DatabaseModel from './src/models/Database.js';
 import AuthDatabase from './src/models/AuthDatabase.js';
@@ -166,9 +166,10 @@ class WhatsAppCourseBot {
             await this.groupManager.initPremium();
             await this.groupManager.initDynamicModerators();
 
+            await bootstrapMovieLinkPublicBase();
             await shortLinkService.init(mongoDb);
             urlShortener.setService(shortLinkService);
-            const movieLinkBase = resolvePublicBaseUrl() || shortLinkService.getPublicBaseUrl();
+            const movieLinkBase = resolveMovieLinkPublicBase() || shortLinkService.getPublicBaseUrl();
             logger.info(
                 movieLinkBase
                     ? `🔗 Movie expiring links: ${movieLinkBase}/d/:code (7h TTL)`

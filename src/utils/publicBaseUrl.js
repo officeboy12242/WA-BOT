@@ -12,9 +12,22 @@
 
 /** @type {string} */
 let learnedPublicBase = '';
+/** Render /d/ base when Koyeb host is blocked by TinyURL (shared MongoDB). */
+let cachedRenderMovieBase = '';
+
+/** TinyURL returns HTTP 400 for these — mint /d/ on Render instead. */
+const TINYURL_BLOCKED_HOST_RE = /\.koyeb\.app$/i;
 
 function stripSlash(s) {
     return String(s || '').trim().replace(/\/$/, '');
+}
+
+export function isTinyUrlBlockedHost(baseUrl) {
+    try {
+        return TINYURL_BLOCKED_HOST_RE.test(new URL(baseUrl).hostname);
+    } catch {
+        return false;
+    }
 }
 
 function normalizeDomain(raw) {
@@ -43,6 +56,62 @@ export function resolvePublicBaseUrl(env = process.env) {
 }
 
 /**
+ * Public base for expiring movie /d/:code links.
+ * On Koyeb, TinyURL blocks *.koyeb.app — prefer Render URL (same MongoDB /d/ handler).
+ */
+export function resolveMovieLinkPublicBase(env = process.env) {
+    const override = stripSlash(env.MOVIE_LINK_PUBLIC_URL || '');
+    if (override) return override;
+
+    const render = stripSlash(env.RENDER_EXTERNAL_URL || '');
+    if (render) return render;
+
+    const publicBase = resolvePublicBaseUrl(env);
+    if (publicBase && !isTinyUrlBlockedHost(publicBase)) {
+        return publicBase;
+    }
+
+    if (cachedRenderMovieBase) return cachedRenderMovieBase;
+
+    return publicBase || '';
+}
+
+/**
+ * On Koyeb: fetch Render service URL so /d/ + TinyURL work like before.
+ * No-op when MOVIE_LINK_PUBLIC_URL / RENDER_EXTERNAL_URL already set.
+ */
+export async function bootstrapMovieLinkPublicBase(env = process.env) {
+    if (stripSlash(env.MOVIE_LINK_PUBLIC_URL || env.RENDER_EXTERNAL_URL || '')) {
+        return resolveMovieLinkPublicBase(env);
+    }
+    if (!normalizeDomain(env.KOYEB_PUBLIC_DOMAIN)) return resolveMovieLinkPublicBase(env);
+
+    const apiKey = env.RENDER_API_KEY?.trim();
+    const serviceId = env.RENDER_SERVICE_ID?.trim();
+    if (!apiKey || !serviceId) return resolveMovieLinkPublicBase(env);
+
+    try {
+        const res = await fetch(`https://api.render.com/v1/services/${serviceId}`, {
+            headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
+        });
+        if (!res.ok) return resolveMovieLinkPublicBase(env);
+        const svc = await res.json();
+        const url = stripSlash(svc?.serviceDetails?.url || '');
+        if (url && !isTinyUrlBlockedHost(url)) {
+            cachedRenderMovieBase = url;
+        }
+    } catch {
+        // ponytail: Render API optional — MOVIE_LINK_PUBLIC_URL still works
+    }
+    return resolveMovieLinkPublicBase(env);
+}
+
+/** @internal test helper */
+export function _setRenderMovieLinkBaseForTests(url) {
+    cachedRenderMovieBase = stripSlash(url);
+}
+
+/**
  * Remember the public host from an inbound HTTP request (Koyeb/Render proxy).
  * Safe no-op for localhost / internal hosts.
  * @param {import('http').IncomingMessage} req
@@ -65,4 +134,5 @@ export function learnPublicBaseFromRequest(req) {
 /** @internal test helper */
 export function _resetLearnedPublicBaseForTests() {
     learnedPublicBase = '';
+    cachedRenderMovieBase = '';
 }

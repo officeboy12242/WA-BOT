@@ -5,8 +5,10 @@
 import assert from 'node:assert/strict';
 import {
     resolvePublicBaseUrl,
+    resolveMovieLinkPublicBase,
     learnPublicBaseFromRequest,
     _resetLearnedPublicBaseForTests,
+    _setRenderMovieLinkBaseForTests,
 } from '../src/utils/publicBaseUrl.js';
 
 _resetLearnedPublicBaseForTests();
@@ -43,6 +45,26 @@ assert.equal(
     resolvePublicBaseUrl({ PUBLIC_URL: '', RENDER_EXTERNAL_URL: '', KOYEB_PUBLIC_DOMAIN: '' }),
     '',
     'empty when nothing injected yet'
+);
+
+_resetLearnedPublicBaseForTests();
+_setRenderMovieLinkBaseForTests('https://whatsappcoursebot.onrender.com');
+assert.equal(
+    resolveMovieLinkPublicBase({
+        PUBLIC_URL: '',
+        RENDER_EXTERNAL_URL: '',
+        KOYEB_PUBLIC_DOMAIN: 'my-app-org-hash.koyeb.app',
+    }),
+    'https://whatsappcoursebot.onrender.com',
+    'Koyeb movie links use cached Render base'
+);
+assert.equal(
+    resolveMovieLinkPublicBase({
+        MOVIE_LINK_PUBLIC_URL: 'https://links.example.com',
+        KOYEB_PUBLIC_DOMAIN: 'my-app-org-hash.koyeb.app',
+    }),
+    'https://links.example.com',
+    'MOVIE_LINK_PUBLIC_URL override wins'
 );
 
 _resetLearnedPublicBaseForTests();

@@ -5,7 +5,7 @@
 import crypto from 'crypto';
 import { config } from '../config/config.js';
 import { logger } from '../utils/logger.js';
-import { resolvePublicBaseUrl } from '../utils/publicBaseUrl.js';
+import { resolveMovieLinkPublicBase } from '../utils/publicBaseUrl.js';
 
 /** Public so UrlShortener can align its memory cache under this TTL. */
 export const LINK_TTL_MS = 7 * 60 * 60 * 1000; // 7 hours
@@ -26,9 +26,9 @@ class ShortLinkService {
     }
 
     getPublicBaseUrl() {
-        // Resolve at call time so Koyeb/Render injected vars + learned Host are live.
+        // Koyeb .koyeb.app is blocked by TinyURL — resolveMovieLinkPublicBase uses Render when needed.
         const base =
-            resolvePublicBaseUrl() ||
+            resolveMovieLinkPublicBase() ||
             config.PUBLIC_URL ||
             (process.env.NODE_ENV === 'production'
                 ? ''
