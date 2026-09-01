@@ -72,7 +72,7 @@ Copy [`.env.example`](.env.example) → `.env`. Important variables:
 | `GEMINI_API_KEY` / `GROQ_API_KEY` / `NVIDIA_API_KEY` / `OPENROUTER_API_KEY` | LLM features (trade, summary, assist, heal) |
 | `ASSIST_OWNER_NAME` / `ASSIST_OWNER_ABOUT` | DM assist persona + bio |
 | `ADMIN_TOKEN` | Web admin panel (`/admin?token=…`) |
-| `PUBLIC_URL` | Movie short-link base (Render sets `RENDER_EXTERNAL_URL`) |
+| `PUBLIC_URL` | Optional custom domain for movie short links (auto on Render/Koyeb) |
 
 Full list and comments: **`.env.example`**. Deploy notes: **[DEPLOY.md](DEPLOY.md)** (Render) / **[DEPLOY_KOYEB.md](DEPLOY_KOYEB.md)** (Koyeb — free tier, never sleeps) / **[QUICKSTART_RENDER.md](QUICKSTART_RENDER.md)**.
 

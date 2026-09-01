@@ -5,6 +5,7 @@
 import crypto from 'crypto';
 import { config } from '../config/config.js';
 import { logger } from '../utils/logger.js';
+import { resolvePublicBaseUrl } from '../utils/publicBaseUrl.js';
 
 /** Public so UrlShortener can align its memory cache under this TTL. */
 export const LINK_TTL_MS = 7 * 60 * 60 * 1000; // 7 hours
@@ -14,6 +15,7 @@ const MIN_REUSE_REMAINING_MS = 60 * 60 * 1000; // 1 hour
 class ShortLinkService {
     constructor() {
         this.collection = null;
+        this._warnedLocalhost = false;
     }
 
     async init(mongoDb) {
@@ -24,8 +26,19 @@ class ShortLinkService {
     }
 
     getPublicBaseUrl() {
-        const base = config.PUBLIC_URL || `http://localhost:${process.env.PORT || 3000}`;
-        return base.replace(/\/$/, '');
+        // Resolve at call time so Koyeb/Render injected vars + learned Host are live.
+        const base =
+            resolvePublicBaseUrl() ||
+            config.PUBLIC_URL ||
+            `http://localhost:${process.env.PORT || 3000}`;
+        if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(base) && !this._warnedLocalhost) {
+            this._warnedLocalhost = true;
+            logger.warn(
+                'Movie short links using localhost — waiting for KOYEB_PUBLIC_DOMAIN / RENDER_EXTERNAL_URL ' +
+                    'or an inbound public request to learn the host'
+            );
+        }
+        return String(base).replace(/\/$/, '');
     }
 
     async _generateCode() {

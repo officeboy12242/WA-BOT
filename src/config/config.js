@@ -5,6 +5,7 @@
 
 import dotenv from 'dotenv';
 import { normalizeDiscoverySource, DEFAULT_DISCOVERY_SOURCE } from '../utils/discoverySource.js';
+import { resolvePublicBaseUrl } from '../utils/publicBaseUrl.js';
 
 dotenv.config();
 
@@ -553,8 +554,8 @@ export const config = {
         50,
         parseInt(process.env.INTERVIEW_Q_DEDUP_LOOKBACK, 10) || 200
     ),
-    /** Public URL for short links (Render sets RENDER_EXTERNAL_URL automatically). */
-    PUBLIC_URL: (process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || '').replace(/\/$/, ''),
+    /** Public base for movie /d/:code links — auto from Render/Koyeb; PUBLIC_URL optional. */
+    PUBLIC_URL: resolvePublicBaseUrl(),
     RENDER_API_KEY: process.env.RENDER_API_KEY?.trim() || '',
     RENDER_SERVICE_ID: process.env.RENDER_SERVICE_ID?.trim() || '',
     KOYEB_API_KEY: process.env.KOYEB_API_KEY?.trim() || '',

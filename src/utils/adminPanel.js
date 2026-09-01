@@ -12,6 +12,7 @@ import { logger } from './logger.js';
 import { botTelemetry } from './botTelemetry.js';
 import { getCyberDashboardHtml } from '../dashboard/cyberGirlyDashboard.js';
 import DashboardService from '../services/DashboardService.js';
+import { learnPublicBaseFromRequest } from './publicBaseUrl.js';
 
 /**
  * Get comprehensive system metrics
@@ -569,6 +570,10 @@ class AdminPanel {
 
     start() {
         this.server = http.createServer(async (req, res) => {
+            // Remember public Host from Koyeb/Render proxy so movie /d/ links
+            // don't need a PUBLIC_URL env var.
+            learnPublicBaseFromRequest(req);
+
             const url = new URL(req.url, `http://localhost:${this.port}`);
             const pathname = url.pathname;
 

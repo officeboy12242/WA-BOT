@@ -216,6 +216,10 @@ All variables from `.env.example` work. Key ones to set:
 - Redeploy the service
 - New QR will appear in logs
 
+**Movie links show `localhost:8000/d/…`:**
+- Bot auto-uses Koyeb's injected `KOYEB_PUBLIC_DOMAIN` — redeploy so that code is live
+- Confirm the service is a **public web** service (port exposed), not private-only
+
 **Bot disconnects:**
 - Check WhatsApp session expiry
 - Rescan QR code
