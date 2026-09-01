@@ -175,6 +175,11 @@ class WhatsAppCourseBot {
                     ? `🔗 Movie expiring links: ${movieLinkBase}/d/:code (7h TTL)`
                     : '⚠️ Movie expiring links disabled — no public URL (need KOYEB_PUBLIC_DOMAIN or PUBLIC_URL)',
             );
+            if (config.UNIVEST_PICK_GROUPS?.length) {
+                logger.info(
+                    `📈 Univest pick webhook: POST /api/univest/pick → ${config.UNIVEST_PICK_GROUPS.length} group(s)`,
+                );
+            }
             await botTelemetry.init(mongoDb);
             this.jobQueue = await createJobQueue(mongoDb);
             if (this.adminPanel) {

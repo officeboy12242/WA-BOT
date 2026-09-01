@@ -561,6 +561,15 @@ export const config = {
     ),
     /** Public base for movie /d/:code links — auto from Render/Koyeb; PUBLIC_URL optional. */
     PUBLIC_URL: resolvePublicBaseUrl(),
+
+    /** Univest research pick webhook → WhatsApp (your Univest backend POSTs picks here). */
+    UNIVEST_WEBHOOK_ENABLED: process.env.UNIVEST_WEBHOOK_ENABLED !== 'false',
+    UNIVEST_WEBHOOK_TOKEN: process.env.UNIVEST_WEBHOOK_TOKEN?.trim() || '',
+    UNIVEST_PICK_GROUPS: (process.env.UNIVEST_PICK_GROUPS || '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean),
+
     RENDER_API_KEY: process.env.RENDER_API_KEY?.trim() || '',
     RENDER_SERVICE_ID: process.env.RENDER_SERVICE_ID?.trim() || '',
     KOYEB_API_KEY: process.env.KOYEB_API_KEY?.trim() || '',

@@ -13,6 +13,7 @@ import { botTelemetry } from './botTelemetry.js';
 import { getCyberDashboardHtml } from '../dashboard/cyberGirlyDashboard.js';
 import DashboardService from '../services/DashboardService.js';
 import { learnPublicBaseFromRequest } from './publicBaseUrl.js';
+import { univestPickRelay } from '../services/UnivestPickRelay.js';
 
 /**
  * Get comprehensive system metrics
@@ -294,6 +295,39 @@ class AdminPanel {
         const url = new URL(req.url, `http://localhost:${this.port}`);
         const token = url.searchParams.get('token');
         return token === this.adminToken;
+    }
+
+    _verifyWebhookToken(req) {
+        const url = new URL(req.url, `http://localhost:${this.port}`);
+        const q = url.searchParams.get('token');
+        if (q === this.adminToken) return true;
+        const hook = process.env.UNIVEST_WEBHOOK_TOKEN?.trim();
+        if (hook && q === hook) return true;
+        const auth = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+        if (auth && (auth === this.adminToken || (hook && auth === hook))) return true;
+        return false;
+    }
+
+    _readJsonBody(req, maxBytes = 64_000) {
+        return new Promise((resolve, reject) => {
+            let raw = '';
+            req.on('data', (chunk) => {
+                raw += chunk;
+                if (raw.length > maxBytes) {
+                    reject(new Error('body too large'));
+                    req.destroy();
+                }
+            });
+            req.on('end', () => {
+                if (!raw.trim()) return resolve(null);
+                try {
+                    resolve(JSON.parse(raw));
+                } catch (err) {
+                    reject(new Error('invalid JSON'));
+                }
+            });
+            req.on('error', reject);
+        });
     }
 
     _getAdminHTML() {
@@ -799,6 +833,26 @@ class AdminPanel {
                     uptime: process.uptime(),
                     system: metrics.summary || {}
                 }));
+                return;
+            }
+
+            // Univest research pick webhook (your backend POSTs new picks here)
+            if (pathname === '/api/univest/pick' && req.method === 'POST') {
+                if (!this._verifyWebhookToken(req)) {
+                    res.writeHead(401, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Unauthorized' }));
+                    return;
+                }
+                try {
+                    const body = await this._readJsonBody(req);
+                    const sock = this.whatsappService?.getSock?.() || this.whatsappService?.sock;
+                    const result = await univestPickRelay.relay(sock, body);
+                    res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify(result));
+                } catch (err) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: false, error: err.message }));
+                }
                 return;
             }
 
