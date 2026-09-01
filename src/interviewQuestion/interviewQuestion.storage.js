@@ -20,6 +20,7 @@ class InterviewQuestionStore {
             this.col.createIndex({ status: 1, answer_due_at: 1 }, { name: 'iq_pending_answers' }),
             this.col.createIndex({ created_at: 1 }, { name: 'iq_created_at' }),
             this.col.createIndex({ question_fp: 1, created_at: -1 }, { name: 'iq_question_fp' }),
+            this.col.createIndex({ poll_message_id: 1 }, { name: 'iq_poll_message_id' }),
         ]);
         logger.info('Mongo interview question store ready');
     }
@@ -130,7 +131,60 @@ class InterviewQuestionStore {
             .toArray();
     }
 
-    async markQuestionPosted(id, { pollMessageId, pollMessageKey, questionPostedAt, answerDueAt }) {
+    async findByPollMessageId(pollMessageId) {
+        if (!pollMessageId) return null;
+        return this.col.findOne({ poll_message_id: String(pollMessageId) });
+    }
+
+    /**
+     * Upsert one voter's choice on a live poll (overwrite if they change vote).
+     * @param {import('mongodb').ObjectId|string} id
+     * @param {{ voter_jid: string, voter_phone?: string, voter_name?: string, option: string, voted_at?: Date }} vote
+     */
+    async upsertVote(id, vote) {
+        if (!id || !vote?.voter_jid || !vote?.option) return { ok: false };
+        const _id = typeof id === 'string' ? new ObjectId(id) : id;
+        const payload = {
+            voter_jid: String(vote.voter_jid).slice(0, 80),
+            voter_phone: String(vote.voter_phone || '').slice(0, 20),
+            voter_name: String(vote.voter_name || 'Member').slice(0, 64),
+            option: String(vote.option).toUpperCase().slice(0, 1),
+            voted_at: vote.voted_at || new Date(),
+        };
+
+        const updated = await this.col.updateOne(
+            { _id, 'votes.voter_jid': payload.voter_jid },
+            {
+                $set: {
+                    'votes.$.voter_phone': payload.voter_phone,
+                    'votes.$.voter_name': payload.voter_name,
+                    'votes.$.option': payload.option,
+                    'votes.$.voted_at': payload.voted_at,
+                    updated_at: new Date(),
+                },
+            }
+        );
+        if (updated.matchedCount) return { ok: true, updated: true };
+
+        await this.col.updateOne(
+            { _id },
+            {
+                $push: { votes: payload },
+                $set: { updated_at: new Date() },
+            }
+        );
+        return { ok: true, updated: false };
+    }
+
+    async markQuestionPosted(id, {
+        pollMessageId,
+        pollMessageKey,
+        questionPostedAt,
+        answerDueAt,
+        pollEncKeyB64,
+        pollOptionNames,
+        pollCreatorJid,
+    }) {
         await this.col.updateOne(
             { _id: id },
             {
@@ -138,6 +192,10 @@ class InterviewQuestionStore {
                     status: 'question_posted',
                     poll_message_id: pollMessageId || '',
                     poll_message_key: pollMessageKey || null,
+                    poll_enc_key: pollEncKeyB64 || '',
+                    poll_option_names: Array.isArray(pollOptionNames) ? pollOptionNames : [],
+                    poll_creator_jid: pollCreatorJid || '',
+                    votes: [],
                     question_posted_at: questionPostedAt || new Date(),
                     answer_due_at: answerDueAt,
                     updated_at: new Date(),

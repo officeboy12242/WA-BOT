@@ -125,6 +125,7 @@ import {
     handleInterviewQ,
     handleInterviewQOn,
     handleInterviewQOff,
+    handleInterviewQBoard,
 } from '../interviewQuestion/interviewQuestion.commands.js';
 
 /**
@@ -521,6 +522,7 @@ export const COMMAND_HANDLERS = {
     interviewqon: ({ sock, chatId, senderJid, ctx }) => handleInterviewQOn(sock, chatId, senderJid, ctx),
     interviewqoff: ({ sock, chatId, senderJid, ctx }) => handleInterviewQOff(sock, chatId, senderJid, ctx),
     interviewq: ({ sock, chatId, senderJid, args, ctx }) => handleInterviewQ(sock, chatId, senderJid, args, ctx),
+    iqboard: ({ sock, chatId, senderJid, ctx }) => handleInterviewQBoard(sock, chatId, senderJid, ctx),
     groups: ({ sock, chatId, senderJid, ctx }) => handleGroups(sock, chatId, senderJid, ctx),
     setwc: ({ sock, chatId, senderJid, fullCommand, ctx }) => handleSetWelcome(sock, chatId, senderJid, fullCommand, ctx),
     link: ({ sock, chatId, senderJid, ctx }) => handleGroupLink(sock, chatId, senderJid, ctx),

@@ -104,6 +104,15 @@ export async function handleInterviewQ(sock, chatId, senderJid, args, ctx) {
             return;
         }
 
+        if (action === 'board' || action === 'leaderboard' || action === 'lb') {
+            const { text } = await interviewQuestionService.getLeaderboardForJid(chatId, {
+                sinceMs: Date.now() - 7 * 24 * 60 * 60 * 1000,
+                limit: 10,
+            });
+            await sock.sendMessage(chatId, { text: `${text}\n🤖 _Sassy Bot_` }, { quoted: originalMsg });
+            return;
+        }
+
         await sock.sendMessage(
             chatId,
             {
@@ -112,8 +121,10 @@ export async function handleInterviewQ(sock, chatId, senderJid, args, ctx) {
                     '• `/interviewq test` — generate + poll here\n' +
                     '• `/interviewq post` — post to all `/interviewqon` groups\n' +
                     '• `/interviewq answer` — reveal answer now in this chat\n' +
+                    '• `/interviewq board` or `/iqboard` — weekly leaderboard\n' +
                     '• `/interviewqon` / `/interviewqoff` — group schedule toggle\n\n' +
-                    `_Auto: ${config.INTERVIEW_Q_TIMES?.join(' & ') || '13:00 & 18:00'} · answer +${Math.round((config.INTERVIEW_Q_ANSWER_DELAY_MS || 1_800_000) / 60_000)}m_`,
+                    `_Auto: ${(config.INTERVIEW_Q_TIMES || []).join(' · ') || '11:00 · 15:00 · 19:00'} IST · answer +${Math.round((config.INTERVIEW_Q_ANSWER_DELAY_MS || 1_800_000) / 60_000)}m_\n` +
+                    `_Sat ${config.INTERVIEW_Q_SUMMARY_TIME || '22:00'} — weekly leaderboard + recap_`,
             },
             { quoted: originalMsg }
         );
@@ -121,6 +132,10 @@ export async function handleInterviewQ(sock, chatId, senderJid, args, ctx) {
         logger.error(`Interview Q command failed: ${err.message}`);
         await sock.sendMessage(chatId, { text: `❌ ${err.message}` }, { quoted: originalMsg });
     }
+}
+
+export async function handleInterviewQBoard(sock, chatId, senderJid, ctx) {
+    return handleInterviewQ(sock, chatId, senderJid, ['board'], ctx);
 }
 
 export async function handleInterviewQOn(sock, chatId, senderJid, { groupManager, originalMsg }) {
@@ -160,8 +175,9 @@ export async function handleInterviewQOn(sock, chatId, senderJid, { groupManager
                     '✅ *INTERVIEW Q ON*\n' +
                     '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
                     `📢 *Group:* ${groupName}\n\n` +
-                    `🧠 Daily MCQ polls at *${(config.INTERVIEW_Q_TIMES || ['13:00', '18:00']).join(' & ')}* IST.\n` +
-                    `Answer posts automatically after *${Math.round((config.INTERVIEW_Q_ANSWER_DELAY_MS || 1_800_000) / 60_000)} min*.\n\n` +
+                    `🧠 Daily MCQ polls at *${(config.INTERVIEW_Q_TIMES || ['11:00', '15:00', '19:00']).join(' · ')}* IST (3×/day).\n` +
+                    `Answer posts automatically after *${Math.round((config.INTERVIEW_Q_ANSWER_DELAY_MS || 1_800_000) / 60_000)} min*.\n` +
+                    `🏆 Weekly leaderboard + recap every Sat *${config.INTERVIEW_Q_SUMMARY_TIME || '22:00'}* — or \`/iqboard\` anytime.\n\n` +
                     '💡 `/interviewqoff` to disable',
             },
             { quoted: originalMsg }

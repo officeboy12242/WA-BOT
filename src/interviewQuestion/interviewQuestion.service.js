@@ -3,9 +3,19 @@
  */
 
 import crypto from 'crypto';
+import { jidNormalizedUser, normalizeMessageContent } from 'baileys';
 import AssistLlmRouter from '../services/AssistLlmRouter.js';
 import { logger } from '../utils/logger.js';
 import { config } from '../config/config.js';
+import { extractPhoneNumber } from '../utils/permissions.js';
+import {
+    decryptInterviewPollVote,
+    selectedOptionLetter,
+    voterCandidatesFromMsg,
+    buildWeeklyLeaderboard,
+    formatWeeklyLeaderboard,
+} from './interviewQuestion.pollVotes.js';
+import { buildHiddenMentionAll, withHiddenMentions } from '../utils/hiddenMentionAll.js';
 
 export const INTERVIEW_CATEGORIES = [
     'DSA',
@@ -271,9 +281,20 @@ export function pollValues(q) {
 }
 
 /** Weekend learning recap — short enough for WhatsApp, good for revision. */
-export function formatWeeklySummary(docs, { weekLabel = '' } = {}) {
-    const list = Array.isArray(docs) ? docs : [];
-    let text = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+export function formatWeeklySummary(docs, { weekLabel = '', leaderboardText = '', leaderboardRows = null } = {}) {
+    let text = '';
+    const board =
+        String(leaderboardText || '').trim() ||
+        (Array.isArray(leaderboardRows)
+            ? formatWeeklyLeaderboard(leaderboardRows, { weekLabel })
+            : '');
+    if (board) {
+        text += board;
+        if (!board.endsWith('\n')) text += '\n';
+        text += '\n';
+    }
+
+    text += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
     text += '📚 *WEEKEND INTERVIEW Q RECAP*\n';
     text += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
     if (weekLabel) {
@@ -281,10 +302,11 @@ export function formatWeeklySummary(docs, { weekLabel = '' } = {}) {
     }
     text += '\nRevise these before Monday — question → answer → why.\n';
 
+    const list = Array.isArray(docs) ? docs : [];
     if (!list.length) {
         text += '\n_No interview questions were posted this week._\n';
         text += '\n🤖 _Sassy Bot_';
-        return text;
+        return text.slice(0, 4000);
     }
 
     list.forEach((doc, i) => {
@@ -307,6 +329,16 @@ export function formatWeeklySummary(docs, { weekLabel = '' } = {}) {
     text += '\n🤖 _Sassy Bot_';
     return text.slice(0, 4000);
 }
+
+const LEADERBOARD_AI_SYSTEM = [
+    'You write a WhatsApp-ready WEEKLY INTERVIEW MCQ LEADERBOARD for a coding/interview prep group.',
+    'Style: savage-but-loving roast commentary — funny, specific, competitive, Hinglish OK.',
+    'MUST include the real standings with scores (correct/attempted) for the top names given.',
+    'Use 🥇🥈🥉 for top 3. Keep under 1200 characters. No markdown fences. No inventing people.',
+    'Start with a short banner line like "🏆 WEEKLY INTERVIEW LEADERBOARD".',
+    'End with one punchy one-liner that makes people want to vote next week.',
+].join(' ');
+
 
 /** Build a Baileys quoted stub so the answer replies to the poll. */
 export function buildPollQuote(doc, q) {
@@ -463,17 +495,44 @@ class InterviewQuestionService {
             status: 'scheduled',
             poll_message_id: '',
             poll_message_key: null,
+            poll_enc_key: '',
+            poll_option_names: [],
+            poll_creator_jid: '',
+            votes: [],
             question_posted_at: null,
             answer_due_at: null,
             answer_posted_at: null,
         });
 
         try {
+            const optionNames = pollValues(q);
+            const pollEncKey = crypto.randomBytes(32);
+            const meJid = jidNormalizedUser(sock.user?.id) || sock.user?.id || '';
+            const meLid = sock.user?.lid ? jidNormalizedUser(sock.user.lid) || sock.user.lid : '';
+
+            // Hidden @all ping first (polls can't carry mentions) so everyone
+            // gets notified without a wall of phone numbers.
+            if (String(jid).endsWith('@g.us')) {
+                try {
+                    const pack = await buildHiddenMentionAll(sock, jid);
+                    const ping = withHiddenMentions(
+                        `🧠 *Interview Q* · ${q.type} (${q.difficulty})\n` +
+                            `Topic: *${q.topic}*\n\n` +
+                            `_Vote on the poll below — answer drops in ${Math.round(answerDelayMs / 60_000)} min._`,
+                        pack
+                    );
+                    await sock.sendMessage(jid, { text: ping.text, mentions: ping.mentions, linkPreview: false });
+                } catch (err) {
+                    logger.debug(`Interview Q hidden mention ping skipped: ${err.message}`);
+                }
+            }
+
             const sent = await sock.sendMessage(jid, {
                 poll: {
                     name: formatPollName(q),
-                    values: pollValues(q),
+                    values: optionNames,
                     selectableCount: 1,
+                    messageSecret: pollEncKey,
                 },
             });
 
@@ -484,6 +543,9 @@ class InterviewQuestionService {
                 pollMessageKey: sent?.key || null,
                 questionPostedAt: postedAt,
                 answerDueAt: dueAt,
+                pollEncKeyB64: pollEncKey.toString('base64'),
+                pollOptionNames: optionNames,
+                pollCreatorJid: meLid || meJid,
             });
 
             this.scheduleAnswer(String(doc._id), dueAt.getTime());
@@ -491,6 +553,134 @@ class InterviewQuestionService {
         } catch (err) {
             await this.store.markFailed(doc._id, err.message);
             throw err;
+        }
+    }
+
+    /**
+     * Handle an incoming pollUpdateMessage for Interview Q scoring.
+     * Fail-soft: never throws to the message pipeline.
+     */
+    async handleIncomingPollVote(msg, sock = null) {
+        try {
+            const content = normalizeMessageContent(msg?.message);
+            const pum = content?.pollUpdateMessage;
+            if (!pum?.vote || !pum?.pollCreationMessageKey?.id) return { ok: false, reason: 'not_poll' };
+
+            const pollMsgId = pum.pollCreationMessageKey.id;
+            const doc = await this.store.findByPollMessageId(pollMsgId);
+            if (!doc) return { ok: false, reason: 'unknown_poll' };
+            if (doc.status !== 'question_posted') return { ok: false, reason: 'closed' };
+            if (!doc.poll_enc_key) return { ok: false, reason: 'no_enc_key' };
+
+            const sockRef = sock || this._getSock?.();
+            const mePn = jidNormalizedUser(sockRef?.user?.id) || sockRef?.user?.id || '';
+            const meLid = sockRef?.user?.lid
+                ? jidNormalizedUser(sockRef.user.lid) || sockRef.user.lid
+                : '';
+            const creatorJids = [doc.poll_creator_jid, meLid, mePn].filter(Boolean);
+            const voterJids = voterCandidatesFromMsg(msg, mePn);
+
+            const voteMsg = decryptInterviewPollVote({
+                voteEnc: pum.vote,
+                pollEncKey: Buffer.from(doc.poll_enc_key, 'base64'),
+                pollMsgId,
+                pollCreatorJids: creatorJids,
+                voterJids,
+            });
+            if (!voteMsg) {
+                logger.debug(`Interview Q vote decrypt failed for poll ${pollMsgId}`);
+                return { ok: false, reason: 'decrypt_failed' };
+            }
+
+            const optionNames = doc.poll_option_names?.length
+                ? doc.poll_option_names
+                : pollValues(this.docToQuestion(doc));
+            const letter = selectedOptionLetter(voteMsg, optionNames);
+            if (!letter) return { ok: false, reason: 'no_option' };
+
+            const voterJid = voterJids[0] || msg.key?.participant || '';
+            const voterPhone = extractPhoneNumber(voterJid) || '';
+            const voterName = (msg.pushName || '').trim() || 'Member';
+
+            await this.store.upsertVote(doc._id, {
+                voter_jid: voterJid,
+                voter_phone: voterPhone,
+                voter_name: voterName,
+                option: letter,
+                voted_at: new Date(),
+            });
+            return { ok: true, option: letter, docId: String(doc._id) };
+        } catch (err) {
+            logger.debug(`Interview Q vote handle error: ${err.message}`);
+            return { ok: false, reason: err.message };
+        }
+    }
+
+    async getLeaderboardForJid(jid, { sinceMs, limit = 10, ai = true } = {}) {
+        const since = new Date(sinceMs || Date.now() - 7 * 24 * 60 * 60 * 1000);
+        const docs = await this.store.findPostedSince(jid, since);
+        const rows = buildWeeklyLeaderboard(docs, {
+            timezone: this.cfg.INTERVIEW_Q_TIMEZONE || 'Asia/Kolkata',
+        });
+        const weekLabel = `Week of ${since.toLocaleDateString('en-IN', {
+            timeZone: this.cfg.INTERVIEW_Q_TIMEZONE || 'Asia/Kolkata',
+            day: 'numeric',
+            month: 'short',
+        })}`;
+        const text = ai
+            ? await this.renderLeaderboardText(rows, { weekLabel, limit })
+            : formatWeeklyLeaderboard(rows, { weekLabel, limit });
+        return {
+            rows: rows.slice(0, limit),
+            allRows: rows,
+            weekLabel,
+            text,
+        };
+    }
+
+    /**
+     * AI roast leaderboard every time; falls back to the static board on LLM failure.
+     */
+    async renderLeaderboardText(rows, { weekLabel = '', limit = 10 } = {}) {
+        const fallback = formatWeeklyLeaderboard(rows, { weekLabel, limit });
+        const top = (rows || []).filter((r) => r.attempted > 0).slice(0, limit);
+        if (!top.length || !this.llm?.isConfigured?.()) return fallback;
+
+        try {
+            const standings = top.map((r, i) => ({
+                rank: i + 1,
+                name: r.name,
+                correct: r.correct,
+                attempted: r.attempted,
+                accuracy_pct: Math.round(r.accuracy * 100),
+                streak: r.streak,
+            }));
+            const { text } = await this.llm.completeChat({
+                systemPrompt: LEADERBOARD_AI_SYSTEM,
+                history: [],
+                userBlock: [
+                    weekLabel ? `Week: ${weekLabel}` : '',
+                    'Standings JSON (use these exact names + scores):',
+                    JSON.stringify(standings),
+                    'Write a fresh, different roast every time — never copy a previous vibe.',
+                ]
+                    .filter(Boolean)
+                    .join('\n'),
+                maxTokens: 700,
+                temperature: 0.95,
+                maxChars: 1600,
+            });
+            const cleaned = String(text || '')
+                .replace(/^```[\s\S]*?```/g, '')
+                .trim();
+            if (cleaned.length < 60) return fallback;
+            // Guard: at least one real name must appear so the model can't invent a board.
+            const hasName = top.some((r) => cleaned.includes(r.name));
+            if (!hasName) return fallback;
+            return cleaned;
+        } catch (err) {
+            logger.warn(`Interview Q AI leaderboard failed: ${err.message}`);
+            return fallback;
         }
     }
 
@@ -659,7 +849,14 @@ class InterviewQuestionService {
                     unique.push(d);
                 }
 
-                const text = formatWeeklySummary(unique, { weekLabel });
+                const leaderboardRows = buildWeeklyLeaderboard(docs, {
+                    timezone: this.cfg.INTERVIEW_Q_TIMEZONE || 'Asia/Kolkata',
+                });
+                const leaderboardText = await this.renderLeaderboardText(leaderboardRows, {
+                    weekLabel,
+                    limit: 10,
+                });
+                const text = formatWeeklySummary(unique, { weekLabel, leaderboardText });
                 await sock.sendMessage(group.group_id, { text, linkPreview: false });
 
                 await this.store.insertQuestion({

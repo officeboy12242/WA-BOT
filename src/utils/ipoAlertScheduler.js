@@ -13,6 +13,7 @@
 import { logger } from './logger.js';
 import { msUntilTimeInTimezone } from './newsScheduler.js';
 import IndianIpoService from '../services/IndianIpoService.js';
+import { buildHiddenMentionAll, withHiddenMentions } from './hiddenMentionAll.js';
 
 /** IST date string for a Date object. */
 function istDateStr(date = new Date()) {
@@ -312,23 +313,11 @@ class IpoAlertScheduler {
                 groups.map(async (g) => {
                     const chatId = g.group_id || g.groupId || g;
                     try {
-                        // Hidden tag all members — Baileys renders @mentions
-                        // as a subtle indicator without showing individual numbers
-                        let mentions = [];
-                        let tagText = '';
-                        try {
-                            const meta = await sock.groupMetadata(chatId);
-                            const participants = meta.participants || [];
-                            mentions = participants.map((p) => p.id || p);
-                            if (mentions.length) {
-                                tagText = '\n\n' + mentions.map(() => '@').join(' ');
-                            }
-                        } catch {
-                            // If metadata fails, post without tags
-                        }
+                        const pack = await buildHiddenMentionAll(sock, chatId);
+                        const payload = withHiddenMentions(text, pack);
                         await sock.sendMessage(chatId, {
-                            text: text + tagText,
-                            mentions,
+                            text: payload.text,
+                            mentions: payload.mentions,
                         });
                     } catch (err) {
                         logger.warn(`IPO alert post failed for ${chatId}: ${err.message}`);

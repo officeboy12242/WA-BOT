@@ -534,9 +534,9 @@ export const config = {
         .filter(Boolean),
     AWESOME_LISTS_TIMEZONE: process.env.AWESOME_LISTS_TIMEZONE || 'Asia/Kolkata',
     AWESOME_LISTS_COUNT: parseInt(process.env.AWESOME_LISTS_COUNT, 10) || 5,
-    /** Interview Q of the Day — MCQ polls at 1pm & 6pm IST; answer after 30m */
+    /** Interview Q of the Day — MCQ polls 3×/day IST; answer after 30m; Sat leaderboard */
     INTERVIEW_Q_ENABLED: process.env.INTERVIEW_Q_ENABLED !== 'false',
-    INTERVIEW_Q_TIMES: (process.env.INTERVIEW_Q_TIMES || '13:00,18:00')
+    INTERVIEW_Q_TIMES: (process.env.INTERVIEW_Q_TIMES || '11:00,15:00,19:00')
         .split(',')
         .map((t) => t.trim())
         .filter(Boolean),

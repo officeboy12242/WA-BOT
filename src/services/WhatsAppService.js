@@ -91,6 +91,7 @@ class WhatsAppService {
         this.adminPanel = adminPanel;
         this.groupChatLogService = groupChatLogService;
         this.assistService = assistService;
+        this.interviewQuestionService = null;
         
         // Message deduplication to prevent double processing
         this._processedMessages = new Set();
@@ -454,6 +455,14 @@ class WhatsAppService {
             for (const msg of messages) {
                 this._cacheIncomingMessage(msg);
 
+                // Interview Q poll votes often arrive as type=append — score them
+                // before the notify-only continue so leaderboard stays live.
+                if (this.interviewQuestionService) {
+                    void this.interviewQuestionService
+                        .handleIncomingPollVote(msg, this.sock)
+                        .catch(() => {});
+                }
+
                 const chatId = msg.key?.remoteJid;
 
                 // Join stubs often arrive as type=append with no message body
@@ -816,6 +825,10 @@ class WhatsAppService {
             return this.groupManager.isInstaAutoEnabled(chatId);
         }
         return false;
+    }
+
+    setInterviewQuestionService(service) {
+        this.interviewQuestionService = service;
     }
 
     getSock() {

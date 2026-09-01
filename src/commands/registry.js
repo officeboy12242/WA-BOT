@@ -267,7 +267,7 @@ export const COMMAND_REGISTRY = [
         key: 'interviewqon',
         scope: 'group_only',
         role: 'staff',
-        help: 'Enable Interview Q polls (1pm & 6pm Medium/Hard) + Sat 10pm weekly recap',
+        help: 'Enable Interview Q polls (3×/day Medium/Hard) + Sat weekly leaderboard/recap',
     },
     {
         names: ['/interviewqoff'],
@@ -281,7 +281,15 @@ export const COMMAND_REGISTRY = [
         key: 'interviewq',
         scope: 'any',
         role: 'admins',
-        help: 'Interview Q: `/interviewq test|post|answer`',
+        help: 'Interview Q: `/interviewq test|post|answer|board`',
+    },
+    {
+        names: ['/iqboard'],
+        key: 'iqboard',
+        scope: 'any',
+        role: 'anyone',
+        help: 'Weekly Interview Q leaderboard for this chat',
+        category: 'daily',
     },
     {
         names: ['/instaon'],
@@ -829,7 +837,7 @@ export const HELP_CATEGORY = {
 
     // Scheduled feeds
     news: 'daily', github: 'daily', awesome: 'daily', interviewq: 'daily',
-    interviewqon: 'daily', interviewqoff: 'daily',
+    interviewqon: 'daily', interviewqoff: 'daily', iqboard: 'daily',
 
     // Fun
     horo: 'fun', advice: 'fun', facts: 'fun',
