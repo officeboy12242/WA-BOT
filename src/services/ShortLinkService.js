@@ -54,12 +54,71 @@ class ShortLinkService {
     }
 
     async _generateCode() {
-        for (let i = 0; i < 5; i++) {
-            const code = crypto.randomBytes(4).toString('base64url');
-            const exists = await this.collection.findOne({ code }, { projection: { _id: 1 } });
-            if (!exists) return code;
+        return crypto.randomBytes(4).toString('base64url');
+    }
+
+    _meta(base, doc) {
+        return {
+            url: `${base}/d/${doc.code}`,
+            code: doc.code,
+            expiresAt: new Date(doc.expires_at).getTime(),
+        };
+    }
+
+    /**
+     * Batch mint /d/ codes — one Mongo read + one insert for many links.
+     * @returns {Map<string, { url: string, code: string, expiresAt: number }>}
+     */
+    async shortenMany(longUrls) {
+        const base = this.getPublicBaseUrl();
+        if (!base) {
+            throw new Error('Public base URL not ready for expiring movie links');
         }
-        throw new Error('Failed to generate unique short code');
+
+        const unique = [...new Set(longUrls.filter(Boolean))];
+        if (!unique.length) return new Map();
+
+        const now = new Date();
+        const reuseAfter = new Date(now.getTime() + MIN_REUSE_REMAINING_MS);
+        const existing = await this.collection
+            .find({ long_url: { $in: unique }, expires_at: { $gt: reuseAfter } })
+            .toArray();
+
+        const out = new Map();
+        for (const doc of existing) {
+            out.set(doc.long_url, this._meta(base, doc));
+        }
+
+        const toCreate = unique.filter((u) => !out.has(u));
+        if (!toCreate.length) return out;
+
+        const expiresAt = new Date(Date.now() + LINK_TTL_MS);
+        const usedCodes = new Set();
+        const docs = toCreate.map((long_url) => {
+            let code;
+            do {
+                code = crypto.randomBytes(4).toString('base64url');
+            } while (usedCodes.has(code));
+            usedCodes.add(code);
+            return { code, long_url, expires_at: expiresAt, created_at: now };
+        });
+
+        try {
+            await this.collection.insertMany(docs, { ordered: false });
+            for (const doc of docs) {
+                out.set(doc.long_url, this._meta(base, doc));
+            }
+        } catch (err) {
+            for (const long_url of toCreate) {
+                if (out.has(long_url)) continue;
+                try {
+                    out.set(long_url, await this.shorten(long_url));
+                } catch {
+                    // skip — urlShortener will log
+                }
+            }
+        }
+        return out;
     }
 
     /**
@@ -87,12 +146,17 @@ class ShortLinkService {
 
         const code = await this._generateCode();
         const expiresAt = new Date(Date.now() + LINK_TTL_MS);
-        await this.collection.insertOne({
-            code,
-            long_url: longUrl,
-            expires_at: expiresAt,
-            created_at: now,
-        });
+        try {
+            await this.collection.insertOne({
+                code,
+                long_url: longUrl,
+                expires_at: expiresAt,
+                created_at: now,
+            });
+        } catch (err) {
+            if (err.code === 11000) return this.shorten(longUrl);
+            throw err;
+        }
 
         return {
             url: `${base}/d/${code}`,

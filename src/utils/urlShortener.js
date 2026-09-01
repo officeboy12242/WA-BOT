@@ -1,6 +1,6 @@
 /**
  * Expiring movie links: self-hosted /d/:code (7h TTL) → display shortener.
- * TinyURL works on Render; Koyeb *.koyeb.app → zip1.io / clck.ru (TinyURL returns 400).
+ * Koyeb: zip1.io / clck.ru (TinyURL blocks *.koyeb.app). Render: TinyURL first.
  */
 
 import https from 'https';
@@ -8,18 +8,12 @@ import { logger } from './logger.js';
 import { isTinyUrlBlockedHost } from './publicBaseUrl.js';
 import { LINK_TTL_MS } from '../services/ShortLinkService.js';
 
-const SHORTENER_TIMEOUT_MS = 3500;
-const PER_LINK_SHORTEN_MS = 8000;
+const SHORTENER_TIMEOUT_MS = 2500;
+const SHORTEN_CONCURRENCY = 14;
 /** Hosts we wrap /d/ links with for WhatsApp display (all still expire via /d/ TTL). */
-export const DISPLAY_SHORT_RE = /(?:tinyurl\.com|zip1\.io|clck\.ru|is\.gd|v\.gd)\//i;
+export const DISPLAY_SHORT_RE = /(?:tinyurl\.com|zip1\.io|clck\.ru)\//i;
 
-const DISPLAY_SHORTENERS = [
-    {
-        name: 'TinyURL',
-        build: (u) => `https://tinyurl.com/api-create.php?url=${encodeURIComponent(u)}`,
-        ok: (status, data) => status === 200 && data.startsWith('https://tinyurl.com/'),
-        attempts: 2,
-    },
+const KOYEB_DISPLAY_CHAIN = [
     {
         name: 'zip1.io',
         post: true,
@@ -33,35 +27,50 @@ const DISPLAY_SHORTENERS = [
                 return null;
             }
         },
-        attempts: 1,
     },
     {
         name: 'clck.ru',
         build: (u) => `https://clck.ru/--?url=${encodeURIComponent(u)}`,
         ok: (status, data) => status === 200 && /^https:\/\/clck\.ru\/\S+/.test(data),
-        attempts: 1,
-    },
-    {
-        name: 'is.gd',
-        build: (u) => `https://is.gd/create.php?format=simple&url=${encodeURIComponent(u)}`,
-        ok: (status, data) => status === 200 && data.startsWith('https://is.gd/'),
-        attempts: 1,
-    },
-    {
-        name: 'v.gd',
-        build: (u) => `https://v.gd/create.php?format=simple&url=${encodeURIComponent(u)}`,
-        ok: (status, data) => status === 200 && data.startsWith('https://v.gd/'),
-        attempts: 1,
     },
 ];
+
+const RENDER_DISPLAY_CHAIN = [
+    {
+        name: 'TinyURL',
+        build: (u) => `https://tinyurl.com/api-create.php?url=${encodeURIComponent(u)}`,
+        ok: (status, data) => status === 200 && data.startsWith('https://tinyurl.com/'),
+    },
+    ...KOYEB_DISPLAY_CHAIN,
+];
+
 const MAX_CACHE_SIZE = 500;
-const SHORTEN_CONCURRENCY = 6;
-const BATCH_PAUSE_MS = 100;
-/** Keep display cache under short-link TTL (buffer so TinyURL never outlives /d/). */
+/** Keep display cache under short-link TTL (buffer so display short never outlives /d/). */
 const MEMORY_CACHE_TTL_MS = Math.max(60 * 60 * 1000, LINK_TTL_MS - 60 * 60 * 1000);
 
-function delay(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+/** Sticky provider — skip failed ones after first success this process lifetime. */
+let _displayProviderHint = null;
+
+function displayChainFor(url) {
+    const chain = isTinyUrlBlockedHost(url) ? KOYEB_DISPLAY_CHAIN : RENDER_DISPLAY_CHAIN;
+    if (!_displayProviderHint) return chain;
+    const hit = chain.find((p) => p.name === _displayProviderHint);
+    return hit ? [hit, ...chain.filter((p) => p !== hit)] : chain;
+}
+
+async function mapPool(items, fn, concurrency, deadline) {
+    const out = new Map();
+    let idx = 0;
+    const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+        while (idx < items.length) {
+            if (deadline && Date.now() >= deadline) return;
+            const i = idx++;
+            const item = items[i];
+            out.set(item, await fn(item));
+        }
+    });
+    await Promise.all(workers);
+    return out;
 }
 
 class UrlShortener {
@@ -120,24 +129,13 @@ class UrlShortener {
     }
 
     async _toDisplayShortUrl(url) {
-        const chain = isTinyUrlBlockedHost(url)
-            ? DISPLAY_SHORTENERS.filter((p) => p.name !== 'TinyURL')
-            : DISPLAY_SHORTENERS;
-
-        let lastErr = null;
-        for (const provider of chain) {
-            for (let i = 0; i < provider.attempts; i++) {
-                try {
-                    return await this._callDisplayShortener(provider, url);
-                } catch (err) {
-                    lastErr = err;
-                    if (i < provider.attempts - 1) {
-                        await delay(400);
-                    }
-                }
-            }
-            if (lastErr) {
-                logger.warn(`${provider.name} failed for ${url.slice(0, 60)}…: ${lastErr.message}`);
+        for (const provider of displayChainFor(url)) {
+            try {
+                const short = await this._callDisplayShortener(provider, url);
+                _displayProviderHint = provider.name;
+                return short;
+            } catch (err) {
+                logger.warn(`${provider.name} failed for ${url.slice(0, 60)}…: ${err.message}`);
             }
         }
         return null;
@@ -156,14 +154,52 @@ class UrlShortener {
         return typeof link === 'string' && link !== original && /\/d\/[A-Za-z0-9_-]+/.test(link);
     }
 
-    async shorten(url) {
-        if (!this.needsShortening(url)) return url;
-
-        const cached = this._cache.get(url);
+    _readCache(original) {
+        const cached = this._cache.get(original);
         if (cached && cached.expiresAt > Date.now() && cached.finalUrl) {
             return cached.finalUrl;
         }
-        if (cached) this._cache.delete(url);
+        if (cached) this._cache.delete(original);
+        return null;
+    }
+
+    _writeCache(original, finalUrl, shortMeta) {
+        if (finalUrl === original) return;
+        if (!this._isDisplayShort(finalUrl) && !finalUrl.includes('/d/')) return;
+
+        const expiresAt = Math.min(
+            shortMeta?.expiresAt || Date.now() + MEMORY_CACHE_TTL_MS,
+            Date.now() + MEMORY_CACHE_TTL_MS,
+        );
+        if (this._cache.size >= MAX_CACHE_SIZE) {
+            this._cache.delete(this._cache.keys().next().value);
+        }
+        this._cache.set(original, {
+            finalUrl,
+            code: shortMeta?.code || null,
+            expiresAt,
+        });
+    }
+
+    async _finalizeShortUrl(original, expiringLink, shortMeta) {
+        if (!this._isExpiringLink(expiringLink, original)) {
+            logger.warn(
+                `No expiring /d/ link for ${original.slice(0, 60)}… — check KOYEB_PUBLIC_DOMAIN / PUBLIC_URL`,
+            );
+            return original;
+        }
+
+        const display = await this._toDisplayShortUrl(expiringLink);
+        const finalUrl = display || expiringLink;
+        this._writeCache(original, finalUrl, shortMeta);
+        return finalUrl;
+    }
+
+    async shorten(url) {
+        if (!this.needsShortening(url)) return url;
+
+        const hit = this._readCache(url);
+        if (hit) return hit;
 
         let shortMeta = null;
         let expiringLink = url;
@@ -181,100 +217,85 @@ class UrlShortener {
             }
         }
 
-        const hasExpiring = this._isExpiringLink(expiringLink, url);
-        if (!hasExpiring) {
-            logger.warn(
-                `No expiring /d/ link for ${url.slice(0, 60)}… — check KOYEB_PUBLIC_DOMAIN / PUBLIC_URL`,
-            );
-            return url;
-        }
-
-        let finalUrl = expiringLink;
-        try {
-            const display = await Promise.race([
-                this._toDisplayShortUrl(expiringLink),
-                new Promise((_, reject) =>
-                    setTimeout(() => reject(new Error('display shorten timeout')), PER_LINK_SHORTEN_MS),
-                ),
-            ]);
-            if (display) finalUrl = display;
-        } catch (err) {
-            logger.warn(
-                `Display shorten skipped for ${expiringLink.slice(0, 60)}…: ${err.message} — using /d/ link`,
-            );
-        }
-
-        // Only cache when we actually minted an expiring short link.
-        const canCache =
-            finalUrl !== url &&
-            (this._isDisplayShort(finalUrl) || finalUrl.includes('/d/'));
-        if (canCache) {
-            const expiresAt = Math.min(
-                shortMeta?.expiresAt || Date.now() + MEMORY_CACHE_TTL_MS,
-                Date.now() + MEMORY_CACHE_TTL_MS,
-            );
-            if (this._cache.size >= MAX_CACHE_SIZE) {
-                this._cache.delete(this._cache.keys().next().value);
-            }
-            this._cache.set(url, {
-                finalUrl,
-                code: shortMeta?.code || null,
-                expiresAt,
-            });
-        }
-
-        return finalUrl;
+        return this._finalizeShortUrl(url, expiringLink, shortMeta);
     }
 
     async shortenMovieResults(results, maxMs = 45000) {
-        const links = [];
+        const entries = [];
         for (const item of results) {
             for (const link of item.links || []) {
                 if (this.needsShortening(link.url)) {
-                    links.push(link);
+                    entries.push({ link, original: link.url });
                 }
             }
         }
-        if (!links.length) return results;
+        if (!entries.length) return results;
 
-        const deadline = Date.now() + maxMs;
+        const t0 = Date.now();
+        const deadline = t0 + maxMs;
+        const unique = [...new Set(entries.map((e) => e.original))];
+
+        const mintedMap = new Map();
+        if (this._service?.shortenMany) {
+            try {
+                for (const [k, v] of await this._service.shortenMany(unique)) {
+                    mintedMap.set(k, v);
+                }
+            } catch (err) {
+                logger.warn(`Batch /d/ mint failed: ${err.message}`);
+            }
+        }
+
+        const resolved = await mapPool(
+            unique,
+            async (original) => {
+                const cached = this._readCache(original);
+                if (cached) return cached;
+
+                let shortMeta = mintedMap.get(original);
+                let expiringLink = shortMeta?.url || original;
+
+                if (!shortMeta && this._service) {
+                    try {
+                        const minted = await this._service.shorten(original);
+                        if (typeof minted === 'string') {
+                            expiringLink = minted;
+                        } else if (minted?.url) {
+                            expiringLink = minted.url;
+                            shortMeta = minted;
+                        }
+                    } catch (err) {
+                        logger.warn(`Expiring link failed: ${err.message}`);
+                    }
+                }
+
+                return this._finalizeShortUrl(original, expiringLink, shortMeta);
+            },
+            SHORTEN_CONCURRENCY,
+            deadline,
+        );
+
         let shortened = 0;
         let failed = 0;
         let skipped = 0;
 
-        for (let i = 0; i < links.length; i += SHORTEN_CONCURRENCY) {
-            if (Date.now() >= deadline) {
-                skipped = links.length - i;
-                logger.warn(`URL shorten time budget reached — ${skipped} link(s) left unshortened`);
-                break;
-            }
-
-            const batch = links.slice(i, i + SHORTEN_CONCURRENCY);
-            const outcomes = await Promise.allSettled(
-                batch.map(async (link) => {
-                    const original = link.url;
-                    link.url = await this.shorten(original);
-                    if (this._isDisplayShort(link.url) || link.url.includes('/d/')) {
-                        shortened++;
-                    } else if (this.needsShortening(link.url)) {
-                        failed++;
-                    }
-                }),
-            );
-
-            for (const outcome of outcomes) {
-                if (outcome.status === 'rejected') {
+        for (const { link, original } of entries) {
+            const finalUrl = resolved.get(original);
+            if (finalUrl) {
+                link.url = finalUrl;
+                if (this._isDisplayShort(finalUrl) || finalUrl.includes('/d/')) {
+                    shortened++;
+                } else if (this.needsShortening(finalUrl)) {
                     failed++;
-                    logger.warn(`Link shorten rejected: ${outcome.reason?.message || outcome.reason}`);
                 }
-            }
-
-            if (i + SHORTEN_CONCURRENCY < links.length) {
-                await delay(BATCH_PAUSE_MS);
+            } else {
+                skipped++;
             }
         }
 
-        logger.info(`URL shorten done: ${shortened}/${links.length} short, ${failed} long, ${skipped} skipped`);
+        logger.info(
+            `URL shorten done: ${shortened}/${entries.length} short, ${failed} long, ${skipped} skipped (${Date.now() - t0}ms)`,
+        );
         return results;
     }
 }
