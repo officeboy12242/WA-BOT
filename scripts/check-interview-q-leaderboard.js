@@ -82,10 +82,15 @@ assert.match(combined, /WEEKEND INTERVIEW Q RECAP/);
 
 const ping = withHiddenMentions('🧠 Interview Q', {
     mentions: ['111@s.whatsapp.net', '222@s.whatsapp.net'],
-    tagText: '\n\n@ @',
+    tagText: '\n\n@ @', // ignored — must not leak into visible text
 });
-assert.equal(ping.text, '🧠 Interview Q\n\n@ @');
+assert.equal(ping.text, '🧠 Interview Q', 'no visible @ wall');
 assert.deepEqual(ping.mentions, ['111@s.whatsapp.net', '222@s.whatsapp.net']);
+assert.equal(
+    withHiddenMentions('hi', { mentions: [], tagText: '@ @' }).text,
+    'hi',
+    'empty mentions → plain text'
+);
 
 const streak = computeStreak(
     new Set(['2026-08-28', '2026-08-29']),

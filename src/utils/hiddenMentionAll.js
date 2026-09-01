@@ -1,6 +1,6 @@
 /**
- * Hidden @all for WhatsApp groups — notifies members without listing numbers.
- * Pattern already used by IPO alerts: bare `@` tokens + mentions[] array.
+ * Silent group mention-all — notify via contextInfo.mentionedJid only.
+ * Never append visible `@ @ @` tokens (that bug showed a wall of @ signs).
  */
 
 import { jidNormalizedUser } from 'baileys';
@@ -38,8 +38,9 @@ export async function buildHiddenMentionAll(sock, groupId, opts = {}) {
         const max = Math.max(1, Number(opts.max) || 900);
         if (mentions.length > max) mentions = mentions.slice(0, max);
 
-        const tagText = mentions.length ? `\n\n${mentions.map(() => '@').join(' ')}` : '';
-        return { mentions, tagText };
+        // tagText stays empty on purpose — bare `@` tokens were rendering as a
+        // visible `@ @ @ …` wall. Baileys still sets mentionedJid from `mentions`.
+        return { mentions, tagText: '' };
     } catch {
         return { mentions: [], tagText: '' };
     }
@@ -47,12 +48,12 @@ export async function buildHiddenMentionAll(sock, groupId, opts = {}) {
 
 /**
  * @param {string} text
- * @param {{ mentions: string[], tagText: string }} pack
+ * @param {{ mentions?: string[], tagText?: string }} pack
  */
 export function withHiddenMentions(text, pack) {
     const mentions = pack?.mentions?.length ? pack.mentions : undefined;
     return {
-        text: `${text || ''}${pack?.tagText || ''}`,
+        text: String(text || ''),
         ...(mentions ? { mentions } : {}),
     };
 }
