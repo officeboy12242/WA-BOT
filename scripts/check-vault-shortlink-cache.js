@@ -7,6 +7,7 @@ import UrlShortener from '../src/utils/urlShortener.js';
 import { isEphemeralDisplayUrl, sanitizeMovieResults } from '../src/services/MovieCacheService.js';
 
 assert.equal(isEphemeralDisplayUrl('https://tinyurl.com/abc'), true);
+assert.equal(isEphemeralDisplayUrl('https://is.gd/abc'), true);
 assert.equal(isEphemeralDisplayUrl('https://bot.example/d/Ab12'), true);
 assert.equal(isEphemeralDisplayUrl('https://drive.example/file/xyz'), false);
 
@@ -70,5 +71,26 @@ shortener2._toTinyUrl = async (u) => {
 const d = await shortener2.shorten('https://drive.example/file.mkv');
 assert.equal(d, 'https://bot.koyeb.app/d/expiring1', 'TinyURL fail → keep expiring /d/ link');
 assert.equal(driveTinyCalls, 0, 'must never TinyURL the raw drive URL');
+
+// Koyeb: TinyURL blocks .koyeb.app — fall through to is.gd for /d/ links.
+const shortener3 = new UrlShortener();
+shortener3.setService({
+    async shorten() {
+        return {
+            url: 'https://bot.koyeb.app/d/koyeb1',
+            code: 'koyeb1',
+            expiresAt: Date.now() + 60_000,
+        };
+    },
+});
+let displayCalls = 0;
+shortener3._toDisplayShortUrl = async (u) => {
+    displayCalls += 1;
+    if (u.includes('koyeb.app/d/')) return 'https://is.gd/koyebshort';
+    return null;
+};
+const k = await shortener3.shorten('https://drive.example/k.mkv');
+assert.equal(k, 'https://is.gd/koyebshort', 'Koyeb /d/ → is.gd when TinyURL blocked');
+assert.equal(displayCalls, 1);
 
 console.log('OK vault shortlink cache + sanitize');

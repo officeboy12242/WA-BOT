@@ -1,15 +1,38 @@
 /**
- * Expiring movie links: self-hosted /d/:code (7h TTL) → TinyURL for display.
- * Memory cache must die before /d/ codes — otherwise vault hits reuse dead TinyURLs.
+ * Expiring movie links: self-hosted /d/:code (7h TTL) → display shortener.
+ * TinyURL works for Render /d/ URLs; Koyeb .koyeb.app is blocked (HTTP 400) → is.gd/v.gd fallback.
+ * Memory cache must die before /d/ codes — otherwise vault hits reuse dead display shorts.
  */
 
 import https from 'https';
 import { logger } from './logger.js';
 import { LINK_TTL_MS } from '../services/ShortLinkService.js';
 
-const TINYURL_API = 'https://tinyurl.com/api-create.php?url=';
 const TINYURL_TIMEOUT_MS = 3500;
-const PER_LINK_SHORTEN_MS = 5000;
+const PER_LINK_SHORTEN_MS = 8000;
+/** Hosts we wrap /d/ links with for WhatsApp display (all still expire via /d/ TTL). */
+export const DISPLAY_SHORT_RE = /(?:tinyurl\.com|is\.gd|v\.gd)\//i;
+
+const DISPLAY_SHORTENERS = [
+    {
+        name: 'TinyURL',
+        build: (u) => `https://tinyurl.com/api-create.php?url=${encodeURIComponent(u)}`,
+        ok: (status, data) => status === 200 && data.startsWith('https://tinyurl.com/'),
+        attempts: 2,
+    },
+    {
+        name: 'is.gd',
+        build: (u) => `https://is.gd/create.php?format=simple&url=${encodeURIComponent(u)}`,
+        ok: (status, data) => status === 200 && data.startsWith('https://is.gd/'),
+        attempts: 1,
+    },
+    {
+        name: 'v.gd',
+        build: (u) => `https://v.gd/create.php?format=simple&url=${encodeURIComponent(u)}`,
+        ok: (status, data) => status === 200 && data.startsWith('https://v.gd/'),
+        attempts: 1,
+    },
+];
 const MAX_CACHE_SIZE = 500;
 const SHORTEN_CONCURRENCY = 6;
 const BATCH_PAUSE_MS = 100;
@@ -32,13 +55,12 @@ class UrlShortener {
 
     needsShortening(url) {
         if (typeof url !== 'string' || !url.startsWith('http')) return false;
-        if (url.includes('tinyurl.com/')) return false;
+        if (DISPLAY_SHORT_RE.test(url)) return false;
         return true;
     }
 
-    _fetchTinyUrl(targetUrl) {
+    _fetchShortenerApi(apiUrl) {
         return new Promise((resolve, reject) => {
-            const apiUrl = `${TINYURL_API}${encodeURIComponent(targetUrl)}`;
             const parsed = new URL(apiUrl);
             const req = https.request(
                 { hostname: parsed.hostname, path: parsed.pathname + parsed.search, method: 'GET' },
@@ -51,32 +73,45 @@ class UrlShortener {
             req.on('error', reject);
             req.setTimeout(TINYURL_TIMEOUT_MS, () => {
                 req.destroy();
-                reject(new Error('TinyURL timeout'));
+                reject(new Error('shortener timeout'));
             });
             req.end();
         });
     }
 
-    async _toTinyUrl(url, attempts = 2) {
+    async _toDisplayShortUrl(url) {
         let lastErr = null;
-        for (let i = 0; i < attempts; i++) {
-            try {
-                const { status, data } = await this._fetchTinyUrl(url);
-                if (status === 200 && data.startsWith('https://tinyurl.com/')) {
-                    return data;
-                }
-                lastErr = new Error(`TinyURL HTTP ${status}`);
-            } catch (err) {
-                lastErr = err;
-                if (i < attempts - 1) {
-                    await delay(400);
+        for (const provider of DISPLAY_SHORTENERS) {
+            for (let i = 0; i < provider.attempts; i++) {
+                try {
+                    const { status, data } = await this._fetchShortenerApi(provider.build(url));
+                    if (provider.ok(status, data)) {
+                        return data;
+                    }
+                    lastErr = new Error(`${provider.name} HTTP ${status}`);
+                } catch (err) {
+                    lastErr = err;
+                    if (i < provider.attempts - 1) {
+                        await delay(400);
+                    }
                 }
             }
-        }
-        if (lastErr) {
-            logger.warn(`TinyURL failed for ${url.slice(0, 60)}…: ${lastErr.message}`);
+            if (lastErr) {
+                logger.warn(
+                    `${provider.name} failed for ${url.slice(0, 60)}…: ${lastErr.message}`,
+                );
+            }
         }
         return null;
+    }
+
+    /** @deprecated tests stub this — production uses _toDisplayShortUrl */
+    async _toTinyUrl(url) {
+        return this._toDisplayShortUrl(url);
+    }
+
+    _isDisplayShort(url) {
+        return typeof url === 'string' && DISPLAY_SHORT_RE.test(url);
     }
 
     _isExpiringLink(link, original) {
@@ -118,23 +153,23 @@ class UrlShortener {
 
         let finalUrl = expiringLink;
         try {
-            const tiny = await Promise.race([
-                this._toTinyUrl(expiringLink),
+            const display = await Promise.race([
+                this._toDisplayShortUrl(expiringLink),
                 new Promise((_, reject) =>
-                    setTimeout(() => reject(new Error('TinyURL timeout')), PER_LINK_SHORTEN_MS),
+                    setTimeout(() => reject(new Error('display shorten timeout')), PER_LINK_SHORTEN_MS),
                 ),
             ]);
-            if (tiny) finalUrl = tiny;
+            if (display) finalUrl = display;
         } catch (err) {
             logger.warn(
-                `TinyURL skipped for ${expiringLink.slice(0, 60)}…: ${err.message} — using /d/ link`,
+                `Display shorten skipped for ${expiringLink.slice(0, 60)}…: ${err.message} — using /d/ link`,
             );
         }
 
         // Only cache when we actually minted an expiring short link.
         const canCache =
             finalUrl !== url &&
-            (finalUrl.includes('tinyurl.com/') || finalUrl.includes('/d/'));
+            (this._isDisplayShort(finalUrl) || finalUrl.includes('/d/'));
         if (canCache) {
             const expiresAt = Math.min(
                 shortMeta?.expiresAt || Date.now() + MEMORY_CACHE_TTL_MS,
@@ -181,7 +216,7 @@ class UrlShortener {
                 batch.map(async (link) => {
                     const original = link.url;
                     link.url = await this.shorten(original);
-                    if (link.url.includes('tinyurl.com/') || link.url.includes('/d/')) {
+                    if (this._isDisplayShort(link.url) || link.url.includes('/d/')) {
                         shortened++;
                     } else if (this.needsShortening(link.url)) {
                         failed++;
