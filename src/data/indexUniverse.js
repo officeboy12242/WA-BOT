@@ -26,6 +26,9 @@ export const F_AND_O_INDICES = {
     BANKNIFTY: { yahoo: '^NSEBANK', lot: 30, label: 'BANK NIFTY', nse: 'BANKNIFTY' },
     FINNIFTY: { yahoo: 'NIFTY_FIN_SERVICE.NS', lot: 65, label: 'FIN NIFTY', nse: 'FINNIFTY' },
     MIDCPNIFTY: { yahoo: 'NIFTY_MID_SELECT.NS', lot: 120, label: 'MIDCAP SELECT', nse: 'MIDCPNIFTY' },
+    // BSE index. Its chain comes from BseOptionChainService (BSE's own API),
+    // not the NSE chain, so `exchange` is what routes the lookup.
+    SENSEX: { yahoo: '^BSESN', lot: 20, label: 'SENSEX', nse: 'SENSEX', exchange: 'BSE', bseScripCd: 1 },
 };
 
 /** Aliases people actually type. */
@@ -42,6 +45,9 @@ const ALIASES = {
     MIDCAP: 'MIDCPNIFTY',
     MIDCPNIFTY50: 'MIDCPNIFTY',
     MIDCAPNIFTY: 'MIDCPNIFTY',
+    BSESN: 'SENSEX',
+    SENSEX50: 'SENSEX',
+    SX: 'SENSEX',
 };
 
 export const INDEX_KEYS = Object.keys(F_AND_O_INDICES);
@@ -81,7 +87,6 @@ export function isIndexSymbol(raw) {
 export const UNSUPPORTED_INDEX_HINTS = {
     NIFTYIT: 'NIFTY IT has no verified underlying feed here',
     NIFTYNXT50: 'NIFTY NEXT 50 has no verified underlying feed here',
-    SENSEX: 'SENSEX is a BSE index — the NSE option chain does not cover it',
     BANKEX: 'BANKEX is a BSE index — the NSE option chain does not cover it',
 };
 
