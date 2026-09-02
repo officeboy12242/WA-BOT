@@ -595,6 +595,52 @@ export const COMMAND_HANDLERS = {
             else await safeSendMessage(sock, chatId, { text: errText });
         }
     },
+    sweep: async ({ sock, chatId, args }) => {
+        // Manual counterpart to the auto-alerts. The time window is ignored on
+        // purpose: asking for the current state outside 09:45-14:45 should
+        // answer, not go quiet, even though the scanner itself stays silent then.
+        let loadingMsg = null;
+        try {
+            loadingMsg = await sock.sendMessage(chatId, {
+                text: '⚡ _Scanning for liquidity sweeps..._',
+            });
+        } catch (_) { /* ignore */ }
+
+        try {
+            const { default: sweepAlertService, ALERT_INDICES } = await import(
+                '../services/SweepAlertService.js'
+            );
+
+            // `/sweep NIFTY` narrows to one index; bare `/sweep` covers all the
+            // alerted ones.
+            const wanted = (args?.[0] || '').trim().toUpperCase();
+            const results = await sweepAlertService.scanNow({ ignoreTimeWindow: true });
+            const shown = wanted
+                ? results.filter((r) => r.setup.index === wanted)
+                : results;
+
+            let text;
+            if (shown.length) {
+                text = shown.map((r) => r.text).join('\n\n━━━━━━━━━━━━━━━━━━━━\n\n');
+            } else {
+                const scope = wanted || ALERT_INDICES.join(', ');
+                text =
+                    `⚡ *No liquidity sweep right now* — ${scope}\n\n` +
+                    '_A sweep is a specific event: price runs the stops under a ' +
+                    'level, then closes back above it. Most bars are not one._\n' +
+                    `_Auto-alerts cover ${ALERT_INDICES.join(' and ')} every 5 min ` +
+                    'during market hours._';
+            }
+
+            if (loadingMsg?.key) await editMessageText(sock, chatId, loadingMsg.key, text);
+            else await safeSendMessage(sock, chatId, { text });
+        } catch (err) {
+            logger.error(`Sweep command failed: ${err.message}`);
+            const errText = `❌ Sweep error: ${err.message}`;
+            if (loadingMsg?.key) await editMessageText(sock, chatId, loadingMsg.key, errText);
+            else await safeSendMessage(sock, chatId, { text: errText });
+        }
+    },
 
     /* ── Admin management ── */
     addadmin: ({ sock, chatId, senderJid, args, originalMsg, ctx }) => handleAddAdmin(sock, chatId, senderJid, args, originalMsg, ctx),

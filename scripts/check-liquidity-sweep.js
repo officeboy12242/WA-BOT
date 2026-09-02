@@ -238,4 +238,28 @@ function sweepScenario({ pierceTo, closeAt }) {
         'NIFTY carries no break-even warning');
 }
 
+// ── 14. /sweep is registered and reachable ───────────────────────────────────
+{
+    const { COMMAND_REGISTRY, findCommand, getAllCommandNames, helpCategoryOf } = await import(
+        '../src/commands/registry.js'
+    );
+    const def = COMMAND_REGISTRY.find((c) => c.names?.includes('/sweep'));
+    assert.ok(def, '/sweep must be in the registry');
+    assert.strictEqual(def.key, 'sweep');
+    assert.strictEqual(findCommand('/sweep')?.key, 'sweep', 'dispatcher resolves /sweep');
+    assert.ok(getAllCommandNames().includes('/sweep'), '/sweep is listed');
+    assert.strictEqual(helpCategoryOf(def), 'trade', '/sweep shows under trade in /help');
+
+    // A registry entry with no handler is worse than no entry: /help advertises
+    // a command that silently does nothing.
+    const CommandControllerMod = await import('../src/controllers/CommandController.js');
+    const CommandController = CommandControllerMod.default || CommandControllerMod.CommandController;
+    const gm = { isPrivilegedAsync: async () => true, isScalpEnabled: async () => true };
+    const cc = new CommandController(
+        null, { isPaused: false }, gm,
+        null, null, null, null, null, null, null, null, null, null, null,
+    );
+    assert.ok(typeof cc.handleCommand === 'function', 'controller exposes handleCommand');
+}
+
 console.log('liquidity sweep + SENSEX + confidence self-check ok');

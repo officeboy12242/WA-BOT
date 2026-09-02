@@ -573,6 +573,14 @@ export const COMMAND_REGISTRY = [
         category: 'trade',
     },
     {
+        names: ['/sweep'],
+        key: 'sweep',
+        scope: 'group_only',
+        role: 'admins',
+        help: 'Liquidity sweep now — `/sweep`, `/sweep NIFTY`, `/sweep SENSEX`',
+        category: 'trade',
+    },
+    {
         names: ['/scalpon'],
         key: 'scalpon',
         scope: 'group_only',
@@ -832,7 +840,7 @@ export const HELP_CATEGORY = {
     sticker: 'sticker', steal: 'sticker', rgb: 'sticker', tgstickers: 'sticker', tgstop: 'sticker', tgstickeron: 'sticker', tgstickeroff: 'sticker',
 
     // Markets
-    tradenow: 'trade', swing: 'trade', expiry: 'trade', tradelert: 'trade', index: 'trade', scalp: 'trade',
+    tradenow: 'trade', swing: 'trade', expiry: 'trade', tradelert: 'trade', index: 'trade', scalp: 'trade', sweep: 'trade',
     svmkr: 'trade', chainai: 'trade', ipo: 'trade',
 
     // Scheduled feeds
