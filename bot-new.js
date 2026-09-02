@@ -62,6 +62,7 @@ import ExpiryTradeService from './src/services/ExpiryTradeService.js';
 import { formatExpiryDigest } from './src/utils/expiryAlertFormatter.js';
 import { deployNotificationService } from './src/services/DeployNotificationService.js';
 import scalpAlertService from './src/services/ScalpAlertService.js';
+import sweepAlertService from './src/services/SweepAlertService.js';
 import { createJobQueue, startJobRuntime } from './src/jobs/index.js';
 
 // Bot state
@@ -521,6 +522,16 @@ class WhatsAppCourseBot {
                 groupManager: this.groupManager,
                 mongoDb,
                 getSock: () => this.whatsappService?.getSock?.() || null,
+            });
+
+            // Liquidity sweep alerts for NIFTY and SENSEX. Reuses the scalp
+            // group list so both trading alerts land in the same places.
+            sweepAlertService.start({
+                getGroups: () => this.groupManager.getScalpGroups(),
+                sendMessage: async (chatId, msg) => {
+                    const sock = this.whatsappService?.getSock?.();
+                    if (sock) await sock.sendMessage(chatId, msg);
+                },
             });
 
             // Auto-trigger scalp alerts when 75%+ confidence setups appear

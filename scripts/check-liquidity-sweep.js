@@ -11,9 +11,13 @@ import assert from 'assert';
 import {
     detectSweep,
     formatSweepAlert,
+    GRADE_WIN_RATE,
+    INDEX_STATS,
     isTradeableTime,
+    sweepConfidence,
     SWEEP_CONFIG,
 } from '../src/services/LiquiditySweepScanService.js';
+import { ALERT_INDICES, MIN_CONFIDENCE } from '../src/services/SweepAlertService.js';
 import { computeAtrSeries, istDayKey, istMinutes } from '../src/utils/yahooCandles.js';
 import {
     F_AND_O_INDICES,
@@ -177,4 +181,61 @@ function sweepScenario({ pierceTo, closeAt }) {
     assert.ok(withStrike.includes('3,063'), 'per-lot cost = premium x lot');
 }
 
-console.log('liquidity sweep + SENSEX self-check ok');
+
+// ── 11. confidence is measured, not flat ─────────────────────────────────────
+{
+    const nA = sweepConfidence('NIFTY', 'A+');
+    const sA = sweepConfidence('SENSEX', 'A+');
+    assert.ok(nA.percent > sA.percent,
+        `NIFTY A+ (${nA.percent}%) must outrank SENSEX A+ (${sA.percent}%)`);
+    assert.strictEqual(nA.edge, 'positive', 'NIFTY tested above break-even');
+    assert.strictEqual(sA.edge, 'negative', 'SENSEX tested below break-even (PF 0.95)');
+
+    // Within one index, A+ must beat A.
+    assert.ok(sweepConfidence('NIFTY', 'A+').percent > sweepConfidence('NIFTY', 'A').percent);
+
+    // The published stats are what the number is built from; if they are edited
+    // without re-measuring, this is the check that should fail.
+    assert.strictEqual(INDEX_STATS.NIFTY.pf, 1.48);
+    assert.strictEqual(INDEX_STATS.SENSEX.pf, 0.95);
+    assert.strictEqual(GRADE_WIN_RATE['A+'], 57);
+
+    const unknown = sweepConfidence('DOESNOTEXIST', 'A+');
+    assert.strictEqual(unknown.edge, 'unmeasured', 'unknown index is not silently scored');
+}
+
+// ── 12. only NIFTY and SENSEX auto-alert ─────────────────────────────────────
+{
+    assert.deepStrictEqual(ALERT_INDICES, ['NIFTY', 'SENSEX'],
+        'auto-alerts are limited to NIFTY and SENSEX');
+    for (const k of ALERT_INDICES) {
+        assert.ok(F_AND_O_INDICES[k], `${k} must exist in the index universe`);
+    }
+    // A confidence floor that admitted SENSEX A (46%) but not much below it.
+    assert.ok(MIN_CONFIDENCE > 0 && MIN_CONFIDENCE <= 50, 'confidence floor is sane');
+}
+
+// ── 13. the alert shows its working ──────────────────────────────────────────
+{
+    const setup = {
+        ...detectSweep(sweepScenario({ pierceTo: 968, closeAt: 1002 })),
+        label: 'SENSEX',
+        index: 'SENSEX',
+        lot: 20,
+    };
+    setup.confidence = sweepConfidence('SENSEX', setup.grade);
+    const text = formatSweepAlert(setup);
+
+    assert.ok(text.includes('Confidence'), 'confidence percent is shown');
+    assert.ok(text.includes(`${setup.confidence.percent}%`), 'the actual number appears');
+    assert.ok(text.includes('PF 0.95'), 'the profit factor behind it is shown');
+    assert.ok(text.includes('below break-even'),
+        'a sub-1.0 profit factor must be stated, not hidden behind a percentage');
+
+    const nifty = { ...setup, label: 'NIFTY 50', index: 'NIFTY' };
+    nifty.confidence = sweepConfidence('NIFTY', setup.grade);
+    assert.ok(!formatSweepAlert(nifty).includes('below break-even'),
+        'NIFTY carries no break-even warning');
+}
+
+console.log('liquidity sweep + SENSEX + confidence self-check ok');

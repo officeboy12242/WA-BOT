@@ -48,6 +48,49 @@ import {
     istMinutes,
 } from '../utils/yahooCandles.js';
 
+/**
+ * Measured per-index performance, same 59-session 5m backtest, quality sweeps
+ * only (pierce 0.25-1.30 ATR). Confidence is derived from these rather than
+ * being a flat number, because the same setup is not equally good everywhere.
+ *
+ * SENSEX is included because it is traded here on request; its profit factor
+ * is below 1, so the confidence it reports is deliberately low rather than
+ * flattering. A number that hides that would be worse than no number.
+ */
+export const INDEX_STATS = {
+    NIFTY: { winRate: 55.7, pf: 1.48 },
+    FINNIFTY: { winRate: 51.8, pf: 1.32 },
+    BANKNIFTY: { winRate: 45.8, pf: 1.14 },
+    SENSEX: { winRate: 42.5, pf: 0.95 },
+};
+
+/** Measured win rate by grade, across all indices. */
+export const GRADE_WIN_RATE = { 'A+': 57, A: 50 };
+
+/**
+ * Confidence for one setup: the grade's measured win rate blended with the
+ * index's own. Returns the parts too, so an alert can show its working instead
+ * of asserting a number.
+ *
+ * @param {string} indexKey
+ * @param {'A+'|'A'} grade
+ */
+export function sweepConfidence(indexKey, grade) {
+    const idx = INDEX_STATS[String(indexKey || '').toUpperCase()];
+    const gradeWr = GRADE_WIN_RATE[grade] ?? 50;
+    if (!idx) return { percent: gradeWr, gradeWr, indexWr: null, pf: null, edge: 'unmeasured' };
+
+    const percent = Math.round((gradeWr + idx.winRate) / 2);
+    return {
+        percent,
+        gradeWr,
+        indexWr: idx.winRate,
+        pf: idx.pf,
+        // Below 1.0 the strategy lost money on this index in testing.
+        edge: idx.pf >= 1.0 ? 'positive' : 'negative',
+    };
+}
+
 export const SWEEP_CONFIG = {
     pivotLeft: 3,
     pivotRight: 3,
@@ -239,7 +282,14 @@ export async function scanIndexForSweep(spec, opts = {}) {
     const last = candles[candles.length - 1];
     if (!opts.ignoreTimeWindow && !isTradeableTime(last.t)) return null;
 
-    return { index: spec.key, label: spec.label || spec.key, lot: spec.lot ?? null, ...setup };
+    const confidence = sweepConfidence(spec.key, setup.grade);
+    return {
+        index: spec.key,
+        label: spec.label || spec.key,
+        lot: spec.lot ?? null,
+        confidence,
+        ...setup,
+    };
 }
 
 /** WhatsApp-ready alert text. */
@@ -278,11 +328,34 @@ export function formatSweepAlert(setup, extra = {}) {
 
     lines.push(
         '',
-        `_Grade ${setup.grade} · historical win rate ~${setup.expectedWinRate}% · ` +
-            `trail ${setup.trailAtr} ATR after T1_`,
+        buildConfidenceLine(setup),
+        `_Grade ${setup.grade} · trail ${setup.trailAtr} ATR after T1_`,
         '_Not advice. Verify premiums at your broker._',
     );
     return lines.join('\n');
+}
+
+
+/**
+ * Confidence line. Shows the two measured inputs behind the number so it can be
+ * argued with, and flags an index whose profit factor is below 1 instead of
+ * letting a middling percentage imply the setup is merely average there.
+ */
+function buildConfidenceLine(setup) {
+    const c = setup.confidence;
+    if (!c) return `_Historical win rate ~${setup.expectedWinRate}%_`;
+
+    const filled = Math.max(0, Math.min(10, Math.round(c.percent / 10)));
+    const bar = '█'.repeat(filled) + '░'.repeat(10 - filled);
+    const parts = [`*Confidence ${c.percent}%*  ${bar}`];
+
+    if (c.indexWr != null) {
+        parts.push(`_grade ${c.gradeWr}% · ${setup.index || 'index'} ${c.indexWr}% · PF ${c.pf}_`);
+    }
+    if (c.edge === 'negative') {
+        parts.push('⚠️ _This index tested below break-even (PF < 1). Size accordingly._');
+    }
+    return parts.join('\n');
 }
 
 function fmt(v) {
