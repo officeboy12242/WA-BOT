@@ -324,6 +324,21 @@ export function formatSweepAlert(setup, extra = {}) {
         if (setup.lot && Number.isFinite(extra.strike.ce?.ltp)) {
             lines.push(`💰 ₹${fmt(extra.strike.ce.ltp * setup.lot)} per lot (${setup.lot})`);
         }
+
+        // The exchange keeps serving the last snapshot after the close, so a
+        // premium can read as live when it is a settlement figure hours old.
+        // Say which it is rather than letting the number speak for itself.
+        if (extra.chainAsOf) {
+            if (extra.chainLive) {
+                lines.push(`_Premium live as of ${extra.chainAsOf}_`);
+            } else {
+                lines.push(
+                    `⚠️ _Premium is a SETTLEMENT price from ${extra.chainAsOf}` +
+                        `${extra.chainAgeMinutes ? ` (${formatAge(extra.chainAgeMinutes)} old)` : ''}` +
+                        ` — indicative only. Check the live premium before entering._`,
+                );
+            }
+        }
     }
 
     lines.push(
@@ -356,6 +371,12 @@ function buildConfidenceLine(setup) {
         parts.push('⚠️ _This index tested below break-even (PF < 1). Size accordingly._');
     }
     return parts.join('\n');
+}
+
+function formatAge(mins) {
+    if (mins < 60) return `${mins}m`;
+    const h = Math.floor(mins / 60);
+    return h < 24 ? `${h}h` : `${Math.floor(h / 24)}d`;
 }
 
 function fmt(v) {

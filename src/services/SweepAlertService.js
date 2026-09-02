@@ -108,7 +108,15 @@ class SweepAlertService {
                     minPremium: PREMIUM_MIN,
                     maxPremium: PREMIUM_MAX,
                 });
-                return strike ? { strike, expiry: snap.expiry } : null;
+                return strike
+                    ? {
+                          strike,
+                          expiry: snap.expiry,
+                          chainAsOf: snap.chainTimestamp,
+                          chainLive: snap.isLive,
+                          chainAgeMinutes: snap.ageMinutes,
+                      }
+                    : null;
             }
 
             const res = await nseOptionChainService.getChainSnapshot?.(spec.nse);

@@ -48,6 +48,73 @@ const HEADERS = {
     Origin: 'https://beta.bseindia.com',
 };
 
+/**
+ * Parse BSE's "as on" stamp, e.g. "02 Sep 2026 | 19:01", into a real Date.
+ *
+ * This matters more than it looks. The chain endpoint keeps serving the last
+ * snapshot after the session ends, with no field that says "this is old" other
+ * than this string. A premium read straight off it looks live and is not: the
+ * 19:01 stamp is a post-close settlement figure, so a 76600 CE quoted at 153.15
+ * from that snapshot can sit well away from the broker's screen.
+ */
+const MONTHS = {
+    jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+    jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
+};
+
+export function parseBseAsOf(stamp) {
+    const s = String(stamp || '').trim();
+    const m = s.match(/^(\d{1,2})\s+([A-Za-z]{3})[a-z]*\s+(\d{4})\s*\|\s*(\d{1,2}):(\d{2})/);
+    if (!m) return null;
+    const mon = MONTHS[m[2].toLowerCase()];
+    if (mon == null) return null;
+    // The stamp is IST wall-clock; build the UTC instant it corresponds to.
+    const utcMs = Date.UTC(
+        Number(m[3]), mon, Number(m[1]), Number(m[4]), Number(m[5]),
+    ) - 5.5 * 3600 * 1000;
+    const d = new Date(utcMs);
+    return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/**
+ * How usable a chain snapshot is right now.
+ *
+ * `live` is only true when the market is open AND the snapshot is recent. Once
+ * the session closes the data is legitimately final rather than stale, so it is
+ * reported as `closed` — a different thing from a feed that has gone silent
+ * mid-session, which is the case worth refusing to trade on.
+ *
+ * @param {Date|null} asOf
+ * @param {Date} [now]
+ */
+export function chainFreshness(asOf, now = new Date()) {
+    if (!asOf) return { state: 'unknown', ageMinutes: null, live: false };
+
+    const ageMinutes = Math.round((now.getTime() - asOf.getTime()) / 60000);
+    const mins = istMinutesOf(now);
+    const marketOpen = mins >= 9 * 60 + 15 && mins <= 15 * 60 + 30 && isWeekday(now);
+
+    if (!marketOpen) return { state: 'closed', ageMinutes, live: false };
+    if (ageMinutes <= 15) return { state: 'live', ageMinutes, live: true };
+    return { state: 'stale', ageMinutes, live: false };
+}
+
+function istMinutesOf(date) {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+        timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false,
+    }).formatToParts(date);
+    const h = Number(parts.find((p) => p.type === 'hour')?.value || 0);
+    const m = Number(parts.find((p) => p.type === 'minute')?.value || 0);
+    return h * 60 + m;
+}
+
+function isWeekday(date) {
+    const wd = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'Asia/Kolkata', weekday: 'short',
+    }).format(date);
+    return !['Sat', 'Sun'].includes(wd);
+}
+
 /** BSE scrip codes for the index derivatives. */
 export const BSE_SCRIP_CODES = { SENSEX: 1, BANKEX: 12 };
 
@@ -81,6 +148,11 @@ async function bseGet(path, params) {
         params,
         timeout: TIMEOUT_MS,
         headers: HEADERS,
+        // BSE sometimes emits a header with trailing whitespace, which Node's
+        // strict parser rejects outright: "Parse Error: Unexpected whitespace
+        // after header value". It is intermittent, so without this the chain
+        // fails at random and an alert silently loses its premium.
+        insecureHTTPParser: true,
         // The moved endpoint redirects to an HTML error page; following it and
         // then failing on the parse is more confusing than seeing it here.
         maxRedirects: 3,
@@ -212,6 +284,9 @@ export async function fetchBseOptionChain(symbol = 'SENSEX', expiry = null) {
           )
         : null;
 
+    const asOf = parseBseAsOf(data?.ASON?.DT_TM);
+    const fresh = chainFreshness(asOf);
+
     const snapshot = {
         symbol: key,
         exchange: 'BSE',
@@ -226,6 +301,11 @@ export async function fetchBseOptionChain(symbol = 'SENSEX', expiry = null) {
         atmCe: atm?.ce ?? null,
         atmPe: atm?.pe ?? null,
         chainTimestamp: data?.ASON?.DT_TM?.trim() || null,
+        asOf: asOf ? asOf.toISOString() : null,
+        // Callers must be able to tell a live quote from a settlement figure.
+        freshness: fresh.state,
+        ageMinutes: fresh.ageMinutes,
+        isLive: fresh.live,
         fetchedAt: new Date().toISOString(),
     };
 
@@ -267,4 +347,11 @@ export function _resetBseChainCache() {
     expiryCache.clear();
 }
 
-export default { fetchBseOptionChain, fetchBseExpiries, pickStrike, BSE_SCRIP_CODES };
+export default {
+    fetchBseOptionChain,
+    fetchBseExpiries,
+    pickStrike,
+    parseBseAsOf,
+    chainFreshness,
+    BSE_SCRIP_CODES,
+};
