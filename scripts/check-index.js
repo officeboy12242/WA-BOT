@@ -68,7 +68,11 @@ ok(getIndexSpec('nope') === null, 'unknown spec is null');
 
 // unsupported index-looking symbols must be NAMED, so callers fail fast instead
 // of stalling on a nonexistent ticker
-ok(unsupportedIndexReason('SENSEX')?.includes('BSE'), 'SENSEX explained as BSE');
+// SENSEX is supported now (BseOptionChainService reads BSE's own chain), so
+// it must NOT be named unsupported - that hint would fail it fast for no reason.
+ok(unsupportedIndexReason('SENSEX') === null, 'SENSEX is supported, not rejected');
+ok(getIndexSpec('SENSEX')?.yahoo === '^BSESN', 'SENSEX resolves to the BSE ticker');
+ok(getIndexSpec('SENSEX')?.exchange === 'BSE', 'SENSEX routes to the BSE chain');
 ok(unsupportedIndexReason('BANKEX')?.includes('BSE'), 'BANKEX explained as BSE');
 ok(unsupportedIndexReason('NIFTYIT') !== null, 'NIFTYIT named as unsupported');
 ok(unsupportedIndexReason('NIFTYNXT50') !== null, 'NIFTYNXT50 named as unsupported');
@@ -113,9 +117,14 @@ let threw = null;
 try { await indexAnalysisService.analyze('RELIANCE'); } catch (e) { threw = e.message; }
 ok(threw !== null, 'analyze rejects a non-index');
 ok(threw?.includes('NIFTY'), 'rejection lists the supported indices');
+// SENSEX no longer rejects outright. IndexAnalysisService still runs on NSE
+// data, so it may fail for its own reasons, but not by calling SENSEX unknown.
 let threwBse = null;
 try { await indexAnalysisService.analyze('SENSEX'); } catch (e) { threwBse = e.message; }
-ok(threwBse?.includes('BSE'), 'SENSEX rejection explains why, not just "unsupported"');
+ok(
+    threwBse === null || !/unsupported|not an index|unknown/i.test(threwBse),
+    'SENSEX is not rejected as an unknown index',
+);
 
 // ------------------------------------------------------------ command wiring
 const cmd = COMMAND_REGISTRY.find((c) => c.key === 'index');

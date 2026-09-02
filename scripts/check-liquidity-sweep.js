@@ -251,15 +251,15 @@ function sweepScenario({ pierceTo, closeAt }) {
     assert.strictEqual(helpCategoryOf(def), 'trade', '/sweep shows under trade in /help');
 
     // A registry entry with no handler is worse than no entry: /help advertises
-    // a command that silently does nothing.
-    const CommandControllerMod = await import('../src/controllers/CommandController.js');
-    const CommandController = CommandControllerMod.default || CommandControllerMod.CommandController;
-    const gm = { isPrivilegedAsync: async () => true, isScalpEnabled: async () => true };
-    const cc = new CommandController(
-        null, { isPaused: false }, gm,
-        null, null, null, null, null, null, null, null, null, null, null,
+    // a command that silently does nothing. Checked by reading the source
+    // rather than importing CommandController, which pulls in the whole app
+    // and pushed this check past the runner's 120s timeout.
+    const { readFileSync } = await import('node:fs');
+    const controllerSrc = readFileSync(
+        new URL('../src/controllers/CommandController.js', import.meta.url), 'utf8',
     );
-    assert.ok(typeof cc.handleCommand === 'function', 'controller exposes handleCommand');
+    assert.ok(controllerSrc.includes('sweep: async ({'),
+        'CommandController must define a sweep handler for the registry entry');
 }
 
 console.log('liquidity sweep + SENSEX + confidence self-check ok');
