@@ -25,6 +25,7 @@ import {
 import { config } from '../../config/config.js';
 import { getYesterdayDateStrIST } from '../../utils/dateIST.js';
 import { getPrimaryOwnerPhone } from '../../utils/ownerProfile.js';
+import { formatClockLabel, DEFAULT_OPEN_TIME, DEFAULT_CLOSE_TIME } from '../AutoChatController.js';
 
 /** Dedupe welcome when both stub message + participants.update fire */
 const recentWelcomes = new Map();
@@ -762,7 +763,7 @@ export async function handleGroups(sock, chatId, senderJid, { groupManager }) {
 
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
         r += '💡 `/activate` `/deactivate` · `/newson` `/newsoff`\n';
-        r += '💡 `/githubon` `/githuboff` · `/awesomeon` `/awesomeoff` · `/interviewqon` `/interviewqoff` · `/instaon` `/instaoff` · `/stickeron` `/stickeroff` · `/movieon` `/movieoff` · `/trending on/off` · `/setwc`';
+        r += '💡 `/githubon` `/githuboff` · `/autochat` · `/awesomeon` `/awesomeoff` · `/interviewqon` `/interviewqoff` · `/instaon` `/instaoff` · `/stickeron` `/stickeroff` · `/movieon` `/movieoff` · `/trending on/off` · `/setwc`';
 
         await sock.sendMessage(chatId, { text: r });
         logger.info(`📋 Group list sent to ${senderPhone}`);
@@ -1340,6 +1341,99 @@ export async function handleGithubOff(sock, chatId, senderJid, { groupManager, o
         logger.info(`🐙 GitHub trending disabled: ${chatId} by ${senderPhone}`);
     } catch (error) {
         logger.error(`Error disabling GitHub trending: ${error.message}`);
+    }
+}
+
+export async function handleAutoChat(sock, chatId, senderJid, args, { groupManager, autoChatController, originalMsg } = {}) {
+    try {
+        const senderPhone = extractPhoneNumber(senderJid);
+        const mode = String(args?.[0] || '').toLowerCase();
+        const openLabel =
+            autoChatController?.openLabel || formatClockLabel(config.AUTOCHAT_OPEN_TIME || DEFAULT_OPEN_TIME);
+        const closeLabel =
+            autoChatController?.closeLabel || formatClockLabel(config.AUTOCHAT_CLOSE_TIME || DEFAULT_CLOSE_TIME);
+
+        let groupName = 'Unknown Group';
+        try {
+            const meta = await getGroupMeta(sock, chatId, groupManager);
+            groupName = meta.subject || groupName;
+        } catch {}
+
+        if (!['on', 'off', 'status'].includes(mode)) {
+            const current = groupManager ? await groupManager.isAutoChatEnabled(chatId) : false;
+            let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+            r += current ? '🔓 *AUTO CHAT ON* 🔓' : '🔒 *AUTO CHAT OFF* 🔒';
+            r += '\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+            r += `📢 *Group:* ${groupName}\n\n`;
+            r += `Bot ${current ? 'opens' : 'will open'} this chat daily at *${openLabel}* `;
+            r += `and locks it at *${closeLabel}*.\n\n`;
+            r += '💡 `/autochat on` — enable\n';
+            r += '💡 `/autochat off` — disable\n';
+            r += '💡 `/autochat status` — current state';
+            await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
+            return;
+        }
+
+        if (mode === 'status') {
+            const current = groupManager ? await groupManager.isAutoChatEnabled(chatId) : false;
+            let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+            r += current ? '🔓 *AUTO CHAT: ON* 🔓' : '🔒 *AUTO CHAT: OFF* 🔒';
+            r += '\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+            r += `📢 *Group:* ${groupName}\n\n`;
+            r += `🔓 Opens daily at *${openLabel}* — short LLM greeting from the group title/description.\n`;
+            r += `🔒 Locks daily at *${closeLabel}* — chat reopens next morning.\n\n`;
+            r += '💡 Use `/autochat on` or `/autochat off`';
+            await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
+            logger.info(`🔓 Auto chat status: ${chatId} by ${senderPhone}`);
+            return;
+        }
+
+        const turningOn = mode === 'on';
+        if (groupManager) {
+            await groupManager.setAutoChatEnabled(chatId, groupName, turningOn, senderPhone);
+        }
+
+        let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        r += turningOn ? '✅ *AUTO CHAT ON* ✅' : '🛑 *AUTO CHAT OFF* 🛑';
+        r += '\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+        r += `📢 *Group:* ${groupName}\n\n`;
+
+        if (turningOn) {
+            if (config.AUTOCHAT_ENABLED === false) {
+                r += '⚠️ Auto chat is globally disabled in the bot env (`AUTOCHAT_ENABLED=false`).\n';
+                r += 'It is saved here, but no open/close will run until that is enabled.\n\n';
+            } else if (!autoChatController) {
+                r += '⚠️ Auto chat service is not available yet — try again in a minute.\n\n';
+            } else {
+                const aligned = await autoChatController.alignGroupToSchedule(sock, chatId);
+                if (aligned === 'opened') {
+                    r += '🌅 *Opened now* — the greeting is on its way.\n';
+                } else if (aligned === 'already-open') {
+                    r += '✔️ Chat is already open for today.\n';
+                } else if (aligned === 'closed') {
+                    r += `🌙 Chat is *locked* until the ${openLabel} open.\n`;
+                } else if (aligned === 'already-closed') {
+                    r += `✔️ Chat is already locked — opens at ${openLabel}.\n`;
+                } else {
+                    r += '✔️ Schedule saved — transitions run automatically.\n';
+                }
+                r += '\n';
+            }
+            r += `🔓 Daily open at *${openLabel}* — short LLM greeting from the group title/description.\n`;
+            r += `🔒 Daily close at *${closeLabel}* — chat locks until next morning.\n\n`;
+            r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+            r += '⚠️ Bot must be a *group admin* to lock/unlock the chat.\n';
+            r += '💡 Use `/autochat off` to stop';
+        } else {
+            r += 'No more daily auto open/close here. The chat is left as it is right now.\n\n';
+            r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+            r += '💡 Use `/autochat on` to enable again';
+        }
+
+        await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
+        logger.info(`🔓 Auto chat ${turningOn ? 'enabled' : 'disabled'}: ${chatId} by ${senderPhone}`);
+    } catch (error) {
+        logger.error(`Error toggling auto chat: ${error.message}`);
     }
 }
 

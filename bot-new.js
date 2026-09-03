@@ -43,10 +43,12 @@ import { urlShortener } from './src/utils/urlShortener.js';
 import { pronoobDriveService } from './src/services/PronoobDriveService.js';
 import GroupChatLogService from './src/services/GroupChatLogService.js';
 import GroupSummaryController from './src/controllers/GroupSummaryController.js';
+import AutoChatController from './src/controllers/AutoChatController.js';
 import AssistService from './src/services/AssistService.js';
 import ResumeProfileStore from './src/models/ResumeProfileStore.js';
 import ResumeTailorService from './src/services/ResumeTailorService.js';
 import { startGroupSummaryScheduler } from './src/utils/groupSummaryScheduler.js';
+import { startAutoChatScheduler } from './src/utils/autoChatScheduler.js';
 import TradeAlertController from './src/controllers/TradeAlertController.js';
 import { startTradeAlertScheduler } from './src/utils/tradeAlertScheduler.js';
 import SvmkrScanService from './src/services/SvmkrScanService.js';
@@ -106,6 +108,8 @@ class WhatsAppCourseBot {
         this.groupSummaryScheduler = null;
         this.groupChatLogService = null;
         this.groupSummaryController = null;
+        this.autoChatController = null;
+        this.autoChatScheduler = null;
         this.tradeAlertController = null;
         this.tradeAlertScheduler = null;
         this.svmkrScanService = null;
@@ -245,6 +249,10 @@ class WhatsAppCourseBot {
             );
             await this.groupSummaryController.init();
 
+            // Daily auto open/close chat (/autochat on groups) — 9 AM unlock + greeting, 11:55 PM lock.
+            this.autoChatController = new AutoChatController(this.groupManager, config, mongoDb);
+            await this.autoChatController.init();
+
             this.assistService = new AssistService(config, this.botSettings, this.groupManager, mongoDb);
             await this.assistService.init();
             this.resumeStore = new ResumeProfileStore(mongoDb);
@@ -317,6 +325,7 @@ class WhatsAppCourseBot {
             this.commandController.setStickerForwarder(this.stickerForwarder);
             this.commandController.setGroupChatLogService(this.groupChatLogService);
             this.commandController.setGroupSummaryController(this.groupSummaryController);
+            this.commandController.setAutoChatController(this.autoChatController);
             this.commandController.setTradeAlertController(this.tradeAlertController);
             this.commandController.setAssistService(this.assistService);
             this.commandController.setResumeTailor(this.resumeStore, this.resumeTailorService);
@@ -441,6 +450,14 @@ class WhatsAppCourseBot {
                 getSock: () => this.whatsappService.getSock(),
                 botState,
                 groupSummaryController: this.groupSummaryController,
+                config,
+                botSettings: this.botSettings,
+            });
+
+            this.autoChatScheduler = startAutoChatScheduler({
+                getSock: () => this.whatsappService.getSock(),
+                botState,
+                autoChatController: this.autoChatController,
                 config,
                 botSettings: this.botSettings,
             });
@@ -585,6 +602,9 @@ class WhatsAppCourseBot {
         }
         if (this.groupSummaryScheduler) {
             this.groupSummaryScheduler.stop();
+        }
+        if (this.autoChatScheduler) {
+            this.autoChatScheduler.stop();
         }
         if (this.tradeAlertScheduler) {
             this.tradeAlertScheduler.stop();

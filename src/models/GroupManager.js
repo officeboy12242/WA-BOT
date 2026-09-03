@@ -1201,6 +1201,42 @@ class GroupManager {
             .toArray();
     }
 
+    /** Auto open/close chat — /autochat on groups unlock at 09:00 and lock at 23:55. */
+    async setAutoChatEnabled(groupId, groupName, enabled, setBy) {
+        const normalizedId = jidNormalizedUser(String(groupId).replace(/:\d+(?=@)/, '')) || groupId;
+        await this.groups.updateOne(
+            { group_id: normalizedId },
+            {
+                $set: {
+                    group_name: groupName,
+                    auto_chat: enabled,
+                    auto_chat_by: setBy,
+                    auto_chat_at: new Date(),
+                },
+                $setOnInsert: { group_id: normalizedId, is_active: false },
+            },
+            { upsert: true }
+        );
+        logger.info(
+            `${enabled ? '🔓 Auto chat ON' : '🔒 Auto chat OFF'}: ${groupName} (${normalizedId}) by ${setBy}`
+        );
+    }
+
+    async isAutoChatEnabled(groupId) {
+        const normalizedId = jidNormalizedUser(String(groupId).replace(/:\d+(?=@)/, '')) || groupId;
+        const row = await this.groups.findOne(
+            { group_id: normalizedId },
+            { projection: { auto_chat: 1 } }
+        );
+        return row?.auto_chat === true;
+    }
+
+    async getAutoChatEnabledGroups() {
+        return this.groups
+            .find({ auto_chat: true }, { projection: { _id: 0 } })
+            .toArray();
+    }
+
     async setTradeAlertEnabled(groupId, groupName, enabled, setBy) {
         const normalizedId = jidNormalizedUser(String(groupId).replace(/:\d+(?=@)/, '')) || groupId;
         await this.groups.updateOne(

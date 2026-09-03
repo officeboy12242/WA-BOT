@@ -17,6 +17,7 @@ WhatsApp multipurpose bot built on [Baileys](https://github.com/WhiskeySockets/B
 | **News** | Scheduled Inshorts tech digests (`/newson`) |
 | **GitHub** | Scheduled trending repos (`/githubon`) |
 | **Group recap** | End-of-day AI summary (`/summaryon`) |
+| **Auto chat** | Locks/unlocks group chat daily — opens 9 AM + short LLM greeting from the group title/description, closes 11:55 PM (`/autochat`) |
 | **Trade** | NSE F&O alerts (`/tradelert`), on-demand `/tradenow`, `/swing` momentum setups, `/expiry` expiry-day index options, and measured win rates via `/tradelert stats` |
 | **Fun** | Horoscope, advice, fun facts, RGB stickers |
 | **Moderation** | Warns, message delete helpers, welcome messages |
@@ -101,7 +102,7 @@ Use `/help` on WhatsApp for the live list filtered by your role and chat type.
 `/tradenow` · `/swing` · `/expiry`
 
 ### Staff (group toggles)
-`/activate` · `/deactivate` · `/courson` · `/coursesoff` · `/newson` · `/newsoff` · `/githubon` · `/githuboff` · `/instaon` · `/instaoff` · `/stickeron` · `/stickeroff` · `/movieon` · `/movieoff` · `/summaryon` · `/summaryoff` · `/summarynow` · `/trending` · `/tradelert`
+`/activate` · `/deactivate` · `/courson` · `/coursesoff` · `/newson` · `/newsoff` · `/githubon` · `/githuboff` · `/autochat` · `/instaon` · `/instaoff` · `/stickeron` · `/stickeroff` · `/movieon` · `/movieoff` · `/summaryon` · `/summaryoff` · `/summarynow` · `/trending` · `/tradelert`
 
 ### Admins / moderation
 `/setwc` · `/warn` · `/warns` · `/mywarns` · `/clearwarns` · `/dellast` · `/delall` · `/groups` · `/pause` · `/resume` · `/clear` · `/confirm` · `/cancel` · `/addadmin` · `/removeadmin` · `/admins` · `/increaselimit`
@@ -115,7 +116,7 @@ Use `/help` on WhatsApp for the live list filtered by your role and chat type.
 
 1. Add the bot to the group (promote to admin if you need deletes/warns/kicks).  
 2. `/activate` — turns on default group features and shows owner @mention.  
-3. Optionally toggle: `/movieon`, `/newson`, `/githubon`, `/instaon`, `/summaryon`, `/tradelert on`, `/setwc on …`.
+3. Optionally toggle: `/movieon`, `/newson`, `/githubon`, `/instaon`, `/summaryon`, `/autochat on`, `/tradelert on`, `/setwc on …`.
 
 ---
 

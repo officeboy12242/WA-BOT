@@ -98,6 +98,17 @@ export const config = {
     /** Cap vision calls per group per day so free-tier Gemini quota isn't burned on meme spam. */
     GROUP_SUMMARY_IMAGE_VISION_MAX_PER_DAY:
         parseInt(process.env.GROUP_SUMMARY_IMAGE_VISION_MAX_PER_DAY, 10) || 40,
+    /** Daily auto open/close chat — /autochat on groups open at 09:00, lock at 23:55. */
+    AUTOCHAT_ENABLED: process.env.AUTOCHAT_ENABLED !== 'false',
+    /** When the group chat is unlocked (members can message) each IST day. */
+    AUTOCHAT_OPEN_TIME: (process.env.AUTOCHAT_OPEN_TIME || '09:00').trim(),
+    /** When the group chat is locked (admins only) each IST day. */
+    AUTOCHAT_CLOSE_TIME: (process.env.AUTOCHAT_CLOSE_TIME || '23:55').trim(),
+    AUTOCHAT_TIMEZONE: process.env.AUTOCHAT_TIMEZONE || 'Asia/Kolkata',
+    /** On boot, still open/close groups whose scheduled transition was missed. */
+    AUTOCHAT_CATCHUP_ENABLED: process.env.AUTOCHAT_CATCHUP_ENABLED !== 'false',
+    /** Ceiling for the LLM-generated open/close message (fallback template after this). */
+    AUTOCHAT_LLM_TIMEOUT_MS: parseInt(process.env.AUTOCHAT_LLM_TIMEOUT_MS, 10) || 25_000,
     NVIDIA_API_KEY: process.env.NVIDIA_API_KEY?.trim() || '',
     /** Group summary / recap model */
     NVIDIA_MODEL: process.env.NVIDIA_MODEL?.trim() || 'nvidia/nemotron-3-super-120b-a12b',

@@ -249,6 +249,13 @@ export const COMMAND_REGISTRY = [
         help: 'Disable GitHub trending only — courses continue',
     },
     {
+        names: ['/autochat'],
+        key: 'autochat',
+        scope: 'group_only',
+        role: 'staff',
+        help: 'Auto open 9 AM & lock at 11:55 PM daily — /autochat on|off|status',
+    },
+    {
         names: ['/awesomeon'],
         key: 'awesomeon',
         scope: 'group_only',
@@ -859,7 +866,7 @@ export const HELP_CATEGORY = {
     courson: 'group', coursesoff: 'group', githubon: 'group', githuboff: 'group',
     awesomeon: 'group', awesomeoff: 'group', instaon: 'group', instaoff: 'group',
     stickeron: 'group', stickeroff: 'group', movieon: 'group', movieoff: 'group',
-    summaryon: 'group', summaryoff: 'group', trending: 'group', setwc: 'group',
+    summaryon: 'group', summaryoff: 'group', autochat: 'group', trending: 'group', setwc: 'group',
 
     // Moderation
     warn: 'moderation', warns: 'moderation', mywarns: 'moderation',

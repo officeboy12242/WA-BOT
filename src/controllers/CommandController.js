@@ -39,6 +39,7 @@ import {
     handleCoursesOff,
     handleGithubOn,
     handleGithubOff,
+    handleAutoChat,
     handleAwesomeOn,
     handleAwesomeOff,
     handleGroups,
@@ -517,6 +518,8 @@ export const COMMAND_HANDLERS = {
     coursesoff: ({ sock, chatId, senderJid, ctx }) => handleCoursesOff(sock, chatId, senderJid, ctx),
     githubon: ({ sock, chatId, senderJid, ctx }) => handleGithubOn(sock, chatId, senderJid, ctx),
     githuboff: ({ sock, chatId, senderJid, ctx }) => handleGithubOff(sock, chatId, senderJid, ctx),
+    autochat: ({ sock, chatId, senderJid, args, ctx }) => handleAutoChat(sock, chatId, senderJid, args, ctx),
+
     awesomeon: ({ sock, chatId, senderJid, ctx }) => handleAwesomeOn(sock, chatId, senderJid, ctx),
     awesomeoff: ({ sock, chatId, senderJid, ctx }) => handleAwesomeOff(sock, chatId, senderJid, ctx),
     interviewqon: ({ sock, chatId, senderJid, ctx }) => handleInterviewQOn(sock, chatId, senderJid, ctx),
@@ -902,6 +905,7 @@ class CommandController {
         this.whatsappService = null;
         this.groupChatLogService = null;
         this.groupSummaryController = null;
+        this.autoChatController = null;
         this.tradeAlertController = null;
         this.svmkrTracker = null;
         this.svmkrScheduler = null;
@@ -931,6 +935,10 @@ class CommandController {
 
     setGroupSummaryController(groupSummaryController) {
         this.groupSummaryController = groupSummaryController;
+    }
+
+    setAutoChatController(autoChatController) {
+        this.autoChatController = autoChatController;
     }
 
     setAssistService(assistService) {
@@ -1008,6 +1016,7 @@ class CommandController {
             whatsappService: this.whatsappService,
             groupChatLogService: this.groupChatLogService,
             groupSummaryController: this.groupSummaryController,
+            autoChatController: this.autoChatController,
             tradeAlertController: this.tradeAlertController,
             svmkrTracker: this.svmkrTracker,
             svmkrScheduler: this.svmkrScheduler,
