@@ -576,7 +576,7 @@ export const COMMAND_REGISTRY = [
         key: 'scalp',
         scope: 'group_only',
         role: 'admins',
-        help: 'NIFTY 2-3 pt micro scalp — live range, premiums, trigger alerts',
+        help: 'Micro scalp card — `/scalp`, `/scalp sensex`, `/scalp alert nifty sensex`',
         category: 'trade',
     },
     {
@@ -592,7 +592,7 @@ export const COMMAND_REGISTRY = [
         key: 'scalpon',
         scope: 'group_only',
         role: 'owner',
-        help: 'Enable /scalp NIFTY micro scalp in this group (owner only)',
+        help: 'Enable scalp alerts here — `/scalpon nifty sensex` (owner only)',
         category: 'trade',
     },
     {

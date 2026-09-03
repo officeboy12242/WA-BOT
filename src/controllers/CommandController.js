@@ -58,6 +58,12 @@ import {
 
 import { handleTradelert, handleTradenow, handleSwing, handleExpiry, handleIndex, handleSvmkr, handleChainAi } from './handlers/tradeHandlers.js';
 import ScalpService from '../services/ScalpService.js';
+import {
+    SCALP_INDICES,
+    SCALP_INDEX_KEYS,
+    resolveScalpIndex,
+    parseScalpIndexArgs,
+} from '../data/scalpIndexConfig.js';
 import { handleAssist } from './handlers/assistHandlers.js';
 import IpoController from './IpoController.js';
 import BacktestController from './BacktestController.js';
@@ -492,6 +498,74 @@ async function handleTgStickers(sock, chatId, args, quotedMessage, stickerForwar
  * loudly at dispatch time instead of silently no-oping — adding a command now
  * means adding one registry entry + one table entry, nothing else.
  */
+/**
+ * Enable scalp alerts here and set which indices they cover.
+ *
+ * Backs both `/scalpon [indices]` and `/scalp alert [indices]` — the second is
+ * how this was asked for, and supporting one spelling only would make the other
+ * silently build a scalp card for an index named "alert".
+ *
+ * No indices given keeps whatever the group already had (NIFTY for groups that
+ * predate SENSEX), so a bare `/scalpon` never quietly changes a selection.
+ */
+async function scalpAlertPrefs({ sock, chatId, senderJid, argStr, ctx }) {
+    const groupManager = ctx?.groupManager;
+    if (!isGroupMessage(chatId)) {
+        await safeSendMessage(sock, chatId, { text: 'Use `/scalpon` in a group.' });
+        return;
+    }
+    if (!groupManager) {
+        await safeSendMessage(sock, chatId, { text: '⚠️ Group manager not available.' });
+        return;
+    }
+    const isActive = await groupManager.isGroupActive(chatId);
+    if (!isActive) {
+        await safeSendMessage(sock, chatId, { text: '⚠️ Group not activated. Use `/activate` first.' });
+        return;
+    }
+
+    const { keys, unknown } = parseScalpIndexArgs(argStr);
+    if (unknown.length && !keys.length) {
+        await safeSendMessage(sock, chatId, {
+            text: `⚠️ Unknown index: ${unknown.join(', ')}\n`
+                + `Supported: ${SCALP_INDEX_KEYS.join(', ').toLowerCase()}\n`
+                + 'Example: `/scalpon nifty sensex`',
+        });
+        return;
+    }
+
+    let groupName = 'Unknown Group';
+    try { groupName = (await sock.groupMetadata(chatId)).subject; } catch {}
+    const senderPhone = extractPhoneNumber(senderJid);
+
+    await groupManager.setScalpEnabled(chatId, groupName, true, senderPhone, keys.length ? keys : undefined);
+    const active = keys.length ? keys : await groupManager.getScalpIndices(chatId);
+    const labels = active.map((k) => SCALP_INDICES[k]?.label || k).join(' + ');
+
+    const lines = [
+        '━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+        '✅ *SCALP ON*',
+        '━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+        '',
+        `📢 *Group:* ${groupName}`,
+        '',
+        `⚡ Alerts: *${labels}*`,
+    ];
+    for (const k of active) {
+        const c = SCALP_INDICES[k];
+        if (c) lines.push(`   ${c.label}: +${c.targetPts} / −${c.stopPts} pts · lot ${c.lot}`);
+    }
+    lines.push('');
+    lines.push('Usage: `/scalp` · `/scalp sensex` for a live card');
+    lines.push('Change: `/scalpon nifty sensex`');
+    if (unknown.length) lines.push(`\n⚠️ Ignored: ${unknown.join(', ')}`);
+    lines.push('');
+    lines.push('💡 `/scalpoff` to disable');
+
+    await safeSendMessage(sock, chatId, { text: lines.join('\n') });
+}
+
+
 export const COMMAND_HANDLERS = {
     /* ── Core ── */
     ping: ({ sock, chatId, ctx }) => handlePing(sock, chatId, ctx),
@@ -565,8 +639,16 @@ export const COMMAND_HANDLERS = {
         }
         return ctx.backtestController.handleCommand(chatId, `/backtest${args?.length ? ' ' + args.join(' ') : ''}`, sock);
     },
-    scalp: async ({ sock, chatId, ctx }) => {
+    scalp: async ({ sock, chatId, senderJid, args, ctx }) => {
         const groupManager = ctx?.groupManager;
+        const argStr = (args || []).join(' ');
+
+        // `/scalp alert nifty sensex` sets which indices auto-alert here — the
+        // same thing /scalpon does, accepted in the phrasing people actually use.
+        if (/^\s*alerts?\b/i.test(argStr)) {
+            return scalpAlertPrefs({ sock, chatId, senderJid, argStr, ctx });
+        }
+
         if (groupManager && isGroupMessage(chatId)) {
             const enabled = await groupManager.isScalpEnabled(chatId);
             if (!enabled) {
@@ -574,14 +656,30 @@ export const COMMAND_HANDLERS = {
                 return;
             }
         }
+
+        // `/scalp sensex` overrides; bare `/scalp` follows the group's own
+        // selection so a SENSEX-only group does not get handed a NIFTY card.
+        let cfg = resolveScalpIndex(argStr);
+        if (!cfg) {
+            const { keys } = parseScalpIndexArgs(argStr);
+            if (keys.length) cfg = SCALP_INDICES[keys[0]];
+        }
+        if (!cfg && groupManager && isGroupMessage(chatId)) {
+            try {
+                const picked = await groupManager.getScalpIndices(chatId);
+                cfg = SCALP_INDICES[picked[0]] || null;
+            } catch (_) { /* fall through to NIFTY */ }
+        }
+        cfg = cfg || SCALP_INDICES.NIFTY;
+
         // Send loading message, then edit with result
         let loadingMsg = null;
         try {
-            loadingMsg = await sock.sendMessage(chatId, { text: '⚡ _Fetching NIFTY scalp data..._' });
+            loadingMsg = await sock.sendMessage(chatId, { text: `⚡ _Fetching ${cfg.label} scalp data..._` });
         } catch (_) { /* ignore */ }
         try {
             const svc = new ScalpService();
-            const card = await svc.buildScalpCard('NIFTY');
+            const card = await svc.buildScalpCard(cfg.key);
             if (card && loadingMsg?.key) {
                 await editMessageText(sock, chatId, loadingMsg.key, card);
             } else if (card) {
@@ -828,33 +926,8 @@ export const COMMAND_HANDLERS = {
                 '💡 `/tgstickeron` to enable again',
         });
     },
-    scalpon: async ({ sock, chatId, senderJid, ctx }) => {
-        const groupManager = ctx?.groupManager;
-        if (!isGroupMessage(chatId)) {
-            await safeSendMessage(sock, chatId, { text: 'Use `/scalpon` in a group.' });
-            return;
-        }
-        if (!groupManager) {
-            await safeSendMessage(sock, chatId, { text: '⚠️ Group manager not available.' });
-            return;
-        }
-        const isActive = await groupManager.isGroupActive(chatId);
-        if (!isActive) {
-            await safeSendMessage(sock, chatId, { text: '⚠️ Group not activated. Use `/activate` first.' });
-            return;
-        }
-        let groupName = 'Unknown Group';
-        try { groupName = (await sock.groupMetadata(chatId)).subject; } catch {}
-        const senderPhone = extractPhoneNumber(senderJid);
-        await groupManager.setScalpEnabled(chatId, groupName, true, senderPhone);
-        await safeSendMessage(sock, chatId, {
-            text: '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n✅ *SCALP ON*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
-                `📢 *Group:* ${groupName}\n\n` +
-                '⚡ NIFTY micro scalp enabled.\n' +
-                'Usage: `/scalp` for live scalp card\n\n' +
-                '💡 `/scalpoff` to disable',
-        });
-    },
+    scalpon: async ({ sock, chatId, senderJid, args, ctx }) =>
+        scalpAlertPrefs({ sock, chatId, senderJid, argStr: (args || []).join(' '), ctx }),
     scalpoff: async ({ sock, chatId, senderJid, ctx }) => {
         const groupManager = ctx?.groupManager;
         if (!isGroupMessage(chatId)) {

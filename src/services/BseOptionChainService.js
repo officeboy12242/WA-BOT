@@ -34,6 +34,18 @@
 import axios from 'axios';
 
 import { logger } from '../utils/logger.js';
+import {
+    DIRECT,
+    egressOrder,
+    egressRequestConfig,
+    egressTimeout,
+    egressUrl,
+    isBlockError,
+    maskProxy,
+    noteDirectBlocked,
+    noteDirectOk,
+    scrubSecrets,
+} from '../utils/nseEgress.js';
 
 const API_BASE = 'https://api.bseindia.com/BseIndiaAPI/api';
 
@@ -143,25 +155,67 @@ function intOrNull(v) {
     return n == null ? null : Math.round(n);
 }
 
+/**
+ * BSE is stricter about burst traffic than NSE, and a scan can ask for expiries
+ * and a chain back to back. One second between calls, as the sibling tgbot2
+ * project does.
+ */
+const MIN_GAP_MS = 1000;
+let _lastFetchAt = 0;
+async function rateLimit() {
+    const wait = MIN_GAP_MS - (Date.now() - _lastFetchAt);
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    _lastFetchAt = Date.now();
+}
+
+/**
+ * GET from BSE, trying each egress in turn.
+ *
+ * BSE blocks non-India and cloud IPs, which is how SENSEX "works locally, and is
+ * silently missing in production" — this bot runs on Render (Singapore). NSE has
+ * had a proxy/ScraperAPI ladder for exactly this; BSE was still direct-only, so
+ * a blocked host lost SENSEX entirely with nothing but a debug line. Same ladder,
+ * same SCRAPER_API_KEY (country_code=in), shared with tgbot2.
+ */
 async function bseGet(path, params) {
-    const { data } = await axios.get(`${API_BASE}/${path}`, {
-        params,
-        timeout: TIMEOUT_MS,
-        headers: HEADERS,
-        // BSE sometimes emits a header with trailing whitespace, which Node's
-        // strict parser rejects outright: "Parse Error: Unexpected whitespace
-        // after header value". It is intermittent, so without this the chain
-        // fails at random and an alert silently loses its premium.
-        insecureHTTPParser: true,
-        // The moved endpoint redirects to an HTML error page; following it and
-        // then failing on the parse is more confusing than seeing it here.
-        maxRedirects: 3,
-        validateStatus: (s) => s >= 200 && s < 400,
-    });
-    if (typeof data === 'string') {
-        throw new Error('BSE returned HTML (endpoint moved or blocked)');
+    // The query has to be baked into the URL: ScraperAPI takes the target as a
+    // URL parameter, so an axios `params` object would be attached to the
+    // WRAPPER request and never reach BSE.
+    const qs = new URLSearchParams(params || {}).toString();
+    const target = `${API_BASE}/${path}${qs ? `?${qs}` : ''}`;
+
+    let lastErr;
+    for (const egress of egressOrder()) {
+        try {
+            await rateLimit();
+            const { data } = await axios.get(egressUrl(egress, target), {
+                timeout: egressTimeout(egress, TIMEOUT_MS),
+                headers: HEADERS,
+                // BSE sometimes emits a header with trailing whitespace, which
+                // Node's strict parser rejects outright: "Parse Error: Unexpected
+                // whitespace after header value". It is intermittent, so without
+                // this the chain fails at random and an alert silently loses its
+                // premium.
+                insecureHTTPParser: true,
+                // The moved endpoint redirects to an HTML error page; following
+                // it and then failing on the parse is more confusing than seeing
+                // it here.
+                maxRedirects: 3,
+                validateStatus: (s) => s >= 200 && s < 400,
+                ...egressRequestConfig(egress),
+            });
+            if (typeof data === 'string') {
+                throw new Error('BSE returned HTML (endpoint moved or blocked)');
+            }
+            if (egress === DIRECT) noteDirectOk();
+            return data;
+        } catch (err) {
+            lastErr = err;
+            if (egress === DIRECT && isBlockError(err)) noteDirectBlocked();
+            logger.debug(`BSE ${path} via ${egress === DIRECT ? 'direct' : maskProxy(egress)}: ${scrubSecrets(err.message)}`);
+        }
     }
-    return data;
+    throw lastErr || new Error(`BSE ${path}: every egress failed`);
 }
 
 /**

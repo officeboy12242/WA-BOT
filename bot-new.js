@@ -554,6 +554,9 @@ class WhatsAppCourseBot {
             // Auto-trigger scalp alerts when 75%+ confidence setups appear
             scalpAlertService.start({
                 sock: this.whatsappService?.getSock?.() || null,
+                // Grades every fired scalp against the live premium of the strike
+                // it quoted. Without this /scalp has no measured win rate at all.
+                mongoDb: this.mongoDb,
                 getGroups: () => this.groupManager.getScalpGroups(),
                 sendMessage: async (chatId, msg) => {
                     const sock = this.whatsappService?.getSock?.();

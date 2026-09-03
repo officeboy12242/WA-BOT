@@ -10,17 +10,20 @@
  */
 
 import { nseOptionChainService, findStrikeLeg } from './NseOptionChainService.js';
-import { maxPain } from '../utils/blackScholes.js';
+import { maxPain, delta } from '../utils/blackScholes.js';
 import { buildVolumeProfile, calcSessionVWAP, detectBarAbsorption, auctionRegime, vwapLevels, confluenceScore } from '../utils/volumeProfile.js';
-import { fetchNiftySessionBars } from '../utils/niftyIntradayProfile.js';
+import { fetchIndexSessionBars } from '../utils/niftyIntradayProfile.js';
+import { fetchBseOptionChain } from './BseOptionChainService.js';
+import { SCALP_INDICES, resolveScalpIndex, netPoints } from '../data/scalpIndexConfig.js';
+import { fetchIndiaVix, vixFitScore } from './IndiaVixService.js';
 import { logger } from '../utils/logger.js';
 
 // ── Regime thresholds ──────────────────────────────────────────────────────
 
 const LOW_VIX_THRESHOLD = 12;
 const HIGH_VIX_THRESHOLD = 18;
-const TIGHT_RANGE_PTS = 100;
-const WIDE_RANGE_PTS = 250;
+// Range thresholds now live per index in scalpIndexConfig.js — a single pair of
+// NIFTY-scale literals silently mis-classified every SENSEX regime.
 
 // ── Confidence weights ─────────────────────────────────────────────────────
 
@@ -98,17 +101,107 @@ function confLabel(pct) {
 
 // ── Confidence calculation ─────────────────────────────────────────────────
 
-function calcConfidence({ oiWallQty, totalOi, pcr, vix, spotDistance, regime }) {
-    const oiScore = Math.min(100, (oiWallQty / 80) * 100);
+/**
+ * How much this wall LEADS the rest of its side, 0-100.
+ *
+ * The old `Math.min(100, (oiWallQty / 80) * 100)` needed open interest below 80
+ * to score under full marks. Real walls measured 1,664 / 16,300 / 56,200 /
+ * 160,000 / 282,973 — every one clamped to 100, so 30% of the confidence score
+ * was a constant, and the constant was the OI wall the whole strategy rests on.
+ *
+ * Two obvious replacements are also constants, both measured before choosing:
+ *   percentile rank  — the wall IS the maximum by construction, so this read
+ *                      96-97% on every chain and side tested.
+ *   ratio to median  — index-biased: NIFTY 3.9-5.4x against SENSEX 9.2-9.6x,
+ *                      because SENSEX's chain carries a longer tail of dead
+ *                      strikes, not because its walls are twice as strong.
+ *
+ * Ratio to the mean of the NEXT FIVE strikes avoids both. It ignores the dead
+ * tail, and measured comparably across indices: NIFTY 1.48-1.85, SENSEX
+ * 1.21-2.38. 1.0x means the "wall" is no bigger than its neighbours — no wall at
+ * all; 2.5x is a genuinely dominant one.
+ */
+export function oiDominance(wallOi, sameSideOis) {
+    const qty = Number(wallOi) || 0;
+    const pool = (sameSideOis || []).filter((v) => Number.isFinite(v) && v > 0);
+    if (!(qty > 0) || pool.length < 4) return 50; // unknown, not "perfect"
+
+    const next5 = [...pool].sort((a, b) => b - a).slice(1, 6);
+    if (!next5.length) return 50;
+    const ref = next5.reduce((s, v) => s + v, 0) / next5.length;
+    if (!(ref > 0)) return 50;
+
+    const FLAT = 1.0;      // indistinguishable from its neighbours
+    const DOMINANT = 2.5;  // a real wall
+    const ratio = qty / ref;
+    return Math.round(Math.max(0, Math.min(1, (ratio - FLAT) / (DOMINANT - FLAT))) * 100);
+}
+
+/**
+ * Can the index realistically travel `needMove` in a scalp's holding time?
+ *
+ * India VIX is 30-day IMPLIED volatility. For a 2-5 minute trade that is the
+ * wrong instrument, and it was being asked the wrong question: at VIX 11.34 the
+ * directional term scored 9/100 while the same session's median 5-minute bar
+ * range was 15.5 points — i.e. the 16-point move the chosen strike needed was a
+ * ONE-BAR move. Realised intraday range answers "does it actually move enough",
+ * which is what a scalp depends on.
+ *
+ * VIX is still the right input for the theta side, where the trade is literally
+ * selling implied volatility.
+ */
+export function movementFit(realisedRange, needMove) {
+    if (!(realisedRange > 0) || !(needMove > 0)) return null;
+    const ratio = realisedRange / needMove;
+    const LOW = 0.25;  // needs ~4 bars — not a scalp
+    const HIGH = 1.0;  // one median bar covers it
+    return Math.round(Math.max(0, Math.min(1, (ratio - LOW) / (HIGH - LOW))) * 100);
+}
+
+/** Median 5m bar range over the recent session — the realised-movement input. */
+export function medianBarRange(bars, lookback = 24) {
+    const r = (bars || [])
+        .slice(-lookback)
+        .map((b) => b.high - b.low)
+        .filter((v) => Number.isFinite(v) && v > 0)
+        .sort((a, b) => a - b);
+    return r.length ? r[Math.floor(r.length / 2)] : null;
+}
+
+function calcConfidence({
+    oiWallQty, sameSideOis, pcr, vix, spotDistance, regime,
+    fitScore = undefined,
+    nearZone = 0,
+    cfg = SCALP_INDICES.NIFTY,
+}) {
+    const oiScore = oiDominance(oiWallQty, sameSideOis);
     const pcrScore = Math.min(100, Math.abs(pcr - 1) * 200 + 50);
-    const vixScore = regime === 'theta'
-        ? Math.max(0, 100 - (vix - LOW_VIX_THRESHOLD) * 5)
-        : Math.min(100, (vix - 10) * 8);
-    // distScore is zone-relative: being near the edge of the trigger zone (early
-    // entry, more room to capture 8pt) scores higher than being right at the wall
-    // (late entry, less room). zonePct: 0 = at wall, 1 = at zone edge.
-    const zonePct = Math.min(1, spotDistance / 200);
-    const distScore = Math.max(40, Math.min(90, 40 + zonePct * 50));
+    // Directional setups pass a realised-movement fit; theta passes nothing and
+    // falls through to the implied-vol mapping. null in either case means the
+    // term is dropped rather than silently defaulted, which is what the
+    // hardcoded 13 was doing.
+    const vixScore = fitScore !== undefined && fitScore !== null
+        ? fitScore
+        : vixFitScore(vix, regime === 'theta' ? 'theta' : 'directional');
+    // The two setup types want OPPOSITE things from distance, and one rule
+    // cannot serve both:
+    //
+    //   directional — mean reversion AT a wall. The wall is the entry, so sitting
+    //                 on it is the best case and drifting off it is worse. Scored
+    //                 against nearZone, the band that actually gates the setup.
+    //   theta       — short premium wants price parked MID-range, as far from
+    //                 both walls as possible, so decay can run without either
+    //                 side being threatened. Scored against the per-index span.
+    //
+    // Getting this backwards is not cosmetic: scoring theta the directional way
+    // paid it most when spot was pinned against a wall, which is precisely when a
+    // short straddle is in danger.
+    const isTheta = regime === 'theta';
+    const span = !isTheta && nearZone > 0 ? nearZone : cfg.zoneSpan;
+    const zonePct = Math.min(1, Math.max(0, spotDistance) / span);
+    const distScore = isTheta
+        ? Math.max(40, Math.min(90, 40 + zonePct * 50))
+        : Math.max(40, Math.min(90, 90 - zonePct * 50));
 
     const { hour, minute } = istTime();
     const timeDecimal = hour + minute / 60;
@@ -118,33 +211,91 @@ function calcConfidence({ oiWallQty, totalOi, pcr, vix, spotDistance, regime }) 
     else if (timeDecimal > 12.5 && timeDecimal <= 14.5) timeScore = 70;
     else timeScore = 30;
 
-    const raw =
-        oiScore * CONF_WEIGHTS.oiWall +
-        pcrScore * CONF_WEIGHTS.pcr +
-        vixScore * CONF_WEIGHTS.vix +
-        distScore * CONF_WEIGHTS.distance +
-        timeScore * CONF_WEIGHTS.timeOfDay;
+    // Weights are renormalised over the terms actually available, so a missing
+    // VIX lowers nobody's score by 20 points — it just stops voting.
+    const terms = [
+        [oiScore, CONF_WEIGHTS.oiWall],
+        [pcrScore, CONF_WEIGHTS.pcr],
+        [vixScore, CONF_WEIGHTS.vix],
+        [distScore, CONF_WEIGHTS.distance],
+        [timeScore, CONF_WEIGHTS.timeOfDay],
+    ].filter(([v]) => Number.isFinite(v));
+
+    const weightSum = terms.reduce((s, [, w]) => s + w, 0);
+    if (!weightSum) return 20;
+    const raw = terms.reduce((s, [v, w]) => s + v * w, 0) / weightSum;
 
     return Math.round(Math.max(20, Math.min(90, raw)));
 }
 
 // ── Regime detection ───────────────────────────────────────────────────────
 
-function detectRegime({ spot, maxPainVal, rangeWidth, vix, pcr }) {
-    if (vix < LOW_VIX_THRESHOLD && rangeWidth < TIGHT_RANGE_PTS) return 'low_vol';
-    if (vix > HIGH_VIX_THRESHOLD || rangeWidth > WIDE_RANGE_PTS) return 'trending';
+function detectRegime({ spot, maxPainVal, rangeWidth, vix, pcr, cfg = SCALP_INDICES.NIFTY }) {
+    if (vix < LOW_VIX_THRESHOLD && rangeWidth < cfg.tightRange) return 'low_vol';
+    if (vix > HIGH_VIX_THRESHOLD || rangeWidth > cfg.wideRange) return 'trending';
     const spotVsMp = spot != null && maxPainVal != null ? Math.abs(spot - maxPainVal) : 0;
-    if (spotVsMp > 100) return 'trending';
+    // Same proportion of spot as the original 100pts was of NIFTY.
+    if (spotVsMp > cfg.tightRange) return 'trending';
     return 'normal';
 }
 
 // ── Best strike selection for 5pt scalps ──────────────────────────────────
 
+const EXPIRY_MONTHS = {
+    jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+    jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
+};
+
 /**
- * Score a strike for scalping based on IV, OI, and proximity to ATM.
- * Higher score = better for capturing 5pt moves.
+ * Years to expiry from either exchange's format — NSE "08-Sep-2026", BSE
+ * "10 Sep 2026". Floored at half a day so expiry-day maths cannot divide by zero.
  */
-function scoreStrikeForScalp(strike, side, spot, atmStrike, allStrikes) {
+export function expiryYears(expiryStr, now = Date.now()) {
+    const m = String(expiryStr || '').trim().match(/^(\d{1,2})[\s-]([A-Za-z]{3})[\s-](\d{4})$/);
+    if (!m) return null;
+    const mon = EXPIRY_MONTHS[m[2].toLowerCase()];
+    if (mon == null) return null;
+    // Contracts settle at the 15:30 IST close = 10:00 UTC, not midnight.
+    const expMs = Date.UTC(Number(m[3]), mon, Number(m[1]), 10, 0);
+    const days = Math.max(0.5, (expMs - now) / 86_400_000);
+    return days / 365;
+}
+
+/**
+ * How far the INDEX must travel for this strike's premium to move `targetPts`.
+ *
+ * This is the number that decides whether an 8-point scalp is reachable at all,
+ * and nothing in the old scorer measured it. Premium move ≈ delta × index move,
+ * so a low-delta OTM strike needs a far bigger move for the same rupees.
+ *
+ * Measured on the live 08-Sep NIFTY chain (spot 23,873) for a +8 target:
+ *   23850 ATM  delta 0.574 ->  14 index pts
+ *   24000      delta 0.332 ->  24 index pts
+ *   24100      delta 0.207 ->  39 index pts
+ *   24200      delta 0.121 ->  66 index pts
+ *
+ * The old scorer's ₹30-90 band picked 24000-24100 — 24 to 39 points — and its
+ * `isOTM ? +15` bonus actively steered there. In a 2-5 minute hold that is the
+ * difference between a routine move and one that essentially never arrives.
+ */
+export function requiredIndexMove({ side, spot, strike, iv, years, targetPts }) {
+    if (!(iv > 0) || !(years > 0)) return null;
+    const d = delta(side === 'PE' ? 'PE' : 'CE', { spot, strike, iv, years });
+    if (d == null || Math.abs(d) < 0.01) return null;
+    return targetPts / Math.abs(d);
+}
+
+/**
+ * Score a strike for scalping: can it actually deliver the target, and is it
+ * liquid and sanely priced while doing so?
+ *
+ * Reachability (delta) is now the largest single term. The stop is the same
+ * number of premium points whichever strike is chosen, so rupee risk per lot
+ * does not change with delta — only the capital deployed does. A higher-delta
+ * strike therefore buys a materially better chance of hitting the target at the
+ * SAME risk, which is why it outranks a cheap lottery ticket here.
+ */
+export function scoreStrikeForScalp(strike, side, spot, atmStrike, allStrikes, cfg = SCALP_INDICES.NIFTY, years = null) {
     const row = allStrikes.find((s) => s.strike === strike);
     if (!row) return 0;
     const leg = side === 'CE' ? row.ce : row.pe;
@@ -153,48 +304,62 @@ function scoreStrikeForScalp(strike, side, spot, atmStrike, allStrikes) {
     const ltp = leg.ltp || 0;
     if (ltp <= 0) return 0;
 
-    // Moneyness check — OTM strikes are ideal for scalping (cheaper, higher % move)
-    // For CE: OTM = strike > spot. For PE: OTM = strike < spot.
-    const isOTM = side === 'CE' ? strike > spot + 50 : strike < spot - 50;
-    const isATM = strike === atmStrike;
-    const moneynessBonus = isOTM ? 15 : isATM ? 5 : -10; // penalize ITM
-
-    // Premium cost score (0-35): ₹30-₹90 is the sweet spot for 8pt scalps
-    // Below ₹30 = illiquid / too far OTM, above ₹90 = hard to capture 8pts
-    let premScore = 0;
-    if (ltp >= 30 && ltp <= 90) {
-        // Peak score at ₹50 — ideal balance of cost vs movement
-        const distFromSweet = Math.abs(ltp - 50);
-        premScore = Math.max(15, 35 - distFromSweet * 0.35);
-    } else if (ltp > 90) {
-        // Expensive — penalty scales with distance from sweet spot
-        premScore = Math.max(0, 15 - (ltp - 90) * 0.2);
-    } else if (ltp > 10) {
-        // Below sweet spot but still tradeable
-        premScore = Math.max(0, 15 - (30 - ltp) * 0.5);
+    // ── Reachability (0-45): the dominant term ───────────────────────────────
+    // How many index points this strike needs to deliver the premium target.
+    // The old scorer never measured this and paid a +15 bonus for being OTM,
+    // which is precisely the low-delta end where the target is hardest to reach.
+    const ivPct = leg.iv || 0;
+    const need = requiredIndexMove({
+        side, spot, strike, iv: ivPct / 100, years, targetPts: cfg.targetPts,
+    });
+    let reachScore;
+    if (need == null) {
+        // No IV or no expiry — fall back to distance from ATM, which is the
+        // crude proxy for delta. Neutral-ish, never a confident full mark.
+        const steps = Math.abs(strike - atmStrike) / cfg.strikeStep;
+        reachScore = Math.max(0, 30 - steps * 6);
+    } else if (need <= cfg.reachMove) {
+        reachScore = 45;
+    } else if (need >= cfg.maxMove) {
+        reachScore = 0;
     } else {
-        // Very cheap — likely illiquid
-        premScore = 0;
+        reachScore = 45 * (1 - (need - cfg.reachMove) / (cfg.maxMove - cfg.reachMove));
     }
 
-    // OI score (0-25): higher OI = better liquidity
+    // ── Premium band (0-25): cost and liquidity guard ────────────────────────
+    // Kept as a guard, not a target. Rupee RISK per lot is set by the stop and
+    // is identical across strikes, so a dearer strike costs capital, not risk —
+    // but spreads widen and size gets awkward at the extremes.
+    const pMin = cfg.premiumMin, pMax = cfg.premiumMax, pSweet = cfg.premiumSweet;
+    let premScore;
+    if (ltp >= pMin && ltp <= pMax) {
+        const span = Math.max(pSweet - pMin, pMax - pSweet, 1);
+        premScore = 25 - Math.min(10, (Math.abs(ltp - pSweet) / span) * 10);
+    } else if (ltp > pMax) {
+        premScore = Math.max(0, 12 - ((ltp - pMax) / Math.max(pMax, 1)) * 24);
+    } else {
+        premScore = Math.max(0, 12 - ((pMin - ltp) / Math.max(pMin, 1)) * 24);
+    }
+
+    // ── Liquidity (0-20), scored within this chain rather than a magic cap ───
     const oi = leg.oi || 0;
-    const maxOi = 300000;
-    const oiScore = Math.min(25, (oi / maxOi) * 25);
+    const sideOis = allStrikes
+        .map((s) => (side === 'CE' ? s.ce?.oi : s.pe?.oi))
+        .filter((v) => Number.isFinite(v) && v > 0);
+    const maxOi = sideOis.length ? Math.max(...sideOis) : 0;
+    const oiScore = maxOi > 0 ? Math.min(20, (oi / maxOi) * 20) : 0;
 
-    // IV score (0-25): moderate IV preferred (not too high = overpriced)
-    const iv = leg.iv || 0;
-    const ivScore = iv >= 5 && iv <= 10 ? 25 : iv > 10 ? Math.max(0, 25 - (iv - 10) * 3) : iv * 2.5;
+    // ── IV sanity (0-10): avoid the most overpriced strike on the board ──────
+    const ivScore = ivPct > 0 && ivPct <= 12 ? 10 : ivPct > 12 ? Math.max(0, 10 - (ivPct - 12)) : 5;
 
-    const raw = premScore + oiScore + ivScore + moneynessBonus;
-    return Math.max(0, Math.round(raw));
+    return Math.max(0, Math.round(reachScore + premScore + oiScore + ivScore));
 }
 
 /**
  * Find the best strike for a given side (CE/PE) near a target level.
  * Returns the strike with highest momentum score.
  */
-function findBestStrike(strikes, targetLevel, side, spot, atmStrike) {
+function findBestStrike(strikes, targetLevel, side, spot, atmStrike, cfg = SCALP_INDICES.NIFTY, years = null) {
     // For scalping, we want OTM strikes near the trigger price:
     // - BUY CE triggers when spot touches SUPPORT → OTM CE at support = strike > support + 50
     // - BUY PE triggers when spot touches RESISTANCE → OTM PE at resistance = strike < resistance - 50
@@ -202,7 +367,7 @@ function findBestStrike(strikes, targetLevel, side, spot, atmStrike) {
     // because the setup fires when price reaches that level.
     // This ensures symmetric premium selection regardless of current spot position.
 
-    const STRIKE_STEP = 50; // NIFTY strike interval
+    const STRIKE_STEP = cfg.strikeStep; // 50 on NIFTY, 100 on SENSEX
 
     // OTM at the TRIGGER PRICE (targetLevel), not current spot
     const isOTM = (s) => side === 'CE'
@@ -213,8 +378,8 @@ function findBestStrike(strikes, targetLevel, side, spot, atmStrike) {
     // Tier 1: OTM at trigger price, ₹30-₹90 premium (best for 8pt scalps)
     // Using the same premium range for both CE and PE ensures symmetric selection
     // regardless of asymmetric support/resistance distances from ATM.
-    const PREM_MIN = 30;
-    const PREM_MAX = 90;
+    const PREM_MIN = cfg.premiumMin;
+    const PREM_MAX = cfg.premiumMax;
     let candidates = strikes
         .filter((s) => Math.abs(s.strike - targetLevel) <= 300)
         .filter((s) => isOTM(s))
@@ -251,7 +416,7 @@ function findBestStrike(strikes, targetLevel, side, spot, atmStrike) {
     let bestLtp = 0;
 
     for (const s of candidates) {
-        const score = scoreStrikeForScalp(s.strike, side, spot, atmStrike, strikes);
+        const score = scoreStrikeForScalp(s.strike, side, spot, atmStrike, strikes, cfg, years);
         const ltp = (side === 'CE' ? s.ce : s.pe)?.ltp || 0;
         // Prefer higher score; break ties by lower premium (cheaper entry)
         if (score > bestScore || (score === bestScore && ltp < bestLtp)) {
@@ -268,7 +433,7 @@ function findBestStrike(strikes, targetLevel, side, spot, atmStrike) {
  * Return top N strikes for a side, sorted by momentum score descending.
  * Each entry: { strike, ltp, iv, oi, score }
  */
-function getTopStrikes(strikes, side, spot, atmStrike, n = 4) {
+function getTopStrikes(strikes, side, spot, atmStrike, n = 4, cfg = SCALP_INDICES.NIFTY, years = null) {
     const candidates = strikes
         .filter((s) => { const leg = side === 'CE' ? s.ce : s.pe; return leg?.ltp > 0; })
         .map((s) => {
@@ -278,7 +443,7 @@ function getTopStrikes(strikes, side, spot, atmStrike, n = 4) {
                 ltp: leg.ltp || 0,
                 iv: leg.iv || 0,
                 oi: leg.oi || 0,
-                score: scoreStrikeForScalp(s.strike, side, spot, atmStrike, strikes),
+                score: scoreStrikeForScalp(s.strike, side, spot, atmStrike, strikes, cfg, years),
             };
         })
         .sort((a, b) => b.score - a.score)
@@ -291,15 +456,59 @@ function getTopStrikes(strikes, side, spot, atmStrike, n = 4) {
 class ScalpService {
     constructor() {
         this.nse = nseOptionChainService;
+        this.bse = fetchBseOptionChain;
+    }
+
+    /**
+     * Chain for one index, from whichever exchange lists it.
+     *
+     * BSE returns settlement figures outside market hours and flags them with
+     * `isLive: false` \u2014 measured after close, ATM SENSEX CE read Rs.0.05. Quoting
+     * that as a scalp entry is the stale-premium failure again, so a non-live BSE
+     * chain is refused here rather than being formatted into a card.
+     */
+    async _fetchSnapshot(cfg) {
+        if (cfg.exchange === 'BSE') {
+            const snap = await this.bse(cfg.key);
+            if (!snap) return { error: `Could not fetch BSE option chain for ${cfg.label}.` };
+            if (snap.isLive === false) {
+                const age = snap.ageMinutes != null ? `${snap.ageMinutes} min old` : snap.freshness;
+                return {
+                    error: `${cfg.label} chain is not live (${age}) \u2014 these are settlement prices, `
+                        + 'not tradeable premiums. No scalp setups while the chain is stale.',
+                };
+            }
+            return { snap };
+        }
+
+        const ctx = await this.nse.fetchOptionContext(cfg.key);
+        if (!ctx?.snapshot) {
+            return { error: 'Could not fetch NSE option chain. Market may be closed or NSE is unreachable.' };
+        }
+        return { snap: ctx.snapshot };
+    }
+
+    /**
+     * Card plus the snapshot it was built from.
+     *
+     * The alert scanner needs the chain to grade open scalps against the live
+     * premium of the strike it quoted. Returning the snapshot it already fetched
+     * keeps that to one request per index per scan instead of two.
+     */
+    async buildScalpCardWithContext(symbol = 'NIFTY') {
+        const cfg = resolveScalpIndex(symbol) || SCALP_INDICES.NIFTY;
+        const { snap, error } = await this._fetchSnapshot(cfg);
+        if (error) return { card: `\u26A0\uFE0F ${error}`, snapshot: null, cfg };
+        const card = await this._render(cfg, snap);
+        return { card, snapshot: snap, cfg };
     }
 
     async buildScalpCard(symbol = 'NIFTY') {
-        const ctx = await this.nse.fetchOptionContext(symbol);
-        if (!ctx?.snapshot) {
-            return '\u26A0\uFE0F Could not fetch NSE option chain. Market may be closed or NSE is unreachable.';
-        }
+        const { card } = await this.buildScalpCardWithContext(symbol);
+        return card;
+    }
 
-        const snap = ctx.snapshot;
+    async _render(cfg, snap) {
         const spot = Number(snap.spot);
         const pcr = snap.pcr;
         const strikes = snap.strikes || [];
@@ -311,9 +520,11 @@ class ScalpService {
             return '\u26A0\uFE0F Incomplete option chain data \u2014 cannot build scalp card.';
         }
 
-        // Near-spot strike universe (+-600 pts)
+        // Near-spot strike universe. Half-width is per index: 600 pts is ~2.5% of
+        // NIFTY but only ~0.8% of SENSEX, which would cut the usable chain to a
+        // third of the strikes.
         const nearStrikes = strikes.filter(
-            (s) => Math.abs(Number(s.strike) - spot) <= 600
+            (s) => Math.abs(Number(s.strike) - spot) <= cfg.nearWindow
         );
         const chain = nearStrikes.length >= 5 ? nearStrikes : strikes;
 
@@ -346,17 +557,31 @@ class ScalpService {
             topPeWall = [...chain].filter((s) => s.strike < spot && s.pe?.oi > 0).sort((a, b) => b.strike - a.strike)[0] || null;
         }
 
-        const resistance = topCeWall?.strike || round5(spot + 100);
-        const support = topPeWall?.strike || round5(spot - 100);
+        const resistance = topCeWall?.strike || round5(spot + cfg.tightRange);
+        const support = topPeWall?.strike || round5(spot - cfg.tightRange);
         const rangeWidth = resistance - support;
 
         // Guard: never fire directional setups inside a degenerate/too-tight range
-        const MIN_RANGE_PTS = 50;
-        const rangeValid = rangeWidth >= MIN_RANGE_PTS;
+        const rangeValid = rangeWidth >= cfg.minRange;
+
+        // Per-side OI distributions, so a wall is scored against its own chain
+        // rather than a fixed divisor.
+        const ceOis = chain.map((x) => x.ce?.oi).filter((v) => Number.isFinite(v) && v > 0);
+        const peOis = chain.map((x) => x.pe?.oi).filter((v) => Number.isFinite(v) && v > 0);
+        const allOis = [...ceOis, ...peOis];
 
         const spotPct = rangeWidth > 0
             ? Math.round(((spot - support) / rangeWidth) * 100)
             : 50;
+
+        // Live India VIX, fetched once and shared by every setup on this card.
+        // null is passed through deliberately: calcConfidence drops the term
+        // rather than substituting a number, which is what `vix: 13` was doing.
+        const vix = await fetchIndiaVix();
+        // Time to expiry drives delta, and delta decides whether an 8-point
+        // premium target is reachable at all. Null on an unparsable expiry —
+        // the strike scorer then falls back to distance-from-ATM.
+        const years = expiryYears(snap.expiry);
 
         // ── Auction Market Theory, on REAL intraday bars ────────────────────
         //
@@ -376,26 +601,29 @@ class ScalpService {
         let amtRegime = null;
         let absorption = null;
         let profileMeta = null;
+        let realisedRange = null;
         try {
-            const session = await fetchNiftySessionBars();
+            const session = await fetchIndexSessionBars({ index: cfg.yahoo, volumeProxy: cfg.volumeProxy });
             if (session?.bars?.length >= 10) {
                 profileMeta = {
                     sessionDate: session.sessionDate,
                     volumeSource: session.volumeSource,
                     barCount: session.barCount,
                 };
-                vp = buildVolumeProfile(session.bars, 5);
+                vp = buildVolumeProfile(session.bars, cfg.vpTick);
                 vwapData = calcSessionVWAP(session.bars);
                 vwapInfo = vwapData ? vwapLevels(vwapData, spot) : null;
                 amtRegime = vp ? auctionRegime(spot, vp) : null;
                 absorption = detectBarAbsorption(session.bars);
+                // Realised 5m movement — what a directional scalp actually needs.
+                realisedRange = medianBarRange(session.bars);
             }
         } catch (err) {
             logger.debug(`Scalp AMT layer unavailable: ${err.message}`);
         }
 
         const regime = detectRegime({
-            spot, maxPainVal: mpVal, rangeWidth, vix: 13, pcr: pcr || 1,
+            spot, maxPainVal: mpVal, rangeWidth, vix: vix ?? 13, pcr: pcr || 1, cfg,
         });
 
         // ── Confluence Score (combines all indicators) ─────────────────────
@@ -407,31 +635,78 @@ class ScalpService {
         });
 
         // ── Build 5 setups (target +8 / stop -5, 75%+ conf filter) ─────────────────────
-        const MIN_CONF = 75;
-        const TARGET_PTS = 8;
-        const STOP_PTS = 5;
+        // Separate gates. Measured on an 8,424-point input grid, ONE 75 gate let
+        // short-premium setups through in 97.8% of the space against 31.4% for
+        // directional -- the filter was effectively not filtering the leg with
+        // unbounded loss. Short premium now carries the higher bar.
+        const MIN_CONF = 75;              // directional
+        const MIN_CONF_THETA = Number(process.env.SCALP_MIN_CONF_THETA || 85);
+        // Per index: SENSEX's lot of 20 makes NIFTY's 8pt target smaller than
+        // its own round-trip cost. See src/data/scalpIndexConfig.js.
+        const TARGET_PTS = cfg.targetPts;
+        const STOP_PTS = cfg.stopPts;
         const setups = [];
 
-        // Directional bias: only show the setup that aligns with market direction
-        // Uses VWAP position + spotPct + PCR to pick ONE direction
-        const spotBelowVwap = vwapData && spot < vwapData.vwap;
-        const spotAboveVwap = vwapData && spot > vwapData.vwap;
-        const pcrBearish = (pcr || 1) > 1.1;  // heavy put OI = bearish
-        const pcrBullish = (pcr || 1) < 0.9;  // heavy call OI = bullish
+        // ── Directional bias: mean reversion at the OI walls ─────────────────
+        //
+        // The walls ARE the thesis of /scalp — a big CE wall is where the move is
+        // expected to stall, a big PE wall is where it is expected to hold. So the
+        // direction follows position in the range: near support buy CE, near
+        // resistance buy PE. Nothing else decides it.
+        //
+        // What this replaces was two opposite strategies fighting. The block below
+        // is named "Support bounce" (mean reversion: buy CE when price is LOW in
+        // the range) while the old bias was VWAP trend-following (buy PE when
+        // price is BELOW VWAP). Near support price is usually below VWAP, so the
+        // mean-reversion half lost every time. Measured over the full input space:
+        //   BUY PE fired in 40% of it, BUY CE in 4% — a 10:1 skew to puts
+        //   spotPct 0-40 could fire NOTHING, because `spotPct < 45` forced
+        //     preferPE while the PE leg demanded proximity to resistance
+        //   BUY CE could only fire at spotPct 45-59, the MIDDLE of the range,
+        //     never at the support it is named for
+        // The skew came from the OR-chain: the bearish branch was tested first, so
+        // a bearish signal overrode a bullish VWAP but never the reverse.
+        //
+        // nearZone is what "at the level" means, sized from how far this index
+        // actually travels in a bar rather than as a share of the range. The old
+        // `rangeWidth * 0.6` fired up to 300 points from support on a 500-point
+        // range while the card said "Spot touches 23,800".
+        const nearZone = realisedRange > 0
+            ? Math.min(rangeWidth * 0.25, Math.max(rangeWidth * 0.06, realisedRange * 2.5))
+            : rangeWidth * 0.15;
 
-        // Prefer CE if bullish signals dominate, PE if bearish, else skip directional
-        let preferCE = false;
-        let preferPE = false;
-        if (spotBelowVwap || pcrBearish || spotPct < 45) {
-            preferPE = true;  // bearish bias → buy PE at resistance
-        } else if (spotAboveVwap || pcrBullish || spotPct > 55) {
-            preferCE = true;  // bullish bias → buy CE at support
+        const distToSupport = spot - support;
+        const distToResistance = resistance - spot;
+        // Negative means the level is already gone — that is a breakout, and the
+        // breakout setup below handles it. Fading a broken level is not this trade.
+        let preferCE = distToSupport >= 0 && distToSupport <= nearZone;
+        let preferPE = distToResistance >= 0 && distToResistance <= nearZone;
+
+        // A range tight enough to sit at both walls: take the nearer one, and let
+        // VWAP break an exact tie. Symmetric by construction — neither side is
+        // privileged by the order of the checks.
+        if (preferCE && preferPE) {
+            if (distToSupport < distToResistance) preferPE = false;
+            else if (distToResistance < distToSupport) preferCE = false;
+            else if (vwapData) {
+                if (spot < vwapData.vwap) preferCE = false;
+                else preferPE = false;
+            } else preferPE = false;
         }
-        // If perfectly neutral (spotPct 45-55, no VWAP/PCR signal) → no directional
+        // Mid-range: no level in play, so no directional trade. Waiting is correct.
 
-        // 1) Support bounce — Buy CE (cheap OTM strike near support)
-        if (preferCE && rangeValid && spot - support < rangeWidth * 0.6) {
-            const bestCe = findBestStrike(chain, support, 'CE', spot, atmStrike);
+        // 1) Support bounce — Buy CE at the PE wall
+        // Proximity is already decided by nearZone above; re-testing it here with
+        // a different rule is what let the two disagree in the first place.
+        if (preferCE && rangeValid) {
+            const bestCe = findBestStrike(chain, support, 'CE', spot, atmStrike, cfg, years);
+            // Index points this strike needs to pay the premium target — the
+            // number the movement fit is scored against.
+            const ceNeedMove = bestCe ? requiredIndexMove({
+                side: 'CE', spot, strike: bestCe.strike,
+                iv: (findStrikeLeg({ strikes }, bestCe.strike, 'CE')?.iv || 0) / 100,
+                years, targetPts: cfg.targetPts,
+            }) : null;
             // Only use strike from findBestStrike (no ATM fallback — it picks ITM)
             const entryPrem = bestCe?.ltp ? round2(bestCe.ltp) : null;
             if (entryPrem && entryPrem >= 15 && entryPrem <= 200) {
@@ -439,8 +714,9 @@ class ScalpService {
                 const stop = round2(entryPrem - STOP_PTS);
                 const conf = calcConfidence({
                     oiWallQty: topPeWall?.pe?.oi || 0,
-                    totalOi: snap.totalPeOi || 0, pcr: pcr || 1, vix: 13,
-                    spotDistance: spot - support, regime: 'directional',
+                    sameSideOis: peOis, pcr: pcr || 1, vix, cfg,
+                    fitScore: movementFit(realisedRange, ceNeedMove),
+                    spotDistance: distToSupport, nearZone, regime: 'directional',
                 });
                 if (conf >= MIN_CONF) {
                     setups.push({
@@ -449,7 +725,8 @@ class ScalpService {
                     strike: bestCe.strike,
                     optionType: 'CE',
                     momentumScore: bestCe.score || 0,
-                    trigger: `Spot touches ${fmtNum(support)}`,
+                    needMove: ceNeedMove,
+                    trigger: `Spot at ${fmtNum(support)} support (within ${Math.round(nearZone)} pts)`,
                     entry: entryPrem, target, stop, speed: '2-5 min',
                     confidence: conf,
                     why: `PE OI wall ${formatOi(topPeWall?.pe?.oi)} at ${fmtNum(support)} · Strike ${fmtNum(bestCe.strike)} CE ₹${entryPrem}`,
@@ -460,8 +737,14 @@ class ScalpService {
         }
 
         // 2) Resistance rejection — Buy PE (cheap OTM strike near resistance)
-        if (preferPE && rangeValid && resistance - spot < rangeWidth * 0.6) {
-            const bestPe = findBestStrike(chain, resistance, 'PE', spot, atmStrike);
+        // 2) Resistance rejection — Buy PE at the CE wall
+        if (preferPE && rangeValid) {
+            const bestPe = findBestStrike(chain, resistance, 'PE', spot, atmStrike, cfg, years);
+            const peNeedMove = bestPe ? requiredIndexMove({
+                side: 'PE', spot, strike: bestPe.strike,
+                iv: (findStrikeLeg({ strikes }, bestPe.strike, 'PE')?.iv || 0) / 100,
+                years, targetPts: cfg.targetPts,
+            }) : null;
             // Only use strike from findBestStrike (no ATM fallback — it picks ITM)
             const entryPrem = bestPe?.ltp ? round2(bestPe.ltp) : null;
             if (entryPrem && entryPrem >= 15 && entryPrem <= 200) {
@@ -469,8 +752,9 @@ class ScalpService {
                 const stop = round2(entryPrem - STOP_PTS);
                 const conf = calcConfidence({
                     oiWallQty: topCeWall?.ce?.oi || 0,
-                    totalOi: snap.totalCeOi || 0, pcr: pcr || 1, vix: 13,
-                    spotDistance: resistance - spot, regime: 'directional',
+                    sameSideOis: ceOis, pcr: pcr || 1, vix, cfg,
+                    fitScore: movementFit(realisedRange, peNeedMove),
+                    spotDistance: distToResistance, nearZone, regime: 'directional',
                 });
                 if (conf >= MIN_CONF) {
                     setups.push({
@@ -479,7 +763,8 @@ class ScalpService {
                     strike: bestPe.strike,
                     optionType: 'PE',
                     momentumScore: bestPe.score || 0,
-                    trigger: `Spot touches ${fmtNum(resistance)}`,
+                    needMove: peNeedMove,
+                    trigger: `Spot at ${fmtNum(resistance)} resistance (within ${Math.round(nearZone)} pts)`,
                     entry: entryPrem, target, stop, speed: '2-5 min',
                     confidence: conf,
                     why: `CE OI wall ${formatOi(topCeWall?.ce?.oi)} at ${fmtNum(resistance)} · Strike ${fmtNum(bestPe.strike)} PE ₹${entryPrem}`,
@@ -503,16 +788,16 @@ class ScalpService {
         if (spotPct >= 30 && spotPct <= 70) {
             const straddle = round2((atmCe?.ltp || 0) + (atmPe?.ltp || 0));
             if (straddle > 50) {
-                const target = round2(straddle - 8);
-                const stop = round2(straddle + 6);
+                const target = round2(straddle - cfg.straddleTargetPts);
+                const stop = round2(straddle + cfg.straddleStopPts);
                 const conf = calcConfidence({
                     oiWallQty: Math.max(topCeWall?.ce?.oi || 0, topPeWall?.pe?.oi || 0),
-                    totalOi: (snap.totalCeOi || 0) + (snap.totalPeOi || 0),
-                    pcr: pcr || 1, vix: 13,
+                    sameSideOis: allOis,
+                    pcr: pcr || 1, vix, cfg,
                     spotDistance: Math.min(spot - support, resistance - spot),
                     regime: 'theta',
                 });
-                if (conf >= MIN_CONF) {
+                if (conf >= MIN_CONF_THETA) {
                     setups.push({
                     type: 'SHORT STRADDLE', emoji: '⚡',
                     rank: 'secondary',
@@ -532,7 +817,7 @@ class ScalpService {
         }
 
         // 4) Short Strangle
-        if (spotPct >= 25 && spotPct <= 75 && rangeWidth >= TIGHT_RANGE_PTS) {
+        if (spotPct >= 25 && spotPct <= 75 && rangeWidth >= cfg.tightRange) {
             const wingStep = Math.max(50, round5(rangeWidth / 4));
             // Snap to strikes the chain actually lists — see nearestStrike().
             const otmCeStrike = nearestStrike(chain, atmStrike + wingStep);
@@ -541,16 +826,17 @@ class ScalpService {
             const otmPe = findStrikeLeg({ strikes }, otmPeStrike, 'PE');
             const strangle = round2((otmCe?.ltp || 0) + (otmPe?.ltp || 0));
             if (strangle > 20) {
-                const target = round2(strangle - Math.max(5, Math.round(strangle * 0.2)));
-                const stop = round2(strangle + Math.max(4, Math.round(strangle * 0.2)));
+                const floor = cfg.strangleFloorPts;
+                const target = round2(strangle - Math.max(floor, Math.round(strangle * 0.2)));
+                const stop = round2(strangle + Math.max(Math.round(floor * 0.8), Math.round(strangle * 0.2)));
                 const conf = calcConfidence({
                     oiWallQty: Math.max(topCeWall?.ce?.oi || 0, topPeWall?.pe?.oi || 0),
-                    totalOi: (snap.totalCeOi || 0) + (snap.totalPeOi || 0),
-                    pcr: pcr || 1, vix: 13,
+                    sameSideOis: allOis,
+                    pcr: pcr || 1, vix, cfg,
                     spotDistance: Math.min(spot - support, resistance - spot),
                     regime: 'theta',
                 });
-                if (conf >= MIN_CONF) {
+                if (conf >= MIN_CONF_THETA) {
                     setups.push({
                     type: 'SHORT STRANGLE', emoji: '🪁',
                     rank: 'secondary',
@@ -580,8 +866,12 @@ class ScalpService {
                     const stop = round2(entryPrem - STOP_PTS);
                     const conf = calcConfidence({
                         oiWallQty: bullBreak ? topCeWall?.ce?.oi || 0 : topPeWall?.pe?.oi || 0,
-                        totalOi: (snap.totalCeOi || 0) + (snap.totalPeOi || 0),
-                        pcr: pcr || 1, vix: 13, spotDistance: 20, regime: 'directional',
+                        sameSideOis: bullBreak ? ceOis : peOis,
+                        pcr: pcr || 1, vix, cfg,
+                        fitScore: movementFit(realisedRange, cfg.targetPts / 0.5),
+                        // A breakout enters just beyond the wall, so it is by
+                        // definition at the near edge of the zone.
+                        spotDistance: cfg.strikeStep * 0.4, regime: 'directional',
                     });
                     if (conf >= MIN_CONF) {
                         setups.push({
@@ -609,7 +899,7 @@ class ScalpService {
         const primarySetups = setups.filter(s => s.rank === 'primary' && s.optionType);
         const strikeTables = {};
         for (const ps of primarySetups) {
-            const topN = getTopStrikes(chain, ps.optionType, spot, atmStrike, 4);
+            const topN = getTopStrikes(chain, ps.optionType, spot, atmStrike, 4, cfg, years);
             if (topN.length) strikeTables[ps.optionType] = topN;
         }
 
@@ -617,11 +907,11 @@ class ScalpService {
             spot, pcr, mpVal, resistance, support, rangeWidth, spotPct,
             atmStrike, atmCe, atmPe, topCeWall, topPeWall, regime, setups,
             strikeTables, vp, vwapData, vwapInfo, amtRegime,
-            absorption, profileMeta, confScore,
+            absorption, profileMeta, confScore, cfg, snapshot: snap,
         });
     }
 
-    _formatCard({ spot, pcr, mpVal, resistance, support, rangeWidth, spotPct, atmStrike, atmCe, atmPe, topCeWall, topPeWall, regime, setups, strikeTables, vp, vwapData, vwapInfo, amtRegime, absorption, profileMeta, confScore }) {
+    _formatCard({ spot, pcr, mpVal, resistance, support, rangeWidth, spotPct, atmStrike, atmCe, atmPe, topCeWall, topPeWall, regime, setups, strikeTables, vp, vwapData, vwapInfo, amtRegime, absorption, profileMeta, confScore, cfg = SCALP_INDICES.NIFTY, snapshot }) {
         const L = [];
         const { hour, minute } = istTime();
         const timeLabel = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
@@ -636,7 +926,8 @@ class ScalpService {
         const ladder = buildPriceLadder({ spot, resistance, support, mpVal, atmStrike, atmCe, atmPe, topCeWall, topPeWall });
 
         L.push('\u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557');
-        L.push('\u2551  \u26A1 /scalp \u00B7 NIFTY MICRO SCALP       \u2551');
+        const title = `\u26A1 /scalp \u00B7 ${cfg.label} MICRO SCALP`;
+        L.push('\u2551  ' + title.padEnd(33) + '\u2551');
         L.push('\u255A\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255D');
         L.push('');
         L.push(`\uD83D\uDCC5 ${dateLabel} \u00B7 ${timeLabel} IST`);
@@ -742,7 +1033,7 @@ class ScalpService {
             const secondary = setups.filter((s) => s.rank !== 'primary');
 
             if (primary.length) {
-                L.push('\uD83C\uDFAF *\uD83D\uDD35 PRIMARY \u00B7 Best for 5pt scalps*');
+                L.push(`\uD83C\uDFAF *\uD83D\uDD35 PRIMARY \u00B7 Best for ${cfg.targetPts}pt scalps*`);
                 L.push('');
                 for (const s of primary) {
                     const pick = s.topPick ? ' \u2B50 TOP PICK' : '';
@@ -753,6 +1044,11 @@ class ScalpService {
                     L.push(`  Entry: \u20B9${s.entry} \u00B7 Target: \u20B9${s.target} \u00B7 Stop: \u20B9${s.stop}`);
                     L.push(`  Conf: ${s.confidence}% ${confBar(s.confidence)} ${confLabel(s.confidence)}`);
                     if (s.momentumScore) L.push(`  Momentum: ${s.momentumScore}/100`);
+                    if (Number.isFinite(s.needMove)) {
+                        const warn = s.needMove > cfg.maxMove ? ' ⚠️ far'
+                            : s.needMove > cfg.reachMove ? ' · stretched' : '';
+                        L.push(`  Needs ~${Math.round(s.needMove)} index pts for +${cfg.targetPts}${warn}`);
+                    }
                     if (s.why) L.push(`  \uD83D\uDCCA ${s.why}`);
                     L.push('');
                 }
@@ -831,8 +1127,13 @@ class ScalpService {
         const isLowVol = regime === 'low_vol';
         const isTrending = regime === 'trending';
         L.push('\u26A1 *SCALP RULES*');
-        L.push('  \uD83C\uDFAF +8 pt target \u00B7 \uD83D\uDED1 \u22125 pt stop');
-        L.push('  \uD83D\uDCCA Fees: ~3.4 pts \u00B7 Net: +4.6 pts win / \u22128.4 pts loss');
+        L.push(`  \uD83C\uDFAF +${cfg.targetPts} pt target \u00B7 \uD83D\uDED1 \u2212${cfg.stopPts} pt stop`);
+        // Quoted per index. On a SENSEX lot of 20 the same rupee cost is ~12.8
+        // points, so NIFTY's "3.4 pts" would understate SENSEX cost by ~4x and
+        // make an 8pt target look profitable when fees alone would exceed it.
+        const net = netPoints(cfg);
+        L.push(`  \uD83D\uDCCA Fees: ~${cfg.feePts} pts \u00B7 Net: +${net.win} pts win / \u2212${net.loss} pts loss`);
+        L.push(`  \uD83D\uDCCF Lot ${cfg.lot} \u00B7 target +${cfg.targetPts} \u00B7 stop \u2212${cfg.stopPts}`);
         L.push('  \u2705 Only 75%+ confidence setups shown');
         L.push(`  \u23F0 2-5 min hold \u00B7 \uD83D\uDCE6 ${isLowVol ? '1 lot' : '2-3 lots'}`);
         L.push(`  \u25BB Max ${isLowVol ? '3' : '4'} trades/day`);
@@ -928,7 +1229,11 @@ function buildPriceLadder({ spot, resistance, support, mpVal, atmStrike, atmCe, 
         let extra = '';
         if (isAlsoResist) extra = ' \u00B7 RESISTANCE';
         if (isAlsoSup)    extra = ' \u00B7 SUPPORT';
-        return `\u2593\u2593\u2593 ${label} (${formatOi(wall?.ce?.oi || wall?.pe?.oi)}) \u2190 ${zone}${extra}`;
+        // Read the leg this wall IS. `wall?.ce?.oi || wall?.pe?.oi` took CE first,
+        // so the PE wall printed the CE open interest sitting at that strike \u2014
+        // wrong on every chain where the strike has both legs, which is all of them.
+        const oi = side === 'CE' ? wall?.ce?.oi : wall?.pe?.oi;
+        return `\u2593\u2593\u2593 ${label} (${formatOi(oi)}) \u2190 ${zone}${extra}`;
     };
 
     // 5. Render rows

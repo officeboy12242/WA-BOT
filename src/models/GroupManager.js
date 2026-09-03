@@ -1273,21 +1273,29 @@ class GroupManager {
 
     // ── Scalp (NIFTY micro scalp) ────────────────────────────────────────
 
-    async setScalpEnabled(groupId, groupName, enabled, setBy) {
+    /**
+     * @param {string[]} [indices] which indices alert here. Omitted keeps the
+     *   group's existing selection, so a plain `/scalpon` does not silently
+     *   reset a group that had asked for SENSEX.
+     */
+    async setScalpEnabled(groupId, groupName, enabled, setBy, indices) {
+        const $set = {
+            group_name: groupName,
+            scalp_enabled: enabled,
+            scalp_by: setBy,
+            scalp_at: new Date(),
+        };
+        if (Array.isArray(indices) && indices.length) $set.scalp_indices = indices;
+
         await this.groups.updateOne(
             { group_id: groupId },
-            {
-                $set: {
-                    group_name: groupName,
-                    scalp_enabled: enabled,
-                    scalp_by: setBy,
-                    scalp_at: new Date(),
-                },
-                $setOnInsert: { group_id: groupId, is_active: false },
-            },
+            { $set, $setOnInsert: { group_id: groupId, is_active: false } },
             { upsert: true }
         );
-        logger.info(`⚡ Scalp ${enabled ? 'enabled' : 'disabled'} for ${groupName || groupId} by ${setBy}`);
+        logger.info(
+            `⚡ Scalp ${enabled ? 'enabled' : 'disabled'} for ${groupName || groupId} by ${setBy}`
+            + (indices?.length ? ` [${indices.join(', ')}]` : '')
+        );
     }
 
     async isScalpEnabled(groupId) {
@@ -1299,10 +1307,34 @@ class GroupManager {
         return row.scalp_enabled === true;
     }
 
+    /**
+     * Indices this group wants scalp alerts for.
+     *
+     * Groups enabled before SENSEX existed have no `scalp_indices` field. They
+     * asked for NIFTY when NIFTY was the only option, so they default to NIFTY —
+     * turning SENSEX on for them without being asked would be a surprise.
+     */
+    async getScalpIndices(groupId) {
+        const row = await this.groups.findOne(
+            { group_id: groupId },
+            { projection: { scalp_indices: 1 } }
+        );
+        const list = Array.isArray(row?.scalp_indices) ? row.scalp_indices.filter(Boolean) : [];
+        return list.length ? list : ['NIFTY'];
+    }
+
     async getScalpGroups() {
-        return this.groups
+        const rows = await this.groups
             .find({ is_active: true, scalp_enabled: true }, { projection: { _id: 0 } })
             .toArray();
+        // Normalise here so every caller sees the same shape and none of them
+        // has to remember the pre-SENSEX default.
+        return rows.map((r) => ({
+            ...r,
+            scalp_indices: Array.isArray(r.scalp_indices) && r.scalp_indices.length
+                ? r.scalp_indices
+                : ['NIFTY'],
+        }));
     }
 
     // ── Telegram Sticker Import ──────────────────────────────────────────

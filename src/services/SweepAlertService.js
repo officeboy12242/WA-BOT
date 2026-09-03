@@ -165,8 +165,19 @@ class SweepAlertService {
                     logger.info(`SweepAlert ${key} ${setup.grade} — no groups enabled`);
                     continue;
                 }
-                for (const chatId of groups) {
-                    await this._sendMessage?.(chatId, { text });
+                // getGroups is wired to getScalpGroups(), which returns group
+                // DOCUMENTS, not ids. Iterating them straight into sendMessage
+                // passed an object where Baileys wants a JID string. Accept
+                // either shape so the alert survives whichever is injected.
+                const chatIds = groups
+                    .map((g) => (typeof g === 'string' ? g : g?.group_id))
+                    .filter(Boolean);
+                for (const chatId of chatIds) {
+                    try {
+                        await this._sendMessage?.(chatId, { text });
+                    } catch (err) {
+                        logger.error(`Failed to send sweep alert to ${chatId}: ${err.message}`);
+                    }
                 }
                 logger.info(
                     `⚡ Sweep alert sent: ${key} ${setup.grade} ` +
