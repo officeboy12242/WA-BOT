@@ -232,16 +232,20 @@ class AutoChatController {
             `Group description: ${desc || '(none)'}`,
             isOpen
                 ? `The bot is unlocking the chat right now (${when}). Greet the group and mention what it is about, using the title/description, in one short line; then one line nudging members to jump in; then a short sign-off.`
-                : `The bot is locking the chat for the night (${when}) and it reopens at ${reopen} tomorrow. Say a quick good night that lightly nods at what the group is about.`,
+                : `The bot is locking the chat for the night (${when}) and it reopens at ${reopen} tomorrow. Say a quick good night that lightly nods at what the group is about — keep it about GitHub, tech and learning. No developer jargon: do not mention commits, merges, builds, PRs, code or CI — just a warm, simple good night.`,
             'Short and simple.',
         ].join('\n');
 
         let text = '';
         if (this.gemini.isConfigured()) {
             try {
+                // gemini-2.5 models spend output tokens on internal "thoughts"
+                // before the reply; 300 leaves only ~10-30 tokens for the actual
+                // message and cuts it mid-sentence (MAX_TOKENS). 1024 keeps the
+                // final text intact — sanitizeGeneratedText caps it at 600 chars.
                 text = await this.gemini.complete(LLM_SYSTEM_PROMPT, prompt, {
                     temperature: 0.8,
-                    maxTokens: 300,
+                    maxTokens: 1024,
                     timeoutMs: this.llmTimeoutMs,
                 });
             } catch (err) {
@@ -254,7 +258,7 @@ class AutoChatController {
                     system: LLM_SYSTEM_PROMPT,
                     user: prompt,
                     temperature: 0.8,
-                    maxTokens: 300,
+                    maxTokens: 800,
                     timeoutMs: this.llmTimeoutMs,
                 });
                 text = res?.text || '';

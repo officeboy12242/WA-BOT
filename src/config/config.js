@@ -494,7 +494,7 @@ export const config = {
 
     /** OpenRouter — LLM fallback when Gemini/Groq/NVIDIA fail (summary, trade, assist). */
     OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY?.trim() || '',
-    OPENROUTER_MODEL: process.env.OPENROUTER_MODEL?.trim() || 'deepseek/deepseek-v4-flash:free',
+    OPENROUTER_MODEL: process.env.OPENROUTER_MODEL?.trim() || 'minimax/minimax-m3:free',
     OPENROUTER_FALLBACK_MODELS: (process.env.OPENROUTER_FALLBACK_MODELS || '')
         .split(',')
         .map((s) => s.trim())

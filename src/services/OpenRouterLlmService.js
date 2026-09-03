@@ -8,21 +8,23 @@ import { config } from '../config/config.js';
 import { buildKeyPool } from '../utils/apiKeyPool.js';
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
+// Slugs verified reachable (Sept 2026): the older :free list (deepseek-v4-flash,
+// llama-3.3-70b, gpt-oss-20b) now 404s as paid-only. Chain skips 404/429 slugs.
 const DEFAULT_MODELS = [
-    'deepseek/deepseek-v4-flash:free',  // 1M context, best for recaps
-    'meta-llama/llama-3.3-70b-instruct:free',
+    'minimax/minimax-m3:free',
+    'z-ai/glm-5.2:free',
     'google/gemma-4-31b-it:free',
-    'openai/gpt-oss-20b:free',
+    'nvidia/nemotron-3.5-lightning:free',
 ];
 
 /** Models that are poor at narrative chat recaps (JSON topics). */
 const SUMMARY_SKIP_MODEL_RE = /coder|code-|devstral|codestral/i;
 
 const DEFAULT_SUMMARY_MODELS = [
-    'deepseek/deepseek-v4-flash:free',  // 1M context, best for recaps
-    'meta-llama/llama-3.3-70b-instruct:free',
+    'minimax/minimax-m3:free',
+    'z-ai/glm-5.2:free',
     'google/gemma-4-31b-it:free',
-    'openai/gpt-oss-20b:free',
+    'nvidia/nemotron-3.5-lightning:free',
 ];
 
 function parseList(raw, fallback) {
@@ -112,6 +114,10 @@ export default class OpenRouterLlmService {
                 logger.warn(`OpenRouter ${model} failed: ${detail}`);
                 if (isOpenRouterRateLimitError(err)) {
                     this.keyPool.markRateLimited(key);
+                }
+                // Free model slugs go paid/deprecated without notice — skip to the
+                // next model instead of killing the whole chain on one dead slug.
+                if (isOpenRouterRateLimitError(err) || err?.response?.status === 404) {
                     continue;
                 }
             }
