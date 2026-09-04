@@ -99,7 +99,7 @@ class WhatsAppCourseBot {
         this.courseController = null;
         this.newsController = null;
         this.whatsappService = null;
-        this.logManager = new LogManager('bot.log', '917887499710', 600000, 14400000); // Check every 10 min, delete after 4 hours
+        this.logManager = new LogManager('bot.log', config.BOT_LOG_NUMBER || config.OWNER_NUMBERS[0] || '917887499710', 600000, 14400000); // Check every 10 min, delete after 4 hours — logs go to owner's number
         this.checkInterval = null;
         this.newsScheduler = null;
         this.githubScheduler = null;
