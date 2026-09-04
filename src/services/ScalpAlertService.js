@@ -22,9 +22,16 @@ import ScalpService from './ScalpService.js';
 import { resolveScalpIndex } from '../data/scalpIndexConfig.js';
 import { isIndianEquityTradingDay } from '../utils/indianMarketCalendar.js';
 import { scalpOutcomeTracker } from './ScalpOutcomeTracker.js';
+import { nseMarketDataService } from './NseMarketDataService.js';
+import { fetchBseOptionChain } from './BseOptionChainService.js';
 
 const SCAN_INTERVAL_MS = 3 * 60 * 1000; // 3 minutes
 const COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes per unique setup
+// Level heads-up watcher. The 3-minute scan is the setup delivery; this faster
+// pass exists so a group hears "spot is touching the wall" within ~30s of the
+// touch instead of up to 3 minutes later.
+const LEVEL_WATCH_INTERVAL_MS = 30 * 1000;
+const LEVEL_PING_COOLDOWN_MS = 10 * 60 * 1000; // per index+zone
 const MARKET_OPEN_HOUR = 9;
 const MARKET_OPEN_MIN = 15;
 const MARKET_CLOSE_HOUR = 15;
@@ -37,7 +44,15 @@ class ScalpAlertService {
     constructor() {
         this.scalpSvc = new ScalpService();
         this._timer = null;
+        this._watchTimer = null;
         this._lastAlerts = {}; // { fingerprint: { timestamp, strike, entry } }
+        // Level watcher state: the OI-wall levels are refreshed by each 3-min
+        // scan (they move slowly), and the fast pass only polls spot against
+        // them. `_levelZone` is the zone seen on the last tick, so a ping fires
+        // on a mid-range -> level transition, not on every tick spent hovering.
+        this._levels = {}; // { NIFTY: { support, resistance, nearZone, ts } }
+        this._levelZone = {}; // { NIFTY: 'mid' | 'support' | ... }
+        this._levelPings = {}; // { 'NIFTY:support': timestamp }
         this._sock = null;
         this._getGroups = null;
         this._sendMessage = null;
@@ -63,12 +78,23 @@ class ScalpAlertService {
 
         // Run first scan after 10 seconds
         setTimeout(() => void this._scan(), 10_000);
+
+        // Level heads-up pass — only meaningful once a scan has stored levels,
+        // so the first watch ticks are no-ops until `_scanIndex` populates them.
+        logger.info('🔔 ScalpAlertService level watch — spot polled every 30s against OI walls');
+        this._watchTimer = setInterval(() => {
+            void this._watchLevels();
+        }, LEVEL_WATCH_INTERVAL_MS);
     }
 
     stop() {
         if (this._timer) {
             clearInterval(this._timer);
             this._timer = null;
+        }
+        if (this._watchTimer) {
+            clearInterval(this._watchTimer);
+            this._watchTimer = null;
         }
         this._enabled = false;
         logger.info('⚡ ScalpAlertService stopped');
@@ -122,6 +148,20 @@ class ScalpAlertService {
         const ctx = await this.scalpSvc.buildScalpCardWithContext(cfg.key);
         const card = ctx?.card;
         const snapshot = ctx?.snapshot;
+
+        // Refresh the level watcher's walls from this live card — support /
+        // resistance are the OI walls the primary setups trigger on, and
+        // nearZone is the band within which they consider a level "hit". Must
+        // happen before the early returns below (a NO CLEAR SETUP card still
+        // has perfectly good walls to watch).
+        if (Number.isFinite(ctx?.support) && Number.isFinite(ctx?.resistance)) {
+            this._levels[cfg.key] = {
+                support: ctx.support,
+                resistance: ctx.resistance,
+                nearZone: Number.isFinite(ctx?.nearZone) ? ctx.nearZone : (ctx.resistance - ctx.support) * 0.1,
+                ts: Date.now(),
+            };
+        }
 
         // Grade anything already open BEFORE the early returns below. A quiet
         // scan with no new setup is exactly when an open scalp is most likely to
@@ -196,6 +236,157 @@ class ScalpAlertService {
                 // Journalling must never cost an alert.
                 logger.warn(`Scalp outcome record failed: ${err.message}`);
             }
+        }
+    }
+
+    // ── Level heads-up watcher ────────────────────────────────────────────
+    //
+    // Polls spot every 30s against the OI-wall levels last stored by a scan.
+    // A mid-range -> level transition fires a short heads-up so the group hears
+    // the touch within ~30s; the full setup alert (with premium, SL, target)
+    // still arrives from the 3-minute scan once the setup clears its gate.
+    async _watchLevels() {
+        if (!this._enabled) return;
+        if (!this._isMarketOpen()) return;
+        if (!Object.keys(this._levels).length) return;
+
+        let scalpGroups;
+        try {
+            const groups = this._getGroups ? await this._getGroups() : [];
+            scalpGroups = groups.filter((g) => g.scalp_enabled);
+        } catch (err) {
+            logger.error('ScalpAlert level watch: group lookup failed:', err.message);
+            return;
+        }
+        if (!scalpGroups.length) return;
+
+        // Only watch levels for indices some enabled group actually follows.
+        const wanted = new Set();
+        for (const g of scalpGroups) {
+            for (const k of ScalpAlertService.indicesFor(g)) wanted.add(k);
+        }
+
+        for (const indexKey of wanted) {
+            const levels = this._levels[indexKey];
+            if (!levels) continue;
+            try {
+                const spot = await this._fetchIndexSpot(indexKey);
+                if (!Number.isFinite(spot)) continue;
+                await this._checkLevels(indexKey, spot, levels, scalpGroups);
+            } catch (err) {
+                logger.debug(`ScalpAlert level watch ${indexKey}: ${err.message}`);
+            }
+        }
+    }
+
+    /** Light spot poll — one cheap call per index, never the whole chain render. */
+    async _fetchIndexSpot(indexKey) {
+        const cfg = resolveScalpIndex(indexKey);
+        if (!cfg) return null;
+        if (cfg.exchange === 'BSE') {
+            // BSE's chain service caches internally for 60s, so this is at most
+            // one live chain call per minute and reuses its egress ladder +
+            // rate limiting. Settlement prices (outside live hours) return null.
+            const snap = await fetchBseOptionChain(cfg.key);
+            return snap?.isLive === false ? null : Number(snap?.spot);
+        }
+        // NSE: allIndices is the single light feed the heatmap scanner already
+        // polls for live index prints.
+        const rows = await nseMarketDataService.fetchAllIndicesRows();
+        const nifty = rows.find((r) => /NIFTY 50/i.test(r.name));
+        return nifty ? Number(nifty.last) : null;
+    }
+
+    /** Which side of the ladder is spot on? Zones are disjoint for range > 2*nearZone. */
+    _zoneFor(spot, { support, resistance, nearZone }) {
+        if (spot > resistance) return 'breakout';
+        if (spot >= resistance - nearZone) return 'resistance';
+        if (spot < support) return 'breakdown';
+        if (spot <= support + nearZone) return 'support';
+        return 'mid';
+    }
+
+    async _checkLevels(indexKey, spot, levels, scalpGroups) {
+        const zone = this._zoneFor(spot, levels);
+        const prev = this._levelZone[indexKey] || 'mid';
+        this._levelZone[indexKey] = zone;
+
+        // Only a fresh entry from mid-range (or a fresh break past a level)
+        // pings. Hovering inside a zone must not re-ping every 30s.
+        if (zone === 'mid' || zone === prev) return;
+
+        const cooldownKey = `${indexKey}:${zone}`;
+        const lastPing = this._levelPings[cooldownKey];
+        const now = Date.now();
+        if (lastPing && now - lastPing < LEVEL_PING_COOLDOWN_MS) return;
+
+        const targets = scalpGroups.filter((g) =>
+            ScalpAlertService.indicesFor(g).includes(indexKey)
+        );
+        if (!targets.length) return;
+
+        const msg = this._levelMsg(indexKey, spot, zone, levels);
+        if (!msg) return;
+        let sent = 0;
+        for (const group of targets) {
+            try {
+                await this._sendMessage(group.group_id, { text: msg });
+                sent++;
+                logger.info(`🔔 ${indexKey} level heads-up (${zone}) sent to ${group.group_name || group.group_id}`);
+            } catch (err) {
+                logger.error(`Failed to send ${indexKey} level heads-up to ${group.group_id}:`, err.message);
+            }
+        }
+        // Cooldown only counts when the ping actually reached someone.
+        if (sent) this._levelPings[cooldownKey] = now;
+    }
+
+    _levelMsg(indexKey, spot, zone, levels) {
+        const now = new Date();
+        const timeStr = new Intl.DateTimeFormat('en-IN', {
+            timeZone: 'Asia/Kolkata',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: true,
+        }).format(now);
+        const fmt = (n) => Number(n).toLocaleString('en-IN');
+        const cfg = resolveScalpIndex(indexKey);
+        const label = cfg?.label || indexKey;
+        const spotLine = `${label} spot ${fmt(Math.round(spot))}`;
+        const watch = 'Full setup alert follows when it clears — /scalp to see now.';
+        switch (zone) {
+            case 'support':
+                return [
+                    `🟢 *${label} TOUCHING SUPPORT* — ${timeStr} IST`,
+                    '',
+                    `${spotLine} · support ${fmt(levels.support)} (PE wall)`,
+                    'BUY CE zone — the bounce setup may fire.',
+                    watch,
+                ].join('\n');
+            case 'resistance':
+                return [
+                    `🔴 *${label} TOUCHING RESISTANCE* — ${timeStr} IST`,
+                    '',
+                    `${spotLine} · resistance ${fmt(levels.resistance)} (CE wall)`,
+                    'BUY PE zone — the fade setup may fire.',
+                    watch,
+                ].join('\n');
+            case 'breakdown':
+                return [
+                    `🩹 *${label} BROKE BELOW SUPPORT ${fmt(levels.support)}* — ${timeStr} IST`,
+                    '',
+                    `${spotLine} — BREAKDOWN PE zone.`,
+                    watch,
+                ].join('\n');
+            case 'breakout':
+                return [
+                    `🚀 *${label} BROKE ABOVE RESISTANCE ${fmt(levels.resistance)}* — ${timeStr} IST`,
+                    '',
+                    `${spotLine} — BREAKOUT CE zone.`,
+                    watch,
+                ].join('\n');
+            default:
+                return '';
         }
     }
 

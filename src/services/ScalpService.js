@@ -499,8 +499,12 @@ class ScalpService {
         const cfg = resolveScalpIndex(symbol) || SCALP_INDICES.NIFTY;
         const { snap, error } = await this._fetchSnapshot(cfg);
         if (error) return { card: `\u26A0\uFE0F ${error}`, snapshot: null, cfg };
-        const card = await this._render(cfg, snap);
-        return { card, snapshot: snap, cfg };
+        const { card, support, resistance, nearZone } = await this._render(cfg, snap);
+        // support/resistance/nearZone ride along for consumers that watch the
+        // OI-wall levels between scans (the scalp level-heads-up watcher) — they
+        // are the exact numbers the card's setups trigger on, so a watcher never
+        // re-derives wall logic and can never disagree with the card.
+        return { card, support, resistance, nearZone, snapshot: snap, cfg };
     }
 
     async buildScalpCard(symbol = 'NIFTY') {
@@ -912,7 +916,6 @@ class ScalpService {
             return b.confidence - a.confidence;
         });
 
-        // Build strike comparison data for primary setups
         const primarySetups = setups.filter(s => s.rank === 'primary' && s.optionType);
         const strikeTables = {};
         for (const ps of primarySetups) {
@@ -920,13 +923,17 @@ class ScalpService {
             if (topN.length) strikeTables[ps.optionType] = topN;
         }
 
-        return this._formatCard({
+        const card = this._formatCard({
             spot, pcr, mpVal, resistance, support, rangeWidth, spotPct,
             atmStrike, atmCe, atmPe, topCeWall, topPeWall, regime, setups,
             strikeTables, vp, vwapData, vwapInfo, amtRegime,
             absorption, profileMeta, confScore, cfg, snapshot: snap,
             minConf: Math.min(MIN_CONF, MIN_CONF_THETA),
         });
+
+        // The trigger zone widths ride with the card so watchers can alert when
+        // spot enters exactly the band the primary setups would consider.
+        return { card, support, resistance, nearZone };
     }
 
     _formatCard({ spot, pcr, mpVal, resistance, support, rangeWidth, spotPct, atmStrike, atmCe, atmPe, topCeWall, topPeWall, regime, setups, strikeTables, vp, vwapData, vwapInfo, amtRegime, absorption, profileMeta, confScore, cfg = SCALP_INDICES.NIFTY, snapshot, minConf = 70 }) {
