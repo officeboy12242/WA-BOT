@@ -13,14 +13,17 @@ import {
 } from '../../services/DeployNotificationService.js';
 
 const RENDER_API = 'https://api.render.com/v1';
-const KOYEB_API = 'https://app.koyeb.com/api/v1';
+// Koyeb's public REST API is at /v1 (NOT /api/v1 — that path returns the dashboard HTML).
+const KOYEB_API = 'https://app.koyeb.com/v1';
 const POLL_INTERVAL_MS = 5000;
 const MAX_POLL_MS = 30 * 60 * 1000;
 
 // ── Platform detection ──────────────────────────────────────────────
+// Koyeb wins when its creds are present: stale Render creds used to shadow
+// Koyeb and made /deploy target a Render service that no longer exists.
 function detectPlatform() {
-    if (config.RENDER_API_KEY && config.RENDER_SERVICE_ID) return 'render';
     if (config.KOYEB_API_KEY && config.KOYEB_SERVICE_ID) return 'koyeb';
+    if (config.RENDER_API_KEY && config.RENDER_SERVICE_ID) return 'render';
     return null;
 }
 
@@ -118,27 +121,50 @@ async function pollRenderStatus(deployId, sock, commitMsg) {
 }
 
 // ── Koyeb polling ───────────────────────────────────────────────────
+// Koyeb statuses arrive as plain strings ("HEALTHY") in the v1 API — never
+// an object with .value. Normalise both shapes to be safe.
+function koyebStatus(raw) {
+    if (!raw) return 'unknown';
+    if (typeof raw === 'string') return raw;
+    return raw.value || raw.state || 'unknown';
+}
+
 async function pollKoyebStatus(deployId, sock, commitMsg) {
     const startTime = Date.now();
+    if (!deployId) return;
+    const noDeployId = deployId.startsWith('koyeb-'); // redeploy gave no id — poll the service instead
+
+    const done = async (text, finalStatus) => {
+        await deployNotificationService.completePendingNow(sock, deployId, commitMsg, text, finalStatus);
+    };
 
     const poll = async () => {
         try {
-            const svc = await koyebFetch(`/services/${config.KOYEB_SERVICE_ID}`);
-            const status = svc?.service?.status?.value || 'unknown';
-            logger.debug(`Koyeb service status: ${status}`);
+            let status;
+            if (!noDeployId) {
+                // Poll the deployment itself (redeploy response carries its id).
+                const dep = await koyebFetch(`/deployments/${deployId}`);
+                status = koyebStatus(dep?.deployment?.status);
+                logger.debug(`Koyeb deployment ${deployId} status: ${status}`);
+            } else {
+                const svc = await koyebFetch(`/services/${config.KOYEB_SERVICE_ID}`);
+                status = koyebStatus(svc?.service?.status);
+                logger.debug(`Koyeb service status: ${status}`);
+            }
 
-            // Koyeb statuses: deploying, starting, running, failed, suspended
-            if (status === 'running') return;
+            // Deployment statuses: STARTING, HEALTHY, ERROR, CANCELED, … (service: HEALTHY)
+            if (status === 'HEALTHY' || status === 'RUNNING') {
+                await done(buildCompleteText(commitMsg, deployId), 'completed');
+                return;
+            }
 
-            if (status === 'failed') {
-                const text = buildFailedText(commitMsg, deployId, 'deploy failed');
-                await deployNotificationService.completePendingNow(sock, deployId, commitMsg, text, 'failed');
+            if (['ERROR', 'CANCELED', 'FAILED', 'SUSPENDED'].includes(status)) {
+                await done(buildFailedText(commitMsg, deployId, `deploy ${status.toLowerCase()}`), 'failed');
                 return;
             }
 
             if (Date.now() - startTime > MAX_POLL_MS) {
-                const text = buildFailedText(commitMsg, deployId, 'timeout — check Koyeb dashboard');
-                await deployNotificationService.completePendingNow(sock, deployId, commitMsg, text, 'failed');
+                await done(buildFailedText(commitMsg, deployId, 'timeout — check Koyeb dashboard'), 'failed');
                 return;
             }
 
@@ -181,12 +207,19 @@ export async function handleDeploy(sock, chatId, senderJid, originalMsg) {
                 { clearCache: 'do_not_clear' },
             )).id;
         } else {
-            // Koyeb — POST to /redeploy triggers a new deploy from the latest commit
+            // Koyeb — POST to /redeploy triggers a new deploy from the latest commit.
+            // The response may carry the new deployment under several field names
+            // depending on API version — accept any of them.
             const resp = await koyebFetch(
                 `/services/${config.KOYEB_SERVICE_ID}/redeploy`,
                 'POST',
             );
-            deployId = resp?.deploy?.id || `koyeb-${Date.now()}`;
+            deployId =
+                resp?.deploy?.id ||
+                resp?.deployment?.id ||
+                resp?.service?.latest_deployment_id ||
+                resp?.service?.active_deployment_id ||
+                `koyeb-${Date.now()}`;
         }
 
         const startedText = deployNotificationService.buildStartedText(commitMsg, deployId, label);
