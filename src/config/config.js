@@ -48,6 +48,10 @@ export const config = {
     CHANNEL_STICKER_POLLER_ENABLED: process.env.CHANNEL_STICKER_POLLER_ENABLED !== 'false',
     /** Ping movie APIs on an interval (set false to save outbound bandwidth). */
     MOVIE_API_KEEPALIVE_ENABLED: process.env.MOVIE_API_KEEPALIVE_ENABLED !== 'false',
+    /** Public URL of this bot — self-ping keeps free-tier hosts (Koyeb/Render) from scale-to-zero. */
+    SELF_PING_URL: process.env.SELF_PING_URL?.trim() || '',
+    /** How often to self-ping (ms, default 4 min — well under the 1h free-tier idle timer). */
+    SELF_PING_INTERVAL_MS: Math.max(60_000, parseInt(process.env.SELF_PING_INTERVAL_MS, 10) || 4 * 60_000),
     /** Global concurrent /movie searches (1–6). */
     MOVIE_SEARCH_MAX: Math.max(1, Math.min(6, parseInt(process.env.MOVIE_SEARCH_MAX, 10) || 4)),
     /** Redis URL enables BullMQ job driver (Phase 3). */

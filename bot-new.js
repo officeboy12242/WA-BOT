@@ -239,6 +239,10 @@ class WhatsAppCourseBot {
             this.movieController = new MovieController(mongoDb, this.groupManager);
             await this.movieController.init();
 
+            // Self-ping: hit our own public URL so free-tier hosts (Koyeb/Render)
+            // see inbound traffic and never scale the instance to zero.
+            this._startSelfPing();
+
             this.groupChatLogService = new GroupChatLogService(mongoDb, this.groupManager, config);
             await this.groupChatLogService.init();
             this.groupSummaryController = new GroupSummaryController(
@@ -590,6 +594,44 @@ class WhatsAppCourseBot {
         }
     }
 
+    /** Hit our own public URL so free-tier hosts (Koyeb/Render) never scale-to-zero us. */
+    _startSelfPing() {
+        const url = config.SELF_PING_URL;
+        if (!url) {
+            logger.info('⏭️ Self-ping disabled — no SELF_PING_URL set');
+            return;
+        }
+        this._stopSelfPing();
+        const ping = async () => {
+            try {
+                const res = await fetch(url, {
+                    method: 'GET',
+                    headers: { 'User-Agent': 'bot-self-ping' },
+                    signal: AbortSignal.timeout(10_000),
+                });
+                if (res.ok) {
+                    logger.info(`🏓 Self-ping OK (${url})`);
+                } else {
+                    logger.warn(`🏓 Self-ping HTTP ${res.status} (${url})`);
+                }
+            } catch (err) {
+                logger.warn(`🏓 Self-ping failed (${url}): ${err?.message || err}`);
+            }
+        };
+        void ping();
+        this._selfPingTimer = setInterval(() => {
+            void ping();
+        }, config.SELF_PING_INTERVAL_MS);
+        logger.info(`🏓 Self-ping armed every ${Math.round(config.SELF_PING_INTERVAL_MS / 60_000)} min → ${url}`);
+    }
+
+    _stopSelfPing() {
+        if (this._selfPingTimer) {
+            clearInterval(this._selfPingTimer);
+            this._selfPingTimer = null;
+        }
+    }
+
     async shutdown(reason = 'Shutdown signal') {
         if (this._isShuttingDown) return;
         this._isShuttingDown = true;
@@ -600,6 +642,7 @@ class WhatsAppCourseBot {
             clearInterval(this.checkInterval);
             this.checkInterval = null;
         }
+        this._stopSelfPing();
         if (this.newsScheduler) {
             this.newsScheduler.stop();
         }
