@@ -708,6 +708,13 @@ export const COMMAND_REGISTRY = [
         help: 'Trigger redeploy on Render or Koyeb (owner only)',
     },
     {
+        names: ['/cmdlog'],
+        key: 'cmdlog',
+        scope: 'any',
+        role: 'owner',
+        help: 'Recent command usage — who, what, where (owner only)',
+    },
+    {
         names: ['/ipo'],
         key: 'ipo',
         scope: 'any',

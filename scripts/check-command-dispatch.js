@@ -61,6 +61,7 @@ function makeCtx() {
 }
 
 const ctrl = new CommandController(null, { isPaused: false }, fakeGroupManager, null, null, null, null, null, null, null, null, null, null, null);
+const sock0 = makeCtx().sock;
 
 // 1. /help in a DM dispatches and actually sends something.
 {
@@ -126,6 +127,34 @@ const ctrl = new CommandController(null, { isPaused: false }, fakeGroupManager, 
     const { sent, sock } = makeCtx();
     await ctrl.handleCommand(sock, '919000000000@s.whatsapp.net', '/zzzznope', '919000000000@s.whatsapp.net', null, 'Tester');
     assert.ok(sent.length >= 1, 'unknown command replies with suggestions');
+}
+
+// 5. /cmdlog is owner-only: a regular member is denied before the handler runs.
+{
+    const def = COMMAND_REGISTRY.find((d) => d.key === 'cmdlog');
+    assert.ok(def, '/cmdlog must exist in the registry');
+    assert.strictEqual(def.role, 'owner', '/cmdlog must be owner-only');
+
+    const { sent, sock } = makeCtx();
+    await ctrl.handleCommand(sock, '919000000000@s.whatsapp.net', '/cmdlog', '919000000000@s.whatsapp.net', null, 'Tester');
+    const last = sent[sent.length - 1];
+    assert.ok(
+        last && /PERMISSION DENIED|OWNER ONLY/i.test(last.text),
+        '/cmdlog must be denied for a non-owner (got: ' + (last?.text?.slice(0, 60) || 'no reply') + ')'
+    );
+}
+
+// 6. Command telemetry records WHO ran WHAT and WHERE.
+{
+    const { botTelemetry } = await import('../src/utils/botTelemetry.js');
+    const before = botTelemetry.recent(50).filter((e) => e.type === 'command' && e.cmd === 'facts').length;
+    await ctrl.handleCommand(sock0, '999000000000@g.us', '/facts', '919999999999@s.whatsapp.net', null, 'FactsUser');
+    const ev = botTelemetry.recent(50).find((e) => e.type === 'command' && e.cmd === 'facts' && e.senderJid === '919999999999@s.whatsapp.net');
+    assert.ok(ev, 'telemetry must record the command event');
+    assert.strictEqual(ev.senderJid, '919999999999@s.whatsapp.net', 'telemetry must store the sender');
+    assert.strictEqual(ev.pushName, 'FactsUser', 'telemetry must store the sender pushName');
+    assert.strictEqual(ev.chatId, '999000000000@g.us', 'telemetry must store the chat where it ran');
+    assert.strictEqual(botTelemetry.recent(50).filter((e) => e.type === 'command' && e.cmd === 'facts').length, before + 1, 'event count must increase');
 }
 
 console.log(`command dispatch ok — ${handlerKeys.length} handlers, ${registryKeys.length} registry keys, smoke tests passed`);

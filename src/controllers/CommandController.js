@@ -113,6 +113,7 @@ import { adviceService } from '../services/AdviceService.js';
 import { handleDriveUrl } from './handlers/driveHandlers.js';
 import { handleViewOnce } from './handlers/viewOnceHandler.js';
 import { handleDeploy } from './handlers/deployHandler.js';
+import { handleCmdLog } from './handlers/cmdlogHandler.js';
 import {
     handleWarn,
     handleMyWarns,
@@ -763,6 +764,7 @@ export const COMMAND_HANDLERS = {
     driveurl: ({ sock, chatId, senderJid, args, ctx }) => handleDriveUrl(sock, chatId, senderJid, args, ctx),
     viewonce: ({ sock, chatId, senderJid, originalMsg }) => handleViewOnce(sock, chatId, senderJid, originalMsg),
     deploy: ({ sock, chatId, senderJid, originalMsg }) => handleDeploy(sock, chatId, senderJid, originalMsg),
+    cmdlog: ({ sock, chatId, args, ctx }) => handleCmdLog(sock, chatId, args, ctx),
 
     /* ── Instagram / News / Movie ── */
     insta: ({ sock, chatId, args, originalMsg }) => _handleInsta(sock, chatId, args, originalMsg),
@@ -1194,6 +1196,8 @@ class CommandController {
             botTelemetry.track('command', {
                 cmd: def.key,
                 chatId,
+                senderJid,
+                pushName: pushName || '',
                 status: 'ok',
                 ms: Date.now() - t0,
             });
@@ -1201,6 +1205,8 @@ class CommandController {
             botTelemetry.track('command', {
                 cmd: def.key,
                 chatId,
+                senderJid,
+                pushName: pushName || '',
                 status: 'err',
                 ms: Date.now() - t0,
                 message: String(err?.message || err).slice(0, 160),
