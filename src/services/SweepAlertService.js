@@ -45,6 +45,9 @@ export const ALERT_INDICES = (process.env.SWEEP_ALERT_INDICES || 'NIFTY,SENSEX')
 /** Skip anything below this confidence. */
 export const MIN_CONFIDENCE = Number(process.env.SWEEP_MIN_CONFIDENCE || 45);
 
+/** Short reuse window on the NSE chain: a sweep alert quotes a live premium. */
+const CHAIN_REUSE_MS = 60_000;
+
 /** Premium band for the suggested strike, in rupees. */
 const PREMIUM_MIN = Number(process.env.SWEEP_PREMIUM_MIN || 50);
 const PREMIUM_MAX = Number(process.env.SWEEP_PREMIUM_MAX || 400);
@@ -119,9 +122,24 @@ class SweepAlertService {
                     : null;
             }
 
-            const res = await nseOptionChainService.getChainSnapshot?.(spec.nse);
-            const snap = res?.snapshot || res;
+            // `getChainSnapshot` does not exist on NseOptionChainService and never
+            // did. Called with `?.()` it resolved to undefined instead of throwing,
+            // so this whole branch returned null and every NIFTY sweep alert went
+            // out with NO strike, premium, expiry or per-lot cost — while SENSEX,
+            // which uses the BSE path above, showed all of it. Silent because an
+            // optional call on a missing method is indistinguishable from a chain
+            // that simply had nothing usable.
+            const ctx = await nseOptionChainService.fetchOptionContext(spec.nse, {
+                // Same contract as the BSE branch: take what the chain has and let
+                // the formatter label its freshness, rather than dropping the
+                // premium entirely. Anything older is reported as a settlement
+                // price, never passed off as live.
+                allowStale: true,
+                maxAgeMs: CHAIN_REUSE_MS,
+            });
+            const snap = ctx?.snapshot;
             if (!snap?.strikes?.length) return null;
+
             const leg = setup.side === 'PE' ? 'pe' : 'ce';
             const usable = snap.strikes.filter((s) => {
                 const ltp = s[leg]?.ltp;
@@ -131,7 +149,15 @@ class SweepAlertService {
             const strike = usable.reduce((best, s) =>
                 Math.abs(s.strike - snap.spot) < Math.abs(best.strike - snap.spot) ? s : best,
             );
-            return { strike, expiry: snap.expiry };
+            return {
+                strike,
+                expiry: snap.expiry,
+                // Mirrors the BSE shape so the formatter's freshness warning works
+                // for NIFTY too instead of silently omitting it.
+                chainAsOf: snap.chainTimestamp,
+                chainLive: snap.stale !== true,
+                chainAgeMinutes: Number.isFinite(snap.ageSec) ? Math.round(snap.ageSec / 60) : null,
+            };
         } catch (err) {
             // A missing chain costs the strike suggestion, not the alert: the
             // index levels are the tradeable part and they do not need it.

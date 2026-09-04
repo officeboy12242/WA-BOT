@@ -262,4 +262,33 @@ function sweepScenario({ pierceTo, closeAt }) {
         'CommandController must define a sweep handler for the registry entry');
 }
 
+// ── The NSE strike lookup must call a method that EXISTS ─────────────────────
+// Shipped bug: _resolveStrike called `nseOptionChainService.getChainSnapshot?.()`,
+// which was never a method on that service. Optional-call syntax made it resolve
+// to undefined rather than throw, so the NSE branch always returned null and
+// every NIFTY sweep alert went out with no strike, premium, expiry or per-lot
+// cost — while SENSEX (BSE path) printed all of it. Nothing logged, nothing
+// threw; the alert just quietly lost half its content.
+{
+    const { nseOptionChainService } = await import('../src/services/NseOptionChainService.js');
+    const { sweepAlertService } = await import('../src/services/SweepAlertService.js');
+
+    assert.strictEqual(
+        typeof nseOptionChainService.fetchOptionContext, 'function',
+        'NSE strike lookup depends on fetchOptionContext existing',
+    );
+    assert.strictEqual(
+        typeof nseOptionChainService.getChainSnapshot, 'undefined',
+        'getChainSnapshot does not exist — if it is ever added, revisit _resolveStrike '
+        + 'rather than reintroducing an optional call to a missing method',
+    );
+
+    // Every method _resolveStrike reaches for must be real, on both exchanges.
+    // An optional call (`?.()`) on a typo is silent, so assert presence directly.
+    const bse = await import('../src/services/BseOptionChainService.js');
+    assert.strictEqual(typeof bse.fetchBseOptionChain, 'function', 'BSE chain fetch exists');
+    assert.strictEqual(typeof bse.pickStrike, 'function', 'BSE strike picker exists');
+    assert.strictEqual(typeof sweepAlertService._resolveStrike, 'function', '_resolveStrike exists');
+}
+
 console.log('liquidity sweep + SENSEX + confidence self-check ok');
