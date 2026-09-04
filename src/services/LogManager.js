@@ -22,8 +22,16 @@ class LogManager {
         this.sock = sock;
     }
 
+    setAdminNumber(number) {
+        this.adminNumber = number;
+    }
+
     start() {
-        logger.info(`📋 Log Manager started - checking every ${this.checkInterval/1000}s, deleting after ${this.deleteAfter/1000}s`);
+        logger.info(`📋 Log Manager started - checking every ${this.checkInterval/1000}s, deleting after ${this.deleteAfter/1000}s, reports go to ${this.adminNumber}`);
+        
+        // Send a one-time ping so the owner can verify delivery works now,
+        // instead of discovering a broken channel 4 hours later.
+        this.sendStartupPing();
         
         // Check immediately on start
         this.checkAndCleanLogs();
@@ -32,6 +40,19 @@ class LogManager {
         this.intervalId = setInterval(() => {
             this.checkAndCleanLogs();
         }, this.checkInterval);
+    }
+
+    async sendStartupPing() {
+        try {
+            if (!this.sock || !this.adminNumber) return;
+            const adminJid = `${this.adminNumber}@s.whatsapp.net`;
+            await this.sock.sendMessage(adminJid, {
+                text: '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n📋 *BOT ONLINE* — log reporting armed\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\nBot log reports will be sent to this number every 4 hours.\nIf you are seeing this, the log channel works ✅'
+            });
+            logger.info(`✅ Startup ping sent to ${this.adminNumber}`);
+        } catch (error) {
+            logger.error(`⚠️ Could not send startup ping to ${this.adminNumber}: ${error.message}`);
+        }
     }
 
     stop() {
@@ -59,8 +80,13 @@ class LogManager {
             if (timeSinceStart > this.deleteAfter) {
                 logger.info(`🗑️ Bot running for over ${this.deleteAfter/1000}s, sending logs and resetting...`);
                 
-                // Send log file to admin
-                await this.sendLogToAdmin();
+                // Send log file to admin; only delete + reset when it actually
+                // went out, otherwise keep the file and retry next check.
+                const sent = await this.sendLogToAdmin();
+                if (!sent) {
+                    logger.warn('⚠️ Log report was NOT sent — keeping log file and retrying next check');
+                    return;
+                }
                 
                 // Delete the log file
                 fs.unlinkSync(this.logFilePath);
@@ -80,7 +106,11 @@ class LogManager {
         try {
             if (!this.sock) {
                 logger.warn('⚠️ WhatsApp socket not available, cannot send logs');
-                return;
+                return false;
+            }
+            if (!this.adminNumber) {
+                logger.warn('⚠️ No log destination number configured');
+                return false;
             }
 
             const stats = fs.statSync(this.logFilePath);
@@ -106,8 +136,10 @@ class LogManager {
             });
 
             logger.info(`✅ Log file sent to ${this.adminNumber}`);
+            return true;
         } catch (error) {
-            logger.error(`Error sending log to admin: ${error.message}`);
+            logger.error(`Error sending log to admin (${this.adminNumber}): ${error.message}`);
+            return false;
         }
     }
 }

@@ -359,8 +359,17 @@ class WhatsAppCourseBot {
             // Wait for connection to be ready
             await this.whatsappService.waitForReady();
             
-            // Start log manager
-            this.logManager.setSocket(this.whatsappService.getSock());
+            // Start log manager — resolve the report destination now that we
+            // know the bot's own number, so the fallback never targets the bot
+            // itself (e.g. OWNER_NUMBERS[0] being the bot's own number).
+            const logSock = this.whatsappService.getSock();
+            const botNumber = String(logSock?.user?.id || '').split(':')[0].replace(/\D/g, '');
+            const logTarget = config.BOT_LOG_NUMBER
+                || (config.OWNER_NUMBERS || []).find((n) => n !== botNumber)
+                || (config.OWNER_NUMBERS || [])[0]
+                || '917887499710';
+            this.logManager.setSocket(logSock);
+            this.logManager.setAdminNumber(logTarget);
             this.logManager.start();
             
             const githubInfo = config.GITHUB_TRENDING_ENABLED
