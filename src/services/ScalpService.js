@@ -638,9 +638,11 @@ class ScalpService {
         // Separate gates. Measured on an 8,424-point input grid, ONE 75 gate let
         // short-premium setups through in 97.8% of the space against 31.4% for
         // directional -- the filter was effectively not filtering the leg with
-        // unbounded loss. Short premium now carries the higher bar.
+        // unbounded loss. Short premium originally carried the higher bar (85),
+        // but the owner wants every setup alerting at the same 75% line so no
+        // entry is missed. SCALP_MIN_CONF_THETA still overrides per deployment.
         const MIN_CONF = 75;              // directional
-        const MIN_CONF_THETA = Number(process.env.SCALP_MIN_CONF_THETA || 85);
+        const MIN_CONF_THETA = Number(process.env.SCALP_MIN_CONF_THETA || 75);
         // Per index: SENSEX's lot of 20 makes NIFTY's 8pt target smaller than
         // its own round-trip cost. See src/data/scalpIndexConfig.js.
         const TARGET_PTS = cfg.targetPts;

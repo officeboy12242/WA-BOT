@@ -270,6 +270,40 @@ class ScalpAlertService {
             });
         }
 
+        // Extract breakout setups (BREAKOUT CE / BREAKDOWN PE) — the momentum
+        // setup that fires when spot breaks past an OI wall. The card renders it
+        // as a secondary setup with the broken level in the trigger line.
+        if (card.includes('BREAKOUT CE')) {
+            // Anchored after the type line: the card prints primary setups
+            // before secondary ones, so an unanchored /Entry:/ match could
+            // grab a BUY CE entry printed earlier in the card.
+            const levelMatch = card.match(/Spot broke above resistance ([\d,]+)/);
+            const entryMatch = card.match(/BREAKOUT CE[\s\S]*?Entry: ₹([\d.]+)/);
+            const level = levelMatch ? levelMatch[1] : '?';
+            const entry = entryMatch ? entryMatch[1] : '0';
+            setups.push({
+                type: 'BREAKOUT CE',
+                emoji: '🚀',
+                strike: level,
+                entry,
+                fingerprint: `${indexKey}:BREAKOUT CE:${level}:${entry}`,
+            });
+        }
+
+        if (card.includes('BREAKDOWN PE')) {
+            const levelMatch = card.match(/Spot broke below support ([\d,]+)/);
+            const entryMatch = card.match(/BREAKDOWN PE[\s\S]*?Entry: ₹([\d.]+)/);
+            const level = levelMatch ? levelMatch[1] : '?';
+            const entry = entryMatch ? entryMatch[1] : '0';
+            setups.push({
+                type: 'BREAKDOWN PE',
+                emoji: '🩹',
+                strike: level,
+                entry,
+                fingerprint: `${indexKey}:BREAKDOWN PE:${level}:${entry}`,
+            });
+        }
+
         // Extract theta setups (SHORT STRADDLE / SHORT STRANGLE)
         if (card.includes('SHORT STRADDLE')) {
             const entryMatch = card.match(/SELL[\s\S]*?Premium: ₹([\d.]+)/);
@@ -308,8 +342,9 @@ class ScalpAlertService {
             hour12: true,
         }).format(now);
 
-        const isDirectional = setups.some(s => s.type.startsWith('BUY'));
-        const isTheta = setups.some(s => s.type.startsWith('SHORT'));
+        const isDirectional = setups.some((s) => s.type.startsWith('BUY')
+            || s.type.startsWith('BREAKOUT') || s.type.startsWith('BREAKDOWN'));
+        const isTheta = setups.some((s) => s.type.startsWith('SHORT'));
         let trigger = '';
         if (isDirectional) trigger = 'Directional setup triggered!';
         if (isTheta) trigger = 'Theta decay setup triggered!';

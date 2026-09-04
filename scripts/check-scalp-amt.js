@@ -83,14 +83,14 @@ class FakeDate extends RealDate {
     static now() { return FIXED; }
 }
 
-function stubChain(spot, atm, ceWall, peWall) {
+function stubChain(spot, atm, ceWall, peWall, wallOi = 180000) {
     const strikes = [];
     for (let k = atm - 700; k <= atm + 700; k += 50) {
         const d = Math.abs(k - atm);
         strikes.push({
             strike: k,
-            ce: { ltp: Math.max(5, 160 - (k - atm) * 0.5), oi: k === ceWall ? 180000 : 40000 + d * 10, iv: 12 },
-            pe: { ltp: Math.max(5, 160 + (k - atm) * 0.5), oi: k === peWall ? 175000 : 40000 + d * 10, iv: 12 },
+            ce: { ltp: Math.max(5, 160 - (k - atm) * 0.5), oi: k === ceWall ? wallOi : 40000 + d * 10, iv: 12 },
+            pe: { ltp: Math.max(5, 160 + (k - atm) * 0.5), oi: k === peWall ? Math.round(wallOi * 0.97) : 40000 + d * 10, iv: 12 },
         });
     }
     const row = strikes.find((s) => s.strike === atm);
@@ -101,11 +101,11 @@ function stubChain(spot, atm, ceWall, peWall) {
     };
 }
 
-async function cardFor(ceWall, peWall, pcr = 0.85) {
+async function cardFor(ceWall, peWall, pcr = 0.85, wallOi) {
     globalThis.Date = FakeDate;
     try {
         const svc = new ScalpService();
-        const snap = { ...stubChain(24325, 24350, ceWall, peWall), pcr };
+        const snap = { ...stubChain(24325, 24350, ceWall, peWall, wallOi), pcr };
         svc.nse = { fetchOptionContext: async () => ({ snapshot: snap }) };
         return await svc.buildScalpCard('NIFTY');
     } finally {
@@ -118,24 +118,27 @@ async function cardFor(ceWall, peWall, pcr = 0.85) {
 // which matches EXACTLY -- returned null, both legs priced 0, and the setup
 // failed its `> 20` guard silently. 5 of 9 typical widths were affected.
 //
-// PCR 0.85 here is deliberate. Short premium now sits behind its own higher gate
-// (85 vs 75), so it needs a real reason to fire rather than clearing on a
-// neutral chain — the reachability being tested is the strike snapping, not the
-// gate. The neutral-PCR case is asserted separately below.
+// PCR 0.85 here is deliberate. Every setup now gates at the same 75 line (the
+// owner asked for no entry to be missed), so a slightly put-heavy chain
+// comfortably clears it — the reachability being tested is the strike snapping,
+// not the gate. The below-75 case is asserted separately below.
 for (const [ce, pe] of [[24450, 24200], [24500, 24200], [24550, 24150], [24400, 24200], [24600, 24100]]) {
     const card = await cardFor(ce, pe);
     ok(card.includes('SHORT STRANGLE'), `short strangle fires at range ${ce - pe}`);
     ok(card.includes('SHORT STRADDLE'), `short straddle fires at range ${ce - pe}`);
 }
 
-// The point of the higher theta gate: an unremarkable chain should NOT produce a
-// short-premium alert. Measured before the split, theta cleared 97.8% of the
-// input space against directional's 31.4% — the filter was not filtering the leg
-// with unbounded loss.
+// The gate at 75 (was 85) means a neutral chain with strong walls now clears it
+// — that is the owner-requested behavior so no entry is missed. The filter must
+// still mean something below 75: the same chain with weak OI walls (nothing to
+// sell against) scores ~45 and must NOT fire, because the leg has unbounded loss.
 {
     const neutral = await cardFor(24500, 24200, 1.0);
-    ok(!neutral.includes('SHORT STRADDLE'), 'neutral PCR + tight range does NOT fire a straddle');
-    ok(!neutral.includes('SHORT STRANGLE'), 'neutral PCR + tight range does NOT fire a strangle');
+    ok(neutral.includes('SHORT STRADDLE'), 'neutral PCR + tight range fires a straddle at the 75 gate');
+    ok(neutral.includes('SHORT STRANGLE'), 'neutral PCR + tight range fires a strangle at the 75 gate');
+    const weakWalls = await cardFor(24500, 24200, 1.0, 30000);
+    ok(!weakWalls.includes('SHORT STRADDLE'), 'weak OI walls still do NOT fire a straddle');
+    ok(!weakWalls.includes('SHORT STRANGLE'), 'weak OI walls still do NOT fire a strangle');
     const wide = await cardFor(24700, 24000, 1.0);
     ok(wide.includes('SHORT STRADDLE'), 'a genuinely wide range still fires theta at neutral PCR');
 }
