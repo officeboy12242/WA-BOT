@@ -2,7 +2,8 @@
  * ScalpAlertService — Auto-trigger scalp alerts
  *
  * Scans every 3 minutes during market hours (9:15–15:30 IST). When a setup hits
- * 75%+ confidence it alerts the groups that asked for that index.
+ * its confidence gate (SCALP_MIN_CONF, default 70) it alerts the groups that
+ * asked for that index.
  *
  * Per-group index selection: a group stores `scalp_indices` (e.g. ['SENSEX'] or
  * ['NIFTY','SENSEX']). Each index's card is built ONCE per scan and then fanned
@@ -144,7 +145,9 @@ class ScalpAlertService {
             || card.includes('is not live')
         ) return;
 
-        // Trigger on any setup with 75%+ confidence (PRIMARY or SECONDARY)
+        // Any setup that cleared its gate in ScalpService (PRIMARY or SECONDARY).
+        // The tick is the card's own marker for "passed the gate", so the
+        // threshold lives in one place and cannot drift between the two files.
         if (!card.includes('✅')) return;
 
         const setups = this._extractSetups(card, cfg.key);

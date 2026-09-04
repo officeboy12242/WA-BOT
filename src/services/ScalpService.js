@@ -634,15 +634,30 @@ class ScalpService {
             spotDistance: Math.min(Math.abs(spot - support), Math.abs(spot - resistance)),
         });
 
-        // ── Build 5 setups (target +8 / stop -5, 75%+ conf filter) ─────────────────────
-        // Separate gates. Measured on an 8,424-point input grid, ONE 75 gate let
-        // short-premium setups through in 97.8% of the space against 31.4% for
-        // directional -- the filter was effectively not filtering the leg with
-        // unbounded loss. Short premium originally carried the higher bar (85),
-        // but the owner wants every setup alerting at the same 75% line so no
-        // entry is missed. SCALP_MIN_CONF_THETA still overrides per deployment.
-        const MIN_CONF = 75;              // directional
-        const MIN_CONF_THETA = Number(process.env.SCALP_MIN_CONF_THETA || 75);
+        // ── Confidence gates ─────────────────────────────────────────────────
+        //
+        // 70, not 75, and the reason is calibration rather than taste.
+        //
+        // The 75 line was set when two of the five inputs were constants pinned
+        // at their maximum: oiScore returned 100 for every real wall, and VIX was
+        // hardcoded to 13. Together they contributed a fixed ~35 points to every
+        // score. Replacing them with live values (wall dominance vs its
+        // neighbours, realised 5m movement) removed that floor and shifted the
+        // whole distribution down ~10-15 points — but the gate stayed put, so the
+        // filter silently became about twice as strict as it had ever been.
+        //
+        // Measured over 3,456 realistic input combinations:
+        //   old scoring, gate 75 -> 27.7% of conditions passed
+        //   new scoring, gate 75 -> 15.1%
+        //   new scoring, gate 70 -> 27.8%   <- same selectivity, honest inputs
+        // New-scoring distribution: max 90, p90 77, median 63.
+        //
+        // This restores the alert frequency the bot always had; it does not lower
+        // the bar. Nothing here has a measured win rate yet — outcome logging
+        // began 2026-09-04 — so preserving prior selectivity is the only
+        // defensible anchor until the data can speak.
+        const MIN_CONF = Number(process.env.SCALP_MIN_CONF || 70);
+        const MIN_CONF_THETA = Number(process.env.SCALP_MIN_CONF_THETA || 70);
         // Per index: SENSEX's lot of 20 makes NIFTY's 8pt target smaller than
         // its own round-trip cost. See src/data/scalpIndexConfig.js.
         const TARGET_PTS = cfg.targetPts;
@@ -910,10 +925,11 @@ class ScalpService {
             atmStrike, atmCe, atmPe, topCeWall, topPeWall, regime, setups,
             strikeTables, vp, vwapData, vwapInfo, amtRegime,
             absorption, profileMeta, confScore, cfg, snapshot: snap,
+            minConf: Math.min(MIN_CONF, MIN_CONF_THETA),
         });
     }
 
-    _formatCard({ spot, pcr, mpVal, resistance, support, rangeWidth, spotPct, atmStrike, atmCe, atmPe, topCeWall, topPeWall, regime, setups, strikeTables, vp, vwapData, vwapInfo, amtRegime, absorption, profileMeta, confScore, cfg = SCALP_INDICES.NIFTY, snapshot }) {
+    _formatCard({ spot, pcr, mpVal, resistance, support, rangeWidth, spotPct, atmStrike, atmCe, atmPe, topCeWall, topPeWall, regime, setups, strikeTables, vp, vwapData, vwapInfo, amtRegime, absorption, profileMeta, confScore, cfg = SCALP_INDICES.NIFTY, snapshot, minConf = 70 }) {
         const L = [];
         const { hour, minute } = istTime();
         const timeLabel = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
@@ -1136,7 +1152,7 @@ class ScalpService {
         const net = netPoints(cfg);
         L.push(`  \uD83D\uDCCA Fees: ~${cfg.feePts} pts \u00B7 Net: +${net.win} pts win / \u2212${net.loss} pts loss`);
         L.push(`  \uD83D\uDCCF Lot ${cfg.lot} \u00B7 target +${cfg.targetPts} \u00B7 stop \u2212${cfg.stopPts}`);
-        L.push('  \u2705 Only 75%+ confidence setups shown');
+        L.push(`  \u2705 Only ${minConf}%+ confidence setups shown`);
         L.push(`  \u23F0 2-5 min hold \u00B7 \uD83D\uDCE6 ${isLowVol ? '1 lot' : '2-3 lots'}`);
         L.push(`  \u25BB Max ${isLowVol ? '3' : '4'} trades/day`);
         if (isLowVol) L.push('  \u26A0\uFE0F Low vol \u2014 tighter stops, faster exits');
