@@ -951,6 +951,41 @@ class ScalpService {
         L.push(`\uD83D\uDCC5 ${dateLabel} \u00B7 ${timeLabel} IST`);
         L.push(`\uD83D\uDCCD Spot: ${fmtNum(spot)} \u00B7 ${regimeBadge}`);
         L.push('');
+
+        // ── YOUR MOVE — the one-line directive ─────────────────────────────
+        // The analysis sections describe the market; this block states what to
+        // actually do. When a setup cleared its gate, that setup IS the directive
+        // (top pick first, else best primary, else any). When nothing fired, the
+        // directive is "do nothing" plus the exact levels that would change the
+        // answer — so the card always answers "buy CE or PE?" in one glance.
+        const actionSetup =
+            setups.find((s) => s.topPick) ||
+            setups.find((s) => s.rank === 'primary') ||
+            setups[0];
+        if (actionSetup) {
+            const isShort = actionSetup.type.startsWith('SHORT');
+            const strikeLabel = actionSetup.strike && actionSetup.optionType
+                ? `${actionSetup.optionType} ${fmtNum(actionSetup.strike)}`
+                : '';
+            const actionTxt = isShort
+                ? `SELL ${actionSetup.type.replace('SHORT ', '')}`
+                : `${actionSetup.type}${strikeLabel ? ` ${strikeLabel}` : ''}`;
+            L.push(`👉 *YOUR MOVE: ${actionTxt}*${actionSetup.topPick ? ' ⭐ TOP PICK' : ''}`);
+            if (isShort) {
+                L.push(`   Collect \u20B9${actionSetup.entry} \u00B7 buyback TGT \u20B9${actionSetup.target} \u00B7 SL \u20B9${actionSetup.stop}`);
+            } else {
+                L.push(`   Entry \u20B9${actionSetup.entry} \u00B7 SL \u20B9${actionSetup.stop} \u00B7 TGT \u20B9${actionSetup.target}`);
+            }
+            if (actionSetup.trigger) L.push(`   ${actionSetup.trigger}`);
+        } else {
+            L.push('👉 *YOUR MOVE: NO TRADE \u2014 do nothing yet*');
+            L.push(`   \uD83D\uDFE2 If spot hits ${fmtNum(support)} (support) \u2192 BUY CE setup fires`);
+            L.push(`   \uD83D\uDD34 If spot hits ${fmtNum(resistance)} (resistance) \u2192 BUY PE setup fires`);
+            if (regime === 'trending') {
+                L.push(`   \uD83D\uDE80 If spot breaks ${fmtNum(resistance)} \u2192 BREAKOUT setup fires`);
+            }
+        }
+        L.push('');
         L.push('\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501');
         L.push('');
         L.push('\uD83D\uDCCA *SCALP MAP*');
