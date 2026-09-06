@@ -129,7 +129,51 @@ const sock0 = makeCtx().sock;
     assert.ok(sent.length >= 1, 'unknown command replies with suggestions');
 }
 
-// 5. /cmdlog is owner-only: a regular member is denied before the handler runs.
+// 5. /tagme & /notag: group-only for anyone — DM is denied, group gets dispatched
+//    (handler replies "not available" because the fake controller has no IQ service).
+{
+    const tagme = COMMAND_REGISTRY.find((d) => d.key === 'tagme');
+    const notag = COMMAND_REGISTRY.find((d) => d.key === 'notag');
+    assert.ok(tagme && notag, '/tagme and /notag must exist in the registry');
+    assert.strictEqual(tagme.scope, 'group_only', '/tagme must be group-only');
+    assert.strictEqual(tagme.role, 'anyone', '/tagme must be open to all members');
+
+    // DM → GROUPS ONLY gate, no handler run.
+    const { sent: dmSent, sock: dmSock } = makeCtx();
+    await ctrl.handleCommand(dmSock, '919000000000@s.whatsapp.net', '/tagme', '919000000000@s.whatsapp.net', null, 'Tester');
+    assert.ok(
+        dmSent.some((m) => /GROUPS ONLY/i.test(m.text)),
+        '/tagme in a DM must be denied by the group-only gate'
+    );
+
+    // Group → reaches the handler (which answers with the no-service notice).
+    const { sent: grpSent, sock: grpSock } = makeCtx();
+    await ctrl.handleCommand(grpSock, '123@g.us', '/tagme', '919000000000@s.whatsapp.net', null, 'Tester');
+    assert.ok(
+        grpSent.length >= 1 && !grpSent.some((m) => /GROUPS ONLY|PERMISSION DENIED/i.test(m.text)),
+        '/tagme in a group must pass the gate and dispatch'
+    );
+
+    // /notag same gate behaviour.
+    const { sent: offSent, sock: offSock } = makeCtx();
+    await ctrl.handleCommand(offSock, '919000000000@s.whatsapp.net', '/notag', '919000000000@s.whatsapp.net', null, 'Tester');
+    assert.ok(
+        offSent.some((m) => /GROUPS ONLY/i.test(m.text)),
+        '/notag in a DM must be denied by the group-only gate'
+    );
+}
+
+// 6. Interview Q Sunday-off default is on (scheduler skips Sun slots unless env says otherwise).
+{
+    const { config } = await import('../src/config/config.js');
+    assert.strictEqual(
+        config.INTERVIEW_Q_SKIP_SUNDAY,
+        true,
+        'INTERVIEW_Q_SKIP_SUNDAY must default to true (no polls on Sunday)'
+    );
+}
+
+// 7. /cmdlog is owner-only: a regular member is denied before the handler runs.
 {
     const def = COMMAND_REGISTRY.find((d) => d.key === 'cmdlog');
     assert.ok(def, '/cmdlog must exist in the registry');

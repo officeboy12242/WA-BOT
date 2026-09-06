@@ -134,6 +134,8 @@ import {
     handleInterviewQOn,
     handleInterviewQOff,
     handleInterviewQBoard,
+    handleTagMeOn,
+    handleTagMeOff,
 } from '../interviewQuestion/interviewQuestion.commands.js';
 
 /**
@@ -601,6 +603,8 @@ export const COMMAND_HANDLERS = {
     interviewqoff: ({ sock, chatId, senderJid, ctx }) => handleInterviewQOff(sock, chatId, senderJid, ctx),
     interviewq: ({ sock, chatId, senderJid, args, ctx }) => handleInterviewQ(sock, chatId, senderJid, args, ctx),
     iqboard: ({ sock, chatId, senderJid, ctx }) => handleInterviewQBoard(sock, chatId, senderJid, ctx),
+    tagme: ({ sock, chatId, senderJid, args, ctx, pushName }) => handleTagMeOn(sock, chatId, senderJid, args, { ...ctx, pushName }),
+    notag: ({ sock, chatId, senderJid, args, ctx, pushName }) => handleTagMeOff(sock, chatId, senderJid, args, { ...ctx, pushName }),
     groups: ({ sock, chatId, senderJid, ctx }) => handleGroups(sock, chatId, senderJid, ctx),
     setwc: ({ sock, chatId, senderJid, fullCommand, ctx }) => handleSetWelcome(sock, chatId, senderJid, fullCommand, ctx),
     link: ({ sock, chatId, senderJid, ctx }) => handleGroupLink(sock, chatId, senderJid, ctx),

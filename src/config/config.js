@@ -574,6 +574,8 @@ export const config = {
         50,
         parseInt(process.env.INTERVIEW_Q_DEDUP_LOOKBACK, 10) || 200
     ),
+    /** Skip the Interview Q poll slots on Sundays (weekly recap still runs Sat night). Default true. */
+    INTERVIEW_Q_SKIP_SUNDAY: process.env.INTERVIEW_Q_SKIP_SUNDAY !== 'false',
     /** Public base for movie /d/:code links — auto from Render/Koyeb; PUBLIC_URL optional. */
     PUBLIC_URL: resolvePublicBaseUrl(),
 

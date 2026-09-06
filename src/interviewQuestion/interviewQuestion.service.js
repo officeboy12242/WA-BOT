@@ -510,20 +510,14 @@ class InterviewQuestionService {
             const meJid = jidNormalizedUser(sock.user?.id) || sock.user?.id || '';
             const meLid = sock.user?.lid ? jidNormalizedUser(sock.user.lid) || sock.user.lid : '';
 
-            // Hidden @all ping first (polls can't carry mentions) so everyone
-            // gets notified without a wall of phone numbers.
+            // Notify ping before the poll (polls can't carry mentions). Tag the
+            // members who opted in via /tagme; only when nobody has opted in do
+            // we fall back to the hidden @all ping.
             if (String(jid).endsWith('@g.us')) {
                 try {
-                    const pack = await buildHiddenMentionAll(sock, jid);
-                    const ping = withHiddenMentions(
-                        `🧠 *Interview Q* · ${q.type} (${q.difficulty})\n` +
-                            `Topic: *${q.topic}*\n\n` +
-                            `_Vote on the poll below — answer drops in ${Math.round(answerDelayMs / 60_000)} min._`,
-                        pack
-                    );
-                    await sock.sendMessage(jid, { text: ping.text, mentions: ping.mentions, linkPreview: false });
+                    await this.sendInterviewPing(sock, jid, q, answerDelayMs);
                 } catch (err) {
-                    logger.debug(`Interview Q hidden mention ping skipped: ${err.message}`);
+                    logger.debug(`Interview Q ping skipped: ${err.message}`);
                 }
             }
 
@@ -553,6 +547,88 @@ class InterviewQuestionService {
         } catch (err) {
             await this.store.markFailed(doc._id, err.message);
             throw err;
+        }
+    }
+
+    /**
+     * Pre-poll notification. Tags /tagme opt-ins (visible @mention, one line
+     * per member); hidden @all only when nobody has opted in.
+     */    async sendInterviewPing(sock, jid, q, answerDelayMs) {
+        const baseText =
+            `🧠 *Interview Q* · ${q.type} (${q.difficulty})\n` +
+            `Topic: *${q.topic}*\n\n` +
+            `_Vote on the poll below — answer drops in ${Math.round(answerDelayMs / 60_000)} min._`;
+
+        let tagged = [];
+        try {
+            const rows = await this.store.getTaggedMembers(jid);
+            if (rows?.length) {
+                tagged = await this.resolveMentionJids(jid, rows.map((r) => r.phone), sock);
+            }
+        } catch (err) {
+            logger.debug(`Interview Q tag lookup failed: ${err.message}`);
+        }
+
+        if (tagged.length) {
+            const tagLines = tagged.map((jid2) => `@${String(jid2).split('@')[0]}`).join(' ');
+            await sock.sendMessage(jid, {
+                text: `${baseText}\n\n🔔 ${tagLines}`,
+                mentions: tagged,
+                linkPreview: false,
+            });
+            return;
+        }
+
+        // Nobody opted in — keep the silent hidden @all behaviour.
+        const pack = await buildHiddenMentionAll(sock, jid);
+        const ping = withHiddenMentions(baseText, pack);
+        await sock.sendMessage(jid, { text: ping.text, mentions: ping.mentions, linkPreview: false });
+    }
+
+    /**
+     * Group participant JIDs for a list of phone numbers (cached metadata lookup).
+     * Handles Baileys 7 pn/lid participant records — phoneNumber wins when present.
+     */
+    async resolveMentionJids(groupId, phones = [], sock = null) {
+        if (!groupId?.endsWith('@g.us') || !phones?.length) return [];
+        const s = sock || this._getSock?.();
+        if (!s?.groupMetadata) return [];
+        try {
+            const want = new Set(phones.map((p) => String(p).replace(/\D/g, '')).filter(Boolean));
+            if (!want.size) return [];
+            const meta = await s.groupMetadata(groupId);
+            const out = [];
+            for (const p of meta?.participants || []) {
+                const phone = String(p.phoneNumber || '').replace(/\D/g, '') ||
+                    String(p.id || '').split('@')[0].replace(/\D/g, '');
+                if (want.has(phone) && p.id) out.push(p.id);
+            }
+            return out;
+        } catch (err) {
+            logger.debug(`Interview Q mention resolve failed: ${err.message}`);
+            return [];
+        }
+    }
+
+    /**
+     * Visible @mention block for leaderboard rows — tags the listed players
+     * in weekly summary and /iqboard messages.
+     */
+    async buildLeaderboardTagPack(groupId, rows = [], { limit = 10, sock = null } = {}) {
+        const picked = (rows || [])
+            .filter((r) => r?.phone && (r.attempted ?? 0) > 0)
+            .slice(0, limit);
+        if (!picked.length || !groupId?.endsWith('@g.us')) {
+            return { text: '', mentions: [] };
+        }
+        try {
+            const jids = await this.resolveMentionJids(groupId, picked.map((r) => r.phone), sock);
+            if (!jids.length) return { text: '', mentions: [] };
+            const tags = jids.map((j) => `@${String(j).split('@')[0]}`).join(' ');
+            return { text: `\n\n🔥 ${tags}`, mentions: jids };
+        } catch (err) {
+            logger.debug(`Interview Q leaderboard tags skipped: ${err.message}`);
+            return { text: '', mentions: [] };
         }
     }
 
@@ -635,6 +711,7 @@ class InterviewQuestionService {
             allRows: rows,
             weekLabel,
             text,
+            jid,
         };
     }
 
@@ -856,8 +933,16 @@ class InterviewQuestionService {
                     weekLabel,
                     limit: 10,
                 });
-                const text = formatWeeklySummary(unique, { weekLabel, leaderboardText });
-                await sock.sendMessage(group.group_id, { text, linkPreview: false });
+                const tagPack = await this.buildLeaderboardTagPack(group.group_id, leaderboardRows, {
+                    limit: 10,
+                    sock,
+                });
+                const text = formatWeeklySummary(unique, { weekLabel, leaderboardText }) + tagPack.text;
+                await sock.sendMessage(group.group_id, {
+                    text,
+                    ...(tagPack.mentions.length ? { mentions: tagPack.mentions } : {}),
+                    linkPreview: false,
+                });
 
                 await this.store.insertQuestion({
                     jid: group.group_id,

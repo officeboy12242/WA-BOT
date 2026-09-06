@@ -14,6 +14,11 @@ import {
     parsePostTimesFromConfig,
 } from '../utils/newsScheduler.js';
 
+/** Poll slots are skipped on these weekdays (short names from Intl weekday:'short'). */
+function skipWeekdays(config) {
+    return new Set(config?.INTERVIEW_Q_SKIP_SUNDAY === false ? [] : ['Sun']);
+}
+
 const RETRY_MS = 45_000;
 const MAX_RETRIES = 3;
 const CATCHUP_GAP_MS = 2_500;
@@ -81,6 +86,7 @@ export function saturdaySummaryKey(timezone, fromMs = Date.now()) {
  */
 export function startInterviewQuestionScheduler({ getSock, botState, service, config }) {
     let tickInterval = null;
+    const skippedDays = skipWeekdays(config);
     let summaryTimeout = null;
     let stopped = false;
     /** @type {Set<string>} */
@@ -139,6 +145,12 @@ export function startInterviewQuestionScheduler({ getSock, botState, service, co
     async function runSlot(slotKey, slotIndex, attempt = 0) {
         if (stopped) return true;
         if (await isDone(slotKey)) return true;
+        // Days off (e.g. Sunday): mark the slot done so retries/catch-up never post it.
+        if (isSkippedDay(slotKey)) {
+            markDone(slotKey);
+            logger.info(`🧠 Interview Q slot ${slotKey}: skipped — ${[...skippedDays].join('/')} is a day off`);
+            return true;
+        }
         if (inFlight.has(slotKey)) return false;
         inFlight.add(slotKey);
 
@@ -202,6 +214,16 @@ export function startInterviewQuestionScheduler({ getSock, botState, service, co
         } finally {
             inFlight.delete(slotKey);
         }
+    }
+
+    /** True when a slot's date (in tz) falls on a configured day off (Sunday by default). */
+    function isSkippedDay(slotKey) {
+        if (!skippedDays.size) return false;
+        const m = /^(?:\d{4}-\d{2}-\d{2})/.exec(String(slotKey || ''));
+        if (!m) return false;
+        const d = new Date(`${m[1]}T12:00:00+05:30`);
+        const wd = new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'short' }).format(d);
+        return skippedDays.has(wd);
     }
 
     /**

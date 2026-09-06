@@ -299,6 +299,22 @@ export const COMMAND_REGISTRY = [
         category: 'daily',
     },
     {
+        names: ['/tagme'],
+        key: 'tagme',
+        scope: 'group_only',
+        role: 'anyone',
+        help: 'Get tagged in Interview Q posts & leaderboards in this group',
+        category: 'daily',
+    },
+    {
+        names: ['/notag'],
+        key: 'notag',
+        scope: 'group_only',
+        role: 'anyone',
+        help: 'Stop being tagged in Interview Q posts in this group',
+        category: 'daily',
+    },
+    {
         names: ['/instaon'],
         key: 'instaon',
         scope: 'group_only',
@@ -860,6 +876,7 @@ export const HELP_CATEGORY = {
     // Scheduled feeds
     news: 'daily', github: 'daily', awesome: 'daily', interviewq: 'daily',
     interviewqon: 'daily', interviewqoff: 'daily', iqboard: 'daily',
+    tagme: 'daily', notag: 'daily',
 
     // Fun
     horo: 'fun', advice: 'fun', facts: 'fun',

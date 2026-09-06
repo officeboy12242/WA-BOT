@@ -1,5 +1,6 @@
 /**
  * Commands: /interviewq test|post|answer · /interviewqon · /interviewqoff
+ *           /tagme · /notag — opt in/out of being tagged in Interview Q posts
  */
 
 import { logger } from '../utils/logger.js';
@@ -105,11 +106,19 @@ export async function handleInterviewQ(sock, chatId, senderJid, args, ctx) {
         }
 
         if (action === 'board' || action === 'leaderboard' || action === 'lb') {
-            const { text } = await interviewQuestionService.getLeaderboardForJid(chatId, {
+            const { text, allRows, jid } = await interviewQuestionService.getLeaderboardForJid(chatId, {
                 sinceMs: Date.now() - 7 * 24 * 60 * 60 * 1000,
                 limit: 10,
             });
-            await sock.sendMessage(chatId, { text: `${text}\n🤖 _Sassy Bot_` }, { quoted: originalMsg });
+            // Tag the leaderboard players (only in groups; /tagme opt-ins resolve by phone).
+            const tagPack = isGroupMessage(chatId)
+                ? await interviewQuestionService.buildLeaderboardTagPack(jid || chatId, allRows, { limit: 10, sock })
+                : { text: '', mentions: [] };
+            const payload = {
+                text: `${text}${tagPack.text}\n🤖 _Sassy Bot_`,
+                ...(tagPack.mentions.length ? { mentions: tagPack.mentions } : {}),
+            };
+            await sock.sendMessage(chatId, payload, { quoted: originalMsg });
             return;
         }
 
@@ -122,7 +131,8 @@ export async function handleInterviewQ(sock, chatId, senderJid, args, ctx) {
                     '• `/interviewq post` — post to all `/interviewqon` groups\n' +
                     '• `/interviewq answer` — reveal answer now in this chat\n' +
                     '• `/interviewq board` or `/iqboard` — weekly leaderboard\n' +
-                    '• `/interviewqon` / `/interviewqoff` — group schedule toggle\n\n' +
+                    '• `/interviewqon` / `/interviewqoff` — group schedule toggle\n' +
+                    '• `/tagme` / `/notag` — opt in/out of tags here\n\n' +
                     `_Auto: ${(config.INTERVIEW_Q_TIMES || []).join(' · ') || '11:00 · 15:00 · 19:00'} IST · answer +${Math.round((config.INTERVIEW_Q_ANSWER_DELAY_MS || 1_800_000) / 60_000)}m_\n` +
                     `_Sat ${config.INTERVIEW_Q_SUMMARY_TIME || '22:00'} — weekly leaderboard + recap_`,
             },
@@ -136,6 +146,70 @@ export async function handleInterviewQ(sock, chatId, senderJid, args, ctx) {
 
 export async function handleInterviewQBoard(sock, chatId, senderJid, ctx) {
     return handleInterviewQ(sock, chatId, senderJid, ['board'], ctx);
+}
+
+/**
+ * /tagme — be tagged in this group's Interview Q posts + leaderboards.
+ * /notag — stop. Prefs are per group, stored in Mongo.
+ */
+export async function handleTagMe(sock, chatId, senderJid, args, ctx, wantsTag = true) {
+    try {
+        if (!isGroupMessage(chatId)) {
+            await sock.sendMessage(
+                chatId,
+                { text: wantsTag ? 'Use `/tagme` in a group.' : 'Use `/notag` in a group.' },
+                { quoted: ctx?.originalMsg }
+            );
+            return;
+        }
+        const { interviewQuestionService, originalMsg } = ctx;
+        const store = interviewQuestionService?.store;
+        if (!store?.setTagged) {
+            await sock.sendMessage(chatId, { text: '⚠️ Tag prefs are not available right now.' }, { quoted: originalMsg });
+            return;
+        }
+
+        const phone = extractPhoneNumber(senderJid);
+        if (!phone) {
+            await sock.sendMessage(
+                chatId,
+                { text: '⚠️ Could not resolve your number (privacy JID). Try again from the group.' },
+                { quoted: originalMsg }
+            );
+            return;
+        }
+
+        await store.setTagged(chatId, phone, wantsTag, { jid: senderJid, name: ctx?.pushName || '' });
+
+        // Mention works best with the group's own participant JID for this member.
+        let mentionJid = senderJid;
+        try {
+            const p = await ctx.groupManager?.findParticipant?.(sock, chatId, senderJid, phone);
+            if (p?.id) mentionJid = p.id;
+        } catch { /* senderJid is fine */ }
+
+        const name = (ctx?.pushName || '').trim() || 'You';
+        const text = wantsTag
+            ? `✅ Done, *${name}*! You'll be tagged in Interview Q posts & leaderboards here.\n💡 \`/notag\` anytime to stop.`
+            : `👌 Okay *${name}*, no more tags from Interview Q here.\n💡 \`/tagme\` anytime to opt back in.`;
+        await sock.sendMessage(
+            chatId,
+            wantsTag
+                ? { text, mentions: [mentionJid] }
+                : { text },
+            { quoted: originalMsg }
+        );
+    } catch (err) {
+        logger.error(`tagme/notag failed: ${err.message}`);
+    }
+}
+
+export async function handleTagMeOn(sock, chatId, senderJid, args, ctx) {
+    return handleTagMe(sock, chatId, senderJid, args, ctx, true);
+}
+
+export async function handleTagMeOff(sock, chatId, senderJid, args, ctx) {
+    return handleTagMe(sock, chatId, senderJid, args, ctx, false);
 }
 
 export async function handleInterviewQOn(sock, chatId, senderJid, { groupManager, originalMsg }) {
@@ -175,7 +249,7 @@ export async function handleInterviewQOn(sock, chatId, senderJid, { groupManager
                     '✅ *INTERVIEW Q ON*\n' +
                     '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
                     `📢 *Group:* ${groupName}\n\n` +
-                    `🧠 Daily MCQ polls at *${(config.INTERVIEW_Q_TIMES || ['11:00', '15:00', '19:00']).join(' · ')}* IST (3×/day).\n` +
+                    `🧠 Daily MCQ polls at *${(config.INTERVIEW_Q_TIMES || ['11:00', '15:00', '19:00']).join(' · ')}* IST${config.INTERVIEW_Q_SKIP_SUNDAY !== false ? ' (Mon–Sat)' : ''}.\n` +
                     `Answer posts automatically after *${Math.round((config.INTERVIEW_Q_ANSWER_DELAY_MS || 1_800_000) / 60_000)} min*.\n` +
                     `🏆 Weekly leaderboard + recap every Sat *${config.INTERVIEW_Q_SUMMARY_TIME || '22:00'}* — or \`/iqboard\` anytime.\n\n` +
                     '💡 `/interviewqoff` to disable',

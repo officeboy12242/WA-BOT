@@ -15,14 +15,56 @@ class InterviewQuestionStore {
 
     async init() {
         this.col = this.mongoDb.collection('interview_questions');
+        // /tagme–/notag opt-ins: one doc per (group, member phone).
+        this.tagCol = this.mongoDb.collection('interview_q_tag_prefs');
         await Promise.all([
             this.col.createIndex({ jid: 1, slot_key: 1 }, { unique: true, name: 'iq_jid_slot' }),
             this.col.createIndex({ status: 1, answer_due_at: 1 }, { name: 'iq_pending_answers' }),
             this.col.createIndex({ created_at: 1 }, { name: 'iq_created_at' }),
             this.col.createIndex({ question_fp: 1, created_at: -1 }, { name: 'iq_question_fp' }),
             this.col.createIndex({ poll_message_id: 1 }, { name: 'iq_poll_message_id' }),
+            this.tagCol.createIndex({ group_id: 1, phone: 1 }, { unique: true, name: 'iq_tag_group_phone' }),
         ]);
         logger.info('Mongo interview question store ready');
+    }
+
+    // ── /tagme / /notag opt-ins ───────────────────────────────────────────
+
+    /** @returns {Promise<boolean>} true when opted-in, false when not stored */
+    async isTaggedIn(group_id, phone) {
+        if (!group_id || !phone || !this.tagCol) return false;
+        const row = await this.tagCol.findOne(
+            { group_id, phone: String(phone) },
+            { projection: { tagged: 1 } }
+        );
+        return row?.tagged === true;
+    }
+
+    async setTagged(group_id, phone, tagged, meta = {}) {
+        if (!group_id || !phone || !this.tagCol) return;
+        const now = new Date();
+        await this.tagCol.updateOne(
+            { group_id, phone: String(phone) },
+            {
+                $set: {
+                    tagged: tagged === true,
+                    name: String(meta.name || '').slice(0, 64),
+                    jid: String(meta.jid || '').slice(0, 80),
+                    updated_at: now,
+                },
+                $setOnInsert: { group_id, phone: String(phone), created_at: now },
+            },
+            { upsert: true }
+        );
+    }
+
+    /** Opted-in members for a group, newest opt-in first. */
+    async getTaggedMembers(group_id) {
+        if (!group_id || !this.tagCol) return [];
+        return this.tagCol
+            .find({ group_id, tagged: true })
+            .sort({ updated_at: -1 })
+            .toArray();
     }
 
     /**
