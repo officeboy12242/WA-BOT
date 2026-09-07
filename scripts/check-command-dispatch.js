@@ -154,6 +154,36 @@ const sock0 = makeCtx().sock;
         '/tagme in a group must pass the gate and dispatch'
     );
 
+    // 5b. /roast: any scope, open to all — DM and group both dispatch.
+    {
+        const roast = COMMAND_REGISTRY.find((d) => d.key === 'roast');
+        assert.ok(roast, '/roast must exist in the registry');
+        assert.strictEqual(roast.scope, 'any', '/roast must work in DMs and groups');
+        assert.strictEqual(roast.role, 'anyone', '/roast must be open to all members');
+
+        const { sent, sock: roastDmSock } = makeCtx();
+        await ctrl.handleCommand(roastDmSock, '919000000000@s.whatsapp.net', '/roast', '919000000000@s.whatsapp.net', null, 'Tester');
+        assert.ok(
+            sent.length >= 1 && !sent.some((m) => /PERMISSION DENIED|GROUPS ONLY/i.test(m.text)),
+            '/roast in a DM must dispatch (usage reply — no doc attached)'
+        );
+    }
+
+    // 5c. /birthday: group-only for anyone.
+    {
+        const birthday = COMMAND_REGISTRY.find((d) => d.key === 'birthday');
+        assert.ok(birthday, '/birthday must exist in the registry');
+        assert.strictEqual(birthday.scope, 'group_only', '/birthday must be group-only');
+        assert.strictEqual(birthday.role, 'anyone', '/birthday must be open to all members');
+
+        const { sent: dmSent2, sock: dmSock3 } = makeCtx();
+        await ctrl.handleCommand(dmSock3, '919000000000@s.whatsapp.net', '/birthday', '919000000000@s.whatsapp.net', null, 'Tester');
+        assert.ok(
+            dmSent2.some((m) => /GROUPS ONLY/i.test(m.text)),
+            '/birthday in a DM must be denied by the group-only gate'
+        );
+    }
+
     // /notag same gate behaviour.
     const { sent: offSent, sock: offSock } = makeCtx();
     await ctrl.handleCommand(offSock, '919000000000@s.whatsapp.net', '/notag', '919000000000@s.whatsapp.net', null, 'Tester');

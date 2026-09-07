@@ -137,6 +137,10 @@ import {
     handleTagMeOn,
     handleTagMeOff,
 } from '../interviewQuestion/interviewQuestion.commands.js';
+import {
+    handleRoast,
+    handleBirthday,
+} from './handlers/roastBirthdayHandlers.js';
 
 /**
  * Import a Telegram sticker pack and send as WhatsApp stickers.
@@ -605,6 +609,8 @@ export const COMMAND_HANDLERS = {
     iqboard: ({ sock, chatId, senderJid, ctx }) => handleInterviewQBoard(sock, chatId, senderJid, ctx),
     tagme: ({ sock, chatId, senderJid, args, ctx, pushName }) => handleTagMeOn(sock, chatId, senderJid, args, { ...ctx, pushName }),
     notag: ({ sock, chatId, senderJid, args, ctx, pushName }) => handleTagMeOff(sock, chatId, senderJid, args, { ...ctx, pushName }),
+    roast: ({ sock, chatId, senderJid, originalMsg, pushName, ctx }) => handleRoast({ sock, chatId, senderJid, originalMsg, pushName, ctx }),
+    birthday: ({ sock, chatId, senderJid, args, originalMsg, ctx }) => handleBirthday({ sock, chatId, senderJid, args, originalMsg, ctx }),
     groups: ({ sock, chatId, senderJid, ctx }) => handleGroups(sock, chatId, senderJid, ctx),
     setwc: ({ sock, chatId, senderJid, fullCommand, ctx }) => handleSetWelcome(sock, chatId, senderJid, fullCommand, ctx),
     link: ({ sock, chatId, senderJid, ctx }) => handleGroupLink(sock, chatId, senderJid, ctx),
@@ -976,6 +982,8 @@ class CommandController {
         this.resumeStore = null;
         this.resumeTailorService = null;
         this.interviewQuestionService = null;
+        this.roastService = null;
+        this.birthdayService = null;
         this.pendingClearConfirmations = new Map();
         this.pendingGithubPosts = createGithubPostSessionStore();
         this.pendingAwesomePosts = createAwesomePostSessionStore();
@@ -1026,6 +1034,14 @@ class CommandController {
 
     setInterviewQuestionService(interviewQuestionService) {
         this.interviewQuestionService = interviewQuestionService;
+    }
+
+    setRoastService(roastService) {
+        this.roastService = roastService;
+    }
+
+    setBirthdayService(birthdayService) {
+        this.birthdayService = birthdayService;
     }
 
     setTradeAlertController(tradeAlertController) {
@@ -1101,6 +1117,8 @@ class CommandController {
             svmkrScheduler: this.svmkrScheduler,
             assistService: this.assistService,
             interviewQuestionService: this.interviewQuestionService,
+            roastService: this.roastService,
+            birthdayService: this.birthdayService,
             botStartTime: this.botStartTime,
             courseAPI: this.courseAPI,
             isOwnerFromJid: this._isOwnerFromJid,

@@ -315,6 +315,22 @@ export const COMMAND_REGISTRY = [
         category: 'daily',
     },
     {
+        names: ['/roast'],
+        key: 'roast',
+        scope: 'any',
+        role: 'anyone',
+        help: 'AI resume roast — send a resume PDF with /roast as caption',
+        category: 'resume',
+    },
+    {
+        names: ['/birthday'],
+        key: 'birthday',
+        scope: 'group_only',
+        role: 'anyone',
+        help: 'Save your birthday (add DD-MM) — get an AI wish + tag on your day',
+        category: 'fun',
+    },
+    {
         names: ['/instaon'],
         key: 'instaon',
         scope: 'group_only',
@@ -876,7 +892,7 @@ export const HELP_CATEGORY = {
     // Scheduled feeds
     news: 'daily', github: 'daily', awesome: 'daily', interviewq: 'daily',
     interviewqon: 'daily', interviewqoff: 'daily', iqboard: 'daily',
-    tagme: 'daily', notag: 'daily',
+    tagme: 'daily', notag: 'daily', roast: 'resume', birthday: 'fun',
 
     // Fun
     horo: 'fun', advice: 'fun', facts: 'fun',

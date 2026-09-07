@@ -33,6 +33,8 @@ import AwesomeListsDatabase from './src/models/AwesomeListsDatabase.js';
 import InterviewQuestionStore from './src/interviewQuestion/interviewQuestion.storage.js';
 import InterviewQuestionService from './src/interviewQuestion/interviewQuestion.service.js';
 import { startInterviewQuestionScheduler } from './src/interviewQuestion/interviewQuestion.scheduler.js';
+import RoastService from './src/services/RoastService.js';
+import BirthdayService from './src/services/BirthdayService.js';
 import WarnDatabase from './src/models/WarnDatabase.js';
 import UserManager from './src/models/UserManager.js';
 import StickerController from './src/controllers/StickerController.js';
@@ -295,6 +297,18 @@ class WhatsAppCourseBot {
                 this.awesomeListsController
             );
             this.commandController.setInterviewQuestionService(this.interviewQuestionService);
+
+            // /roast — AI resume roast (multi-LLM router, per-phone daily limit)
+            this.roastService = new RoastService({ mongoDb, cfg: config });
+            await this.roastService.init();
+            this.commandController.setRoastService(this.roastService);
+
+            // /birthday — daily AI birthday wish + tag (dedup via Mongo)
+            this.birthdayService = new BirthdayService({ mongoDb, groupManager: this.groupManager, cfg: config });
+            await this.birthdayService.init();
+            this.commandController.setBirthdayService(this.birthdayService);
+            this.birthdayService.start();
+
             this.courseController = new CourseController(
                 this.database,
                 this.courseAPI,
@@ -654,6 +668,9 @@ class WhatsAppCourseBot {
         }
         if (this.interviewQScheduler) {
             this.interviewQScheduler.stop();
+        }
+        if (this.birthdayService) {
+            this.birthdayService.stop();
         }
         if (this.groupSummaryScheduler) {
             this.groupSummaryScheduler.stop();

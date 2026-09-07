@@ -574,6 +574,13 @@ export const config = {
         50,
         parseInt(process.env.INTERVIEW_Q_DEDUP_LOOKBACK, 10) || 200
     ),
+    /** /roast — AI resume roast (PDF/DOCX/TXT) on the multi-provider LLM router. */
+    ROAST_ENABLED: process.env.ROAST_ENABLED !== 'false',
+    /** Per-phone roasts per IST day (owner bypasses). */
+    ROAST_DAILY_LIMIT: Math.max(1, parseInt(process.env.ROAST_DAILY_LIMIT, 10) || 2),
+    /** /birthday — daily LLM birthday wish + tag, once per day after this IST time. */
+    BIRTHDAY_ENABLED: process.env.BIRTHDAY_ENABLED !== 'false',
+    BIRTHDAY_TIME: (process.env.BIRTHDAY_TIME || '09:07').trim(),
     /** Skip the Interview Q poll slots on Sundays (weekly recap still runs Sat night). Default true. */
     INTERVIEW_Q_SKIP_SUNDAY: process.env.INTERVIEW_Q_SKIP_SUNDAY !== 'false',
     /** Public base for movie /d/:code links — auto from Render/Koyeb; PUBLIC_URL optional. */
