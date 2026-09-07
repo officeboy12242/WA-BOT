@@ -19,6 +19,23 @@ function skipWeekdays(config) {
     return new Set(config?.INTERVIEW_Q_SKIP_SUNDAY === false ? [] : ['Sun']);
 }
 
+/**
+ * Weekday short name ('Sun'..'Sat') of the calendar date embedded in a slot key
+ * (e.g. '2026-09-07T11:00'). A calendar date's weekday is timezone-independent,
+ * so the noon-UTC anchor is exact for any tz. Returns null when the key has no
+ * date prefix — and never throws (a bad key must not kill the scheduler tick).
+ */
+export function slotWeekday(slotKey) {
+    try {
+        const m = /^(\d{4}-\d{2}-\d{2})/.exec(String(slotKey || ''));
+        if (!m) return null;
+        return new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', weekday: 'short' })
+            .format(new Date(`${m[1]}T12:00:00Z`));
+    } catch {
+        return null;
+    }
+}
+
 const RETRY_MS = 45_000;
 const MAX_RETRIES = 3;
 const CATCHUP_GAP_MS = 2_500;
@@ -216,14 +233,11 @@ export function startInterviewQuestionScheduler({ getSock, botState, service, co
         }
     }
 
-    /** True when a slot's date (in tz) falls on a configured day off (Sunday by default). */
+    /** True when a slot's date falls on a configured day off (Sunday by default). */
     function isSkippedDay(slotKey) {
         if (!skippedDays.size) return false;
-        const m = /^(?:\d{4}-\d{2}-\d{2})/.exec(String(slotKey || ''));
-        if (!m) return false;
-        const d = new Date(`${m[1]}T12:00:00+05:30`);
-        const wd = new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'short' }).format(d);
-        return skippedDays.has(wd);
+        const wd = slotWeekday(slotKey);
+        return wd !== null && skippedDays.has(wd);
     }
 
     /**
@@ -235,30 +249,40 @@ export function startInterviewQuestionScheduler({ getSock, botState, service, co
 
         const expired = getExpiredSlotsToday(config.INTERVIEW_Q_TIMES, tz, new Date(), graceMs);
         for (const slot of expired) {
-            const slotKey = formatSlotKey(new Date(), tz, slot.hour, slot.minute);
-            if (await isDone(slotKey)) continue;
-            markDone(slotKey);
-            logger.info(
-                `🧠 Interview Q slot ${slotKey} missed (outside ${Math.round(graceMs / 60_000)}m grace) — skipped`
-            );
+            // Per-slot guard: one bad slot must never starve the rest of the tick.
+            try {
+                const slotKey = formatSlotKey(new Date(), tz, slot.hour, slot.minute);
+                if (await isDone(slotKey)) continue;
+                markDone(slotKey);
+                logger.info(
+                    `🧠 Interview Q slot ${slotKey} missed (outside ${Math.round(graceMs / 60_000)}m grace) — skipped`
+                );
+            } catch (err) {
+                logger.error(`Interview Q expired-slot check failed: ${err.message}`);
+            }
         }
 
         const due = getCatchUpSlotsToday(config.INTERVIEW_Q_TIMES, tz, new Date(), graceMs);
         for (const slot of due) {
             if (stopped) return;
-            const slotKey = formatSlotKey(new Date(), tz, slot.hour, slot.minute);
-            if (await isDone(slotKey)) continue;
-            const slotIndex =
-                slot.index >= 0
-                    ? slot.index
-                    : slots.findIndex((s) => s.hour === slot.hour && s.minute === slot.minute);
-            logger.info(
-                `🧠 Interview Q due ${slotKey}` +
-                    (slot.ageMs > 60_000
-                        ? ` (catch-up +${Math.round(slot.ageMs / 60_000)}m)`
-                        : '')
-            );
-            await runSlot(slotKey, Math.max(0, slotIndex), 0);
+            // Per-slot guard: one bad slot must never starve the rest of the tick.
+            try {
+                const slotKey = formatSlotKey(new Date(), tz, slot.hour, slot.minute);
+                if (await isDone(slotKey)) continue;
+                const slotIndex =
+                    slot.index >= 0
+                        ? slot.index
+                        : slots.findIndex((s) => s.hour === slot.hour && s.minute === slot.minute);
+                logger.info(
+                    `🧠 Interview Q due ${slotKey}` +
+                        (slot.ageMs > 60_000
+                            ? ` (catch-up +${Math.round(slot.ageMs / 60_000)}m)`
+                            : '')
+                );
+                await runSlot(slotKey, Math.max(0, slotIndex), 0);
+            } catch (err) {
+                logger.error(`Interview Q slot ${slot?.hour}:${slot?.minute} tick failed: ${err.message}`);
+            }
             await new Promise((r) => setTimeout(r, CATCHUP_GAP_MS));
         }
     }
