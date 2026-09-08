@@ -63,13 +63,17 @@ export async function handleRoast({ sock, chatId, senderJid, originalMsg, pushNa
     } catch (err) {
         const friendly = err?.userFriendly ? err.message : null;
         logger.warn(`Roast failed for ${chatId}: ${err.message}`);
+        const reason = friendly
+            ? ''
+            : String(err?.message || '').slice(0, 120);
         await safeSendMessage(
             sock,
             chatId,
             {
                 text:
                     friendly ||
-                    '💀 The grill broke mid-roast (LLM hiccup). Try again in a minute — the fallback providers usually catch it.',
+                    `💀 The grill broke mid-roast (LLM hiccup: ${reason || 'all providers failed'}). ` +
+                        'Try again in a minute — the fallback providers usually catch it.',
             },
             originalMsg
         );

@@ -121,8 +121,8 @@ export const config = {
     GEMINI_TRADE_MODELS: process.env.GEMINI_TRADE_MODELS?.trim() || 'gemini-2.5-flash,gemini-flash-latest,gemini-flash-lite-latest,gemini-2.5-pro',
     /** Groq fallback for trade alerts (/tradenow when Gemini rate-limited) */
     GROQ_API_KEY: process.env.GROQ_API_KEY?.trim() || '',
-    GROQ_TRADE_MODEL: process.env.GROQ_TRADE_MODEL?.trim() || 'llama-3.3-70b-versatile',
-    GROQ_TRADE_MODELS: process.env.GROQ_TRADE_MODELS?.trim() || 'llama-3.3-70b-versatile,llama-3.1-8b-instant',
+    GROQ_TRADE_MODEL: process.env.GROQ_TRADE_MODEL?.trim() || 'openai/gpt-oss-120b',
+    GROQ_TRADE_MODELS: process.env.GROQ_TRADE_MODELS?.trim() || 'openai/gpt-oss-120b,qwen/qwen3.8-27b',
     /** Provider order: orcarouter (free DeepSeek V4 Flash) → gemini → groq → nvidia → openrouter */
     TRADE_LLM_PROVIDERS: (process.env.TRADE_LLM_PROVIDERS || 'orcarouter,gemini,groq,nvidia,openrouter').trim(),
     /** After a provider 429, skip it for this many ms (daily scan keeps using fallbacks). */
@@ -209,8 +209,8 @@ export const config = {
     ASSIST_GEMINI_MODEL: process.env.ASSIST_GEMINI_MODEL?.trim() || 'gemini-2.5-flash',
     ASSIST_GEMINI_MODELS: process.env.ASSIST_GEMINI_MODELS?.trim() || 'gemini-2.5-flash,gemini-flash-latest,gemini-flash-lite-latest,gemini-2.5-pro',
     /** Assist fallback — Groq / NVIDIA (same keys as trade) */
-    ASSIST_GROQ_MODEL: process.env.ASSIST_GROQ_MODEL?.trim() || 'llama-3.1-8b-instant',
-    ASSIST_GROQ_MODELS: process.env.ASSIST_GROQ_MODELS?.trim() || 'llama-3.1-8b-instant,llama-3.3-70b-versatile',
+    ASSIST_GROQ_MODEL: process.env.ASSIST_GROQ_MODEL?.trim() || 'openai/gpt-oss-120b',
+    ASSIST_GROQ_MODELS: process.env.ASSIST_GROQ_MODELS?.trim() || 'openai/gpt-oss-120b,qwen/qwen3.8-27b',
     /**
      * How long an assist provider is skipped after a QUOTA error (not a burst 429).
      * A daily quota does not recover in seconds, and re-walking a dead provider's

@@ -15,7 +15,10 @@ const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const NVIDIA_URL = 'https://integrate.api.nvidia.com/v1/chat/completions';
 
 const DEFAULT_GEMINI = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.5-pro'];
-const DEFAULT_GROQ = ['llama-3.1-8b-instant', 'llama-3.3-70b-versatile'];
+// Verified live against the Groq API (2026-09-08): the old llama-3.1-8b-instant /
+// llama-3.3-70b-versatile names now 404 on every key — every provider in the
+// chain died at once and callers saw "LLM hiccup". These two respond and are fast.
+const DEFAULT_GROQ = ['openai/gpt-oss-120b', 'qwen/qwen3.8-27b'];
 const DEFAULT_PROVIDERS = ['gemini', 'groq', 'nvidia', 'openrouter'];
 
 function parseList(raw, fallback) {

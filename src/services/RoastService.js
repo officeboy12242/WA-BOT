@@ -103,8 +103,20 @@ export default class RoastService {
      * @returns {Promise<{ text: string, score: number|null, provider: string, model: string }>}
      */
     async roastDocument({ sock, waMessage, senderJid, displayName = '', bypassLimit = false }) {
-        const { downloadWaDocument } = await import('../utils/waDocument.js');
-        const { buffer, fileName, mimetype } = await downloadWaDocument(sock, waMessage);
+        let buffer, fileName, mimetype;
+        try {
+            const { downloadWaDocument } = await import('../utils/waDocument.js');
+            const dl = await downloadWaDocument(sock, waMessage);
+            buffer = dl.buffer;
+            fileName = dl.fileName;
+            mimetype = dl.mimetype;
+        } catch (err) {
+            // Download failures (timeout, media not re-uploaded, etc.) are NOT
+            // LLM problems — say so instead of the misleading "LLM hiccup".
+            const e = new Error(`Could not download the file: ${err.message}`);
+            e.userFriendly = true;
+            throw e;
+        }
         if (buffer.length > MAX_PDF_BYTES) {
             const err = new Error('File too big (max 8 MB). Export a lighter PDF.');
             err.userFriendly = true;
