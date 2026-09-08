@@ -6,6 +6,7 @@ import { logger } from '../utils/logger.js';
 import { formatGitHubRepoMessage } from '../utils/githubFormatter.js';
 import { sendTextWithLinkPreview } from '../utils/linkPreview.js';
 import GitHubTrendingService, { GITHUB_SLOT_CATEGORIES } from '../services/GitHubTrendingService.js';
+import AssistLlmRouter from '../services/AssistLlmRouter.js';
 
 const GROUP_DELAY_MS = 500;
 const REPO_DELAY_MS = 2000;
@@ -19,7 +20,11 @@ class GitHubTrendingController {
         this.config = config;
         this.groupManager = groupManager;
         this.githubDatabase = githubDatabase;
-        this.service = new GitHubTrendingService(config.GITHUB_TRENDING_COUNT);
+        this.service = new GitHubTrendingService(config.GITHUB_TRENDING_COUNT, {
+            timezone: config.GITHUB_TRENDING_TIMEZONE || 'Asia/Kolkata',
+            collegeSaturday: config.GITHUB_COLLEGE_SATURDAY !== false,
+            llm: new AssistLlmRouter(config),
+        });
     }
 
     async fetchTrendingRepos() {
@@ -176,7 +181,10 @@ class GitHubTrendingController {
             }
 
             const total = this.config.GITHUB_TRENDING_COUNT;
-            const category = GITHUB_SLOT_CATEGORIES[slotIndex] || repo.category || 'trending';
+            const category = this.service.isCollegeSaturday()
+                ? 'college'
+                : (GITHUB_SLOT_CATEGORIES[slotIndex] || repo.category || 'trending');
+            if (!repo.category) repo.category = category;
             logger.info(`GitHub slot ${slotIndex + 1}: ${repo.fullName} (${category})`);
 
             const { posted, groups } = await this.postSingleRepoToGroups(sock, repo, slotIndex + 1, total);

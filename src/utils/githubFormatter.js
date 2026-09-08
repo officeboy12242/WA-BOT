@@ -19,6 +19,7 @@ const CATEGORY_HEADERS = {
     trending: '🔥 *GITHUB TRENDING*',
     popular: '⭐ *GITHUB POPULAR*',
     underrated: '💎 *GITHUB HIDDEN GEM*',
+    college: '🎓 *COLLEGE / RESUME PROJECT*',
 };
 
 function categoryHeader(repo) {
@@ -46,6 +47,9 @@ export function formatGitHubRepoMessage(repo, index = 1, total = 5) {
     }
     if (repo.forks) {
         text += `🍴 *Forks:* ${repo.forks}\n`;
+    }
+    if (repo.whyNow) {
+        text += `🏷 *Why now:* ${repo.whyNow}\n`;
     }
     // Full URL on its own line — WhatsApp generates link preview from this
     text += `\n${repo.url}`;

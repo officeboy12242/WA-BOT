@@ -541,6 +541,11 @@ export const config = {
         .filter(Boolean),
     GITHUB_TRENDING_TIMEZONE: process.env.GITHUB_TRENDING_TIMEZONE || 'Asia/Kolkata',
     GITHUB_TRENDING_COUNT: parseInt(process.env.GITHUB_TRENDING_COUNT, 10) || 5,
+    /**
+     * Saturdays: post college/resume projects (LLM topic mix) instead of
+     * trending/popular/hidden-gem; awesome lists are skipped that day.
+     */
+    GITHUB_COLLEGE_SATURDAY: process.env.GITHUB_COLLEGE_SATURDAY !== 'false',
     /** Awesome lists — offset from GitHub times so posts don't collide */
     AWESOME_LISTS_ENABLED: process.env.AWESOME_LISTS_ENABLED !== 'false',
     AWESOME_LISTS_TIMES: (process.env.AWESOME_LISTS_TIMES || '10:15,12:45,15:15,17:45,20:30')

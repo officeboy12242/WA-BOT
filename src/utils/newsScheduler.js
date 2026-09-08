@@ -78,6 +78,15 @@ export function formatDayKey(date, timezone) {
     return `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`;
 }
 
+/** Short weekday in timezone: 'Sun'..'Sat' (en-US). */
+export function weekdayShortInTimezone(date = new Date(), timezone = 'Asia/Kolkata') {
+    return new Intl.DateTimeFormat('en-US', { timeZone: timezone, weekday: 'short' }).format(date);
+}
+
+export function isSaturdayInTimezone(date = new Date(), timezone = 'Asia/Kolkata') {
+    return weekdayShortInTimezone(date, timezone) === 'Sat';
+}
+
 export function getCurrentDueSlot(postTimes, timezone, now = new Date()) {
     const p = zonedParts(now, timezone);
     const slots = parsePostTimes(postTimes);

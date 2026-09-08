@@ -7,6 +7,7 @@ import {
     formatSlotKey,
     getCurrentDueSlot,
     getMsUntilNextNewsPost,
+    isSaturdayInTimezone,
     parsePostTimesFromConfig,
 } from './newsScheduler.js';
 import { createDurableSlotStore } from './durableSlots.js';
@@ -68,6 +69,17 @@ export function startAwesomeScheduler({ getSock, botState, awesomeController, co
                     due.minute
                 );
                 if (await slots.isDone(botState, slotKey, 'lastAwesomePostSlots')) return;
+
+                // Mark Saturday slots done without posting (college/resume day).
+                if (
+                    config.GITHUB_COLLEGE_SATURDAY !== false
+                    && isSaturdayInTimezone(new Date(), config.AWESOME_LISTS_TIMEZONE)
+                ) {
+                    logger.info(`⭐ Awesome slot ${slotKey}: skipped — Saturday college/resume day`);
+                    await slots.markDone(botState, slotKey, 'lastAwesomePostSlots');
+                    return;
+                }
+
                 if (!sock) return;
 
                 await awesomeController.checkAndPostList(sock, botState, slotIndex);

@@ -391,7 +391,7 @@ export async function handleActivate(sock, chatId, senderJid, { groupManager, or
         r += '_Tap the name above to open DM_\n\n';
         r += '🎓 This group will now receive free course updates!\n';
         r += '📰 Tech news digests at *10:00 AM* & *10:00 PM* (IST)!\n';
-        r += '🐙 GitHub trending repos daily at *9:00, 11:30, 2:00, 4:30 & 7:00 PM* (IST)!\n\n';
+        r += '🐙 GitHub repos daily at *9:00, 11:30, 2:00, 4:30 & 7:00 PM* (IST) — *Saturdays* = college/resume projects only!\n\n';
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
         r += '💡 Use `/newsoff`, `/githuboff`, or `/coursesoff` to turn off individually\n';
         r += '💡 Use `/instaon` for auto Instagram downloads\n';
@@ -1283,8 +1283,9 @@ export async function handleGithubOn(sock, chatId, senderJid, { groupManager, or
         r += '✅ *GITHUB TRENDING ON* ✅\n';
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
         r += `📢 *Group:* ${groupName}\n\n`;
-        r += '🐙 Daily GitHub picks — *trending, popular & hidden gems* (5 posts, fresh each time).\n';
-        r += '🎓 Courses continue as normal.\n\n';
+        r += '🐙 Daily GitHub picks — *trending, popular & hidden gems* (5 posts).\n';
+        r += '🎓 *Saturdays:* college / resume projects only (no awesome lists that day).\n';
+        r += '📚 Courses continue as normal.\n\n';
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
         r += '💡 Use `/githuboff` to stop GitHub trending only';
 

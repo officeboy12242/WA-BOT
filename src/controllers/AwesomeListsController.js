@@ -6,6 +6,7 @@ import { logger } from '../utils/logger.js';
 import { formatAwesomeListMessage } from '../utils/awesomeFormatter.js';
 import { sendTextWithLinkPreview } from '../utils/linkPreview.js';
 import AwesomeListsService from '../services/AwesomeListsService.js';
+import { isSaturdayInTimezone } from '../utils/newsScheduler.js';
 
 const GROUP_DELAY_MS = 500;
 const LIST_DELAY_MS = 2000;
@@ -128,6 +129,15 @@ class AwesomeListsController {
     /** Post one random awesome list at a scheduled slot. */
     async checkAndPostList(sock, botState, slotIndex) {
         if (!this.config.AWESOME_LISTS_ENABLED) return;
+
+        // Saturdays are college/resume GitHub only — skip awesome that day.
+        if (
+            this.config.GITHUB_COLLEGE_SATURDAY !== false
+            && isSaturdayInTimezone(new Date(), this.config.AWESOME_LISTS_TIMEZONE || 'Asia/Kolkata')
+        ) {
+            logger.info(`⭐ Awesome slot ${slotIndex + 1}: skipped — Saturday college/resume day`);
+            return { posted: 0, skipped: true, reason: 'saturday_college' };
+        }
 
         if (!sock) {
             logger.info('Waiting for WhatsApp connection (awesome lists)...');
