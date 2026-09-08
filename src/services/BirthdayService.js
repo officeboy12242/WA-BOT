@@ -11,6 +11,7 @@
 import { logger } from '../utils/logger.js';
 import { config } from '../config/config.js';
 import { isGroupMessage, extractPhoneNumber } from '../utils/permissions.js';
+import { indexParticipantsByDigits, resolveMentionIdentity } from '../utils/welcomeMessage.js';
 import AssistLlmRouter from './AssistLlmRouter.js';
 
 const TZ = 'Asia/Kolkata';
@@ -271,6 +272,18 @@ export default class BirthdayService {
 
         for (const [groupId, members] of byGroup) {
             const wishText = await this._generateWish(members);
+
+            // Bare stored digits don't record whether they came from @s.whatsapp.net
+            // or @lid — resolve against the group's live roster so the tag actually
+            // lands on the member instead of printing unresolvable raw digits.
+            let digitIndex = new Map();
+            try {
+                const meta = await this.groupManager?.getGroupMetadataCached?.(s, groupId);
+                digitIndex = indexParticipantsByDigits(meta?.participants);
+            } catch (err) {
+                logger.debug(`Birthday wish: group metadata fetch failed for ${groupId}: ${err.message}`);
+            }
+
             for (const member of members) {
                 try {
                     const inserted = await this.wishesCol.insertOne({
@@ -286,10 +299,13 @@ export default class BirthdayService {
                         skipped++;
                         continue;
                     }
-                    const tag = `${member.phone}@s.whatsapp.net`;
+                    const participant = digitIndex.get(String(member.phone));
+                    const tags = participant
+                        ? resolveMentionIdentity(participant).mentions
+                        : [`${member.phone}@s.whatsapp.net`];
                     await s.sendMessage(groupId, {
                         text: `${wishText}\n\n@${member.phone}`,
-                        mentions: [tag],
+                        mentions: tags,
                     });
                     posted++;
                     // Explicit 0 must disable the gap (no `|| 700` — 0 is falsy).

@@ -183,6 +183,35 @@ export function resolveMentionIdentity(participant) {
 }
 
 /**
+ * Index a group's participants by every digit form they can be addressed with
+ * (id / lid / pn / phoneNumber, stripped of domain and device suffix).
+ *
+ * A bare digit string saved earlier (e.g. from `extractPhoneNumber(senderJid)`)
+ * doesn't record which domain it came from — in a LID-addressed group that's
+ * often `@lid`, not `@s.whatsapp.net`. Tagging it with the wrong domain always
+ * produces an unresolvable mention: WhatsApp just prints the digits back as
+ * plain text, which reads exactly like a stray JID. Looking the digits up here
+ * against the group's *current* participant list recovers the participant
+ * record regardless of which form was originally captured, so
+ * `resolveMentionIdentity()` can build a mention that actually resolves.
+ *
+ * @param {Array<object>} participants
+ * @returns {Map<string, object>}
+ */
+export function indexParticipantsByDigits(participants) {
+    const index = new Map();
+    for (const p of participants || []) {
+        const keys = [p.id, p.lid, p.pn, p.phoneNumber]
+            .filter(Boolean)
+            .map((v) => String(v).split('@')[0].split(':')[0]);
+        for (const k of keys) {
+            if (k) index.set(k, p);
+        }
+    }
+    return index;
+}
+
+/**
  * @param {string} customPart
  * @param {string} groupName
  * @param {string|object} member participant record, or the JID to display

@@ -6,6 +6,7 @@ import { logger } from '../../utils/logger.js';
 import { safeSendMessage } from '../../utils/waMessage.js';
 import { isGroupMessage, extractPhoneNumber } from '../../utils/permissions.js';
 import { hasWaDocument } from '../../utils/waDocument.js';
+import { indexParticipantsByDigits, resolveMentionIdentity } from '../../utils/welcomeMessage.js';
 
 const ROAST_USAGE =
     '🔥 *AI Resume Roast*\n\n' +
@@ -132,11 +133,30 @@ export async function handleBirthday({ sock, chatId, senderJid, args, originalMs
         }
         const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', day: '2-digit', month: '2-digit' }).format(new Date());
         const [tD, tM] = today.split('-').map(Number);
-        const mentions = rows.map((r) => `${r.phone}@s.whatsapp.net`);
+
+        // The stored `phone` is bare digits with no record of which domain they
+        // came from (@s.whatsapp.net vs @lid) — match against the group's live
+        // participant list to tag the right one instead of guessing the domain.
+        let digitIndex = new Map();
+        try {
+            const meta = await ctx?.groupManager?.getGroupMetadataCached?.(sock, chatId);
+            digitIndex = indexParticipantsByDigits(meta?.participants);
+        } catch (err) {
+            logger.debug(`Birthday list: group metadata fetch failed: ${err.message}`);
+        }
+
+        const mentionSet = new Set();
         const lines = rows.map((r) => {
             const isToday = r.dd === tD && r.mm === tM;
+            const participant = digitIndex.get(String(r.phone));
+            if (participant) {
+                for (const m of resolveMentionIdentity(participant).mentions) mentionSet.add(m);
+            } else {
+                mentionSet.add(`${r.phone}@s.whatsapp.net`);
+            }
             return `${isToday ? '🎉' : '•'} ${String(r.dd).padStart(2, '0')}-${String(r.mm).padStart(2, '0')} → @${r.phone}${isToday ? ' (today!)' : ''}`;
         });
+        const mentions = [...mentionSet];
         await safeSendMessage(
             sock,
             chatId,
