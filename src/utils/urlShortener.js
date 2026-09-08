@@ -35,13 +35,11 @@ const KOYEB_DISPLAY_CHAIN = [
     },
 ];
 
+// clck.ru is the default everywhere now (TinyURL blocks *.koyeb.app and is
+// flaky for movie hosts) — zip1.io stays as the second fallback.
 const RENDER_DISPLAY_CHAIN = [
-    {
-        name: 'TinyURL',
-        build: (u) => `https://tinyurl.com/api-create.php?url=${encodeURIComponent(u)}`,
-        ok: (status, data) => status === 200 && data.startsWith('https://tinyurl.com/'),
-    },
-    ...KOYEB_DISPLAY_CHAIN,
+    { name: 'clck.ru', ...KOYEB_DISPLAY_CHAIN[1] },
+    KOYEB_DISPLAY_CHAIN[0],
 ];
 
 const MAX_CACHE_SIZE = 500;
