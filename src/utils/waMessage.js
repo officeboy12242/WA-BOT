@@ -193,7 +193,7 @@ export function collectMessageSenderDmCandidates(key) {
     return out;
 }
 
-function getContextInfo(message) {
+export function getContextInfo(message) {
     if (!message) {
         return null;
     }

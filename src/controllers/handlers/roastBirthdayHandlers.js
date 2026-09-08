@@ -10,7 +10,8 @@ import { indexParticipantsByDigits, resolveMentionIdentity } from '../../utils/w
 
 const ROAST_USAGE =
     '🔥 *AI Resume Roast*\n\n' +
-    'Send your resume PDF here *with* `/roast` as the caption (or quote a resume and type `/roast`).\n\n' +
+    'Send your resume PDF here *with* `/roast` as the caption.\n' +
+    '(Replying `/roast` to an old file often fails — WhatsApp strips the bytes.)\n\n' +
     'You get: roast score /100, what works, what gets roasted, and a fix list.\n\n' +
     '_PDF / DOCX / TXT up to 8 MB._';
 

@@ -111,9 +111,21 @@ export default class RoastService {
             fileName = dl.fileName;
             mimetype = dl.mimetype;
         } catch (err) {
-            // Download failures (timeout, media not re-uploaded, etc.) are NOT
-            // LLM problems — say so instead of the misleading "LLM hiccup".
-            const e = new Error(`Could not download the file: ${err.message}`);
+            // Download failures are NOT LLM problems — keep the message actionable.
+            const raw = String(err?.message || err);
+            let tip = raw;
+            if (/no document found/i.test(raw)) {
+                tip =
+                    'No resume file on that message. Send a PDF/DOCX with `/roast` as the caption, or reply to the file with `/roast`.';
+            } else if (/media unavailable|not a media message|no media/i.test(raw)) {
+                tip =
+                    'WhatsApp did not give us the file bytes (common when *replying* to an old PDF). Re-send the resume *with* `/roast` in the caption.';
+            } else if (/timed? ?out/i.test(raw)) {
+                tip = 'Download timed out — try again with a smaller PDF (under 8 MB).';
+            } else {
+                tip = `Could not download the file: ${raw}`;
+            }
+            const e = new Error(tip);
             e.userFriendly = true;
             throw e;
         }

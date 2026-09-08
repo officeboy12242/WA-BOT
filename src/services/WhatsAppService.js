@@ -269,6 +269,12 @@ class WhatsAppService {
             },
         });
 
+        // Expose cache to media downloaders (/roast quoted PDFs, etc.)
+        this.sock.__getCachedMessage = (key) => {
+            if (!key?.remoteJid || !key?.id) return undefined;
+            return this._messageCache.get(`${key.remoteJid}:${key.id}`);
+        };
+
         this._wrapOutgoingMessageTracking();
 
         this.setupEventHandlers(saveCreds);

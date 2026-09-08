@@ -157,5 +157,32 @@ const JID = '919999000001@s.whatsapp.net';
     console.log('✅ ROAST_ENABLED=false switches the feature off');
 }
 
+// ── 7) incomplete quoted stub → actionable error (not "LLM hiccup") ─────────
+{
+    const svc = new RoastService({ mongoDb: makeDb(), cfg: { ROAST_ENABLED: true, ROAST_DAILY_LIMIT: 2 } });
+    svc.llm = llm;
+    await svc.init();
+    const stubMsg = {
+        key: { id: 'CMD', remoteJid: 'g@g.us' },
+        message: {
+            extendedTextMessage: {
+                text: '/roast',
+                contextInfo: {
+                    stanzaId: 'OLD',
+                    remoteJid: 'g@g.us',
+                    quotedMessage: {
+                        documentMessage: { fileName: 'Resume.pdf', mimetype: 'application/pdf' },
+                    },
+                },
+            },
+        },
+    };
+    await assert.rejects(
+        () => svc.roastDocument({ sock: {}, waMessage: stubMsg, senderJid: JID }),
+        /Re-send the resume|media unavailable|caption/i
+    );
+    console.log('✅ incomplete quoted PDF returns an actionable download error');
+}
+
 console.log(`✅ check-roast passed (day key ${getTodayDateStrIST()})`);
 process.exit(0);
