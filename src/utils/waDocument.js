@@ -5,6 +5,7 @@
 import { downloadMediaMessage, normalizeMessageContent } from 'baileys';
 import pino from 'pino';
 import { buildQuotedTargetMessage } from './waMessage.js';
+import { logger } from './logger.js';
 
 const baileysLogger = pino({ level: 'silent' });
 const DOWNLOAD_TIMEOUT_MS = 45_000;
@@ -66,6 +67,25 @@ export function resolveDocumentTarget(waMessage) {
 export async function downloadWaDocument(sock, waMessage) {
     const target = resolveDocumentTarget(waMessage);
     if (!target) {
+        // Diagnostic dump — this shouldn't fire if the caller already checked
+        // hasWaDocument() on the same waMessage, since both call the same
+        // resolveDocumentTarget(). If it ever does, this tells us why instead
+        // of leaving us guessing from the generic error text alone.
+        const topKeys = waMessage?.message ? Object.keys(waMessage.message) : [];
+        const ctxQuoted = (() => {
+            try {
+                const c = normalizeMessageContent(waMessage?.message);
+                for (const value of Object.values(c || {})) {
+                    if (value?.contextInfo?.quotedMessage) {
+                        return Object.keys(value.contextInfo.quotedMessage);
+                    }
+                }
+            } catch {}
+            return null;
+        })();
+        logger.warn(
+            `Roast: no document resolved — msgId=${waMessage?.key?.id || '?'} topKeys=${JSON.stringify(topKeys)} quotedKeys=${JSON.stringify(ctxQuoted)}`
+        );
         throw new Error('No document found');
     }
 
@@ -82,7 +102,12 @@ export async function downloadWaDocument(sock, waMessage) {
             }
         ),
         DOWNLOAD_TIMEOUT_MS
-    );
+    ).catch((err) => {
+        logger.warn(
+            `Roast: document download failed (source=${target.source}, fileName=${target.document?.fileName || target.document?.title || '?'}): ${err?.message || err}`
+        );
+        throw err;
+    });
 
     if (!Buffer.isBuffer(buffer) || !buffer.length) {
         throw new Error('Empty document download');

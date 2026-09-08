@@ -132,14 +132,18 @@ export async function handleBirthday({ sock, chatId, senderJid, args, originalMs
         }
         const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', day: '2-digit', month: '2-digit' }).format(new Date());
         const [tD, tM] = today.split('-').map(Number);
+        const mentions = rows.map((r) => `${r.phone}@s.whatsapp.net`);
         const lines = rows.map((r) => {
             const isToday = r.dd === tD && r.mm === tM;
-            return `${isToday ? '🎉' : '•'} ${String(r.dd).padStart(2, '0')}-${String(r.mm).padStart(2, '0')} → +${r.phone}${isToday ? ' (today!)' : ''}`;
+            return `${isToday ? '🎉' : '•'} ${String(r.dd).padStart(2, '0')}-${String(r.mm).padStart(2, '0')} → @${r.phone}${isToday ? ' (today!)' : ''}`;
         });
         await safeSendMessage(
             sock,
             chatId,
-            { text: `🎂 *Birthdays in this group*\n\n${lines.join('\n')}\n\n_Add yours: /birthday add DD-MM_` },
+            {
+                text: `🎂 *Birthdays in this group*\n\n${lines.join('\n')}\n\n_Add yours: /birthday add DD-MM_`,
+                mentions,
+            },
             originalMsg
         );
         return;
