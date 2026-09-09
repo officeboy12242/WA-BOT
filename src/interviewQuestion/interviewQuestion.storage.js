@@ -30,6 +30,15 @@ class InterviewQuestionStore {
 
     // ── /tagme / /notag opt-ins ───────────────────────────────────────────
 
+    /** @returns {Promise<object|null>} full pref row, or null if never set */
+    async getTagPref(group_id, phone) {
+        if (!group_id || !phone || !this.tagCol) return null;
+        return this.tagCol.findOne(
+            { group_id, phone: String(phone) },
+            { projection: { tagged: 1, name: 1, phone: 1, updated_at: 1, jid: 1 } }
+        );
+    }
+
     /** @returns {Promise<boolean>} true when opted-in, false when not stored */
     async isTaggedIn(group_id, phone) {
         if (!group_id || !phone || !this.tagCol) return false;

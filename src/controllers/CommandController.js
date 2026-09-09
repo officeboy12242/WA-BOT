@@ -136,6 +136,7 @@ import {
     handleInterviewQBoard,
     handleTagMeOn,
     handleTagMeOff,
+    handleCheckTagStatus,
 } from '../interviewQuestion/interviewQuestion.commands.js';
 import {
     handleRoast,
@@ -609,6 +610,8 @@ export const COMMAND_HANDLERS = {
     iqboard: ({ sock, chatId, senderJid, ctx }) => handleInterviewQBoard(sock, chatId, senderJid, ctx),
     tagme: ({ sock, chatId, senderJid, args, ctx, pushName }) => handleTagMeOn(sock, chatId, senderJid, args, { ...ctx, pushName }),
     notag: ({ sock, chatId, senderJid, args, ctx, pushName }) => handleTagMeOff(sock, chatId, senderJid, args, { ...ctx, pushName }),
+    checktagstatus: ({ sock, chatId, senderJid, args, ctx, pushName }) =>
+        handleCheckTagStatus(sock, chatId, senderJid, args, { ...ctx, pushName }),
     roast: ({ sock, chatId, senderJid, originalMsg, pushName, ctx }) => handleRoast({ sock, chatId, senderJid, originalMsg, pushName, ctx }),
     birthday: ({ sock, chatId, senderJid, args, originalMsg, ctx }) => handleBirthday({ sock, chatId, senderJid, args, originalMsg, ctx }),
     groups: ({ sock, chatId, senderJid, ctx }) => handleGroups(sock, chatId, senderJid, ctx),

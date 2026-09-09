@@ -1,6 +1,6 @@
 /**
  * Commands: /interviewq test|post|answer · /interviewqon · /interviewqoff
- *           /tagme · /notag — opt in/out of being tagged in Interview Q posts
+ *           /tagme · /notag · /checktagstatus — Interview Q mention prefs
  */
 
 import { logger } from '../utils/logger.js';
@@ -132,7 +132,8 @@ export async function handleInterviewQ(sock, chatId, senderJid, args, ctx) {
                     '• `/interviewq answer` — reveal answer now in this chat\n' +
                     '• `/interviewq board` or `/iqboard` — weekly leaderboard\n' +
                     '• `/interviewqon` / `/interviewqoff` — group schedule toggle\n' +
-                    '• `/tagme` / `/notag` — opt in/out of tags here\n\n' +
+                    '• `/tagme` / `/notag` — opt in/out of tags here\n' +
+                    '• `/checktagstatus` — your tag ON/OFF + who is opted in\n\n' +
                     `_Auto: ${(config.INTERVIEW_Q_TIMES || []).join(' · ') || '11:00 · 15:00 · 19:00'} IST · answer +${Math.round((config.INTERVIEW_Q_ANSWER_DELAY_MS || 1_800_000) / 60_000)}m_\n` +
                     `_Sat ${config.INTERVIEW_Q_SUMMARY_TIME || '22:00'} — weekly leaderboard + recap_`,
             },
@@ -217,6 +218,118 @@ export async function handleTagMeOn(sock, chatId, senderJid, args, ctx) {
 
 export async function handleTagMeOff(sock, chatId, senderJid, args, ctx) {
     return handleTagMe(sock, chatId, senderJid, args, ctx, false);
+}
+
+/**
+ * /checktagstatus — your Interview Q tag pref + opted-in list + mention resolve check.
+ */
+export async function handleCheckTagStatus(sock, chatId, senderJid, args, ctx) {
+    try {
+        if (!isGroupMessage(chatId)) {
+            await sock.sendMessage(
+                chatId,
+                { text: 'Use `/checktagstatus` in a group.' },
+                { quoted: ctx?.originalMsg }
+            );
+            return;
+        }
+
+        const { interviewQuestionService, originalMsg } = ctx;
+        const store = interviewQuestionService?.store;
+        if (!store?.getTaggedMembers) {
+            await sock.sendMessage(chatId, { text: '⚠️ Tag prefs are not available right now.' }, { quoted: originalMsg });
+            return;
+        }
+
+        const phone = extractPhoneNumber(senderJid);
+        if (!phone) {
+            await sock.sendMessage(
+                chatId,
+                { text: '⚠️ Could not resolve your number (privacy JID). Try again from the group.' },
+                { quoted: originalMsg }
+            );
+            return;
+        }
+
+        const pref = typeof store.getTagPref === 'function'
+            ? await store.getTagPref(chatId, phone)
+            : null;
+        const youOn = pref?.tagged === true;
+        const youOff = pref && pref.tagged === false;
+        const youLabel = youOn ? '✅ *ON* (`/tagme`)' : youOff ? '🚫 *OFF* (`/notag`)' : '⚪ *not set* — run `/tagme` to opt in';
+
+        const members = await store.getTaggedMembers(chatId);
+        let resolved = [];
+        let youJids = [];
+        let resolveOk = false;
+        try {
+            if (interviewQuestionService?.resolveMentionJids) {
+                resolved = await interviewQuestionService.resolveMentionJids(
+                    chatId,
+                    members.map((r) => r.phone),
+                    sock,
+                );
+                youJids = await interviewQuestionService.resolveMentionJids(chatId, [phone], sock);
+                resolveOk = true;
+            }
+        } catch (err) {
+            logger.warn(`checktagstatus resolve failed: ${err.message}`);
+        }
+
+        const youResolved = youJids.length > 0;
+
+        let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        r += '🔔 *INTERVIEW Q TAG STATUS*\n';
+        r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+        r += `👤 *You:* ${youLabel}\n`;
+        if (resolveOk) {
+            r += youOn
+                ? (youResolved
+                    ? '🧪 *Mention check:* working — you will be @tagged on the next Q ping\n'
+                    : '⚠️ *Mention check:* pref is ON but your JID did not resolve in this group (privacy / not a participant?)\n')
+                : `🧪 *Mention check:* ${youResolved ? 'number resolves in group' : 'skipped (you are not opted in)'}\n`;
+        }
+        r += '\n';
+
+        if (!members.length) {
+            r += '📭 *Opted in here:* nobody yet\n';
+            r += '_Until someone runs `/tagme`, Q pings use a silent group ping._\n\n';
+        } else {
+            r += `✅ *Opted in (${members.length}):*\n`;
+            const max = 25;
+            for (let i = 0; i < Math.min(members.length, max); i++) {
+                const m = members[i];
+                const label = (m.name || '').trim() || m.phone || '?';
+                r += `  ${i + 1}. ${label}\n`;
+            }
+            if (members.length > max) r += `  … +${members.length - max} more\n`;
+            if (resolveOk) {
+                r += `\n🧪 *Group resolve:* ${resolved.length}/${members.length} mention JIDs found\n`;
+                if (resolved.length < members.length) {
+                    r += '_Some opted-in numbers could not be matched to participants — those will not get a visible @._\n';
+                }
+            }
+            r += '\n';
+        }
+
+        r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        r += '💡 `/tagme` opt in · `/notag` opt out';
+
+        await sock.sendMessage(
+            chatId,
+            youOn && youJids.length ? { text: r, mentions: youJids } : { text: r },
+            { quoted: originalMsg }
+        );
+    } catch (err) {
+        logger.error(`checktagstatus failed: ${err.message}`);
+        try {
+            await sock.sendMessage(
+                chatId,
+                { text: '⚠️ Could not read tag status right now. Try again in a minute.' },
+                { quoted: ctx?.originalMsg }
+            );
+        } catch { /* ignore */ }
+    }
 }
 
 export async function handleInterviewQOn(sock, chatId, senderJid, { groupManager, originalMsg }) {

@@ -134,9 +134,13 @@ const sock0 = makeCtx().sock;
 {
     const tagme = COMMAND_REGISTRY.find((d) => d.key === 'tagme');
     const notag = COMMAND_REGISTRY.find((d) => d.key === 'notag');
+    const tagstatus = COMMAND_REGISTRY.find((d) => d.key === 'checktagstatus');
     assert.ok(tagme && notag, '/tagme and /notag must exist in the registry');
+    assert.ok(tagstatus, '/checktagstatus must exist in the registry');
     assert.strictEqual(tagme.scope, 'group_only', '/tagme must be group-only');
     assert.strictEqual(tagme.role, 'anyone', '/tagme must be open to all members');
+    assert.strictEqual(tagstatus.scope, 'group_only');
+    assert.ok(tagstatus.names.includes('/tagstatus'), '/tagstatus alias');
 
     // DM → GROUPS ONLY gate, no handler run.
     const { sent: dmSent, sock: dmSock } = makeCtx();
@@ -152,6 +156,17 @@ const sock0 = makeCtx().sock;
     assert.ok(
         grpSent.length >= 1 && !grpSent.some((m) => /GROUPS ONLY|PERMISSION DENIED/i.test(m.text)),
         '/tagme in a group must pass the gate and dispatch'
+    );
+
+    const { sent: statusDm, sock: statusDmSock } = makeCtx();
+    await ctrl.handleCommand(statusDmSock, '919000000000@s.whatsapp.net', '/checktagstatus', '919000000000@s.whatsapp.net', null, 'Tester');
+    assert.ok(statusDm.some((m) => /GROUPS ONLY/i.test(m.text)), '/checktagstatus DM denied');
+
+    const { sent: statusGrp, sock: statusGrpSock } = makeCtx();
+    await ctrl.handleCommand(statusGrpSock, '123@g.us', '/tagstatus', '919000000000@s.whatsapp.net', null, 'Tester');
+    assert.ok(
+        statusGrp.length >= 1 && !statusGrp.some((m) => /GROUPS ONLY|PERMISSION DENIED/i.test(m.text)),
+        '/tagstatus alias must dispatch in a group'
     );
 
     // 5b. /roast: any scope, open to all — DM and group both dispatch.

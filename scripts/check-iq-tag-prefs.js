@@ -13,7 +13,7 @@
 import assert from 'node:assert/strict';
 import InterviewQuestionStore from '../src/interviewQuestion/interviewQuestion.storage.js';
 import InterviewQuestionService from '../src/interviewQuestion/interviewQuestion.service.js';
-import { handleTagMe } from '../src/interviewQuestion/interviewQuestion.commands.js';
+import { handleTagMe, handleCheckTagStatus } from '../src/interviewQuestion/interviewQuestion.commands.js';
 
 process.on('unhandledRejection', (e) => {
     console.error('✖ unhandled rejection:', e?.message || e);
@@ -95,6 +95,15 @@ assert.ok(!(await store.getTaggedMembers(GA)).some((r) => r.phone === P1), 'nota
 
 await store.setTagged(GA, P2, true, { jid: J2, name: 'Amit' });
 assert.equal(await store.isTaggedIn(GA, P2), true, 'tagme must store tagged=true');
+{
+    const prefOn = await store.getTagPref(GA, P2);
+    assert.equal(prefOn?.tagged, true);
+    assert.equal(prefOn?.name, 'Amit');
+    const prefOff = await store.getTagPref(GA, P1);
+    assert.equal(prefOff?.tagged, false);
+    assert.equal(await store.getTagPref(GA, '919999000099'), null, 'never-set returns null');
+}
+console.log('✅ storage: getTagPref returns ON / OFF / null');
 
 // per-group isolation: opted-in in GB says nothing about GA
 await store.setTagged(GB, P1, true, { jid: J1, name: 'Riya' });
@@ -222,6 +231,42 @@ const q = { type: 'DSA', difficulty: 'Hard', topic: 'Arrays' };
         'storage failure must produce a user-facing error reply'
     );
     console.log('✅ handler: a failed pref save replies with a warning instead of silence');
+}
+
+// ── 5) /checktagstatus: your pref + opted-in list + mention resolve ──────────
+{
+    const sock = makeSock();
+    // Amit is ON in GA; Riya is OFF in GA
+    await handleCheckTagStatus(sock, GA, `${P2}@s.whatsapp.net`, [], {
+        interviewQuestionService: service,
+        pushName: 'Amit',
+        originalMsg: null,
+    });
+    assert.equal(sock.sent.length, 1);
+    assert.match(sock.sent[0].text, /TAG STATUS/i);
+    assert.match(sock.sent[0].text, /\*ON\*/);
+    assert.match(sock.sent[0].text, /Mention check:.*working/i);
+    assert.match(sock.sent[0].text, /Opted in \(1\)/);
+    assert.match(sock.sent[0].text, /Amit/);
+    assert.match(sock.sent[0].text, /1\/1 mention JIDs/);
+    assert.deepEqual(sock.sent[0].mentions, [J2]);
+
+    await handleCheckTagStatus(sock, GA, `${P1}@s.whatsapp.net`, [], {
+        interviewQuestionService: service,
+        pushName: 'Riya',
+        originalMsg: null,
+    });
+    assert.match(sock.sent[1].text, /\*OFF\*/);
+    assert.match(sock.sent[1].text, /number resolves in group/i);
+    assert.equal(sock.sent[1].mentions.length, 0);
+
+    await handleCheckTagStatus(sock, '919999000001@s.whatsapp.net', `${P2}@s.whatsapp.net`, [], {
+        interviewQuestionService: service,
+        pushName: 'Amit',
+        originalMsg: null,
+    });
+    assert.ok(sock.sent[2].text.includes('`/checktagstatus` in a group'), 'DM usage is redirected');
+    console.log('✅ handler: /checktagstatus reports ON/OFF, list, and resolve health');
 }
 
 console.log('\nAll tag-pref checks passed.');

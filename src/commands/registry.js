@@ -315,6 +315,14 @@ export const COMMAND_REGISTRY = [
         category: 'daily',
     },
     {
+        names: ['/checktagstatus', '/tagstatus', '/tagcheck'],
+        key: 'checktagstatus',
+        scope: 'group_only',
+        role: 'anyone',
+        help: 'Check your Interview Q tag ON/OFF status and who is opted in',
+        category: 'daily',
+    },
+    {
         names: ['/roast'],
         key: 'roast',
         scope: 'any',
@@ -892,7 +900,7 @@ export const HELP_CATEGORY = {
     // Scheduled feeds
     news: 'daily', github: 'daily', awesome: 'daily', interviewq: 'daily',
     interviewqon: 'daily', interviewqoff: 'daily', iqboard: 'daily',
-    tagme: 'daily', notag: 'daily', roast: 'resume', birthday: 'fun',
+    tagme: 'daily', notag: 'daily', checktagstatus: 'daily', roast: 'resume', birthday: 'fun',
 
     // Fun
     horo: 'fun', advice: 'fun', facts: 'fun',
