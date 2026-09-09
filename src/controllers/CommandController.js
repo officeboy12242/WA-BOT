@@ -121,6 +121,13 @@ import {
     handleClearWarns,
 } from './handlers/warnHandlers.js';
 
+import {
+    handleKick,
+    handleBan,
+    handleUnban,
+    handleBanList,
+} from './handlers/banHandlers.js';
+
 import { handleDelLast } from './handlers/deleteHandlers.js';
 import {
     handleCv,
@@ -622,6 +629,10 @@ export const COMMAND_HANDLERS = {
     mywarns: ({ sock, chatId, senderJid, ctx }) => handleMyWarns(sock, chatId, senderJid, ctx),
     warns: ({ sock, chatId, senderJid, args, originalMsg, ctx }) => handleWarns(sock, chatId, senderJid, args, originalMsg, ctx),
     clearwarns: ({ sock, chatId, senderJid, args, originalMsg, ctx }) => handleClearWarns(sock, chatId, senderJid, args, originalMsg, ctx),
+    kick: ({ sock, chatId, senderJid, args, originalMsg, ctx }) => handleKick(sock, chatId, senderJid, args, originalMsg, ctx),
+    ban: ({ sock, chatId, senderJid, args, originalMsg, ctx }) => handleBan(sock, chatId, senderJid, args, originalMsg, ctx),
+    unban: ({ sock, chatId, senderJid, args, originalMsg, ctx }) => handleUnban(sock, chatId, senderJid, args, originalMsg, ctx),
+    banlist: ({ sock, chatId, senderJid, args, originalMsg, ctx }) => handleBanList(sock, chatId, senderJid, args, originalMsg, ctx),
     dellast: ({ sock, chatId, args, originalMsg, ctx }) => handleDelLast(sock, chatId, args, originalMsg, ctx),
     delall: ({ sock, chatId, args, originalMsg, ctx }) => handleDelLast(sock, chatId, args, originalMsg, ctx),
     movieon: ({ sock, chatId, senderJid, ctx }) => handleMovieOn(sock, chatId, senderJid, ctx),
@@ -985,6 +996,7 @@ class CommandController {
         this.resumeStore = null;
         this.resumeTailorService = null;
         this.interviewQuestionService = null;
+        this.banDatabase = null;
         this.roastService = null;
         this.birthdayService = null;
         this.pendingClearConfirmations = new Map();
@@ -1037,6 +1049,10 @@ class CommandController {
 
     setInterviewQuestionService(interviewQuestionService) {
         this.interviewQuestionService = interviewQuestionService;
+    }
+
+    setBanDatabase(banDatabase) {
+        this.banDatabase = banDatabase;
     }
 
     setRoastService(roastService) {
@@ -1098,6 +1114,7 @@ class CommandController {
             githubTrendingController: this.githubTrendingController,
             awesomeListsController: this.awesomeListsController,
             warnDatabase: this.warnDatabase,
+            banDatabase: this.banDatabase,
             movieController: this.movieController,
             userManager: this.userManager,
             stickerController: this.stickerController,

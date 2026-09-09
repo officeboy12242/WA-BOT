@@ -5,7 +5,7 @@
 import { jidNormalizedUser } from 'baileys';
 import { logger, describeError } from '../../utils/logger.js';
 import { sendTextWithLinkPreview } from '../../utils/linkPreview.js';
-import { extractPhoneNumber } from '../../utils/permissions.js';
+import { extractPhoneNumber, normalizePhoneNumber } from '../../utils/permissions.js';
 import { scheduleAutoDelete, AUTO_DELETE_2_MIN } from '../../utils/autoDelete.js';
 import {
     DEFAULT_HEADER_TEMPLATE,
@@ -1004,7 +1004,7 @@ export async function handleRevokeLink(sock, chatId, senderJid, { groupManager, 
     }
 }
 
-export async function handleGroupParticipantsUpdate(sock, update, { groupManager }) {
+export async function handleGroupParticipantsUpdate(sock, update, { groupManager, banDatabase }) {
     try {
         const groupId = update?.id || update?.jid || update?.groupId;
         const action = String(update?.action || '').toLowerCase();
@@ -1023,6 +1023,7 @@ export async function handleGroupParticipantsUpdate(sock, update, { groupManager
         }
 
         if (JOIN_ACTIONS.has(action)) {
+            await enforceBansOnJoin(sock, { groupManager, banDatabase }, groupId, participants);
             scheduleWelcomeAfterJoin(sock, groupManager, groupId);
         }
     } catch (error) {
@@ -1031,9 +1032,51 @@ export async function handleGroupParticipantsUpdate(sock, update, { groupManager
 }
 
 /**
+ * Durable ban enforcement — remove banned members the moment they (re)join.
+ * Fail-soft: a ban-check failure must never break welcomes or the snapshot.
+ */
+export async function enforceBansOnJoin(sock, { groupManager, banDatabase }, groupId, participants = []) {
+    if (!banDatabase || !participants?.length) return;
+    try {
+        const keys = [];
+        for (const p of participants) {
+            const phone = normalizePhoneNumber(extractPhoneNumber(p?.phoneNumber || p?.pn || p?.id || ''));
+            if (phone) keys.push(phone);
+            if (p?.id) keys.push(String(p.id));
+        }
+        if (!keys.length) return;
+
+        const banned = await banDatabase.filterBanned(groupId, keys);
+        if (!banned.size) return;
+
+        const toRemove = participants.filter((p) => {
+            const phone = normalizePhoneNumber(extractPhoneNumber(p?.phoneNumber || p?.pn || p?.id || ''));
+            return (phone && banned.has(phone)) || (p?.id && banned.has(String(p.id)));
+        });
+        const removeJids = toRemove.map((p) => p.id).filter(Boolean);
+        if (!removeJids.length) return;
+
+        try {
+            await sock.groupParticipantsUpdate(groupId, removeJids, 'remove');
+            logger.warn(`🛡️ Ban enforcement: removed ${removeJids.length} banned member(s) from ${groupId}`);
+            await sock.sendMessage(groupId, {
+                text:
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🛡️ *BAN ENFORCED* 🛡️\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                    `${removeJids.length} banned member(s) tried to rejoin and were removed.\n\n` +
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+            });
+        } catch (err) {
+            logger.error(`Ban enforcement kick failed in ${groupId}: ${err.message}`);
+        }
+    } catch (err) {
+        logger.error(`Ban enforcement check failed in ${groupId}: ${err.message}`);
+    }
+}
+
+/**
  * Fallback when join arrives as a system stub message instead of participants.update.
  */
-export async function handleJoinStubMessage(sock, msg, { groupManager }) {
+export async function handleJoinStubMessage(sock, msg, { groupManager, banDatabase }) {
     try {
         const groupId = msg?.key?.remoteJid;
         if (!groupId?.endsWith('@g.us')) {
@@ -1054,6 +1097,14 @@ export async function handleJoinStubMessage(sock, msg, { groupManager }) {
         }
 
         logger.info(`👋 Join stub type ${stubType} in ${groupId}`);
+
+        // Stub joins carry the participant JIDs in messageStubParameters —
+        // enforce bans here too so the stub path can't be used to slip past /ban.
+        const stubJids = (msg.messageStubParameters || []).filter((p) => String(p).includes('@'));
+        if (stubJids.length) {
+            await enforceBansOnJoin(sock, { groupManager, banDatabase }, groupId, stubJids.map((j) => ({ id: j })));
+        }
+
         scheduleWelcomeAfterJoin(sock, groupManager, groupId);
     } catch (error) {
         logger.error(`Join stub welcome error: ${error.message}`);

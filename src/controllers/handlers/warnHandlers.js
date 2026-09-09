@@ -125,7 +125,7 @@ async function findParticipantRecord(sock, chatId, jid, phone, groupManager) {
     return null;
 }
 
-async function isTargetGroupAdmin(sock, chatId, jid, phone, groupManager) {
+export async function isTargetGroupAdmin(sock, chatId, jid, phone, groupManager) {
     const participant = await findParticipantRecord(sock, chatId, jid, phone, groupManager);
     if (participant) {
         return participant.admin === 'admin' || participant.admin === 'superadmin';
@@ -136,7 +136,7 @@ async function isTargetGroupAdmin(sock, chatId, jid, phone, groupManager) {
     return false;
 }
 
-async function kickFromGroup(sock, chatId, jid, phone, groupManager) {
+export async function kickFromGroup(sock, chatId, jid, phone, groupManager) {
     const participant = await findParticipantRecord(sock, chatId, jid, phone, groupManager);
     const kickJid = participant?.id || jid;
     if (!kickJid || !sock?.groupParticipantsUpdate) {

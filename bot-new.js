@@ -36,6 +36,7 @@ import { startInterviewQuestionScheduler } from './src/interviewQuestion/intervi
 import RoastService from './src/services/RoastService.js';
 import BirthdayService from './src/services/BirthdayService.js';
 import WarnDatabase from './src/models/WarnDatabase.js';
+import BanDatabase from './src/models/BanDatabase.js';
 import UserManager from './src/models/UserManager.js';
 import StickerController from './src/controllers/StickerController.js';
 import BotSettings from './src/models/BotSettings.js';
@@ -156,6 +157,7 @@ class WhatsAppCourseBot {
             this.awesomeListsDatabase = new AwesomeListsDatabase(mongoDb);
             this.interviewQuestionStore = new InterviewQuestionStore(mongoDb);
             this.warnDatabase = new WarnDatabase(mongoDb);
+            this.banDatabase = new BanDatabase(mongoDb);
             this.groupManager = new GroupManager(mongoDb);
             this.userManager = new UserManager(mongoDb);
             this.authDatabase = new AuthDatabase(mongoDb);
@@ -166,6 +168,7 @@ class WhatsAppCourseBot {
                 this.awesomeListsDatabase.init(),
                 this.interviewQuestionStore.init(),
                 this.warnDatabase.init(),
+                this.banDatabase.init(),
                 this.groupManager.init(),
                 this.authDatabase.init(),
             ]);
@@ -297,6 +300,7 @@ class WhatsAppCourseBot {
                 this.awesomeListsController
             );
             this.commandController.setInterviewQuestionService(this.interviewQuestionService);
+            this.commandController.setBanDatabase(this.banDatabase);
 
             // /roast — AI resume roast (multi-LLM router, per-phone daily limit)
             this.roastService = new RoastService({ mongoDb, cfg: config });

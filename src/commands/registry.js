@@ -415,6 +415,34 @@ export const COMMAND_REGISTRY = [
         help: 'Clear all warnings for a member (reply/@tag/phone)',
     },
     {
+        names: ['/kick', '/remove'],
+        key: 'kick',
+        scope: 'group_only',
+        role: 'group_admins',
+        help: 'Remove a member (reply/@tag/phone) — they can rejoin later',
+    },
+    {
+        names: ['/ban'],
+        key: 'ban',
+        scope: 'group_only',
+        role: 'group_admins',
+        help: 'Kick + blacklist a member (reply/@tag/phone) — auto-removed if they rejoin',
+    },
+    {
+        names: ['/unban'],
+        key: 'unban',
+        scope: 'group_only',
+        role: 'group_admins',
+        help: 'Remove a member from this group\'s ban list (reply/@tag/phone)',
+    },
+    {
+        names: ['/banlist'],
+        key: 'banlist',
+        scope: 'group_only',
+        role: 'group_admins',
+        help: 'Show this group\'s banned members',
+    },
+    {
         names: ['/dellast', '/del'],
         key: 'dellast',
         scope: 'group_only',
@@ -919,6 +947,7 @@ export const HELP_CATEGORY = {
     // Moderation
     warn: 'moderation', warns: 'moderation', mywarns: 'moderation',
     clearwarns: 'moderation', dellast: 'moderation', delall: 'moderation',
+    kick: 'moderation', ban: 'moderation', unban: 'moderation', banlist: 'moderation',
 
     // Bot administration
     groups: 'admin', pause: 'admin', resumecourses: 'admin', clear: 'admin',
