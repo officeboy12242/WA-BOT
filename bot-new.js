@@ -35,6 +35,9 @@ import InterviewQuestionService from './src/interviewQuestion/interviewQuestion.
 import { startInterviewQuestionScheduler } from './src/interviewQuestion/interviewQuestion.scheduler.js';
 import RoastService from './src/services/RoastService.js';
 import BirthdayService from './src/services/BirthdayService.js';
+import AiUpdatesController from './src/controllers/AiUpdatesController.js';
+import AiUpdatesDatabase from './src/models/AiUpdatesDatabase.js';
+import { startAiUpdatesScheduler } from './src/utils/aiUpdatesScheduler.js';
 import WarnDatabase from './src/models/WarnDatabase.js';
 import BanDatabase from './src/models/BanDatabase.js';
 import UserManager from './src/models/UserManager.js';
@@ -106,6 +109,7 @@ class WhatsAppCourseBot {
         this.checkInterval = null;
         this.newsScheduler = null;
         this.githubScheduler = null;
+        this.aiUpdatesScheduler = null;
         this.awesomeScheduler = null;
         this.interviewQScheduler = null;
         this.groupSummaryScheduler = null;
@@ -154,6 +158,7 @@ class WhatsAppCourseBot {
             this.database = new DatabaseModel(mongoDb);
             this.newsDatabase = new NewsDatabase(mongoDb);
             this.githubTrendingDatabase = new GitHubTrendingDatabase(mongoDb);
+            this.aiUpdatesDatabase = new AiUpdatesDatabase(mongoDb);
             this.awesomeListsDatabase = new AwesomeListsDatabase(mongoDb);
             this.interviewQuestionStore = new InterviewQuestionStore(mongoDb);
             this.warnDatabase = new WarnDatabase(mongoDb);
@@ -165,6 +170,7 @@ class WhatsAppCourseBot {
                 this.database.init(),
                 this.newsDatabase.init(),
                 this.githubTrendingDatabase.init(),
+                this.aiUpdatesDatabase.init(),
                 this.awesomeListsDatabase.init(),
                 this.interviewQuestionStore.init(),
                 this.warnDatabase.init(),
@@ -230,6 +236,11 @@ class WhatsAppCourseBot {
                 config,
                 this.groupManager,
                 this.githubTrendingDatabase
+            );
+            this.aiUpdatesController = new AiUpdatesController(
+                config,
+                this.groupManager,
+                this.aiUpdatesDatabase
             );
             this.awesomeListsController = new AwesomeListsController(
                 config,
@@ -312,6 +323,9 @@ class WhatsAppCourseBot {
             await this.birthdayService.init();
             this.commandController.setBirthdayService(this.birthdayService);
             this.birthdayService.start();
+
+            // /aiupdateson — daily AI tools/India-AI/model-release posts, opt-in per group
+            this.commandController.setAiUpdatesController(this.aiUpdatesController);
 
             this.courseController = new CourseController(
                 this.database,
@@ -459,6 +473,13 @@ class WhatsAppCourseBot {
                 getSock: () => this.whatsappService.getSock(),
                 botState,
                 githubController: this.githubTrendingController,
+                config,
+            });
+
+            this.aiUpdatesScheduler = startAiUpdatesScheduler({
+                getSock: () => this.whatsappService.getSock(),
+                botState,
+                aiUpdatesController: this.aiUpdatesController,
                 config,
             });
 
@@ -666,6 +687,9 @@ class WhatsAppCourseBot {
         }
         if (this.githubScheduler) {
             this.githubScheduler.stop();
+        }
+        if (this.aiUpdatesScheduler) {
+            this.aiUpdatesScheduler.stop();
         }
         if (this.awesomeScheduler) {
             this.awesomeScheduler.stop();

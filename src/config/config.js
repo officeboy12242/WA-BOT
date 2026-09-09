@@ -554,6 +554,18 @@ export const config = {
         .filter(Boolean),
     AWESOME_LISTS_TIMEZONE: process.env.AWESOME_LISTS_TIMEZONE || 'Asia/Kolkata',
     AWESOME_LISTS_COUNT: parseInt(process.env.AWESOME_LISTS_COUNT, 10) || 5,
+    /**
+     * AI updates — opt-in per group via /aiupdateson. One item per slot,
+     * rotating tools/apps, India-specific AI news, and model releases.
+     * Times offset from GitHub (:00/:30) and Awesome (:15/:45) so a group with
+     * all three enabled doesn't get three posts at once.
+     */
+    AI_UPDATES_ENABLED: process.env.AI_UPDATES_ENABLED !== 'false',
+    AI_UPDATES_TIMES: (process.env.AI_UPDATES_TIMES || '09:20,11:50,14:20,16:50,19:20')
+        .split(',')
+        .map((t) => t.trim())
+        .filter(Boolean),
+    AI_UPDATES_TIMEZONE: process.env.AI_UPDATES_TIMEZONE || 'Asia/Kolkata',
     /** Interview Q of the Day — MCQ polls 3×/day IST; answer after 30m; Sat leaderboard */
     INTERVIEW_Q_ENABLED: process.env.INTERVIEW_Q_ENABLED !== 'false',
     INTERVIEW_Q_TIMES: (process.env.INTERVIEW_Q_TIMES || '11:00,15:00,19:00')

@@ -39,6 +39,8 @@ import {
     handleCoursesOff,
     handleGithubOn,
     handleGithubOff,
+    handleAiUpdatesOn,
+    handleAiUpdatesOff,
     handleAutoChat,
     handleAwesomeOn,
     handleAwesomeOff,
@@ -607,6 +609,8 @@ export const COMMAND_HANDLERS = {
     coursesoff: ({ sock, chatId, senderJid, ctx }) => handleCoursesOff(sock, chatId, senderJid, ctx),
     githubon: ({ sock, chatId, senderJid, ctx }) => handleGithubOn(sock, chatId, senderJid, ctx),
     githuboff: ({ sock, chatId, senderJid, ctx }) => handleGithubOff(sock, chatId, senderJid, ctx),
+    aiupdateson: ({ sock, chatId, senderJid, ctx }) => handleAiUpdatesOn(sock, chatId, senderJid, ctx),
+    aiupdatesoff: ({ sock, chatId, senderJid, ctx }) => handleAiUpdatesOff(sock, chatId, senderJid, ctx),
     autochat: ({ sock, chatId, senderJid, args, ctx }) => handleAutoChat(sock, chatId, senderJid, args, ctx),
 
     awesomeon: ({ sock, chatId, senderJid, ctx }) => handleAwesomeOn(sock, chatId, senderJid, ctx),
@@ -999,6 +1003,7 @@ class CommandController {
         this.banDatabase = null;
         this.roastService = null;
         this.birthdayService = null;
+        this.aiUpdatesController = null;
         this.pendingClearConfirmations = new Map();
         this.pendingGithubPosts = createGithubPostSessionStore();
         this.pendingAwesomePosts = createAwesomePostSessionStore();
@@ -1061,6 +1066,10 @@ class CommandController {
 
     setBirthdayService(birthdayService) {
         this.birthdayService = birthdayService;
+    }
+
+    setAiUpdatesController(aiUpdatesController) {
+        this.aiUpdatesController = aiUpdatesController;
     }
 
     setTradeAlertController(tradeAlertController) {
@@ -1139,6 +1148,7 @@ class CommandController {
             interviewQuestionService: this.interviewQuestionService,
             roastService: this.roastService,
             birthdayService: this.birthdayService,
+            aiUpdatesController: this.aiUpdatesController,
             botStartTime: this.botStartTime,
             courseAPI: this.courseAPI,
             isOwnerFromJid: this._isOwnerFromJid,

@@ -284,6 +284,20 @@ export const COMMAND_REGISTRY = [
         help: 'Disable Interview Q polls in this group',
     },
     {
+        names: ['/aiupdateson'],
+        key: 'aiupdateson',
+        scope: 'group_only',
+        role: 'staff',
+        help: 'Enable daily AI updates (tools, India AI news, model releases) in this group',
+    },
+    {
+        names: ['/aiupdatesoff'],
+        key: 'aiupdatesoff',
+        scope: 'group_only',
+        role: 'staff',
+        help: 'Disable AI updates in this group',
+    },
+    {
         names: ['/interviewq'],
         key: 'interviewq',
         scope: 'any',
@@ -940,7 +954,8 @@ export const HELP_CATEGORY = {
     link: 'group', revokelink: 'group',
     activate: 'group', deactivate: 'group', newson: 'group', newsoff: 'group',
     courson: 'group', coursesoff: 'group', githubon: 'group', githuboff: 'group',
-    awesomeon: 'group', awesomeoff: 'group', instaon: 'group', instaoff: 'group',
+    awesomeon: 'group', awesomeoff: 'group', aiupdateson: 'group', aiupdatesoff: 'group',
+    instaon: 'group', instaoff: 'group',
     stickeron: 'group', stickeroff: 'group', movieon: 'group', movieoff: 'group',
     summaryon: 'group', summaryoff: 'group', autochat: 'group', trending: 'group', setwc: 'group',
 

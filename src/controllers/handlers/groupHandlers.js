@@ -763,7 +763,7 @@ export async function handleGroups(sock, chatId, senderJid, { groupManager }) {
 
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
         r += '💡 `/activate` `/deactivate` · `/newson` `/newsoff`\n';
-        r += '💡 `/githubon` `/githuboff` · `/autochat` · `/awesomeon` `/awesomeoff` · `/interviewqon` `/interviewqoff` · `/instaon` `/instaoff` · `/stickeron` `/stickeroff` · `/movieon` `/movieoff` · `/trending on/off` · `/setwc`';
+        r += '💡 `/githubon` `/githuboff` · `/autochat` · `/awesomeon` `/awesomeoff` · `/interviewqon` `/interviewqoff` · `/aiupdateson` `/aiupdatesoff` · `/instaon` `/instaoff` · `/stickeron` `/stickeroff` · `/movieon` `/movieoff` · `/trending on/off` · `/setwc`';
 
         await sock.sendMessage(chatId, { text: r });
         logger.info(`📋 Group list sent to ${senderPhone}`);
@@ -1393,6 +1393,93 @@ export async function handleGithubOff(sock, chatId, senderJid, { groupManager, o
         logger.info(`🐙 GitHub trending disabled: ${chatId} by ${senderPhone}`);
     } catch (error) {
         logger.error(`Error disabling GitHub trending: ${error.message}`);
+    }
+}
+
+export async function handleAiUpdatesOn(sock, chatId, senderJid, { groupManager, originalMsg }) {
+    try {
+        const senderPhone = extractPhoneNumber(senderJid);
+        const isActive = await groupManager.isGroupActive(chatId);
+        if (!isActive) {
+            await sock.sendMessage(chatId, {
+                text:
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\nℹ️ *GROUP NOT ACTIVATED* ℹ️\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                    'AI updates requires an activated group.\n\nUse `/activate` first, then `/aiupdateson`.',
+            }, { quoted: originalMsg });
+            return;
+        }
+
+        let groupName = 'Unknown Group';
+        try {
+            const meta = await getGroupMeta(sock, chatId, groupManager);
+            groupName = meta.subject;
+        } catch (err) {
+            logger.error(`Error fetching group metadata: ${err.message}`);
+        }
+
+        await groupManager.setAiUpdatesEnabled(chatId, groupName, true, senderPhone);
+
+        let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        r += '✅ *AI UPDATES ON* ✅\n';
+        r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+        r += `📢 *Group:* ${groupName}\n\n`;
+        r += '🤖 5 posts a day — new AI tools, India-specific AI news, and model releases.\n';
+        r += 'One headline per post, straight to the point.\n\n';
+        r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        r += '💡 Use `/aiupdatesoff` to stop';
+
+        await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
+        logger.info(`🤖 AI updates enabled: ${groupName} (${chatId}) by ${senderPhone}`);
+    } catch (error) {
+        logger.error(`Error enabling AI updates: ${error.message}`);
+    }
+}
+
+export async function handleAiUpdatesOff(sock, chatId, senderJid, { groupManager, originalMsg }) {
+    try {
+        const senderPhone = extractPhoneNumber(senderJid);
+        const isActive = await groupManager.isGroupActive(chatId);
+        if (!isActive) {
+            await sock.sendMessage(chatId, {
+                text:
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\nℹ️ *GROUP NOT ACTIVATED* ℹ️\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                    'This group is not activated.\n\nUse `/activate` to enable updates.',
+            }, { quoted: originalMsg });
+            return;
+        }
+
+        const aiUpdatesEnabled = await groupManager.isAiUpdatesEnabled(chatId);
+        if (!aiUpdatesEnabled) {
+            await sock.sendMessage(chatId, {
+                text:
+                    '━━━━━━━━━━━━━━━━━━━━━━━━━━━\nℹ️ *AI UPDATES ALREADY OFF* ℹ️\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
+                    'AI updates is not enabled in this group.\n\nUse `/aiupdateson` to enable it.',
+            }, { quoted: originalMsg });
+            return;
+        }
+
+        let groupName = 'Unknown Group';
+        try {
+            const meta = await getGroupMeta(sock, chatId, groupManager);
+            groupName = meta.subject;
+        } catch (err) {
+            logger.error(`Error fetching group metadata: ${err.message}`);
+        }
+
+        await groupManager.setAiUpdatesEnabled(chatId, groupName, false, senderPhone);
+
+        let r = '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        r += '🛑 *AI UPDATES OFF* 🛑\n';
+        r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+        r += `📢 *Group:* ${groupName}\n\n`;
+        r += '🤖 Daily AI update posts are disabled here.\n\n';
+        r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+        r += '💡 Use `/aiupdateson` to enable again';
+
+        await sock.sendMessage(chatId, { text: r }, { quoted: originalMsg });
+        logger.info(`🤖 AI updates disabled: ${chatId} by ${senderPhone}`);
+    } catch (error) {
+        logger.error(`Error disabling AI updates: ${error.message}`);
     }
 }
 

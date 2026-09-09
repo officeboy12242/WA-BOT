@@ -1084,6 +1084,45 @@ class GroupManager {
             .toArray();
     }
 
+    /** AI updates — opt-in via /aiupdateson (default off, like Interview Q). */
+    async setAiUpdatesEnabled(groupId, groupName, enabled, setBy) {
+        await this.groups.updateOne(
+            { group_id: groupId },
+            {
+                $set: {
+                    group_name: groupName,
+                    ai_updates: enabled,
+                    ai_updates_by: setBy,
+                    ai_updates_at: new Date(),
+                },
+                $setOnInsert: { group_id: groupId, is_active: false },
+            },
+            { upsert: true }
+        );
+        logger.info(
+            `🤖 AI updates ${enabled ? 'enabled' : 'disabled'} for ${groupName || groupId} by ${setBy}`
+        );
+    }
+
+    async isAiUpdatesEnabled(groupId) {
+        const row = await this.groups.findOne(
+            { group_id: groupId },
+            { projection: { ai_updates: 1, is_active: 1 } }
+        );
+        if (!row?.is_active) return false;
+        return row.ai_updates === true;
+    }
+
+    async getAiUpdatesGroups() {
+        return this.groups
+            .find(
+                { is_active: true, ai_updates: true },
+                { projection: { _id: 0 } }
+            )
+            .sort({ activated_at: -1 })
+            .toArray();
+    }
+
     async getAllGroups() {
         return this.groups
             .find({}, { projection: { _id: 0 } })
