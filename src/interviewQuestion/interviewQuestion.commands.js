@@ -201,6 +201,13 @@ export async function handleTagMe(sock, chatId, senderJid, args, ctx, wantsTag =
         );
     } catch (err) {
         logger.error(`tagme/notag failed: ${err.message}`);
+        try {
+            await sock.sendMessage(
+                chatId,
+                { text: '⚠️ Could not save your tag preference right now. Please try again in a minute.' },
+                { quoted: ctx?.originalMsg }
+            );
+        } catch { /* channel gone — nothing more we can do */ }
     }
 }
 

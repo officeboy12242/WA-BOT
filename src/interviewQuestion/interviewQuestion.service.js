@@ -615,13 +615,23 @@ class InterviewQuestionService {
      * in weekly summary and /iqboard messages.
      */
     async buildLeaderboardTagPack(groupId, rows = [], { limit = 10, sock = null } = {}) {
-        const picked = (rows || [])
-            .filter((r) => r?.phone && (r.attempted ?? 0) > 0)
-            .slice(0, limit);
-        if (!picked.length || !groupId?.endsWith('@g.us')) {
+        const eligible = (rows || [])
+            .filter((r) => r?.phone && (r.attempted ?? 0) > 0);
+        if (!eligible.length || !groupId?.endsWith('@g.us')) {
             return { text: '', mentions: [] };
         }
         try {
+            // /notag wins: only members who explicitly opted in via /tagme in
+            // THIS group may be @-mentioned on the leaderboard or weekly recap.
+            const taggedPhones = new Set(
+                (await this.store.getTaggedMembers(groupId))
+                    .filter((r) => r.tagged === true)
+                    .map((r) => String(r.phone))
+            );
+            const picked = eligible
+                .filter((r) => taggedPhones.has(String(r.phone)))
+                .slice(0, limit);
+            if (!picked.length) return { text: '', mentions: [] };
             const jids = await this.resolveMentionJids(groupId, picked.map((r) => r.phone), sock);
             if (!jids.length) return { text: '', mentions: [] };
             const tags = jids.map((j) => `@${String(j).split('@')[0]}`).join(' ');
