@@ -33,8 +33,9 @@ class InterviewQuestionStore {
     /** @returns {Promise<object|null>} full pref row, or null if never set */
     async getTagPref(group_id, phone) {
         if (!group_id || !phone || !this.tagCol) return null;
+        const phoneKey = String(phone).replace(/\D/g, '') || String(phone);
         return this.tagCol.findOne(
-            { group_id, phone: String(phone) },
+            { group_id, phone: phoneKey },
             { projection: { tagged: 1, name: 1, phone: 1, updated_at: 1, jid: 1 } }
         );
     }
@@ -42,8 +43,9 @@ class InterviewQuestionStore {
     /** @returns {Promise<boolean>} true when opted-in, false when not stored */
     async isTaggedIn(group_id, phone) {
         if (!group_id || !phone || !this.tagCol) return false;
+        const phoneKey = String(phone).replace(/\D/g, '') || String(phone);
         const row = await this.tagCol.findOne(
-            { group_id, phone: String(phone) },
+            { group_id, phone: phoneKey },
             { projection: { tagged: 1 } }
         );
         return row?.tagged === true;
@@ -52,8 +54,9 @@ class InterviewQuestionStore {
     async setTagged(group_id, phone, tagged, meta = {}) {
         if (!group_id || !phone || !this.tagCol) return;
         const now = new Date();
+        const phoneKey = String(phone).replace(/\D/g, '') || String(phone);
         await this.tagCol.updateOne(
-            { group_id, phone: String(phone) },
+            { group_id, phone: phoneKey },
             {
                 $set: {
                     tagged: tagged === true,
@@ -61,7 +64,7 @@ class InterviewQuestionStore {
                     jid: String(meta.jid || '').slice(0, 80),
                     updated_at: now,
                 },
-                $setOnInsert: { group_id, phone: String(phone), created_at: now },
+                $setOnInsert: { group_id, phone: phoneKey, created_at: now },
             },
             { upsert: true }
         );
@@ -74,6 +77,12 @@ class InterviewQuestionStore {
             .find({ group_id, tagged: true })
             .sort({ updated_at: -1 })
             .toArray();
+    }
+
+    /** Explicit /notag opt-outs — must never appear in Interview Q mentions. */
+    async getOptedOutMembers(group_id) {
+        if (!group_id || !this.tagCol) return [];
+        return this.tagCol.find({ group_id, tagged: false }).toArray();
     }
 
     /**

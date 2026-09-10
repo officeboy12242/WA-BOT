@@ -4,7 +4,7 @@
  */
 
 import { logger } from '../utils/logger.js';
-import { extractPhoneNumber, isGroupMessage } from '../utils/permissions.js';
+import { extractPhoneNumber, isGroupMessage, normalizePhoneNumber } from '../utils/permissions.js';
 import { formatSlotKey } from '../utils/newsScheduler.js';
 import { config } from '../config/config.js';
 
@@ -170,7 +170,8 @@ export async function handleTagMe(sock, chatId, senderJid, args, ctx, wantsTag =
             return;
         }
 
-        const phone = extractPhoneNumber(senderJid);
+        const phoneRaw = extractPhoneNumber(senderJid);
+        let phone = normalizePhoneNumber(phoneRaw) || phoneRaw;
         if (!phone) {
             await sock.sendMessage(
                 chatId,
@@ -180,14 +181,18 @@ export async function handleTagMe(sock, chatId, senderJid, args, ctx, wantsTag =
             return;
         }
 
-        await store.setTagged(chatId, phone, wantsTag, { jid: senderJid, name: ctx?.pushName || '' });
-
-        // Mention works best with the group's own participant JID for this member.
+        // Prefer the group's participant phone/JID so LID senders still match later.
         let mentionJid = senderJid;
         try {
             const p = await ctx.groupManager?.findParticipant?.(sock, chatId, senderJid, phone);
             if (p?.id) mentionJid = p.id;
-        } catch { /* senderJid is fine */ }
+            const pPhone = normalizePhoneNumber(
+                p?.phoneNumber || String(p?.id || '').split('@')[0]
+            );
+            if (/^\d{10,15}$/.test(pPhone)) phone = pPhone;
+        } catch { /* senderJid / phoneRaw is fine */ }
+
+        await store.setTagged(chatId, phone, wantsTag, { jid: mentionJid, name: ctx?.pushName || '' });
 
         const name = (ctx?.pushName || '').trim() || 'You';
         const text = wantsTag

@@ -551,9 +551,11 @@ class InterviewQuestionService {
     }
 
     /**
-     * Pre-poll notification. Tags /tagme opt-ins (visible @mention, one line
-     * per member); hidden @all only when nobody has opted in.
-     */    async sendInterviewPing(sock, jid, q, answerDelayMs) {
+     * Pre-poll notification. Tags /tagme opt-ins (visible @mention);
+     * when nobody opted in, silent hidden @all — but /notag always wins
+     * (opt-outs are excluded from the fallback).
+     */
+    async sendInterviewPing(sock, jid, q, answerDelayMs) {
         const baseText =
             `🧠 *Interview Q* · ${q.type} (${q.difficulty})\n` +
             `Topic: *${q.topic}*\n\n` +
@@ -579,10 +581,35 @@ class InterviewQuestionService {
             return;
         }
 
-        // Nobody opted in — keep the silent hidden @all behaviour.
-        const pack = await buildHiddenMentionAll(sock, jid);
+        // Nobody opted in — silent hidden @all, minus anyone who ran /notag.
+        const excludeJids = await this.resolveOptOutExcludeJids(jid, sock);
+        const pack = await buildHiddenMentionAll(sock, jid, { excludeJids });
         const ping = withHiddenMentions(baseText, pack);
         await sock.sendMessage(jid, { text: ping.text, mentions: ping.mentions, linkPreview: false });
+    }
+
+    /**
+     * JIDs for members who ran /notag in this group (by stored jid + phone resolve).
+     */
+    async resolveOptOutExcludeJids(groupId, sock = null) {
+        if (!groupId?.endsWith('@g.us') || !this.store?.getOptedOutMembers) return [];
+        try {
+            const rows = await this.store.getOptedOutMembers(groupId);
+            if (!rows?.length) return [];
+            const exclude = new Set();
+            for (const row of rows) {
+                const j = String(row.jid || '').trim();
+                if (j) exclude.add(j);
+            }
+            const phones = rows.map((r) => r.phone).filter(Boolean);
+            for (const jid of await this.resolveMentionJids(groupId, phones, sock)) {
+                if (jid) exclude.add(jid);
+            }
+            return [...exclude];
+        } catch (err) {
+            logger.debug(`Interview Q opt-out resolve failed: ${err.message}`);
+            return [];
+        }
     }
 
     /**

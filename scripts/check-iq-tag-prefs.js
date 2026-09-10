@@ -156,14 +156,25 @@ const q = { type: 'DSA', difficulty: 'Hard', topic: 'Arrays' };
     console.log('✅ ping: only /tagme opt-ins are tagged, /notag respected');
 }
 
-// hidden @all fallback when nobody opted in
+// hidden @all fallback when nobody opted in — /notag still excludes
 {
     const sock = makeSock();
     await service.sendInterviewPing(sock, GB, q, 30 * 60_000);
     const msg = sock.sent[0];
-    assert.ok(msg.mentions.length >= 3, 'no opt-ins → hidden @all fallback to every participant');
+    assert.ok(!msg.mentions.includes(J1), '/notag member must be excluded from hidden @all');
+    assert.ok(msg.mentions.includes(J2) && msg.mentions.includes(J3), 'others still get the silent ping');
     assert.ok(!/@\d{6,}/.test(msg.text), 'fallback stays silent (no visible @tokens)');
-    console.log('✅ ping: hidden @all fallback when nobody opted in');
+    console.log('✅ ping: hidden @all fallback excludes /notag');
+}
+
+// pure group with zero prefs → full silent @all
+{
+    const GC = '120363033333333333@g.us';
+    const sock = makeSock();
+    await service.sendInterviewPing(sock, GC, q, 30 * 60_000);
+    const msg = sock.sent[0];
+    assert.ok(msg.mentions.length >= 3, 'no prefs at all → hidden @all to every participant');
+    console.log('✅ ping: hidden @all when nobody has a pref');
 }
 
 // ── 3) leaderboard tag pack: /notag wins ────────────────────────────────────
