@@ -13,6 +13,7 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { logger } from '../utils/logger.js';
+import { parseLooseJson, tidySentence } from '../utils/summaryText.js';
 
 const FEEDS = {
     tools: [
@@ -61,9 +62,8 @@ function stripHtml(html) {
         .trim();
 }
 
-function truncate(text, max = 220) {
-    if (!text || text.length <= max) return text;
-    return `${text.slice(0, max - 1)}…`;
+function completeSummary(text, max = 500) {
+    return tidySentence(text, max);
 }
 
 /**
@@ -98,7 +98,9 @@ async function fetchFeed(feed, category) {
                 $el.find('content\\:encoded').first().text() ||
                 $el.find('summary').first().text() ||
                 '';
-            const summary = truncate(stripHtml(rawSummary));
+            // Keep enough article context for the LLM. The old raw 220-char
+            // slice routinely ended mid-sentence and made cards look broken.
+            const summary = completeSummary(stripHtml(rawSummary), 4000);
             const pubDateRaw =
                 $el.find('pubDate').first().text() || $el.find('published').first().text() || '';
             const publishedAt = pubDateRaw ? new Date(pubDateRaw) : new Date();
@@ -134,9 +136,16 @@ export function dedupeAiUpdates(items) {
 }
 
 class AiUpdatesService {
-    /** @param {{ llm?: import('./AssistLlmRouter.js').default | null }} [opts] */
+    /**
+     * @param {{
+     *   llm?: import('./AssistLlmRouter.js').default | null,
+     *   orca?: import('./OrcaRouterTradeService.js').default | null
+     * }} [opts]
+     */
     constructor(opts = {}) {
         this.llm = opts.llm || null;
+        this.orca = opts.orca || null;
+        this.cardCache = new Map();
     }
 
     /**
@@ -182,35 +191,103 @@ class AiUpdatesService {
         return dedupeAiUpdates([...pick(tools), ...pick(india), ...pick(model)]);
     }
 
+    _normalizeCardData(value, item) {
+        const whatHappened = tidySentence(
+            value?.what_happened || value?.whatHappened || value?.summary || item.summary,
+            420
+        );
+        const industryImpact = tidySentence(
+            value?.industry_impact || value?.industryImpact ||
+                'The update shows where AI products, investment, and technical priorities are moving.',
+            280
+        );
+        const rawAngles = value?.student_career_angle || value?.studentCareerAngle;
+        const studentCareerAngle = (Array.isArray(rawAngles) ? rawAngles : [rawAngles])
+            .map((line) => tidySentence(line, 140))
+            .filter(Boolean)
+            .slice(0, 4);
+        if (!studentCareerAngle.length) {
+            studentCareerAngle.push('Use the update to identify skills and project ideas worth exploring.');
+        }
+        const projectIdea = tidySentence(
+            value?.project_idea || value?.projectIdea ||
+                'Build a small proof of concept inspired by the update and document its trade-offs.',
+            500
+        );
+        return { whatHappened, industryImpact, studentCareerAngle, projectIdea };
+    }
+
+    async _generateCardData(item) {
+        const systemPrompt =
+            'Turn one AI news item into a concise WhatsApp update for a mixed audience of students, ' +
+            'developers, working professionals, and corporate members. ' +
+            'Use only facts present in the supplied headline and RSS description; never invent details. ' +
+            'The project idea may be your practical suggestion, but must be feasible for a student or small team. ' +
+            'Keep every sentence complete, concrete, and hype-free. Return JSON only with: ' +
+            '{"what_happened":"2 complete sentences, 35-65 words",' +
+            '"industry_impact":"1-2 complete sentences",' +
+            '"student_career_angle":["2-4 short skill, career, or learning takeaways"],' +
+            '"project_idea":"one specific buildable project idea"}.';
+        const userPrompt =
+            `Headline: ${item.title}\nSource: ${item.source}\nCategory: ${item.category}\n` +
+            `RSS description: ${item.summary}`;
+
+        if (this.orca?.isConfigured?.()) {
+            try {
+                const text = await this.orca.completeTrade(systemPrompt, userPrompt, {
+                    maxTokens: 500,
+                    temperature: 0.25,
+                    timeoutMs: 45_000,
+                });
+                const parsed = parseLooseJson(text);
+                if (parsed?.value?.what_happened || parsed?.value?.summary) {
+                    logger.info(`AI updates summary via OrcaRouter ${this.orca.tradeModel}`);
+                    return this._normalizeCardData(parsed.value, item);
+                }
+                throw new Error('invalid summary JSON');
+            } catch (err) {
+                logger.warn(`AI updates: OrcaRouter summary failed: ${err.message}`);
+            }
+        }
+
+        if (this.llm?.isConfigured?.()) {
+            try {
+                const { text, provider, model } = await this.llm.completeChat({
+                    systemPrompt,
+                    history: [],
+                    userBlock: userPrompt,
+                    maxTokens: 700,
+                    temperature: 0.25,
+                    maxChars: 2600,
+                });
+                const parsed = parseLooseJson(text);
+                if (parsed?.value?.what_happened || parsed?.value?.summary) {
+                    logger.info(`AI updates summary via ${provider}/${model}`);
+                    return this._normalizeCardData(parsed.value, item);
+                }
+                throw new Error('invalid summary JSON');
+            } catch (err) {
+                logger.warn(`AI updates: fallback summary LLM failed: ${err.message}`);
+            }
+        }
+
+        return this._normalizeCardData({}, item);
+    }
+
     /**
-     * One short line on why this matters for a student tech group. Falls back
-     * to the feed's own summary (truncated) if the LLM is unavailable/fails —
-     * never blocks posting on it.
-     * @param {{ title: string, summary: string, category: string }} item
+     * Complete card prose, cached by source URL so fan-out to many groups costs
+     * one LLM call rather than one call per group.
      */
-    async generateWhyItMatters(item) {
-        const fallback = truncate(item.summary, 120) || 'Worth a look if this is your area.';
-        if (!this.llm?.isConfigured?.()) {
-            return fallback;
+    async generateCardData(item) {
+        const key = item.url || item.title;
+        if (!this.cardCache.has(key)) {
+            this.cardCache.set(key, this._generateCardData(item));
         }
         try {
-            const { text } = await this.llm.completeChat({
-                systemPrompt:
-                    'You write ONE short line (max 22 words) explaining why an AI news headline ' +
-                    'matters to a group of Indian college students/early-career developers. ' +
-                    'Be concrete and specific — no hype words like "game-changing" or "revolutionary". ' +
-                    'Reply with ONLY that one line, no quotes, no prefix.',
-                history: [],
-                userBlock: `Headline: ${item.title}\nSummary: ${item.summary}`,
-                maxTokens: 80,
-                temperature: 0.5,
-                maxChars: 200,
-            });
-            const line = truncate(String(text || '').trim().replace(/^["']|["']$/g, ''), 200);
-            return line || fallback;
+            return await this.cardCache.get(key);
         } catch (err) {
-            logger.warn(`AI updates: why-it-matters LLM failed, using feed summary: ${err.message}`);
-            return fallback;
+            this.cardCache.delete(key);
+            throw err;
         }
     }
 }

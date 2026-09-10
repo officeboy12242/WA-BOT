@@ -12,6 +12,7 @@
 import assert from 'node:assert/strict';
 import AiUpdatesDatabase from '../src/models/AiUpdatesDatabase.js';
 import AiUpdatesController from '../src/controllers/AiUpdatesController.js';
+import AiUpdatesService from '../src/services/AiUpdatesService.js';
 import { formatAiUpdateMessage } from '../src/utils/aiUpdatesFormatter.js';
 import { parsePostTimesFromConfig } from '../src/utils/aiUpdatesScheduler.js';
 import GroupManager from '../src/models/GroupManager.js';
@@ -124,24 +125,107 @@ function makeDb(indexes = {}) {
     }
 }
 
-// ── 2) formatter: headline + why-it-matters + link, no tags/decoration ──────
+// ── 2) formatter: complete summary + why-it-matters + labelled source link ──
 {
     const text = formatAiUpdateMessage(
-        { title: 'OpenAI ships GPT-5.2', url: 'https://openai.com/index/gpt-5-2' },
-        'Longer context, cheaper per token.'
+        {
+            title: 'OpenAI ships GPT-5.2',
+            url: 'https://openai.com/index/gpt-5-2',
+            source: 'OpenAI',
+        },
+        {
+            whatHappened: 'OpenAI released a new model with a longer context window. The release also changes its token pricing.',
+            industryImpact: 'Teams may reassess model costs for large-context applications.',
+            studentCareerAngle: ['Compare its cost and quality in a portfolio benchmark.'],
+            projectIdea: 'Build a model comparison dashboard using the same test prompts.',
+        }
     );
     assert.ok(text.includes('OpenAI ships GPT-5.2'), 'must include the headline');
-    assert.ok(text.includes('Longer context, cheaper per token.'), 'must include why-it-matters line');
+    assert.ok(text.includes('🧠 *What happened?*'), 'must explain the event');
+    assert.ok(text.includes('🏢 *Industry impact*'), 'must include corporate relevance');
+    assert.ok(text.includes('🎓 *Student & career angle*'), 'must include student relevance');
+    assert.ok(text.includes('💡 *Project idea*'), 'must include a buildable idea');
+    assert.ok(text.includes('📰 *Source:* OpenAI'), 'must identify the source');
+    assert.ok(text.includes('🔗 *Full preview:*'), 'must label the full source link');
     assert.ok(text.includes('https://openai.com/index/gpt-5-2'), 'must include the source link');
     assert.ok(!/\[Tool\]|\[India\]|\[Model\]/.test(text), 'must not include category bracket tags');
     assert.ok(!/buzz|vibe|react 👍/i.test(text), 'must not include the rejected decoration');
 
-    // no why-it-matters line → still valid, just skips that line
+    // Missing optional prose still leaves a valid source card.
     const bare = formatAiUpdateMessage({ title: 'X', url: 'https://x.example/1' }, '');
     assert.ok(bare.includes('X') && bare.includes('https://x.example/1'));
 }
 
-// ── 3) AiUpdatesDatabase: dedup per group, partial fan-out stays fresh ──────
+// ── 3) card data: OrcaRouter first and cached per source URL ─────────────────
+{
+    let calls = 0;
+    const orca = {
+        tradeModel: 'deepseek/deepseek-v4-flash-free',
+        isConfigured: () => true,
+        completeTrade: async () => {
+            calls++;
+            return JSON.stringify({
+                what_happened: 'A vendor released a compact AI model for local devices. It targets applications that need lower latency and offline use.',
+                industry_impact: 'Teams can consider more private, lower-latency deployments.',
+                student_career_angle: ['Learn local model deployment.', 'Benchmark memory and latency.'],
+                project_idea: 'Build an offline document assistant and measure its latency.',
+            });
+        },
+    };
+    const service = new AiUpdatesService({ orca });
+    const item = {
+        title: 'Compact model released',
+        summary: 'A compact model was released for local devices.',
+        url: 'https://example.com/story',
+        source: 'Example',
+        category: 'model',
+    };
+    const first = await service.generateCardData(item);
+    const second = await service.generateCardData(item);
+    assert.equal(calls, 1, 'fan-out must reuse one OrcaRouter summary');
+    assert.match(first.whatHappened, /\.$/);
+    assert.equal(second.whatHappened, first.whatHappened);
+    assert.equal(first.studentCareerAngle.length, 2);
+}
+
+// Orca failure routes into the existing Gemini/Groq/NVIDIA/OpenRouter router.
+{
+    let fallbackCalls = 0;
+    const service = new AiUpdatesService({
+        orca: {
+            tradeModel: 'deepseek/deepseek-v4-flash-free',
+            isConfigured: () => true,
+            completeTrade: async () => { throw new Error('Orca unavailable'); },
+        },
+        llm: {
+            isConfigured: () => true,
+            completeChat: async () => {
+                fallbackCalls++;
+                return {
+                    text: JSON.stringify({
+                        what_happened: 'A fallback provider summarized the update. The card remains complete.',
+                        industry_impact: 'Companies still receive useful context.',
+                        student_career_angle: ['Students still receive practical takeaways.'],
+                        project_idea: 'Build a provider failover status dashboard.',
+                    }),
+                    provider: 'groq',
+                    model: 'test-model',
+                };
+            },
+        },
+    });
+    const card = await service.generateCardData({
+        title: 'Fallback test',
+        summary: 'Fallback providers keep summaries available.',
+        url: 'https://example.com/fallback',
+        source: 'Example',
+        category: 'tools',
+    });
+    assert.equal(fallbackCalls, 1, 'Orca failure must route to the existing LLM chain');
+    assert.match(card.projectIdea, /dashboard\.$/);
+}
+
+// ── 4) AiUpdatesDatabase: dedup per group, partial fan-out stays fresh ──────
 {
     const db = new AiUpdatesDatabase(makeDb({
         posted_ai_updates: [['hash', 'group_id']],
@@ -169,7 +253,7 @@ function makeDb(indexes = {}) {
     assert.equal(await db.isSlotDone('2026-09-10T09:20'), true);
 }
 
-// ── 4) AiUpdatesController: checkAndPostItem end-to-end with a fake service ─
+// ── 5) AiUpdatesController: checkAndPostItem end-to-end with a fake service ─
 {
     const mongoDb = makeDb({
         posted_ai_updates: [['hash', 'group_id']],
@@ -201,7 +285,12 @@ function makeDb(indexes = {}) {
     // Stub the network-touching bits — this check must never hit real feeds.
     controller.service.fetchForSlot = async () => [fakeItem];
     controller.service.fetchMixedPool = async () => [fakeItem];
-    controller.service.generateWhyItMatters = async () => 'One to try before the next hackathon.';
+    controller.service.generateCardData = async () => ({
+        whatHappened: 'DeepMind released a small multimodal model. It can run on one consumer GPU.',
+        industryImpact: 'Smaller teams can test multimodal applications locally.',
+        studentCareerAngle: ['Learn multimodal inference.'],
+        projectIdea: 'Build a local image-question answering demo.',
+    });
 
     const sent = [];
     const fakeSock = {
@@ -216,7 +305,7 @@ function makeDb(indexes = {}) {
     assert.equal(result.posted, 1);
     assert.equal(sent.length, 1);
     assert.ok(sent[0].text.includes(fakeItem.title));
-    assert.ok(sent[0].text.includes('One to try before the next hackathon.'));
+    assert.ok(sent[0].text.includes('Learn multimodal inference.'));
     assert.ok(sent[0].text.includes(fakeItem.url));
 
     // Re-running the same slot for the same item must not re-post (per-group dedup).
@@ -238,7 +327,7 @@ function makeDb(indexes = {}) {
     assert.equal(noGroupsResult.reason, 'no_groups');
 }
 
-// ── 5) GroupManager opt-in triad: default OFF, like Interview Q (not GitHub) ─
+// ── 6) GroupManager opt-in triad: default OFF, like Interview Q (not GitHub) ─
 {
     const groupManager = new GroupManager(makeDb());
     await groupManager.init();

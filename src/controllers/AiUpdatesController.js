@@ -8,6 +8,7 @@ import { formatAiUpdateMessage } from '../utils/aiUpdatesFormatter.js';
 import { sendTextWithLinkPreview } from '../utils/linkPreview.js';
 import AiUpdatesService from '../services/AiUpdatesService.js';
 import AssistLlmRouter from '../services/AssistLlmRouter.js';
+import OrcaRouterTradeService from '../services/OrcaRouterTradeService.js';
 
 const GROUP_DELAY_MS = 500;
 
@@ -20,7 +21,10 @@ class AiUpdatesController {
         this.config = config;
         this.groupManager = groupManager;
         this.aiUpdatesDatabase = aiUpdatesDatabase;
-        this.service = new AiUpdatesService({ llm: new AssistLlmRouter(config) });
+        this.service = new AiUpdatesService({
+            orca: new OrcaRouterTradeService(config),
+            llm: new AssistLlmRouter(config),
+        });
     }
 
     async isSlotDone(slotKey) {
@@ -39,8 +43,8 @@ class AiUpdatesController {
             return false;
         }
 
-        const whyItMatters = await this.service.generateWhyItMatters(item);
-        const text = formatAiUpdateMessage(item, whyItMatters);
+        const card = await this.service.generateCardData(item);
+        const text = formatAiUpdateMessage(item, card);
         await sendTextWithLinkPreview(sock, chatId, text, item.url);
 
         if (markPosted && this.aiUpdatesDatabase) {
