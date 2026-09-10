@@ -11,7 +11,11 @@
  * Run: node scripts/check-command-dispatch.js
  */
 import assert from 'node:assert';
-import { COMMAND_REGISTRY } from '../src/commands/registry.js';
+import {
+    COMMAND_REGISTRY,
+    HELP_CATEGORY,
+    formatHelpText,
+} from '../src/commands/registry.js';
 import CommandController, { COMMAND_HANDLERS } from '../src/controllers/CommandController.js';
 
 const registryKeys = COMMAND_REGISTRY.map((d) => d.key);
@@ -30,6 +34,30 @@ assert.strictEqual(
     phantom.length,
     0,
     `handlers for unknown keys: ${phantom.join(', ')}`
+);
+
+// Every registered command has an intentional help section. The menu must show
+// every command the caller can run, even when an optional feature is currently
+// disabled in that group.
+const uncategorized = registryKeys.filter((key) => !HELP_CATEGORY[key]);
+assert.deepEqual(uncategorized, [], `commands missing a help section: ${uncategorized.join(', ')}`);
+
+const ownerGroupHelp = formatHelpText({
+    isStaff: true,
+    isPrivileged: true,
+    canManageAdmins: true,
+    canSetWelcome: true,
+    isOwner: true,
+    features: { movie: false },
+});
+const ownerGroupExpected = COMMAND_REGISTRY.filter((def) => def.scope !== 'dm_only');
+const absentFromOwnerHelp = ownerGroupExpected.filter(
+    (def) => !ownerGroupHelp.includes(`\`${def.names[0]}\``)
+);
+assert.deepEqual(
+    absentFromOwnerHelp,
+    [],
+    `authorized commands absent from owner group help: ${absentFromOwnerHelp.map((d) => d.key).join(', ')}`
 );
 
 /* ── live dispatch smoke test ─────────────────────────────────────────────── */
@@ -111,7 +139,6 @@ const sock0 = makeCtx().sock;
     );
 
     // /help lists by the same role field — don't advertise what they can't run.
-    const { formatHelpText } = await import('../src/commands/registry.js');
     assert.ok(
         !/tgstickers/.test(formatHelpText({ isPrivileged: false })),
         '/help must hide /tgstickers from non-admins'

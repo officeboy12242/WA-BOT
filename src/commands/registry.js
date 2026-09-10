@@ -937,7 +937,7 @@ export const HELP_CATEGORY = {
 
     // Markets
     tradenow: 'trade', swing: 'trade', expiry: 'trade', tradelert: 'trade', index: 'trade', scalp: 'trade', sweep: 'trade',
-    svmkr: 'trade', chainai: 'trade', ipo: 'trade',
+    svmkr: 'trade', chainai: 'trade', ipo: 'trade', backtest: 'trade',
 
     // Scheduled feeds
     news: 'daily', github: 'daily', awesome: 'daily', interviewq: 'daily',
@@ -974,7 +974,7 @@ export const HELP_CATEGORY = {
     addpremium: 'owner', removepremium: 'owner', premium: 'owner',
     addmod: 'owner', removemod: 'owner', addchannel: 'owner',
     removechannel: 'owner', channels: 'owner', grouppost: 'owner',
-    driveurl: 'owner',
+    driveurl: 'owner', scalpon: 'owner', scalpoff: 'owner', cmdlog: 'owner',
 };
 
 /** Section order and presentation. */
@@ -1025,8 +1025,6 @@ export function formatHelpText({
     isDirectMessage = false,
     features = {},
 } = {}) {
-    const movieEnabled = features.movie || movieOnly || isDirectMessage;
-
     /** Can this caller actually run the command? Mirrors access.js. */
     const canUse = (def) => {
         switch (def.role) {
@@ -1056,9 +1054,11 @@ export function formatHelpText({
         return true;
     };
 
-    const visible = COMMAND_REGISTRY.filter(
-        (d) => canUse(d) && inScope(d) && (movieEnabled || d.category !== 'movie')
-    );
+    // Help is a command catalog, not a feature-status screen. A legacy
+    // `category: movie` flag gates runtime access in some groups, but must not
+    // hide commands (including owner tools) from users who are allowed to run
+    // them. Role and chat scope remain enforced here.
+    const visible = COMMAND_REGISTRY.filter((d) => canUse(d) && inScope(d));
 
     let out = '╔════════════════════════════════╗\n';
     out += '║   🤖 BOT COMMAND GUIDE 🤖   ║\n';
