@@ -173,6 +173,8 @@ function makeDb(indexes = {}) {
         },
     };
     const service = new AiUpdatesService({ orca });
+    // This check must never hit real feeds — stub the project-resource pool.
+    service._fetchProjectResourcePool = async () => [];
     const item = {
         title: 'Compact model released',
         summary: 'A compact model was released for local devices.',
@@ -214,6 +216,7 @@ function makeDb(indexes = {}) {
             },
         },
     });
+    service._fetchProjectResourcePool = async () => [];
     const card = await service.generateCardData({
         title: 'Fallback test',
         summary: 'Fallback providers keep summaries available.',
@@ -223,6 +226,89 @@ function makeDb(indexes = {}) {
     });
     assert.equal(fallbackCalls, 1, 'Orca failure must route to the existing LLM chain');
     assert.match(card.projectIdea, /dashboard\.$/);
+}
+
+// ── 3b) project-idea grounding: references picked, ranked, and wired into the prompt ──
+{
+    const fakePool = [
+        {
+            title: 'Ship an offline RAG chatbot with a local vector store',
+            summary: 'A dev write-up on building a fully offline retrieval assistant.',
+            url: 'https://dev.to/example/offline-rag',
+            source: 'DEV Community (AI)',
+            publishedAt: new Date('2026-09-08'),
+        },
+        {
+            title: 'A new drag-and-drop website builder launches',
+            summary: 'Unrelated launch with no AI/offline overlap at all.',
+            url: 'https://www.producthunt.com/posts/site-builder',
+            source: 'Product Hunt (AI)',
+            publishedAt: new Date('2026-09-10'),
+        },
+    ];
+
+    // 3b-i) Topical overlap outranks a fresher-but-unrelated item.
+    {
+        const service = new AiUpdatesService({});
+        service._fetchProjectResourcePool = async () => fakePool;
+        const picked = await service._pickProjectResources(
+            { title: 'New offline AI model for local devices', summary: 'Runs fully offline on-device.' },
+            2
+        );
+        assert.equal(picked[0].url, 'https://dev.to/example/offline-rag', 'overlapping reference must rank first');
+    }
+
+    // 3b-ii) No overlap at all → falls back to just-freshest, never empty when pool exists.
+    {
+        const service = new AiUpdatesService({});
+        service._fetchProjectResourcePool = async () => fakePool;
+        const picked = await service._pickProjectResources(
+            { title: 'Totally unrelated headline', summary: 'Shares no keywords with the pool.' },
+            1
+        );
+        assert.equal(picked.length, 1);
+        assert.equal(picked[0].url, 'https://www.producthunt.com/posts/site-builder', 'falls back to freshest');
+    }
+
+    // 3b-iii) Empty pool never crashes — just no references.
+    {
+        const service = new AiUpdatesService({});
+        service._fetchProjectResourcePool = async () => [];
+        const picked = await service._pickProjectResources({ title: 'X', summary: 'Y' }, 3);
+        assert.deepEqual(picked, []);
+    }
+
+    // 3b-iv) References actually reach the LLM prompt, and NOT the whatHappened/
+    // industry_impact fields — grounding the idea without contaminating the facts.
+    {
+        let capturedUser = '';
+        const service = new AiUpdatesService({
+            orca: {
+                tradeModel: 'test',
+                isConfigured: () => true,
+                completeTrade: async (_system, user) => {
+                    capturedUser = user;
+                    return JSON.stringify({
+                        what_happened: 'A model shipped with offline support. It targets edge devices.',
+                        industry_impact: 'Vendors may compete on offline capability.',
+                        student_career_angle: ['Try on-device inference.'],
+                        project_idea: 'Build an offline RAG assistant inspired by the DEV Community write-up.',
+                    });
+                },
+            },
+        });
+        service._fetchProjectResourcePool = async () => fakePool;
+        const card = await service.generateCardData({
+            title: 'New offline AI model for local devices',
+            summary: 'Runs fully offline on-device.',
+            url: 'https://example.com/offline-model',
+            source: 'Example',
+            category: 'model',
+        });
+        assert.match(capturedUser, /Real, currently-live references/, 'prompt must include the references block');
+        assert.match(capturedUser, /Ship an offline RAG chatbot/, 'prompt must include the overlapping reference');
+        assert.match(card.projectIdea, /DEV Community/, 'grounded idea reached the final card');
+    }
 }
 
 // ── 4) AiUpdatesDatabase: dedup per group, partial fan-out stays fresh ──────
