@@ -218,7 +218,46 @@ function mentionMsg(targetJid) {
     console.log('✅ no target → usage box');
 }
 
-// ── 7) /banlist renders entries ─────────────────────────────────────────────
+// ── 7) LID-only bot roster: isBotGroupAdminAsync saves a false BOT NOT ADMIN ─
+{
+    // Real-world case: bot's roster entry exposes only a LID (no pn/phoneNumber)
+    // while sock.user.id stays a phone JID. The local participant scan can't
+    // match the bot; GroupManager.isBotGroupAdmin resolves via creds.me.lid.
+    const BOT_LID = '999000000000000@lid';
+    const sock = makeSock();
+    sock.user = { id: '999000000000@s.whatsapp.net' };
+    const lidOnlyRoster = Object.values(P).filter((p) => p !== P.bot);
+    lidOnlyRoster.push({ id: BOT_LID, admin: 'superadmin' });
+    const groupManagerLidOnly = {
+        getGroupMetadataCached: async () => ({ participants: lidOnlyRoster }),
+        isSenderGroupAdmin: () => true,
+        isBotGroupAdminAsync: async (s, gid) => {
+            assert.equal(gid, GA, 'isBotGroupAdminAsync receives the group id');
+            return true; // creds.me.lid match in production
+        },
+    };
+
+    await handleBan(sock, GA, SENDER, ['lidbot'], quotedMsg(P.user2.pn), {
+        banDatabase, groupManager: groupManagerLidOnly, userManager, originalMsg: null,
+    });
+    assert.ok(
+        kicked.includes('100000000000003@lid'),
+        'ban must kick even when bot roster entry is LID-only',
+    );
+    assert.match(sock.sent[0].text, /MEMBER BANNED/, 'must not report BOT NOT ADMIN');
+    console.log('✅ LID-only bot roster → isBotGroupAdminAsync prevents false BOT NOT ADMIN');
+}
+
+// ── 8) WA per-participant status codes surface real failures ───────────────
+{
+    const sock = makeSock();
+    sock.groupParticipantsUpdate = async () => [{ jid: '100000000000002@lid', status: '403' }];
+    await handleKick(sock, GA, SENDER, [], quotedMsg(P.user1.pn), ctxFor(sock));
+    assert.match(sock.sent[0].text, /BOT NOT ADMIN/, 'status 403 must map to bot_not_admin');
+    console.log('✅ kick status 403 → bot_not_admin reported to the group');
+}
+
+// ── 9) /banlist renders entries ─────────────────────────────────────────────
 {
     await banDatabase.addBan({
         groupId: GA, memberKey: '919999000002', reason: 'test', bannedByPhone: '919999000001',

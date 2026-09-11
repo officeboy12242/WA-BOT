@@ -143,16 +143,30 @@ export async function kickFromGroup(sock, chatId, jid, phone, groupManager) {
         return { ok: false, reason: 'no_jid' };
     }
 
+    // Bot-admin preflight. The local participant scan can miss the bot in
+    // LID-addressed groups (roster entry may expose only the LID, no phone),
+    // producing a false "bot is not admin" — GroupManager.isBotGroupAdmin
+    // also matches via creds.me.lid, so treat it as the authoritative retry.
     const botJid = jidNormalizedUser(sock.user?.id?.split(':')[0] || '');
     const botParticipant = await findParticipantRecord(sock, chatId, botJid, '', groupManager);
     const botIsAdmin =
-        botParticipant?.admin === 'admin' || botParticipant?.admin === 'superadmin';
+        botParticipant?.admin === 'admin' || botParticipant?.admin === 'superadmin' ||
+        (await groupManager?.isBotGroupAdminAsync?.(sock, chatId)) === true;
     if (!botIsAdmin) {
         return { ok: false, reason: 'bot_not_admin' };
     }
 
     try {
-        await sock.groupParticipantsUpdate(chatId, [kickJid], 'remove');
+        const results = await sock.groupParticipantsUpdate(chatId, [kickJid], 'remove');
+        // Baileys returns per-participant status codes — surface real failures
+        // (401 not-authorized / 403 forbidden) instead of reporting success.
+        const status = Array.isArray(results)
+            ? String(results.find((r) => r?.jid === kickJid || !r?.jid)?.status || '200')
+            : '200';
+        if (status === '401' || status === '403') {
+            logger.warn(`Kick rejected for ${kickJid} in ${chatId} (status=${status})`);
+            return { ok: false, reason: status === '403' ? 'bot_not_admin' : 'kick_failed', error: `status ${status}` };
+        }
         return { ok: true };
     } catch (err) {
         logger.error(`Failed to kick ${kickJid} from ${chatId}: ${err.message}`);
