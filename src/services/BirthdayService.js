@@ -6,6 +6,12 @@
  * birthdays in enabled groups and posts an LLM-written wish tagging the person,
  * falling back to a template wish if every provider is rate-limited. Once per
  * birthday per group per year — stored in Mongo, so redeploys never double-post.
+ *
+ * Owners can force-check/retry on demand with `/birthday check` — reports
+ * whether each celebrant in that group has been wished yet and at what time
+ * (sent just now, or the timestamp of the earlier send), and sends the wish
+ * for anyone still pending. Same Mongo dedupe as the scheduler, so it is
+ * always safe to run and can never double-wish someone.
  */
 
 import { logger } from '../utils/logger.js';
@@ -61,10 +67,11 @@ export function msUntilIST(hour, minute, fromMs = Date.now()) {
 }
 
 const SYSTEM_PROMPT = [
-    'You write short, warm, funny WhatsApp birthday wishes for members of a students\' tech group.',
-    'Rules: max 40 words, no emojis walls (max 3 emojis), no hashtag spam, no quotes or poems.',
-    'Make it feel personal to a coding student — light tech/coding wordplay is welcome.',
-    'Reply with ONLY the wish text, nothing else.',
+    'You write a short, warm, funny WhatsApp birthday wish for ONE member of a students\' tech group.',
+    'Speak directly to them ("you"), never in the third person and never as a group announcement.',
+    'If you are given their name, use it naturally once — do not repeat it or overuse it.',
+    'Rules: max 35 words, no emoji walls (max 3 emojis), no hashtag spam, no quotes or poems.',
+    'Light tech/coding wordplay is welcome. Reply with ONLY the wish text, nothing else.',
 ].join('\n');
 
 /** Target {hour, minute} from config, with safe defaults. */
@@ -96,14 +103,15 @@ export function inWishWindow(target, now = istHourMinute()) {
 }
 
 const FALLBACK_WISH = (name) =>
-    `🎂 Happy Birthday, *${name}*! 🎉\n` +
+    (name ? `🎂 Happy Birthday, *${name}*! 🎉\n` : `🎂 Happy Birthday to you! 🎉\n`) +
     `May your code compile on the first try today and your bugs be easy finds.\n` +
     `_— your friends here_`;
 
 export default class BirthdayService {
-    constructor({ mongoDb, groupManager, cfg = config } = {}) {
+    constructor({ mongoDb, groupManager, userManager = null, cfg = config } = {}) {
         this.cfg = cfg;
         this.groupManager = groupManager;
+        this.userManager = userManager;
         this.mongoDb = mongoDb || null;
         this.col = null;
         this.wishesCol = null;
@@ -255,7 +263,6 @@ export default class BirthdayService {
         }
         const today = todayDdMmIST();
         const [dd, mm] = today.split('-').map(Number);
-        const year = Number(new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric' }).format(new Date()));
 
         const rows = await this.col.find({ dd, mm }).toArray();
         if (!rows.length) {
@@ -265,85 +272,174 @@ export default class BirthdayService {
 
         // Group IDs from birthday docs; keep the bot's enabled-group check loose
         // (a saved birthday implies the group wants wishes).
-        let posted = 0;
-        let skipped = 0;
         const byGroup = new Map();
         for (const r of rows) byGroup.set(r.group_id, (byGroup.get(r.group_id) || []).concat(r));
 
+        let posted = 0;
+        let skipped = 0;
         for (const [groupId, members] of byGroup) {
-            const wishText = await this._generateWish(members);
-
-            // Bare stored digits don't record whether they came from @s.whatsapp.net
-            // or @lid — resolve against the group's live roster so the tag actually
-            // lands on the member instead of printing unresolvable raw digits.
-            let digitIndex = new Map();
-            try {
-                const meta = await this.groupManager?.getGroupMetadataCached?.(s, groupId);
-                digitIndex = indexParticipantsByDigits(meta?.participants);
-            } catch (err) {
-                logger.debug(`Birthday wish: group metadata fetch failed for ${groupId}: ${err.message}`);
-            }
-
-            for (const member of members) {
-                try {
-                    const inserted = await this.wishesCol.insertOne({
-                        group_id: groupId,
-                        phone: String(member.phone),
-                        year,
-                        sent_at: new Date(),
-                    }).then(() => true).catch((err) => {
-                        if (err?.code === 11000) return false; // already wished this year
-                        throw err;
-                    });
-                    if (!inserted) {
-                        skipped++;
-                        continue;
-                    }
-                    const participant = digitIndex.get(String(member.phone));
-                    const tags = participant
-                        ? resolveMentionIdentity(participant).mentions
-                        : [`${member.phone}@s.whatsapp.net`];
-                    await s.sendMessage(groupId, {
-                        text: `${wishText}\n\n@${member.phone}`,
-                        mentions: tags,
-                    });
-                    posted++;
-                    // Explicit 0 must disable the gap (no `|| 700` — 0 is falsy).
-                    const rawGap = this.cfg.BIRTHDAY_SEND_GAP_MS;
-                    const gapMs =
-                        rawGap === undefined || rawGap === null || rawGap === ''
-                            ? 700
-                            : Math.max(0, Number(rawGap) || 0);
-                    if (gapMs) await new Promise((r) => setTimeout(r, gapMs));
-                } catch (err) {
-                    logger.warn(`Birthday wish failed for ${groupId}/${member.phone}: ${err.message}`);
-                    // Roll back the marker so a later retry can still send it.
-                    await this.wishesCol
-                        .deleteOne({ group_id: groupId, phone: String(member.phone), year })
-                        .catch(() => {});
-                }
+            const results = await this._wishGroup(groupId, members, s);
+            for (const r of results) {
+                if (r.status === 'sent') posted++;
+                else if (r.status === 'already') skipped++;
+                // 'failed' counts as neither — the marker was rolled back so a
+                // later run (scheduled or manual /birthday check) can retry it.
             }
         }
         logger.info(`🎂 Birthday wishes ${today}: ${posted} posted, ${skipped} already done`);
         return { posted, skipped };
     }
 
-    /** One LLM wish per group day (all celebrants in one text), with template fallback. */
-    async _generateWish(members) {
-        const names = members.map((m) => `+${m.phone}`).join(', ');
+    /**
+     * On-demand version of the daily run, scoped to ONE group — for
+     * `/birthday check`. Reports exactly what happened to each of today's
+     * celebrants in this group: sent just now (with the timestamp), already
+     * wished earlier (with the original timestamp), or a send that failed and
+     * will be retried by the next scheduled/manual run.
+     *
+     * Safe to call any time and any number of times — the same Mongo dedupe
+     * that guards the scheduler guards this, so it can never double-wish.
+     *
+     * @returns {Promise<{ hasBirthdayToday: boolean, results: Array<{phone:string,status:'sent'|'already'|'failed',at:Date|null,error?:string}>, error?: string }>}
+     */
+    async checkAndWish({ groupId, sock } = {}) {
+        const s = sock || (typeof this._getSock === 'function' ? this._getSock() : null);
+        if (!s) {
+            return { hasBirthdayToday: false, results: [], error: 'no-socket' };
+        }
+        const today = todayDdMmIST();
+        const [dd, mm] = today.split('-').map(Number);
+
+        const rows = await this.col.find({ group_id: groupId, dd, mm }).toArray();
+        if (!rows.length) {
+            return { hasBirthdayToday: false, results: [] };
+        }
+
+        const results = await this._wishGroup(groupId, rows, s);
+        return { hasBirthdayToday: true, results };
+    }
+
+    /**
+     * Shared per-group send loop used by both `runDailyWishes` (all groups,
+     * scheduled) and `checkAndWish` (one group, on demand). Every member gets
+     * either a fresh wish (dedupe-inserted first, so a crash mid-send can
+     * never double-post) or a report of when they were already wished.
+     * @returns {Promise<Array<{phone:string,status:'sent'|'already'|'failed',at:Date|null,error?:string}>>}
+     */
+    async _wishGroup(groupId, members, s) {
+        const year = Number(new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric' }).format(new Date()));
+
+        // Bare stored digits don't record whether they came from @s.whatsapp.net
+        // or @lid — resolve against the group's live roster so the tag actually
+        // lands on the member instead of printing unresolvable raw digits.
+        let digitIndex = new Map();
+        try {
+            const meta = await this.groupManager?.getGroupMetadataCached?.(s, groupId);
+            digitIndex = indexParticipantsByDigits(meta?.participants);
+        } catch (err) {
+            logger.debug(`Birthday wish: group metadata fetch failed for ${groupId}: ${err.message}`);
+        }
+
+        const results = [];
+        for (const member of members) {
+            const phone = String(member.phone);
+            const now = new Date();
+            try {
+                const inserted = await this.wishesCol.insertOne({
+                    group_id: groupId,
+                    phone,
+                    year,
+                    sent_at: now,
+                }).then(() => true).catch((err) => {
+                    if (err?.code === 11000) return false; // already wished this year
+                    throw err;
+                });
+
+                // Resolved once per member, before branching, so /birthday check
+                // can show a real name instead of raw digits on EVERY line —
+                // "already wished" and "send failed" included, not just "sent".
+                const displayName = await this._resolveName(phone);
+
+                if (!inserted) {
+                    const existing = await this.wishesCol.findOne({ group_id: groupId, phone, year });
+                    results.push({ phone, name: displayName, status: 'already', at: existing?.sent_at || null });
+                    continue;
+                }
+
+                const participant = digitIndex.get(phone);
+                const identity = participant ? resolveMentionIdentity(participant) : null;
+                const tags = identity ? identity.mentions : [`${phone}@s.whatsapp.net`];
+                // The visible "@digits" must match a JID actually present in
+                // `mentions` for the tag to render — a resolved participant's
+                // real phone/LID digits can differ from the bare digits we
+                // stored, so use the resolved one when we have it.
+                const tagDigits = identity?.displayJid ? identity.displayJid.split('@')[0] : phone;
+
+                // A personal wish for THIS person, not a generic group blast —
+                // resolved only after the dedupe check passes, so an
+                // already-wished member never costs a wasted LLM call.
+                const wishText = await this._generateWish(member, displayName);
+
+                await s.sendMessage(groupId, {
+                    text: `${wishText}\n\n@${tagDigits}`,
+                    mentions: tags,
+                });
+                results.push({ phone, name: displayName, status: 'sent', at: now });
+
+                // Explicit 0 must disable the gap (no `|| 700` — 0 is falsy).
+                const rawGap = this.cfg.BIRTHDAY_SEND_GAP_MS;
+                const gapMs =
+                    rawGap === undefined || rawGap === null || rawGap === ''
+                        ? 700
+                        : Math.max(0, Number(rawGap) || 0);
+                if (gapMs) await new Promise((r) => setTimeout(r, gapMs));
+            } catch (err) {
+                logger.warn(`Birthday wish failed for ${groupId}/${phone}: ${err.message}`);
+                // Roll back the marker so a later retry can still send it.
+                await this.wishesCol.deleteOne({ group_id: groupId, phone, year }).catch(() => {});
+                results.push({ phone, name: null, status: 'failed', at: null, error: err.message });
+            }
+        }
+        return results;
+    }
+
+    /**
+     * A saved WhatsApp display name for this phone/LID digit string, if this
+     * person has ever sent a message the bot logged their pushName for.
+     * Tried under both JID forms since a bare digit string doesn't record
+     * which addressing mode it came from.
+     * @returns {Promise<string | null>}
+     */
+    async _resolveName(phone) {
+        if (!this.userManager) return null;
+        try {
+            return await this.userManager.resolveUserName([
+                `${phone}@s.whatsapp.net`,
+                `${phone}@lid`,
+            ]);
+        } catch (err) {
+            logger.debug(`Birthday wish: name lookup failed for ${phone}: ${err.message}`);
+            return null;
+        }
+    }
+
+    /** One personal LLM wish for THIS celebrant, with template fallback. */
+    async _generateWish(member, displayName) {
         try {
             const { text } = await this.llm.completeChat({
                 systemPrompt: SYSTEM_PROMPT,
                 history: [],
-                userBlock: `Write today's birthday wish for: ${names}. Use their phone-number style names lightly (or "birthday star"). One wish covering all of them.`,
-                maxTokens: 120,
+                userBlock: displayName
+                    ? `Write today's birthday wish for ${displayName}. Speak directly to them.`
+                    : 'Write today\'s birthday wish for this member. Their name is not known — address them warmly (e.g. "birthday star" or "friend"), never by a phone number. Speak directly to them.',
+                maxTokens: 100,
                 temperature: 0.9,
-                maxChars: 400,
+                maxChars: 320,
             });
-            return text.trim().slice(0, 380);
+            return text.trim().slice(0, 300);
         } catch (err) {
             logger.warn(`Birthday LLM wish failed (template fallback): ${err.message}`);
-            return FALLBACK_WISH(members.length === 1 ? '' : 'birthday star');
+            return FALLBACK_WISH(displayName);
         }
     }
 }

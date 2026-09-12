@@ -283,5 +283,75 @@ const [todayDd, todayMm] = todayDdMmIST().split('-').map(Number);
     console.log('✅ failed send rolls back the dedupe marker (retry possible)');
 }
 
+// /birthday check — on-demand status + retry, scoped to one group
+{
+    const checkDb = makeDb({
+        group_birthdays: [['group_id', 'phone']],
+        birthday_wishes_sent: [['group_id', 'phone', 'year']],
+    });
+    const svc = new BirthdayService({
+        mongoDb: checkDb,
+        groupManager: {},
+        cfg: { BIRTHDAY_ENABLED: true },
+    });
+    svc.llm = {
+        isConfigured: () => true,
+        async completeChat() {
+            return { text: 'Happy birthday — may your builds be green today! 🎂', provider: 'fake', model: 'wish-1' };
+        },
+    };
+    await svc.init();
+
+    const G = '120363023333333333@g.us';
+    const P1 = '919999111111';
+    const P2 = '919999222222';
+    const [dd, mm] = todayDdMmIST().split('-').map(Number);
+    await svc.col.insertOne({ group_id: G, phone: P1, dd, mm });
+    await svc.col.insertOne({ group_id: G, phone: P2, dd, mm });
+
+    // A group with no birthday today reports that plainly, sends nothing.
+    const none = await svc.checkAndWish({ groupId: '120363029999999999@g.us', sock: { sendMessage: async () => ({ key: {} }) } });
+    assert.equal(none.hasBirthdayToday, false);
+    assert.deepEqual(none.results, []);
+    console.log('✅ /birthday check: no birthday today in this group is reported, not an error');
+
+    // No socket available yet → reported, not thrown.
+    const noSock = await svc.checkAndWish({ groupId: G });
+    assert.equal(noSock.error, 'no-socket');
+    console.log('✅ /birthday check: missing socket is reported instead of throwing');
+
+    // First call: both celebrants pending → both get wished now.
+    const sent = [];
+    const sock = {
+        sendMessage: async (jid, content) => {
+            sent.push({ jid, text: content.text, mentions: content.mentions });
+            return { key: { id: `k${sent.length}` } };
+        },
+    };
+    const before = Date.now();
+    const first = await svc.checkAndWish({ groupId: G, sock });
+    assert.equal(first.hasBirthdayToday, true);
+    assert.equal(first.results.length, 2);
+    for (const r of first.results) {
+        assert.equal(r.status, 'sent');
+        assert.ok(r.at instanceof Date && r.at.getTime() >= before, 'sent result carries a real send timestamp');
+    }
+    assert.equal(sent.length, 2);
+    console.log('✅ /birthday check: pending celebrants are wished now, with a real timestamp');
+
+    // Second call same day: already wished, and the ORIGINAL time is reported
+    // (not a new one) — proves it never re-sends and never re-stamps.
+    const firstTimes = new Map(first.results.map((r) => [r.phone, r.at.getTime()]));
+    await new Promise((r) => setTimeout(r, 5));
+    const second = await svc.checkAndWish({ groupId: G, sock });
+    assert.equal(second.results.length, 2);
+    for (const r of second.results) {
+        assert.equal(r.status, 'already');
+        assert.equal(r.at.getTime(), firstTimes.get(r.phone), 'reports the original wish time, unchanged');
+    }
+    assert.equal(sent.length, 2, 'no additional message sent on the second check');
+    console.log('✅ /birthday check: re-running the same day reports the original wish time, sends nothing new');
+}
+
 console.log(`✅ check-birthday passed (day key ${istDayKey()}, today ${todayDdMmIST()})`);
 process.exit(0);

@@ -319,10 +319,10 @@ class WhatsAppCourseBot {
             this.commandController.setRoastService(this.roastService);
 
             // /birthday — daily AI birthday wish + tag (dedup via Mongo)
-            this.birthdayService = new BirthdayService({ mongoDb, groupManager: this.groupManager, cfg: config });
+            this.birthdayService = new BirthdayService({ mongoDb, groupManager: this.groupManager, userManager: this.userManager, cfg: config });
             await this.birthdayService.init();
             this.commandController.setBirthdayService(this.birthdayService);
-            this.birthdayService.start();
+            this.birthdayService.start({ getSock: () => this.whatsappService?.getSock?.() || null });
 
             // /aiupdateson — daily AI tools/India-AI/model-release posts, opt-in per group
             this.commandController.setAiUpdatesController(this.aiUpdatesController);

@@ -86,11 +86,19 @@ export async function handleRoast({ sock, chatId, senderJid, originalMsg, pushNa
     }
 }
 
+const IST_TIME_FMT = new Intl.DateTimeFormat('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    dateStyle: 'medium',
+    timeStyle: 'short',
+});
+
 /**
  * /birthday — add/remove/list birthdays in a group.
  *   /birthday add 14-11 [optional: quote or reply does nothing special]
  *   /birthday list
  *   /birthday remove
+ *   /birthday check — owner only: has today's celebrant(s) been wished, and
+ *     when — retries (sends now) anyone still pending
  */
 export async function handleBirthday({ sock, chatId, senderJid, args, originalMsg, ctx }) {
     const service = ctx?.birthdayService;
@@ -123,6 +131,45 @@ export async function handleBirthday({ sock, chatId, senderJid, args, originalMs
         }
         const res = await service.removeBirthday(chatId, phone);
         await safeSendMessage(sock, chatId, { text: res.message }, originalMsg);
+        return;
+    }
+
+    if (sub === 'check' || sub === 'retry' || sub === 'status') {
+        const isOwner = ctx?.isOwnerFromJid ? await ctx.isOwnerFromJid(sock, chatId, senderJid) : false;
+        if (!isOwner) {
+            await safeSendMessage(
+                sock,
+                chatId,
+                { text: '🔒 `/birthday check` is owner-only — it force-sends real wishes, not just a status peek.' },
+                originalMsg
+            );
+            return;
+        }
+
+        const { hasBirthdayToday, results, error } = await service.checkAndWish({ groupId: chatId, sock });
+
+        if (error === 'no-socket') {
+            await safeSendMessage(sock, chatId, { text: '⚠️ No WhatsApp connection available right now — try again shortly.' }, originalMsg);
+            return;
+        }
+        if (!hasBirthdayToday) {
+            await safeSendMessage(sock, chatId, { text: '📅 No birthdays today in this group.' }, originalMsg);
+            return;
+        }
+
+        // A resolved display name reads far better than raw stored digits (which
+        // can be a phone number OR a WhatsApp @lid pseudo-ID) — but this is an
+        // owner-facing status report, not the wish itself, so it deliberately
+        // does NOT @mention the celebrant again on top of their actual wish.
+        const lines = results.map((r) => {
+            const when = r.at ? IST_TIME_FMT.format(new Date(r.at)) : 'unknown time';
+            const who = r.name ? `${r.name} (+${r.phone})` : `+${r.phone}`;
+            if (r.status === 'sent') return `🎉 ${who} — wished just now at ${when}`;
+            if (r.status === 'already') return `✅ ${who} — already wished today at ${when}`;
+            return `⚠️ ${who} — send failed (${r.error || 'unknown error'}); will retry on the next check`;
+        });
+
+        await safeSendMessage(sock, chatId, { text: `🎂 *Birthday check*\n\n${lines.join('\n')}` }, originalMsg);
         return;
     }
 
@@ -182,7 +229,8 @@ export async function handleBirthday({ sock, chatId, senderJid, args, originalMs
                 `${ownLine}` +
                 `• \`/birthday add DD-MM\` — save your birthday (year optional)\n` +
                 `• \`/birthday list\` — see the group's birthdays\n` +
-                `• \`/birthday remove\` — stop wishes for you\n\n` +
+                `• \`/birthday remove\` — stop wishes for you\n` +
+                `• \`/birthday check\` — _(owner)_ has today's celebrant been wished, and when? Retries if not\n\n` +
                 `_On your day the bot posts an AI-written wish and tags you 🎉_`,
         },
         originalMsg
