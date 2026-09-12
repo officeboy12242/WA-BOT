@@ -67,11 +67,12 @@ export function msUntilIST(hour, minute, fromMs = Date.now()) {
 }
 
 const SYSTEM_PROMPT = [
-    'You write a short, warm, funny WhatsApp birthday wish for ONE member of a students\' tech group.',
+    'You write a short, warm, funny WhatsApp birthday message BODY for ONE member of a students\' tech group.',
+    'A separate "🎂 Happy Birthday @Name!" line is added BEFORE your text by the app — do NOT write your own',
+    '"Happy birthday" greeting or their name at the start. Start straight into the wish itself.',
     'Speak directly to them ("you"), never in the third person and never as a group announcement.',
-    'If you are given their name, use it naturally once — do not repeat it or overuse it.',
-    'Rules: max 35 words, no emoji walls (max 3 emojis), no hashtag spam, no quotes or poems.',
-    'Light tech/coding wordplay is welcome. Reply with ONLY the wish text, nothing else.',
+    'Rules: max 30 words, no emoji walls (max 2 emojis), no hashtag spam, no quotes or poems.',
+    'Light tech/coding wordplay is welcome. Reply with ONLY the body text, nothing else.',
 ].join('\n');
 
 /** Target {hour, minute} from config, with safe defaults. */
@@ -102,10 +103,11 @@ export function inWishWindow(target, now = istHourMinute()) {
     return nowMin >= targetMin;
 }
 
-const FALLBACK_WISH = (name) =>
-    (name ? `🎂 Happy Birthday, *${name}*! 🎉\n` : `🎂 Happy Birthday to you! 🎉\n`) +
-    `May your code compile on the first try today and your bugs be easy finds.\n` +
-    `_— your friends here_`;
+// Body only — the "🎂 Happy Birthday @tag!" greeting is always prepended by
+// the caller, once, with the actual mention. No name/greeting duplicated here.
+const FALLBACK_WISH_BODY =
+    'May your code compile on the first try today and your bugs be easy finds.\n' +
+    '_— your friends here_';
 
 export default class BirthdayService {
     constructor({ mongoDb, groupManager, userManager = null, cfg = config } = {}) {
@@ -378,10 +380,12 @@ export default class BirthdayService {
                 // A personal wish for THIS person, not a generic group blast —
                 // resolved only after the dedupe check passes, so an
                 // already-wished member never costs a wasted LLM call.
-                const wishText = await this._generateWish(member, displayName);
+                const wishBody = await this._generateWish(member, displayName);
 
+                // The mention lives IN the greeting line, not tacked on as a
+                // trailing "@digits" afterthought — one message, tag up front.
                 await s.sendMessage(groupId, {
-                    text: `${wishText}\n\n@${tagDigits}`,
+                    text: `🎂 Happy Birthday @${tagDigits}! 🎉\n${wishBody}`,
                     mentions: tags,
                 });
                 results.push({ phone, name: displayName, status: 'sent', at: now });
@@ -423,23 +427,27 @@ export default class BirthdayService {
         }
     }
 
-    /** One personal LLM wish for THIS celebrant, with template fallback. */
+    /**
+     * The wish BODY only for THIS celebrant — no greeting, no name, no tag.
+     * The caller prepends the one "🎂 Happy Birthday @tag!" line that carries
+     * the actual mention, so this never duplicates a greeting.
+     */
     async _generateWish(member, displayName) {
         try {
             const { text } = await this.llm.completeChat({
                 systemPrompt: SYSTEM_PROMPT,
                 history: [],
                 userBlock: displayName
-                    ? `Write today's birthday wish for ${displayName}. Speak directly to them.`
-                    : 'Write today\'s birthday wish for this member. Their name is not known — address them warmly (e.g. "birthday star" or "friend"), never by a phone number. Speak directly to them.',
-                maxTokens: 100,
+                    ? `Write the birthday message body for ${displayName}. Do not greet them by name — just the body.`
+                    : 'Write the birthday message body for this member. Their name is not known and is not needed — just the body, speaking directly to them.',
+                maxTokens: 90,
                 temperature: 0.9,
-                maxChars: 320,
+                maxChars: 280,
             });
-            return text.trim().slice(0, 300);
+            return text.trim().slice(0, 260);
         } catch (err) {
             logger.warn(`Birthday LLM wish failed (template fallback): ${err.message}`);
-            return FALLBACK_WISH(displayName);
+            return FALLBACK_WISH_BODY;
         }
     }
 }
