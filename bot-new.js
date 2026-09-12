@@ -768,6 +768,52 @@ const PORT = process.env.PORT || 3000;
 bot.adminPanel = new AdminPanel(PORT);
 bot.adminPanel.start();
 
+// ─── Crash guards ───────────────────────────────────────────────────────────
+// Without these, ONE unhandled rejection or synchronous throw anywhere in this
+// process — a scheduler tick, a stray library call, a message shape nobody
+// tested — kills the entire Node process. Koyeb then restarts the whole
+// container: a full re-auth/reconnect cycle, far heavier than the socket-level
+// reconnect WhatsAppService already does on its own for ordinary disconnects.
+// This does not make failures stop happening — network drops, WhatsApp API
+// quirks, and Mongo timeouts are still going to occur — it means one of them
+// no longer takes the whole bot down with it; it gets logged (logger.error
+// already writes to bot.log, which LogManager already ships to the owner) and
+// whatever actually failed can retry on its own next tick/message.
+//
+// Node's own docs note that resuming "normal operation" after an
+// uncaughtException is not guaranteed safe — a handler mid-write to a file or
+// holding a lock could leave real state inconsistent. In this app almost all
+// state lives in Mongo (transactional per-write, not in-process), so the
+// realistic risk is low and outweighed by not bouncing the whole bot over a
+// single bad message. If restarts show up as data corruption rather than a
+// stray error log, that would be the signal to make specific code paths
+// safer instead of leaning on this net.
+let _lastCrashNotifyAt = 0;
+function handleFatalError(kind, err) {
+    logger.error(`🛑 ${kind} (process kept alive): ${err?.stack || err?.message || err}`);
+
+    // Best-effort owner ping, hard-throttled so a repeating error can't spam —
+    // and wrapped so a failure HERE can never itself become another
+    // unhandled rejection feeding back into this same handler.
+    const now = Date.now();
+    if (now - _lastCrashNotifyAt < 5 * 60_000) return;
+    _lastCrashNotifyAt = now;
+    try {
+        const sock = bot?.whatsappService?.getSock?.();
+        const ownerNumber = config.OWNER_NUMBERS?.[0];
+        if (sock && ownerNumber) {
+            void sock
+                .sendMessage(`${ownerNumber}@s.whatsapp.net`, {
+                    text: `⚠️ *${kind}* — bot kept running.\n${String(err?.message || err).slice(0, 300)}`,
+                })
+                .catch(() => {});
+        }
+    } catch {}
+}
+
+process.on('unhandledRejection', (reason) => handleFatalError('Unhandled rejection', reason));
+process.on('uncaughtException', (err) => handleFatalError('Uncaught exception', err));
+
 async function boot() {
     process.on('SIGINT', () => {
         void bot.shutdown('SIGINT');
@@ -779,6 +825,10 @@ async function boot() {
     await bot.start();
 }
 
+// A failure INSIDE boot() (Mongo unreachable, auth store broken, etc.) is a
+// genuine startup failure, not a steady-state hiccup — exiting here is
+// correct so Koyeb retries with its normal backoff. The crash guards above
+// only cover errors AFTER the bot is already up and running.
 boot().catch((err) => {
     logger.error('Fatal error:', err);
     process.exit(1);

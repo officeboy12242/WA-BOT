@@ -424,80 +424,102 @@ class WhatsAppService {
         });
 
         this.sock.ev.on('group-participants.update', (update) => {
-            // Keep admin/meta caches fresh in large groups (promote/demote/join/leave)
-            const gid = update?.id || update?.groupId;
-            if (gid && this.groupManager?.invalidateGroupMeta) {
-                this.groupManager.invalidateGroupMeta(gid);
+            try {
+                // Keep admin/meta caches fresh in large groups (promote/demote/join/leave)
+                const gid = update?.id || update?.groupId;
+                if (gid && this.groupManager?.invalidateGroupMeta) {
+                    this.groupManager.invalidateGroupMeta(gid);
+                }
+                void this.commandController
+                    .handleGroupParticipantsUpdate(this.sock, update)
+                    .catch((err) => {
+                        logger.error('Welcome message error:', err?.message || err);
+                    });
+            } catch (err) {
+                // A synchronous throw here is NOT caught by the .catch() above
+                // (it never gets that far) — without this, one malformed
+                // update kills the process instead of just this one update.
+                logger.error('group-participants.update handler error:', err?.message || err);
             }
-            void this.commandController
-                .handleGroupParticipantsUpdate(this.sock, update)
-                .catch((err) => {
-                    logger.error('Welcome message error:', err?.message || err);
-                });
         });
 
         this.sock.ev.on('messages.update', (updates) => {
             if (!this.stickerForwarder) return;
 
             for (const update of updates) {
-                const chatId = update.key?.remoteJid;
-                if (!chatId || !update.update?.message) continue;
-                const stickerPayload = extractStickerFromMessage(update.update.message);
-                if (!stickerPayload || !isStickerForwardReady(chatId, stickerPayload)) continue;
-                if (!this.stickerForwarder.shouldForwardFrom(chatId)) continue;
+                try {
+                    const chatId = update.key?.remoteJid;
+                    if (!chatId || !update.update?.message) continue;
+                    const stickerPayload = extractStickerFromMessage(update.update.message);
+                    if (!stickerPayload || !isStickerForwardReady(chatId, stickerPayload)) continue;
+                    if (!this.stickerForwarder.shouldForwardFrom(chatId)) continue;
 
-                void this.stickerForwarder
-                    .forwardSticker(
-                        this.sock,
-                        { key: update.key, message: update.update.message },
-                        chatId,
-                        { isRetry: true },
-                    )
-                    .catch(() => {});
+                    void this.stickerForwarder
+                        .forwardSticker(
+                            this.sock,
+                            { key: update.key, message: update.update.message },
+                            chatId,
+                            { isRetry: true },
+                        )
+                        .catch(() => {});
+                } catch (err) {
+                    // One bad item in the batch must not abort the rest of it.
+                    logger.error('messages.update item error:', err?.message || err);
+                }
             }
         });
 
         this.sock.ev.on('messages.upsert', ({ messages, type }) => {
             for (const msg of messages) {
-                this._cacheIncomingMessage(msg);
+                try {
+                    this._cacheIncomingMessage(msg);
 
-                // Interview Q poll votes often arrive as type=append — score them
-                // before the notify-only continue so leaderboard stays live.
-                if (this.interviewQuestionService) {
-                    void this.interviewQuestionService
-                        .handleIncomingPollVote(msg, this.sock)
-                        .catch(() => {});
-                }
-
-                const chatId = msg.key?.remoteJid;
-
-                // Join stubs often arrive as type=append with no message body
-                if (chatId?.endsWith('@g.us') && msg.messageStubType != null) {
-                    void this.commandController
-                        .handleJoinStubMessage(this.sock, msg)
-                        .catch((err) => {
-                            logger.error('Join stub welcome error:', err?.message || err);
-                        });
-                }
-
-                const stickerPayload = extractStickerFromMessage(msg.message);
-
-                if (type !== 'notify') {
-                    if (
-                        stickerPayload
-                        && isStickerForwardReady(chatId, stickerPayload)
-                        && this.stickerForwarder?.shouldForwardFrom(chatId)
-                    ) {
-                        void this.stickerForwarder
-                            .forwardSticker(this.sock, msg, chatId, { isRetry: true })
+                    // Interview Q poll votes often arrive as type=append — score them
+                    // before the notify-only continue so leaderboard stays live.
+                    if (this.interviewQuestionService) {
+                        void this.interviewQuestionService
+                            .handleIncomingPollVote(msg, this.sock)
                             .catch(() => {});
                     }
-                    continue;
-                }
 
-                void this.processIncomingMessage(msg).catch((err) => {
-                    logger.error('Message handling error:', err?.message || err);
-                });
+                    const chatId = msg.key?.remoteJid;
+
+                    // Join stubs often arrive as type=append with no message body
+                    if (chatId?.endsWith('@g.us') && msg.messageStubType != null) {
+                        void this.commandController
+                            .handleJoinStubMessage(this.sock, msg)
+                            .catch((err) => {
+                                logger.error('Join stub welcome error:', err?.message || err);
+                            });
+                    }
+
+                    const stickerPayload = extractStickerFromMessage(msg.message);
+
+                    if (type !== 'notify') {
+                        if (
+                            stickerPayload
+                            && isStickerForwardReady(chatId, stickerPayload)
+                            && this.stickerForwarder?.shouldForwardFrom(chatId)
+                        ) {
+                            void this.stickerForwarder
+                                .forwardSticker(this.sock, msg, chatId, { isRetry: true })
+                                .catch(() => {});
+                        }
+                        continue;
+                    }
+
+                    void this.processIncomingMessage(msg).catch((err) => {
+                        logger.error('Message handling error:', err?.message || err);
+                    });
+                } catch (err) {
+                    // One malformed message in the batch (unexpected shape, a
+                    // future WhatsApp protocol field, whatever) must not stop
+                    // the rest of the batch from being processed. A `.catch()`
+                    // on an async call only covers rejections — it does nothing
+                    // for a plain synchronous throw earlier in this same
+                    // iteration, which is exactly what this guards.
+                    logger.error('messages.upsert item error:', err?.message || err);
+                }
             }
         });
     }
