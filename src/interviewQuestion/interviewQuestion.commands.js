@@ -132,7 +132,7 @@ export async function handleInterviewQ(sock, chatId, senderJid, args, ctx) {
                     '• `/interviewq answer` — reveal answer now in this chat\n' +
                     '• `/interviewq board` or `/iqboard` — weekly leaderboard\n' +
                     '• `/interviewqon` / `/interviewqoff` — group schedule toggle\n' +
-                    '• `/tagme` / `/notag` — opt in/out of tags here\n' +
+                    '• `/notag` — stop being tagged here (tagging is ON by default)\n' +
                     '• `/checktagstatus` — your tag ON/OFF + who is opted in\n\n' +
                     `_Auto: ${(config.INTERVIEW_Q_TIMES || []).join(' · ') || '11:00 · 15:00 · 19:00'} IST · answer +${Math.round((config.INTERVIEW_Q_ANSWER_DELAY_MS || 1_800_000) / 60_000)}m_\n` +
                     `_Sat ${config.INTERVIEW_Q_SUMMARY_TIME || '22:00'} — weekly leaderboard + recap_`,
@@ -150,8 +150,9 @@ export async function handleInterviewQBoard(sock, chatId, senderJid, ctx) {
 }
 
 /**
- * /tagme — be tagged in this group's Interview Q posts + leaderboards.
- * /notag — stop. Prefs are per group, stored in Mongo.
+ * /tagme — legacy alias; tagging is now ON by default, so this is no longer required.
+ * /notag — stop being tagged in this group's Interview Q posts + leaderboards.
+ *       Default is tag everyone; /notag is the only way to opt out.
  */
 export async function handleTagMe(sock, chatId, senderJid, args, ctx, wantsTag = true) {
     try {
@@ -190,19 +191,17 @@ export async function handleTagMe(sock, chatId, senderJid, args, ctx, wantsTag =
                 p?.phoneNumber || String(p?.id || '').split('@')[0]
             );
             if (/^\d{10,15}$/.test(pPhone)) phone = pPhone;
-        } catch { /* senderJid / phoneRaw is fine */ }
-
-        await store.setTagged(chatId, phone, wantsTag, { jid: mentionJid, name: ctx?.pushName || '' });
+        } catch { /* senderJid / phoneRaw is fine */ }        await store.setTagged(chatId, phone, wantsTag, { jid: mentionJid, name: ctx?.pushName || '' });
 
         const name = (ctx?.pushName || '').trim() || 'You';
+        const pref = await store.getTagPref(chatId, phone);
+        const youOn = wantsTag || !pref || pref.tagged !== false;
         const text = wantsTag
-            ? `✅ Done, *${name}*! You'll be tagged in Interview Q posts & leaderboards here.\n💡 \`/notag\` anytime to stop.`
-            : `👌 Okay *${name}*, no more tags from Interview Q here.\n💡 \`/tagme\` anytime to opt back in.`;
+                ? `✅ Done *${name}*, tagging is already ON by default — you were never excluded.\n💡 Use \`/notag\` if you ever want to stop being tagged here.`
+                : `👌 Okay *${name}*, no more tags from Interview Q here.\n💡 Use \`/tagme\` if you ever want to start getting tagged again.`;
         await sock.sendMessage(
             chatId,
-            wantsTag
-                ? { text, mentions: [mentionJid] }
-                : { text },
+            { text, mentions: wantsTag && youOn ? [mentionJid] : [] },
             { quoted: originalMsg }
         );
     } catch (err) {
@@ -259,11 +258,15 @@ export async function handleCheckTagStatus(sock, chatId, senderJid, args, ctx) {
         const pref = typeof store.getTagPref === 'function'
             ? await store.getTagPref(chatId, phone)
             : null;
-        const youOn = pref?.tagged === true;
         const youOff = pref && pref.tagged === false;
-        const youLabel = youOn ? '✅ *ON* (`/tagme`)' : youOff ? '🚫 *OFF* (`/notag`)' : '⚪ *not set* — run `/tagme` to opt in';
+        const youOn = !youOff;
+        const youLabel = youOn
+            ? '✅ *ON* (default — you will be tagged unless you run `/notag`)'
+            : '🚫 *OFF* (`/notag`) — you will not be tagged';
 
         const members = await store.getTaggedMembers(chatId);
+        // members can now be plain phone strings (default-on path) or pref rows (legacy call sites).
+        const memberPhones = members.map((r) => typeof r === 'string' ? r : r.phone);
         let resolved = [];
         let youJids = [];
         let resolveOk = false;
@@ -271,7 +274,7 @@ export async function handleCheckTagStatus(sock, chatId, senderJid, args, ctx) {
             if (interviewQuestionService?.resolveMentionJids) {
                 resolved = await interviewQuestionService.resolveMentionJids(
                     chatId,
-                    members.map((r) => r.phone),
+                    memberPhones,
                     sock,
                 );
                 youJids = await interviewQuestionService.resolveMentionJids(chatId, [phone], sock);
@@ -311,14 +314,14 @@ export async function handleCheckTagStatus(sock, chatId, senderJid, args, ctx) {
             if (resolveOk) {
                 r += `\n🧪 *Group resolve:* ${resolved.length}/${members.length} mention JIDs found\n`;
                 if (resolved.length < members.length) {
-                    r += '_Some opted-in numbers could not be matched to participants — those will not get a visible @._\n';
+                    r += '_Some numbers could not be matched to participants — those will not get a visible @._\n';
                 }
             }
             r += '\n';
         }
 
         r += '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
-        r += '💡 `/tagme` opt in · `/notag` opt out';
+        r += '💡 Default is tag everyone — `/notag` to stop being tagged here';
 
         await sock.sendMessage(
             chatId,
