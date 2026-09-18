@@ -15,7 +15,6 @@ import {
     buildWeeklyLeaderboard,
     formatWeeklyLeaderboard,
 } from './interviewQuestion.pollVotes.js';
-import { buildHiddenMentionAll, withHiddenMentions } from '../utils/hiddenMentionAll.js';
 
 export const INTERVIEW_CATEGORIES = [
     'DSA',
@@ -510,9 +509,8 @@ class InterviewQuestionService {
             const meJid = jidNormalizedUser(sock.user?.id) || sock.user?.id || '';
             const meLid = sock.user?.lid ? jidNormalizedUser(sock.user.lid) || sock.user.lid : '';
 
-            // Notify ping before the poll (polls can't carry mentions). Tag the
-            // members who opted in via /tagme; only when nobody has opted in do
-            // we fall back to the hidden @all ping.
+            // Polls cannot carry mentions, so send a pre-poll message. Mentions
+            // are strictly opt-in via /tagme.
             if (String(jid).endsWith('@g.us')) {
                 try {
                     await this.sendInterviewPing(sock, jid, q, answerDelayMs);
@@ -551,9 +549,7 @@ class InterviewQuestionService {
     }
 
     /**
-     * Pre-poll notification. Tags /tagme opt-ins (visible @mention);
-     * when nobody opted in, silent hidden @all — but /notag always wins
-     * (opt-outs are excluded from the fallback).
+     * Pre-poll notification. Only /tagme opt-ins receive an @mention.
      */
     async sendInterviewPing(sock, jid, q, answerDelayMs) {
         const baseText =
@@ -581,35 +577,8 @@ class InterviewQuestionService {
             return;
         }
 
-        // Nobody opted in — silent hidden @all, minus anyone who ran /notag.
-        const excludeJids = await this.resolveOptOutExcludeJids(jid, sock);
-        const pack = await buildHiddenMentionAll(sock, jid, { excludeJids });
-        const ping = withHiddenMentions(baseText, pack);
-        await sock.sendMessage(jid, { text: ping.text, mentions: ping.mentions, linkPreview: false });
-    }
-
-    /**
-     * JIDs for members who ran /notag in this group (by stored jid + phone resolve).
-     */
-    async resolveOptOutExcludeJids(groupId, sock = null) {
-        if (!groupId?.endsWith('@g.us') || !this.store?.getOptedOutMembers) return [];
-        try {
-            const rows = await this.store.getOptedOutMembers(groupId);
-            if (!rows?.length) return [];
-            const exclude = new Set();
-            for (const row of rows) {
-                const j = String(row.jid || '').trim();
-                if (j) exclude.add(j);
-            }
-            const phones = rows.map((r) => r.phone).filter(Boolean);
-            for (const jid of await this.resolveMentionJids(groupId, phones, sock)) {
-                if (jid) exclude.add(jid);
-            }
-            return [...exclude];
-        } catch (err) {
-            logger.debug(`Interview Q opt-out resolve failed: ${err.message}`);
-            return [];
-        }
+        // No opt-ins: send the context message without notifying the group.
+        await sock.sendMessage(jid, { text: baseText, linkPreview: false });
     }
 
     /**

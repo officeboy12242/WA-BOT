@@ -79,12 +79,6 @@ class InterviewQuestionStore {
             .toArray();
     }
 
-    /** Explicit /notag opt-outs — must never appear in Interview Q mentions. */
-    async getOptedOutMembers(group_id) {
-        if (!group_id || !this.tagCol) return [];
-        return this.tagCol.find({ group_id, tagged: false }).toArray();
-    }
-
     /**
      * @param {object} doc
      */

@@ -2,7 +2,7 @@
  * Self-check: /tagme–/notag prefs must gate every visible @mention.
  *
  * 1. Storage: setTagged/isTaggedIn/getTaggedMembers per (group, phone).
- * 2. Pre-poll ping: tags ONLY /tagme opt-ins; hidden @all only when nobody opted in.
+ * 2. Pre-poll ping: tags ONLY /tagme opt-ins; no opt-ins means no mentions.
  * 3. Leaderboard tag pack: /notag wins — no tag without an explicit opt-in,
  *    including players who scored high but never ran /tagme.
  * 4. Handler: /tagme + /notag flip the stored pref, and a Mongo failure tells
@@ -156,25 +156,24 @@ const q = { type: 'DSA', difficulty: 'Hard', topic: 'Arrays' };
     console.log('✅ ping: only /tagme opt-ins are tagged, /notag respected');
 }
 
-// hidden @all fallback when nobody opted in — /notag still excludes
+// No opt-ins means the context message is sent without notifying anyone.
 {
     const sock = makeSock();
     await service.sendInterviewPing(sock, GB, q, 30 * 60_000);
     const msg = sock.sent[0];
-    assert.ok(!msg.mentions.includes(J1), '/notag member must be excluded from hidden @all');
-    assert.ok(msg.mentions.includes(J2) && msg.mentions.includes(J3), 'others still get the silent ping');
-    assert.ok(!/@\d{6,}/.test(msg.text), 'fallback stays silent (no visible @tokens)');
-    console.log('✅ ping: hidden @all fallback excludes /notag');
+    assert.deepEqual(msg.mentions, [], '/notag and never-opted-in members must not be mentioned');
+    assert.ok(!/@\d{6,}/.test(msg.text), 'no visible @tokens');
+    console.log('✅ ping: no opt-ins means no mentions');
 }
 
-// pure group with zero prefs → full silent @all
+// A group with no saved prefs also receives no mentions.
 {
     const GC = '120363033333333333@g.us';
     const sock = makeSock();
     await service.sendInterviewPing(sock, GC, q, 30 * 60_000);
     const msg = sock.sent[0];
-    assert.ok(msg.mentions.length >= 3, 'no prefs at all → hidden @all to every participant');
-    console.log('✅ ping: hidden @all when nobody has a pref');
+    assert.deepEqual(msg.mentions, [], 'no prefs at all → no mentions');
+    console.log('✅ ping: never-opted-in members are not tagged');
 }
 
 // ── 3) leaderboard tag pack: /notag wins ────────────────────────────────────
