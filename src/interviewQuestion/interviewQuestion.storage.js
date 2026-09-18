@@ -34,25 +34,21 @@ class InterviewQuestionStore {
     async getTagPref(group_id, phone) {
         if (!group_id || !phone || !this.tagCol) return null;
         const phoneKey = String(phone).replace(/\D/g, '') || String(phone);
-        const row = this.tagCol.findOne(
+        return this.tagCol.findOne(
             { group_id, phone: phoneKey },
             { projection: { tagged: 1, name: 1, phone: 1, updated_at: 1, jid: 1 } }
         );
-        if (!row) return null;
-        return row;
     }
 
-    /** @returns {Promise<boolean>} true when NOT opted out, false when explicitly /notag'd */
+    /** @returns {Promise<boolean>} true when opted-in, false when not stored */
     async isTaggedIn(group_id, phone) {
-        if (!group_id || !phone || !this.tagCol) return true;
+        if (!group_id || !phone || !this.tagCol) return false;
         const phoneKey = String(phone).replace(/\D/g, '') || String(phone);
         const row = await this.tagCol.findOne(
             { group_id, phone: phoneKey },
             { projection: { tagged: 1 } }
         );
-        // default is ON; only explicit /notag sets tagged=false
-        if (!row) return true;
-        return row.tagged !== false;
+        return row?.tagged === true;
     }
 
     async setTagged(group_id, phone, tagged, meta = {}) {
@@ -74,23 +70,13 @@ class InterviewQuestionStore {
         );
     }
 
-    /**
-     * Interview Q tagging is now OFF only when a member explicitly runs /notag.
-     * Default is ON for everyone — so the mention list is "all participants minus /notag".
-     */
-    async getTaggedMembers(group_id, allParticipantPhones = null) {
+    /** Opted-in members for a group, newest opt-in first. */
+    async getTaggedMembers(group_id) {
         if (!group_id || !this.tagCol) return [];
-        if (!Array.isArray(allParticipantPhones) || !allParticipantPhones.length) {
-            // fallback for call sites that do not pass the roster yet
-            return this.tagCol
-                .find({ group_id, tagged: false })
-                .sort({ updated_at: -1 })
-                .toArray();
-        }
-        const optedOut = new Set(
-            (await this.tagCol.find({ group_id, tagged: false }).toArray()).map((r) => String(r.phone))
-        );
-        return allParticipantPhones.filter((p) => !optedOut.has(String(p)));
+        return this.tagCol
+            .find({ group_id, tagged: true })
+            .sort({ updated_at: -1 })
+            .toArray();
     }
 
     /** Explicit /notag opt-outs — must never appear in Interview Q mentions. */

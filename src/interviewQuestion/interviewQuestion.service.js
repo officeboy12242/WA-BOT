@@ -551,26 +551,21 @@ class InterviewQuestionService {
     }
 
     /**
-     * Pre-poll notification. Default is tag everyone in the group (visible @mention),
-     * minus anyone who explicitly ran /notag. There is no longer an opt-in gate.
+     * Pre-poll notification. Tags /tagme opt-ins (visible @mention);
+     * when nobody opted in, silent hidden @all — but /notag always wins
+     * (opt-outs are excluded from the fallback).
      */
     async sendInterviewPing(sock, jid, q, answerDelayMs) {
         const baseText =
             `🧠 *Interview Q* · ${q.type} (${q.difficulty})\n` +
-            `Topic: *${q.topic}*\r
-\n` +
+            `Topic: *${q.topic}*\n\n` +
             `_Vote on the poll below — answer drops in ${Math.round(answerDelayMs / 60_000)} min._`;
-
-        const meta = await sock.groupMetadata?.(jid);
-        const allPhones = (meta?.participants || [])
-            .map((p) => String(p.phoneNumber || '').replace(/\D/g, '') || String(p.id || '').split('@')[0].replace(/\D/g, ''))
-            .filter(Boolean);
 
         let tagged = [];
         try {
-            const taggedPhones = await this.store.getTaggedMembers(jid, allPhones);
-            if (taggedPhones?.length) {
-                tagged = await this.resolveMentionJids(jid, taggedPhones, sock);
+            const rows = await this.store.getTaggedMembers(jid);
+            if (rows?.length) {
+                tagged = await this.resolveMentionJids(jid, rows.map((r) => r.phone), sock);
             }
         } catch (err) {
             logger.debug(`Interview Q tag lookup failed: ${err.message}`);
@@ -586,7 +581,7 @@ class InterviewQuestionService {
             return;
         }
 
-        // Edge case: roster resolved empty (private/ghost group) — still exclude /notag.
+        // Nobody opted in — silent hidden @all, minus anyone who ran /notag.
         const excludeJids = await this.resolveOptOutExcludeJids(jid, sock);
         const pack = await buildHiddenMentionAll(sock, jid, { excludeJids });
         const ping = withHiddenMentions(baseText, pack);
@@ -653,12 +648,15 @@ class InterviewQuestionService {
             return { text: '', mentions: [] };
         }
         try {
-            // Default is tag everyone; /notag is the only exclusion.
-            const optedOutPhones = new Set(
-                (await this.store.getOptedOutMembers(groupId)).map((r) => String(r.phone))
+            // /notag wins: only members who explicitly opted in via /tagme in
+            // THIS group may be @-mentioned on the leaderboard or weekly recap.
+            const taggedPhones = new Set(
+                (await this.store.getTaggedMembers(groupId))
+                    .filter((r) => r.tagged === true)
+                    .map((r) => String(r.phone))
             );
             const picked = eligible
-                .filter((r) => !optedOutPhones.has(String(r?.phone)))
+                .filter((r) => taggedPhones.has(String(r.phone)))
                 .slice(0, limit);
             if (!picked.length) return { text: '', mentions: [] };
             const jids = await this.resolveMentionJids(groupId, picked.map((r) => r.phone), sock);
