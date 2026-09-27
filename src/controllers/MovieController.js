@@ -12,6 +12,7 @@ import { extractPhoneNumber, isGroupMessage, normalizePhoneNumber, resolveNotifi
 import { config } from '../config/config.js';
 import { atozService } from '../services/AtoZService.js';
 import { hdHubMoviesService } from '../services/HdHubMoviesService.js';
+import { mkvbaseService } from '../services/MkvbaseService.js';
 import { pronoobDriveService } from '../services/PronoobDriveService.js';
 import { movieCacheService, cloneMovieResults } from '../services/MovieCacheService.js';
 import { urlShortener } from '../utils/urlShortener.js';
@@ -356,6 +357,10 @@ function formatMovieSearchProgress(dialogue, query, state) {
 
     msg += `\n*$ sources*\n`;
 
+    if (state.vault !== undefined) {
+        const detail = state.vaultCount != null ? `${state.vaultCount} found` : '';
+        msg += `${formatSourceLine('🗄️', 'Mkvbase vault', state.vault, detail)}\n`;
+    }
     if (state.hd !== undefined) {
         const detail = state.hdCount != null ? `${state.hdCount} found` : '';
         msg += `${formatSourceLine('📡', 'HDHub4u', state.hd, detail)}\n`;
@@ -390,6 +395,7 @@ function makeMovieProgressEditor(sock, chatId, messageKey, dialogue, query) {
     let lastText = '';
     let currentState = {
         percent: 10,
+        vault: 'pending',
         hd: 'loading',
         drive: 'pending',
         atoz: 'pending',
@@ -781,12 +787,14 @@ class MovieController {
         pronoobDriveService.startKeepAlive();
         atozService.startKeepAlive();
         hdHubMoviesService.startKeepAlive();
+        mkvbaseService.startKeepAlive();
     }
 
     stopKeepAlive() {
         pronoobDriveService.stopKeepAlive();
         atozService.stopKeepAlive();
         hdHubMoviesService.stopKeepAlive();
+        mkvbaseService.stopKeepAlive();
     }
 
     async logSearch(userId, query, resultCount, chatId) {
@@ -1291,7 +1299,18 @@ class MovieController {
         const enrichGraceMs = 2_000;
 
         progress?.startPulse?.();
-        await progress?.update?.({ percent: 15, hd: 'loading', drive: 'pending', atoz: 'pending' }, { force: true });
+        await progress?.update?.({ percent: 15, vault: 'loading', hd: 'pending', drive: 'pending', atoz: 'pending' }, { force: true });
+
+        // Our own Mkvbase vault API first — pinned above scraped sources in results.
+        const vaultTimeout = config.MKVBASE_TIMEOUT_MS || 6_000;
+        const vaultPromise = this._withTimeout(
+            mkvbaseService.searchMovies(query, 8),
+            vaultTimeout,
+            'vault timeout',
+        ).catch((err) => {
+            logger.warn(`Mkvbase vault search failed for "${query}": ${err?.message || err}`);
+            return [];
+        });
 
         const hdPromise = this._withTimeout(
             hdHubMoviesService.searchMovies(query, 8),
@@ -1315,9 +1334,12 @@ class MovieController {
         ).catch(() => []);
 
         const hdResults = await hdPromise;
+        const vaultResults = await vaultPromise;
         progress?.stopPulse?.();
         await progress?.flush?.({
             percent: 45,
+            vault: 'done',
+            vaultCount: vaultResults.length,
             hd: 'done',
             hdCount: hdResults.length,
             drive: 'loading',
@@ -1358,13 +1380,14 @@ class MovieController {
             atozCount: atozResults.length,
         });
 
-        return { hdResults, driveResults, atozResults };
+        return { vaultResults, hdResults, driveResults, atozResults };
     }
 
     async _fetchMovieResultsFromApis(query) {
-        const { hdResults, driveResults, atozResults } = await this._searchMovieSources(query, null);
+        const { vaultResults, hdResults, driveResults, atozResults } = await this._searchMovieSources(query, null);
 
         let results = [];
+        if (vaultResults.length > 0) results.push(...vaultResults);
         if (hdResults.length > 0) results.push(...hdResults);
         if (driveResults.length > 0) results.push(...driveResults);
         if (atozResults.length > 0) results.push(...atozResults);
@@ -1509,9 +1532,10 @@ class MovieController {
     }
 
     async _fetchMovieResultsFromApisWithProgress(query, progress) {
-        const { hdResults, driveResults, atozResults } = await this._searchMovieSources(query, progress);
+        const { vaultResults, hdResults, driveResults, atozResults } = await this._searchMovieSources(query, progress);
 
         let results = [];
+        if (vaultResults.length > 0) results.push(...vaultResults);
         if (hdResults.length > 0) results.push(...hdResults);
         if (driveResults.length > 0) results.push(...driveResults);
         if (atozResults.length > 0) results.push(...atozResults);
@@ -1544,6 +1568,7 @@ class MovieController {
         const dialogue = getRandomDialogue(SEARCH_DIALOGUES);
         const initialProgress = formatMovieSearchProgress(dialogue, query, {
             percent: 10,
+            vault: 'pending',
             hd: 'loading',
             drive: 'pending',
             atoz: 'pending',
