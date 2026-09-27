@@ -359,7 +359,7 @@ function formatMovieSearchProgress(dialogue, query, state) {
 
     if (state.vault !== undefined) {
         const detail = state.vaultCount != null ? `${state.vaultCount} found` : '';
-        msg += `${formatSourceLine('🗄️', 'Mkvbase vault', state.vault, detail)}\n`;
+        msg += `${formatSourceLine('🗄️', 'ProNooB Drive', state.vault, detail)}\n`;
     }
     if (state.hd !== undefined) {
         const detail = state.hdCount != null ? `${state.hdCount} found` : '';
@@ -1304,7 +1304,7 @@ class MovieController {
         // Our own Mkvbase vault API first — pinned above scraped sources in results.
         const vaultTimeout = config.MKVBASE_TIMEOUT_MS || 6_000;
         const vaultPromise = this._withTimeout(
-            mkvbaseService.searchMovies(query, 8),
+            mkvbaseService.searchMovies(query, 10),
             vaultTimeout,
             'vault timeout',
         ).catch((err) => {

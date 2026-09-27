@@ -17,6 +17,13 @@ const REQUEST_TIMEOUT = 6000;
 const SEARCH_CACHE_MAX = 200;
 const SEARCH_CACHE_TTL_MS = 60 * 1000;
 const MAX_LINKS_PER_TITLE = 8;
+const SIZE_RE = /(\d+(?:\.\d+)?\s?(?:GB|MB))\b/i;
+
+/** File size embedded in the title ("1.4GB"), when the source lists one. */
+function sizeFromTitle(title) {
+    const m = SIZE_RE.exec(String(title || ''));
+    return m ? m[1].replace(/\s+/, ' ') : '';
+}
 
 class MkvbaseService {
     constructor() {
@@ -85,11 +92,13 @@ class MkvbaseService {
             const ordered = [...active, ...dead].slice(0, MAX_LINKS_PER_TITLE);
             if (!ordered.length) continue;
 
+            const quality = qualityFromFilename(title);
+            const fileSize = sizeFromTitle(title);
             results.push({
                 title,
-                source: 'Mkvbase',
+                source: 'ProNooB Drive',
                 links: ordered.map((row) => ({
-                    size: qualityFromFilename(title),
+                    size: quality && fileSize ? `${quality} • ${fileSize}` : (quality || fileSize),
                     audio: audioFromFilename(title),
                     url: row.url,
                     rawFilename: title,
