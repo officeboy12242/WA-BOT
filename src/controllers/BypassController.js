@@ -518,10 +518,11 @@ class BypassController {
         } catch {
             return;
         }
-        const url = extractBypassableUrl(text);
-        if (!url) return;
+        // A message may carry several links — bypass ALL of them in one go
+        const urls = extractBypassableUrls(text).slice(0, BYPASS_MAX_LINKS);
+        if (!urls.length) return;
         if (msg?.key?.fromMe) return;
-        void this._runBypass(sock, chatId, senderJid, [url], msg, msg?.pushName || '');
+        void this._runBypass(sock, chatId, senderJid, urls, msg, msg?.pushName || '');
     }
 }
 
