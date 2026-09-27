@@ -1,16 +1,19 @@
 /**
  * BypassController — /bypass command + group auto-detect.
  *
- *   /bypass <link>            resolve one HDHub4u/HubCloud/GDFlix link now
- *   /bypasson / /bypassoff    (staff) auto-bypass pasted links in this group
+ *   /bypass <link> [link2 ...]  resolve one or more HDHub/HubCloud links now
+ *                               (parallel worker pool — extra links ≈ free speed)
+ *   /bypasson / /bypassoff      (staff) auto-bypass pasted links in this group
  *
- * Free users: 3 bypasses/day (MOVIE_BYPASS_DAILY_LIMIT). Owners, moderators,
- * bot admins and premium users are unlimited — same rule set as /movie.
- * Progress is edited into the same message; results replace it; the footer
- * shows remaining bypasses (or the premium upsell when exhausted).
+ * Free users: 3 successful link-bypasses/day (MOVIE_BYPASS_DAILY_LIMIT), one
+ * credit per link that yields results. Owners, moderators, bot admins and
+ * premium users are unlimited. Progress is edited into the same message; the
+ * footer shows remaining bypasses (or the premium upsell when exhausted).
  *
- * Auto-detect: when a group has /bypasson, WhatsAppService calls
- * maybeAutoBypass() for every message; the first bypassable link is handled.
+ * Concurrency: a global worker pool (bypassManyLinks) shared across ALL users
+ * and groups — many simultaneous requests run in parallel up to
+ * MOVIE_BYPASS_MAX_CONCURRENT workers instead of stampeding target hosts.
+ * Additionally, one in-flight command per user prevents double-taps.
  */
 
 import { dirname, resolve } from 'path';
@@ -21,24 +24,38 @@ import { config } from '../config/config.js';
 import { messageQueue } from '../utils/messageQueue.js';
 import { sendAndDelete } from '../utils/autoDelete.js';
 import { isGroupMessage, extractPhoneNumber, normalizePhoneNumber } from '../utils/permissions.js';
-import { bypassSingleLink, isBypassableUrl } from '../services/HdHubBypassService.js';
+import { bypassManyLinks, isBypassableUrl } from '../services/HdHubBypassService.js';
 import { shortLinkService } from '../services/ShortLinkService.js';
 import { urlShortener } from '../utils/urlShortener.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const QR_IMAGE_PATH = resolve(__dirname, '../../assets/payment_qr.jpg');
 const BYPASS_DAILY_LIMIT = Math.max(1, parseInt(process.env.MOVIE_BYPASS_DAILY_LIMIT, 10) || 3);
+const BYPASS_MAX_LINKS = Math.max(1, config.MOVIE_BYPASS_MAX_LINKS || 5);
 const BYPASS_PROGRESS_PRIORITY = 2;
 const BYPASS_BUDGET_MS = config.MOVIE_HD_BYPASS_BUDGET_MS || 8_000;
 const AUTO_DELETE_MS = 5 * 60 * 60 * 1000; // 5 hours
 
 /** Hosts whose links are auto-bypassable (mirror of HdHubBypassService families). */
-const BYPASS_HOST_RE = /https?:\/\/[^\s"'<>]*(hubcloud|hubdrive|hubcdn|hubstream|hdhubdrive|driveseed|hdstream4u|nexdrive|gdflix)\.[a-z.]+[^\s"'<>]*/i;
+const BYPASS_HOST_RE = /https?:\/\/[^\s"'<>]*(hubcloud|hubdrive|hubcdn|hubstream|hdhubdrive|driveseed|hdstream4u|nexdrive|gdflix)\.[a-z.]+[^\s"'<>]*/gi;
+
+/** All bypassable URLs in a text message (deduped, order preserved). */
+export function extractBypassableUrls(text) {
+    const out = [];
+    const seen = new Set();
+    for (const m of String(text || '').matchAll(BYPASS_HOST_RE)) {
+        const u = m[0];
+        if (!seen.has(u)) {
+            seen.add(u);
+            out.push(u);
+        }
+    }
+    return out;
+}
 
 /** First bypassable URL in a text message, or null. */
 export function extractBypassableUrl(text) {
-    const m = String(text || '').match(BYPASS_HOST_RE);
-    return m ? m[0] : null;
+    return extractBypassableUrls(text)[0] || null;
 }
 
 function normalizeOwnMessageKey(messageKey, chatId) {
@@ -61,22 +78,33 @@ function progressBar(percent) {
     return '█'.repeat(filled) + '░'.repeat(BAR_BLOCKS - filled);
 }
 
-function formatBypassProgress(url, percent, note = '') {
-    let msg = '🔗 *BYPASSING…*\n\n';
-    msg += `> ${url.slice(0, 90)}\n`;
-    msg += `[${progressBar(percent)}] ${percent}%\n`;
+function formatBypassProgress(urls, percent, note = '') {
+    const count = urls.length;
+    let msg = `🔗 *BYPASSING…* (${count} link${count > 1 ? 's' : ''} in parallel)\n\n`;
+    for (const u of urls.slice(0, 3)) msg += `> ${u.replace(/^https?:\/\//, '').slice(0, 70)}\n`;
+    if (urls.length > 3) msg += `> … +${urls.length - 3} more\n`;
+    msg += `\n[${progressBar(percent)}] ${percent}%\n`;
     if (note) msg += `> ${note}\n`;
     return msg.trimEnd();
 }
 
-function formatBypassResult({ title, links, remaining, unlimited }) {
+function formatBypassResult({ results, remaining, unlimited }) {
     let msg = '✅ *BYPASS SUCCESSFUL*\n\n';
-    if (title) msg += `📄 ${title}\n\n`;
-    for (const l of links) {
-        msg += `┌ 📌 ${l.label}\n`;
-        msg += `└ 🔗 ${l.url}\n`;
+    let linkTotal = 0;
+    for (const r of results) {
+        if (results.length > 1 && r.title) msg += `📄 *${r.title}*\n`;
+        for (const l of r.links) {
+            linkTotal += 1;
+            msg += `┌ 📌 ${l.label}\n`;
+            msg += `└ 🔗 ${l.url}\n`;
+        }
+        if (results.length > 1 && r.links.length === 0) {
+            msg += '┌ ⚠️ No bypassable servers found\n└ —\n';
+        }
+        if (results.length > 1) msg += '\n';
     }
-    msg += '\n─────────────────────────────\n';
+    msg += '─────────────────────────────\n';
+    if (results.length > 1) msg += `⚡ ${results.length} link(s) · ${linkTotal} direct links\n`;
     msg += '⚠️ _Use VPN if links are blocked_\n';
     msg += '⏰ _Download links expire in 7 hours_\n';
     msg += '─────────────────────────────\n';
@@ -89,10 +117,11 @@ function formatBypassResult({ title, links, remaining, unlimited }) {
     return msg;
 }
 
-function formatBypassFailed(url, remaining, unlimited) {
+function formatBypassFailed(urls, remaining, unlimited) {
     let msg = '❌ *BYPASS FAILED*\n\n';
-    msg += `> ${url.slice(0, 90)}\n\n`;
-    msg += 'The link may be dead, password-protected, or not supported yet.\n';
+    for (const u of urls.slice(0, 3)) msg += `> ${u.slice(0, 90)}\n`;
+    if (urls.length > 3) msg += `> … +${urls.length - 3} more\n`;
+    msg += '\nThe link(s) may be dead, password-protected, or not supported yet.\n';
     msg += '_Supported: HDHub4u, HubCloud, HubDrive, HubCDN pages._\n\n';
     msg += '─────────────────────────────\n';
     if (unlimited) {
@@ -104,10 +133,10 @@ function formatBypassFailed(url, remaining, unlimited) {
     return msg;
 }
 
-function formatGdflixLimited(url) {
+function formatGdflixLimited(urls) {
     let msg = '⛔ *GDFLIX NOT SUPPORTED*\n\n';
-    msg += `> ${url.slice(0, 90)}\n\n`;
-    msg += 'GDFlix pages are protected by Cloudflare Turnstile — the bot cannot solve it.\n';
+    for (const u of urls.slice(0, 3)) msg += `> ${u.slice(0, 90)}\n`;
+    msg += '\nGDFlix pages are protected by Cloudflare Turnstile — the bot cannot solve it.\n';
     msg += '_Only their Telegram mirror exists, which is excluded._\n\n';
     msg += '💡 *Instead:* open the movie page on HDHub4u and send me its\n';
     msg += 'HubCloud / HubDrive / HubCDN link — those bypass fully.\n';
@@ -139,8 +168,12 @@ class BypassController {
         this.bypassLimits = null;
         /** @type {Map<string, { unlimited: boolean, at: number }>} */
         this._unlimitedCache = new Map();
-        /** one in-flight bypass per user per chat */
+        /** one in-flight command per user per chat */
         this._activeByUser = new Map();
+        /** global in-flight link slots (shared across all users/groups) */
+        this._globalActive = 0;
+        this._globalMax = Math.max(1, config.MOVIE_BYPASS_MAX_CONCURRENT || 6);
+        this._waiters = [];
     }
 
     async init() {
@@ -149,7 +182,23 @@ class BypassController {
             { user_id: 1, date: 1 },
             { unique: true, name: 'user_daily_bypass_limit' }
         );
-        logger.info('Bypass controller ready');
+        logger.info(`Bypass controller ready (global concurrency: ${this._globalMax})`);
+    }
+
+    /** Acquire one global link slot (fair FIFO). Resolves when acquired. */
+    async _acquireSlot() {
+        if (this._globalActive < this._globalMax) {
+            this._globalActive += 1;
+            return;
+        }
+        await new Promise((resolveWait) => this._waiters.push(resolveWait));
+        this._globalActive += 1;
+    }
+
+    _releaseSlot() {
+        this._globalActive = Math.max(0, this._globalActive - 1);
+        const next = this._waiters.shift();
+        if (next) next();
     }
 
     getTodayDateStr() {
@@ -164,11 +213,11 @@ class BypassController {
         return record?.count || 0;
     }
 
-    async incrementBypassCount(userId) {
+    async incrementBypassCount(userId, by = 1) {
         const normalized = normalizePhoneNumber(userId);
         await this.bypassLimits.updateOne(
             { user_id: normalized, date: this.getTodayDateStr() },
-            { $inc: { count: 1 }, $setOnInsert: { user_id: normalized, date: this.getTodayDateStr() } },
+            { $inc: { count: by }, $setOnInsert: { user_id: normalized, date: this.getTodayDateStr() } },
             { upsert: true }
         );
     }
@@ -207,11 +256,36 @@ class BypassController {
         }, delayMs).unref?.();
     }
 
+    /** Wrap one link's resolution in the global slot limiter. */
+    async _resolveWithSlot(urls, budgetMs) {
+        const slots = Math.min(urls.length, Math.max(1, this._globalMax - this._globalActive));
+        // bypassManyLinks already pools internally; the global limiter throttles
+        // how many links from THIS command may run right now.
+        await this._acquireSlots(urls.length);
+        try {
+            return await bypassManyLinks(urls, {
+                budgetMs,
+                maxLinks: BYPASS_MAX_LINKS,
+                concurrency: this._globalMax,
+            });
+        } finally {
+            this._releaseSlots(urls.length);
+        }
+    }
+
+    async _acquireSlots(n) {
+        for (let i = 0; i < n; i++) await this._acquireSlot();
+    }
+
+    _releaseSlots(n) {
+        for (let i = 0; i < n; i++) this._releaseSlot();
+    }
+
     /**
-     * Core flow: progress message → bypass → shorten → edit to results.
+     * Core flow: progress message → parallel pool resolve → shorten → edit to results.
      * @returns {Promise<boolean>} true when a bypass was attempted
      */
-    async _runBypass(sock, chatId, senderJid, url, originalMsg, pushName = '') {
+    async _runBypass(sock, chatId, senderJid, urlsIn, originalMsg, pushName = '') {
         void pushName;
         const userKey = `${chatId}:${normalizePhoneNumber(senderJid)}`;
         if (this._activeByUser.has(userKey)) {
@@ -223,7 +297,9 @@ class BypassController {
 
         const unlimited = await this.isUnlimitedUser(senderJid);
         let used = unlimited ? 0 : await this.getUserBypassCount(senderJid);
-        if (!unlimited && used >= BYPASS_DAILY_LIMIT) {
+        const freeLeft = Math.max(0, BYPASS_DAILY_LIMIT - used);
+
+        if (!unlimited && freeLeft <= 0) {
             const sent = await sendAndDelete(sock, chatId, { text: formatLimitReached() }, originalMsg);
             this.scheduleDelete(sock, chatId, sent?.key);
             if (existsSync(QR_IMAGE_PATH)) {
@@ -238,13 +314,16 @@ class BypassController {
             return true;
         }
 
+        // Free users: only attempt as many links as they have credits for
+        const urls = unlimited ? urlsIn.slice(0, BYPASS_MAX_LINKS) : urlsIn.slice(0, freeLeft);
+        if (!urls.length) return true;
+
         this._activeByUser.set(userKey, true);
         const run = (async () => {
-            // 1) progress message (edited in place through the flow)
             let progressMsg = null;
             try {
                 progressMsg = await sock.sendMessage(chatId, {
-                    text: formatBypassProgress(url, 15, '🔎 Fetching page…'),
+                    text: formatBypassProgress(urls, 15, '🔎 Fetching pages…'),
                 }, { quoted: originalMsg });
             } catch {}
 
@@ -253,7 +332,7 @@ class BypassController {
                 try {
                     await messageQueue.enqueue(chatId, async () => {
                         await sock.sendMessage(resolveOutboundJid(progressMsg.key, chatId), {
-                            text: formatBypassProgress(url, percent, note),
+                            text: formatBypassProgress(urls, percent, note),
                             edit: normalizeOwnMessageKey(progressMsg.key, chatId),
                             linkPreview: false,
                         });
@@ -264,57 +343,57 @@ class BypassController {
             try {
                 await editProgress(35, '🔓 Unlocking download servers…');
 
-                // 2) resolve
-                const { title, links } = await bypassSingleLink(url, BYPASS_BUDGET_MS);
-                if (!links.length) {
-                    const isGdflix = /gdflix\./i.test(url);
+                // 2) resolve all links through the shared parallel pool
+                const resolved = await this._resolveWithSlot(urls, BYPASS_BUDGET_MS);
+                const ok = resolved.filter((r) => r.links.length > 0);
+                const gdflixTried = urls.filter((u) => /gdflix\./i.test(u));
+
+                if (!ok.length) {
                     if (progressMsg?.key) {
                         try {
                             await sock.sendMessage(resolveOutboundJid(progressMsg.key, chatId), {
-                                text: isGdflix
-                                    ? formatGdflixLimited(url)
-                                    : formatBypassFailed(url, Math.max(0, BYPASS_DAILY_LIMIT - used), unlimited),
+                                text: gdflixTried.length && ok.length === 0
+                                    ? formatGdflixLimited(gdflixTried)
+                                    : formatBypassFailed(urls, Math.max(0, BYPASS_DAILY_LIMIT - used), unlimited),
                                 edit: normalizeOwnMessageKey(progressMsg.key, chatId),
                                 linkPreview: false,
                             });
                             this.scheduleDelete(sock, chatId, progressMsg.key);
                         } catch {}
                     }
-                    logger.info(`Bypass failed for ${url}`);
+                    logger.info(`Bypass failed for ${urls.length} link(s)`);
                     return;
                 }
 
                 await editProgress(70, '🔗 Creating short links…');
 
-                // 3) short links (expiring /d/ + display shortener) — same as /movie
-                try {
-                    await Promise.all(links.map(async (l) => {
-                        try {
-                            const minted = await shortLinkService.shorten(l.url);
-                            const expiring = typeof minted === 'string' ? minted : minted?.url;
-                            if (!expiring) return;
-                            const display = await urlShortener._toDisplayShortUrl(expiring);
-                            l.url = display || expiring;
-                        } catch (e) {
-                            logger.warn(`Bypass short link failed for one server: ${e?.message || e}`);
-                        }
-                    }));
-                } catch (err) {
-                    logger.warn(`Bypass short-link step failed (sending direct): ${err?.message || err}`);
-                }
+                // 3) short links for every direct link (parallel)
+                const allLinks = [];
+                for (const r of ok) allLinks.push(...r.links);
+                await Promise.all(allLinks.map(async (l) => {
+                    try {
+                        const minted = await shortLinkService.shorten(l.url);
+                        const expiring = typeof minted === 'string' ? minted : minted?.url;
+                        if (!expiring) return;
+                        const display = await urlShortener._toDisplayShortUrl(expiring);
+                        l.url = display || expiring;
+                    } catch (e) {
+                        logger.warn(`Bypass short link failed for one server: ${e?.message || e}`);
+                    }
+                }));
 
                 await editProgress(100, '✅ Done');
 
-                // 4) consume one credit
-                if (!unlimited) {
-                    await this.incrementBypassCount(senderJid);
-                    used += 1;
+                // 4) consume one credit per successful link
+                const successCount = ok.length;
+                if (!unlimited && successCount > 0) {
+                    await this.incrementBypassCount(senderJid, successCount);
+                    used += successCount;
                 }
 
                 // 5) replace progress with results
                 const resultText = formatBypassResult({
-                    title,
-                    links,
+                    results: ok,
                     remaining: Math.max(0, BYPASS_DAILY_LIMIT - used),
                     unlimited,
                 });
@@ -336,7 +415,7 @@ class BypassController {
                 if (progressMsg?.key) {
                     try {
                         await sock.sendMessage(resolveOutboundJid(progressMsg.key, chatId), {
-                            text: formatBypassFailed(url, Math.max(0, BYPASS_DAILY_LIMIT - used), unlimited),
+                            text: formatBypassFailed(urls, Math.max(0, BYPASS_DAILY_LIMIT - used), unlimited),
                             edit: normalizeOwnMessageKey(progressMsg.key, chatId),
                             linkPreview: false,
                         });
@@ -352,21 +431,23 @@ class BypassController {
         return true;
     }
 
-    /** /bypass <link> */
+    /** /bypass <link> [link2 ...] */
     async handleBypass(sock, chatId, senderJid, args, originalMsg = null, pushName = '') {
-        const url = (args || []).find((a) => /^https?:\/\//i.test(a)) || extractBypassableUrl((args || []).join(' '));
-        if (!url) {
+        const urls = extractBypassableUrls((args || []).join(' '));
+        if (!urls.length) {
             await sendAndDelete(sock, chatId, {
                 text:
                     '🔗 *LINK BYPASSER*\n\n' +
-                    'Usage: `/bypass <link>`\n\n' +
+                    'Usage: `/bypass <link>` — or up to ' + BYPASS_MAX_LINKS + ' links at once:\n' +
+                    '`/bypass <link1> <link2> <link3>`\n\n' +
                     '_Supported links:_\n' +
                     '• HDHub4u / HubCloud / HubDrive / HubCDN\n\n' +
                     `_Free limit: ${BYPASS_DAILY_LIMIT} bypasses/day · admins & premium: unlimited_`,
             }, originalMsg);
             return;
         }
-        if (!isBypassableUrl(url)) {
+        const unsupported = urls.filter((u) => !isBypassableUrl(u));
+        if (unsupported.length === urls.length) {
             await sendAndDelete(sock, chatId, {
                 text:
                     '⚠️ That link is not a supported bypass target.\n\n' +
@@ -374,7 +455,8 @@ class BypassController {
             }, originalMsg);
             return;
         }
-        await this._runBypass(sock, chatId, senderJid, url, originalMsg, pushName);
+        const supported = urls.filter((u) => isBypassableUrl(u)).slice(0, BYPASS_MAX_LINKS);
+        await this._runBypass(sock, chatId, senderJid, supported, originalMsg, pushName);
     }
 
     /** /bypasson — staff only (enforced by registry role) */
@@ -392,7 +474,7 @@ class BypassController {
                 '✅ *BYPASS AUTO ON* ✅\n' +
                 '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
                 `📢 *Group:* ${groupName}\n\n` +
-                '🔗 HDHub4u / HubCloud / GDFlix links pasted here are bypassed automatically.\n' +
+                '🔗 HDHub4u / HubCloud links pasted here are bypassed automatically.\n' +
                 '_No command needed — just send the link._\n\n' +
                 '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' +
                 '💡 Use `/bypassoff` to turn this off',
@@ -438,9 +520,8 @@ class BypassController {
         }
         const url = extractBypassableUrl(text);
         if (!url) return;
-        // ignore our own outgoing text — caller filters, but double-check
         if (msg?.key?.fromMe) return;
-        void this._runBypass(sock, chatId, senderJid, url, msg, msg?.pushName || '');
+        void this._runBypass(sock, chatId, senderJid, [url], msg, msg?.pushName || '');
     }
 }
 

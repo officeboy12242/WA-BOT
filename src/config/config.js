@@ -68,6 +68,8 @@ export const config = {
     MOVIE_HD_BYPASS_ENABLED: process.env.MOVIE_HD_BYPASS_ENABLED !== 'false',
     MOVIE_HD_BYPASS_BUDGET_MS: Math.max(4_000, parseInt(process.env.MOVIE_HD_BYPASS_BUDGET_MS, 10) || 12_000),
     MOVIE_HD_BYPASS_MAX_LINKS: Math.max(1, parseInt(process.env.MOVIE_HD_BYPASS_MAX_LINKS, 10) || 10),
+    MOVIE_BYPASS_MAX_CONCURRENT: Math.max(1, parseInt(process.env.MOVIE_BYPASS_MAX_CONCURRENT, 10) || 6),
+    MOVIE_BYPASS_MAX_LINKS: Math.max(1, parseInt(process.env.MOVIE_BYPASS_MAX_LINKS, 10) || 5),
     /** Movie search — Drive/AtoZ timeout (ms). */
     MOVIE_SECONDARY_TIMEOUT_MS: Math.max(4_000, parseInt(process.env.MOVIE_SECONDARY_TIMEOUT_MS, 10) || 8_000),
     /** Movie search — max ms to shorten links before sending results. */

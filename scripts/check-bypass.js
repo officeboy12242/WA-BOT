@@ -70,8 +70,24 @@ assert.match(limitText, /Want unlimited bypasses/, 'upsell expected in limit mes
 sent.length = 0;
 const before = await bypassController.getUserBypassCount(TEST_USER);
 await bypassController.handleBypass(sock, CHAT, SENDER, ['https://example.com/not-supported'], null, 'Tester');
-assert.ok(/not a supported bypass target/.test(sent[0]?.content?.text || ''), 'unsupported rejection expected');
+assert.ok(/LINK BYPASSER|not a supported bypass target/.test(sent[0]?.content?.text || ''), 'unsupported/usage reply expected');
 assert.equal(await bypassController.getUserBypassCount(TEST_USER), before, 'unsupported link must not consume credit');
+
+// 5) multi-link: two links in one command resolve in parallel (credits consumed = successes)
+await bypassController.bypassLimits.deleteMany({ user_id: TEST_USER });
+sent.length = 0;
+await bypassController.handleBypass(sock, CHAT, SENDER, [
+    'https://hubcdn.wiki/file/1EQ9EwtzCY4v4WaKSzwNy3b3N',
+    'https://hubcloud.ist/drive/elc6e7ce2x1yffr',
+], null, 'Tester');
+const multiText = sent.map((x) => x.content.text || '').find((t) => /BYPASS SUCCESSFUL|BYPASS FAILED/.test(t));
+assert.ok(multiText, 'multi-link result expected');
+if (/BYPASS SUCCESSFUL/.test(multiText)) {
+    assert.match(multiText, /link\(s\) · \d+ direct links/, 'multi-link summary line expected');
+    const used = await bypassController.getUserBypassCount(TEST_USER);
+    assert.ok(used >= 1 && used <= 2, `credits consumed should be 1 or 2, got ${used}`);
+    assert.match(multiText, new RegExp('Bypasses left today: \*' + (3 - used) + '\*'), 'remaining reflects successes');
+}
 
 // cleanup test data
 await bypassController.bypassLimits.deleteMany({ user_id: TEST_USER });

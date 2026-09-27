@@ -1,17 +1,22 @@
 /**
  * HDHub4u direct-link bypass service.
  *
- * Resolves intermediate pages returned by the movies API into DIRECT download links:
- *   - hubcdn.<tld>/file/ID  → reurl b64 → hubcdn.club/dl/?link=<R2 r2.dev URL>
+ * Resolves intermediate pages into DIRECT download links:
+ *   - hubcdn.<tld>/file/ID  → reurl (b64 or ad-wrapped ?r=) → hubcdn.club/dl/?link=<R2>
  *   - hubcloud.<tld>/drive/ID → a#download → gamerxyt.com/hubcloud.php → final servers
  *   - hubdrive.<tld>/file/ID → hubcloud /drive page (same as above)
- *   - nexdrive.you/genxfmID → ad-lockered (fast-dl.one / vgmlinks) — best-effort only
+ *   - nexdrive.you/genxfmID → ad-lockered — best-effort only
+ *   - gdflix.<tld>/file/ID  → pre-generated mirrors only (DDL is Turnstile-gated)
  *
- * Final servers surfaced (per user request): R2 cloudflarestorage (presigned + r2.dev),
- * 10Gbps, FSLv2, FuckingFast. Telegram and PixelDrain mirrors are skipped.
+ * Final servers surfaced: R2 cloudflarestorage (presigned + r2.dev), 10Gbps,
+ * FSLv2, FuckingFast, PixelDrain (/bypass command only). Telegram mirrors skipped.
  *
- * All links are resolved IN PARALLEL with a hard time budget so multi-link bypasses
- * never add meaningful latency to a search.
+ * Architecture:
+ *   - Pure extractors (*FromHtml) take already-fetched HTML — the /bypass path
+ *     fetches each page ONCE (title + links from the same response).
+ *   - bypassManyLinks runs a worker pool of parallel "agents", one per link,
+ *     shared across ALL users/chats → multi-group, multi-user requests are
+ *     handled concurrently without stampeding the target hosts.
  */
 
 import axios from 'axios';
@@ -20,7 +25,6 @@ import { config } from '../config/config.js';
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
 
-// Keep unknown-origin redirects from leaking our request beyond the target host
 const DEFAULT_HEADERS = {
     'User-Agent': UA,
     Referer: 'https://new6.hdhub4u.cl/',
@@ -63,7 +67,7 @@ async function fetchPage(urlStr, { referer, timeoutMs } = {}) {
 /** Server classification from the hubcloud.php page (order = user priority). */
 const SERVER_PATTERNS = [
     { key: 'r2', re: /\.cloudflarestorage\.com/i, label: 'R2 ⚡' },
-    { key: '10gbps', re: /gpdl\.hubcloud\.|10\s*gbps/i, label: '10Gbps ⚡' },
+    { key: '10gbps', re: /gpdl\.hubcloud\.|pixel\.hubcloud\.|10\s*gbps/i, label: '10Gbps ⚡' },
     { key: 'fslv2', re: /lenin\.buzz|fslv?2/i, label: 'FSLv2 ⚡' },
     { key: 'pixeldrain', re: /pixeldrain/i, label: 'PixelDrain' },
     { key: 'fuckingfast', re: /fuckingfast/i, label: 'FuckingFast' },
@@ -90,10 +94,7 @@ function dedupeLinks(links) {
     return out;
 }
 
-/**
- * hubcloud.php page → [{ label, url, serverKey }] for R2/10Gbps/PixelDrain/FuckingFast.
- * (Telegram / Watch Online / login / ads are filtered out.)
- */
+/** Extract classified server links from a hubcloud.php-style page. */
 function extractServerLinks(html) {
     const out = [];
     const anchorRe = /<a[^>]+href="(https?:\/\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
@@ -106,14 +107,19 @@ function extractServerLinks(html) {
         const cls = classifyServer(href, text);
         if (!cls) continue;
         const pd = href.match(/pixeldrain\.[a-z.]+\/u\/([A-Za-z0-9]+)/i);
-        out.push({ label: cls.label, serverKey: cls.key, url: pd ? 'https://pixeldrain.com/api/file/' + pd[1] : href });
+        out.push({
+            label: cls.label,
+            serverKey: cls.key,
+            url: pd ? `https://pixeldrain.com/api/file/${pd[1]}` : href,
+        });
     }
     return out;
 }
 
-/** hubcdn.wiki /file/ page → direct R2 r2.dev URL hidden in the reurl param. */
-async function bypassHubcdn(urlStr, timeoutMs) {
-    const html = await fetchPage(urlStr, { timeoutMs });
+/* ────────────────────────── Pure HTML extractors ────────────────────────── */
+
+/** hubcdn /file/ page HTML → direct R2 URL from the reurl param (both forms). */
+function bypassHubcdnFromHtml(html) {
     const m = html.match(/reurl\s*=\s*"([^"]+)"/i);
     if (!m) return [];
     let decoded = m[1];
@@ -132,38 +138,93 @@ async function bypassHubcdn(urlStr, timeoutMs) {
     return [{ label: 'R2 ⚡', serverKey: 'r2', url: target }];
 }
 
-/** hubcloud.ist /drive/ page → the gamerxyt.com hubcloud.php URL. */
-async function hubcloudDriveToPhp(urlStr, timeoutMs) {
-    const html = await fetchPage(urlStr, { timeoutMs });
+/** GDFlix page mirrors, classified by host. */
+function gdflixMirrorLabel(urlStr) {
+    if (/instant\.busycdn/i.test(urlStr)) return 'Instant ⚡';
+    if (/filesgram/i.test(urlStr)) return 'Filesgram';
+    if (/multiup/i.test(urlStr)) return 'MultiUp';
+    if (/drivebot\.sbs/i.test(urlStr)) return 'DriveBot';
+    if (/tgredirect/i.test(urlStr)) return 'Telegram';
+    return '';
+}
+
+/** GDFlix /file/ HTML → pre-generated mirror links (DDL itself is Turnstile-gated). */
+function bypassGdflixFromHtml(html) {
+    const out = [];
+    const seen = new Set();
+    const push = (u) => {
+        const label = gdflixMirrorLabel(u);
+        if (!label) return;
+        const k = u.replace(/[?#].*$/, '');
+        if (!seen.has(k)) {
+            seen.add(k);
+            out.push({ label, serverKey: 'mirror', url: u });
+        }
+    };
+    for (const m of html.matchAll(/(?:data-url|data-href|href)="(https?:[^"\s]+)"/gi)) push(m[1]);
+    for (const m of html.matchAll(/["'](https?:[^"'\s]*?(?:busycdn|filesgram|multiup|drivebot|tgredirect)[^"'\s]*)["']/gi)) push(m[1]);
+    return out;
+}
+
+/** hubcloud.php URL from a /drive/ page's a#download anchor (or null). */
+function downloadAnchorFromHtml(html, pageUrl) {
     const dn = html.match(/<a[^>]+id="download"[^>]+href="([^"]+)"/i);
     if (!dn) return null;
     const href = dn[1];
     if (!/^https?:\/\//i.test(href)) {
-        return new URL(href, urlStr).href;
+        try {
+            return new URL(href, pageUrl).href;
+        } catch {
+            return null;
+        }
     }
     return href;
 }
 
-/** hubdrive.pics /file/ page → hubcloud /drive/ URL (or direct server links). */
-async function bypassHubdrive(urlStr, timeoutMs) {
-    const html = await fetchPage(urlStr, { timeoutMs });
-    const out = [];
-    // Some hubdrive pages already embed server links directly
-    out.push(...extractServerLinks(html));
-    if (out.length) return out;
-
+/** hubdrive HTML → direct servers (some pages embed them) or the hubcloud.php hop. */
+async function bypassHubdriveFromHtml(html, pageUrl, timeoutMs) {
+    const direct = extractServerLinks(html);
+    if (direct.length) return direct;
     const m = html.match(/href="(https?:\/\/[^"]*hubcloud[^"]*)"/i);
     if (m) {
         const php = await hubcloudDriveToPhp(m[1], timeoutMs);
         if (php) {
             const html2 = await fetchPage(php, { referer: m[1], timeoutMs });
-            out.push(...extractServerLinks(html2));
+            return extractServerLinks(html2);
         }
     }
-    return out;
+    return [];
 }
 
-/** hubcloud.ist /drive/ → hubcloud.php → final servers (2 hops). */
+/** hubcloud /drive/ HTML → hubcloud.php fetch → final servers. */
+async function bypassHubcloudFromHtml(html, pageUrl, timeoutMs) {
+    const php = downloadAnchorFromHtml(html, pageUrl);
+    if (!php) return [];
+    const html2 = await fetchPage(php, { referer: pageUrl, timeoutMs });
+    return extractServerLinks(html2);
+}
+
+/* ────────────────── Fetching wrappers (enrichment path) ────────────────── */
+
+/** hubcdn /file/ page → R2 link. */
+async function bypassHubcdn(urlStr, timeoutMs) {
+    const html = await fetchPage(urlStr, { timeoutMs });
+    return bypassHubcdnFromHtml(html);
+}
+
+/** hubcloud.ist /drive/ page → the gamerxyt.com hubcloud.php URL (or null). */
+async function hubcloudDriveToPhp(urlStr, timeoutMs) {
+    const html = await fetchPage(urlStr, { timeoutMs });
+    return downloadAnchorFromHtml(html, urlStr);
+}
+
+/** hubdrive /file/ page → direct servers. */
+async function bypassHubdrive(urlStr, timeoutMs) {
+    const html = await fetchPage(urlStr, { timeoutMs });
+    return bypassHubdriveFromHtml(html, urlStr, timeoutMs);
+}
+
+/** hubcloud /drive/ page → final servers. */
 async function bypassHubcloud(urlStr, timeoutMs) {
     const php = await hubcloudDriveToPhp(urlStr, timeoutMs);
     if (!php) return [];
@@ -172,8 +233,8 @@ async function bypassHubcloud(urlStr, timeoutMs) {
 }
 
 /**
- * nexdrive.you pages are ad-lockered (fast-dl.one / vgmlinks). Best-effort:
- * only return a link when the page embeds one of our target servers directly.
+ * nexdrive.you pages are ad-lockered. Best-effort: only return a link when the
+ * page embeds one of our target servers directly.
  */
 async function bypassNexdrive(urlStr, timeoutMs) {
     const html = await fetchPage(urlStr, { timeoutMs });
@@ -185,13 +246,13 @@ function perAttemptTimeout(budgetMs) {
     return Math.max(3_000, Math.min(9_000, Math.floor(budgetMs)));
 }
 
-/** True when the URL host is one of the HDHub-family file pages we can bypass. */
+/** True when the URL host is one of the bypassable file-page families. */
 export function isBypassableUrl(urlStr) {
     const host = hostOf(String(urlStr || ''));
     return /(^|\.)(hubcloud|hubdrive|hubcdn|hubstream|hdhubdrive|driveseed|hdstream4u|nexdrive|gdflix)\.[a-z.]+$/i.test(host);
 }
 
-/** Resolve ONE intermediate link to direct server links. Never throws. */
+/** Resolve ONE intermediate link to direct server links (enrichment path). Never throws. */
 async function resolveLink(rawUrl, budgetMs) {
     const urlStr = canonicalizeHost(String(rawUrl || ''));
     if (!/^https?:\/\//i.test(urlStr)) return [];
@@ -199,8 +260,11 @@ async function resolveLink(rawUrl, budgetMs) {
     const host = hostOf(urlStr);
 
     try {
-        if (/gdflix\./i.test(host)) return await bypassGdflix(urlStr, timeoutMs);
-                if (/hubcdn\./i.test(host)) return await bypassHubcdn(urlStr, timeoutMs);
+        if (/gdflix\./i.test(host)) {
+            const html = await fetchPage(urlStr, { timeoutMs });
+            return bypassGdflixFromHtml(html);
+        }
+        if (/hubcdn\./i.test(host)) return await bypassHubcdn(urlStr, timeoutMs);
         if (/hubdrive\.|hdstream4u\./i.test(host)) return await bypassHubdrive(urlStr, timeoutMs);
         if (/hubcloud\.|hubstream\.|driveseed\./i.test(host)) return await bypassHubcloud(urlStr, timeoutMs);
         if (/nexdrive\./i.test(host)) return await bypassNexdrive(urlStr, timeoutMs);
@@ -213,67 +277,93 @@ async function resolveLink(rawUrl, budgetMs) {
     }
 }
 
-/** GDFlix page mirrors, classified by host. */
-function gdflixMirrorLabel(urlStr) {
-    if (/instant\.busycdn/i.test(urlStr)) return 'Instant ⚡';
-    if (/filesgram/i.test(urlStr)) return 'Filesgram';
-    if (/multiup/i.test(urlStr)) return 'MultiUp';
-    if (/drivebot\.sbs/i.test(urlStr)) return 'DriveBot';
-    if (/tgredirect/i.test(urlStr)) return 'Telegram';
-    return '';
-}
-
-/** GDFlix /file/ pages expose pre-generated mirror links (no captcha needed). */
-async function bypassGdflix(urlStr, timeoutMs) {
-    const html = await fetchPage(urlStr, { timeoutMs });
-    const out = [];
-    const seen = new Set();
-    const push = (u) => {
-        const label = gdflixMirrorLabel(u);
-        if (!label) return;
-        const k = u.replace(/[?#].*$/, '');
-        if (!seen.has(k)) { seen.add(k); out.push({ label, serverKey: 'mirror', url: u }); }
-    };
-    for (const m of html.matchAll(/(?:data-url|data-href|href)="(https?:[^"\s]+)"/gi)) push(m[1]);
-    for (const m of html.matchAll(/["'](https?:[^"'\s]*?(?:busycdn|filesgram|multiup|drivebot|tgredirect)[^"'\s]*)["']/gi)) push(m[1]);
-    return out;
-}
+/* ─────────────────────── /bypass command (user path) ────────────────────── */
 
 /**
- * Resolve ONE user-supplied link to direct server links (for the /bypass command).
- * Handles hubcloud-family pages and GDFlix file pages. Never throws.
+ * Resolve ONE user-supplied link: ONE page fetch yields title AND links.
  * @returns {Promise<{title:string, links:Array<{label:string, url:string}>}>}
  */
 export async function bypassSingleLink(rawUrl, budgetMs = 12_000) {
     const urlStr = canonicalizeHost(String(rawUrl || '').trim());
     if (!/^https?:\/\//i.test(urlStr)) return { title: '', links: [] };
-    const timeoutMs = perAttemptTimeout(budgetMs);
-    const host = hostOf(urlStr);
+    return resolveForUser(urlStr, hostOf(urlStr), perAttemptTimeout(budgetMs));
+}
+
+/**
+ * One user-facing resolution: fetch the page once, extract title AND links,
+ * routing by host family. Never throws.
+ */
+async function resolveForUser(urlStr, host, timeoutMs) {
+    let html = '';
     try {
-        let links = [];
-        if (/gdflix\./i.test(host)) {
-            links = await bypassGdflix(urlStr, timeoutMs);
-        } else if (/hubcdn\./i.test(host)) {
-            links = await bypassHubcdn(urlStr, timeoutMs);
-        } else if (/hubdrive\.|hdstream4u\./i.test(host)) {
-            links = await bypassHubdrive(urlStr, timeoutMs);
-        } else {
-            links = await bypassHubcloud(urlStr, timeoutMs);
-        }
-        links = dedupeLinks(links);
-        // Page title for a nice header (best-effort)
-        let title = '';
-        try {
-            const html = await fetchPage(urlStr, { timeoutMs: Math.min(timeoutMs, 5000) });
-            const m = html.match(/<title[^>]*>([^<]+)<\/title>/i);
-            if (m) title = m[1].trim().slice(0, 90);
-        } catch {}
-        return { title, links };
+        html = await fetchPage(urlStr, { timeoutMs });
     } catch (err) {
-        logger.warn(`[HdHubBypass] single-link ${host} failed: ${err?.message || err}`);
+        logger.warn(`[HdHubBypass] ${host} page fetch failed: ${err?.message || err}`);
         return { title: '', links: [] };
     }
+    const title = (html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1] || '').trim().slice(0, 90);
+    let links = [];
+    try {
+        if (/gdflix\./i.test(host)) {
+            links = bypassGdflixFromHtml(html);
+        } else if (/hubcdn\./i.test(host)) {
+            links = bypassHubcdnFromHtml(html);
+        } else if (/hubdrive\.|hdstream4u\./i.test(host)) {
+            links = await bypassHubdriveFromHtml(html, urlStr, timeoutMs);
+        } else {
+            links = await bypassHubcloudFromHtml(html, urlStr, timeoutMs);
+        }
+    } catch (err) {
+        logger.warn(`[HdHubBypass] ${host} extract failed: ${err?.message || err}`);
+        links = [];
+    }
+    return { title, links: dedupeLinks(links) };
 }
+
+/**
+ * Bypass several user links at once — a pool of parallel "agents", one per link.
+ * Cross-user concurrency is bounded by this pool, so many users bypassing at
+ * the same time share the same workers instead of stampeding the targets.
+ * @param {string[]} urls user-supplied links
+ * @param {object} [opts]
+ * @param {number} [opts.maxLinks] hard cap per command (default 5)
+ * @param {number} [opts.budgetMs] per-link resolution budget
+ * @param {number} [opts.concurrency] worker pool size (default config.MOVIE_BYPASS_MAX_CONCURRENT || 6)
+ * @returns {Promise<Array<{url:string, title:string, links:Array<{label:string,url:string}>}>>}
+ */
+export async function bypassManyLinks(urls, { maxLinks = 5, budgetMs = 12_000, concurrency } = {}) {
+    const seen = new Set();
+    const list = [];
+    for (const u of urls || []) {
+        const s = canonicalizeHost(String(u || '').trim());
+        if (!/^https?:\/\//i.test(s) || seen.has(s)) continue;
+        seen.add(s);
+        list.push(s);
+    }
+    const capped = list.slice(0, maxLinks);
+    if (!capped.length) return [];
+    const workers = Math.max(1, Math.min(capped.length, concurrency || config.MOVIE_BYPASS_MAX_CONCURRENT || 6));
+    const results = new Array(capped.length).fill(null);
+    let idx = 0;
+    const pool = Array.from({ length: workers }, async () => {
+        while (idx < capped.length) {
+            const i = idx++;
+            const urlStr = capped[i];
+            try {
+                results[i] = {
+                    url: urlStr,
+                    ...(await resolveForUser(urlStr, hostOf(urlStr), perAttemptTimeout(budgetMs))),
+                };
+            } catch (err) {
+                logger.warn(`[HdHubBypass] pool link failed (${hostOf(urlStr)}): ${err?.message || err}`);
+            }
+        }
+    });
+    await Promise.all(pool);
+    return results.filter(Boolean);
+}
+
+/* ────────────────── Enrichment path (/movie vault & HDHub rows) ────────────────── */
 
 /**
  * Resolve many intermediate links at once (parallel) under a shared time budget.
@@ -322,8 +412,6 @@ export async function resolveManyLinks(urls, { budgetMs = 12_000, maxLinks = 8 }
 /**
  * Rewrite one result's links: attach direct server links to each quality entry,
  * keep unresolved links (other sources' mirrors, telegram, pages) untouched.
- * @param {object} result { title, source, links }
- * @param {Map<string, {label,url}[]>} resolvedMap
  */
 export function applyResolvedLinks(result, resolvedMap) {
     if (!result || !resolvedMap?.size || !Array.isArray(result.links)) return result;
@@ -352,9 +440,8 @@ export function hasBypassableLinks(result) {
     return Array.isArray(result?.links) && result.links.some((l) => isBypassableUrl(String(l?.url || '')));
 }
 
-
 // Labels produced by the bypass for direct server links
-const SERVER_LABEL_RE = /(R2|10Gbps|FSLv2|FuckingFast)/i;
+const SERVER_LABEL_RE = /(R2|10Gbps|FSLv2|FuckingFast|PixelDrain)/i;
 
 /**
  * Cap an enriched link list for WhatsApp: at most 2 direct servers per quality,
@@ -393,8 +480,6 @@ function trimEnrichedLinks(links, { maxPerResult = 14, maxServersPerQuality = 2 
  * Enrich ANY set of grouped results (HDHub API rows, ProNooB Drive vault rows, ...)
  * by resolving bypassable intermediate links in ONE parallel batch under budgetMs.
  * Non-bypassable results/links pass through untouched. Never throws.
- * @param {Array<{title:string, source?:string, links:Array<{url:string}>}>} results
- * @param {number} budgetMs wall-clock budget for the whole batch
  */
 export async function enrichResultsWithDirectLinks(results, budgetMs = 8_000) {
     try {
