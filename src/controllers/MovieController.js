@@ -1387,12 +1387,14 @@ class MovieController {
         const { vaultResults, hdResults, driveResults, atozResults } = await this._searchMovieSources(query, null);
 
         let results = [];
-        if (vaultResults.length > 0) results.push(...vaultResults);
         if (hdResults.length > 0) results.push(...hdResults);
         if (driveResults.length > 0) results.push(...driveResults);
         if (atozResults.length > 0) results.push(...atozResults);
 
         results = rankMovieResults(results, query);
+        // Vault results always lead, regardless of relevance score (deduped by title).
+        const seen = new Set(vaultResults.map((r) => cleanTitle(r.title).toLowerCase()));
+        results = [...vaultResults, ...results.filter((r) => !seen.has(cleanTitle(r.title).toLowerCase()))];
         const sources = [...new Set(results.map((r) => r.source).filter(Boolean))];
         return { results, sources, hdResults, driveResults, atozResults };
     }
@@ -1535,12 +1537,14 @@ class MovieController {
         const { vaultResults, hdResults, driveResults, atozResults } = await this._searchMovieSources(query, progress);
 
         let results = [];
-        if (vaultResults.length > 0) results.push(...vaultResults);
         if (hdResults.length > 0) results.push(...hdResults);
         if (driveResults.length > 0) results.push(...driveResults);
         if (atozResults.length > 0) results.push(...atozResults);
 
         results = rankMovieResults(results, query);
+        // Vault results always lead, regardless of relevance score (deduped by title).
+        const seen = new Set(vaultResults.map((r) => cleanTitle(r.title).toLowerCase()));
+        results = [...vaultResults, ...results.filter((r) => !seen.has(cleanTitle(r.title).toLowerCase()))];
         const sources = [...new Set(results.map((r) => r.source).filter(Boolean))];
         return { results, sources, hdResults, driveResults, atozResults };
     }
