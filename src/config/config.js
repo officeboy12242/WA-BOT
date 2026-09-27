@@ -62,9 +62,12 @@ export const config = {
     JOB_WORKER_CONCURRENCY: Math.max(1, Math.min(4, parseInt(process.env.JOB_WORKER_CONCURRENCY, 10) || 2)),
     TMDB_API_KEY: process.env.TMDB_API_KEY?.trim() || '',
     /** HDHub4u movie search API (free-udemy-courses-bot). */
-    MOVIES_API_URL: process.env.MOVIES_API_URL?.trim() || 'https://free-udemy-courses-bot.onrender.com/api/movies',
+    MOVIES_API_URL: process.env.MOVIES_API_URL?.trim() || 'https://free-udemy-courses-bot2.onrender.com/api/movies',
     /** Movie search — HDHub API timeout (ms). */
     MOVIE_HD_TIMEOUT_MS: Math.max(12_000, parseInt(process.env.MOVIE_HD_TIMEOUT_MS, 10) || 28_000),
+    MOVIE_HD_BYPASS_ENABLED: process.env.MOVIE_HD_BYPASS_ENABLED !== 'false',
+    MOVIE_HD_BYPASS_BUDGET_MS: Math.max(4_000, parseInt(process.env.MOVIE_HD_BYPASS_BUDGET_MS, 10) || 12_000),
+    MOVIE_HD_BYPASS_MAX_LINKS: Math.max(1, parseInt(process.env.MOVIE_HD_BYPASS_MAX_LINKS, 10) || 10),
     /** Movie search — Drive/AtoZ timeout (ms). */
     MOVIE_SECONDARY_TIMEOUT_MS: Math.max(4_000, parseInt(process.env.MOVIE_SECONDARY_TIMEOUT_MS, 10) || 8_000),
     /** Movie search — max ms to shorten links before sending results. */

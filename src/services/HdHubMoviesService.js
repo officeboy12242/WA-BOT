@@ -1,15 +1,24 @@
 /**
  * HDHub4u movie search via free-udemy-courses-bot API.
  * Each result groups all quality/download links under one title (like AtoZ).
+ *
+ * HDHub4u rows are additionally ENRICHED: intermediate pages (hubcloud/hubcdn/
+ * hubdrive) are bypassed into direct server links (R2 / 10Gbps / FSLv2 /
+ * PixelDrain / FuckingFast) by HdHubBypassService — in parallel, time-budgeted.
  */
 
 import axios from 'axios';
 import { logger } from '../utils/logger.js';
 import { audioFromFilename } from '../utils/movieMetadata.js';
 import { config } from '../config/config.js';
+import { resolveManyLinks, applyResolvedLinks } from './HdHubBypassService.js';
 
-const DEFAULT_API_URL = 'https://free-udemy-courses-bot.onrender.com/api/movies';
+const DEFAULT_API_URL = 'https://free-udemy-courses-bot2.onrender.com/api/movies';
 const SEARCH_CACHE_MAX = 80;
+
+// Labels produced by the bypass for direct server links
+const SERVER_LABEL_RE = /(R2|10Gbps|FSLv2|FuckingFast)/i;
+const REAL_SIZE_RE = /\d+(?:\.\d+)?\s*(?:gb|mb)\b/i;
 
 function sourceLabel(raw) {
     const s = String(raw || 'hdhub4u').trim();
@@ -66,6 +75,41 @@ function prioritizeLinks(links, maxLinks, { preferNullDrop = false } = {}) {
     const zipTake = Math.min(zips.length, maxLinks);
     const episodeTake = Math.max(0, maxLinks - zipTake);
     return [...zips.slice(0, zipTake), ...rest.slice(0, episodeTake)];
+}
+
+/**
+ * Cap an enriched link list for WhatsApp:
+ *  - at most `maxServersPerQuality` direct server links per quality entry
+ *  - exact-duplicate URLs dropped
+ *  - total capped at `maxPerResult` (server links win over leftover mirrors)
+ */
+function trimEnrichedLinks(links, { maxPerResult = 14, maxServersPerQuality = 2 } = {}) {
+    const seen = new Set();
+    const out = [];
+    let runCount = 0; // consecutive server links for the current quality entry
+
+    for (const link of links) {
+        const key = String(link?.url || '');
+        if (!key || seen.has(key)) continue;
+        const isServer = SERVER_LABEL_RE.test(String(link?.label || ''));
+
+        if (isServer) {
+            runCount += 1;
+            if (runCount > maxServersPerQuality) continue;
+        } else {
+            runCount = 0;
+        }
+
+        seen.add(key);
+        out.push(link);
+    }
+
+    if (out.length <= maxPerResult) return out;
+
+    // Over cap: keep all direct server links first, then mirrors in original order
+    const servers = out.filter((l) => SERVER_LABEL_RE.test(String(l?.label || '')));
+    const mirrors = out.filter((l) => !SERVER_LABEL_RE.test(String(l?.label || '')));
+    return [...servers.slice(0, maxPerResult), ...mirrors].slice(0, maxPerResult);
 }
 
 function formatLinkEntry(link) {
@@ -138,6 +182,55 @@ class HdHubMoviesService {
     _apiBase() {
         const raw = config.MOVIES_API_URL || DEFAULT_API_URL;
         return String(raw).replace(/\/$/, '');
+    }
+
+    /**
+     * Resolve intermediate pages (hubcloud/hubcdn/hubdrive) into direct server
+     * links (R2 / 10Gbps / FSLv2 / FuckingFast) in one parallel batch.
+     * `budgetMs` is the max wall-clock this may add (already clamped by caller).
+     */
+    async _enrichWithDirectLinks(results, budgetMs) {
+        if (config.MOVIE_HD_BYPASS_ENABLED === false) return results;
+        if (!budgetMs || budgetMs < 4_000) return results;
+        if (!Array.isArray(results) || !results.length) return results;
+
+        const maxLinks = config.MOVIE_HD_BYPASS_MAX_LINKS || 10;
+
+        // Collect intermediate links from HDHub-family rows only (by URL host)
+        const candidates = [];
+        for (const r of results) {
+            for (const l of r.links || []) {
+                const u = String(l?.url || '');
+                if (/https?:\/\/[^/]*(hubcloud|hubcdn|hubdrive|hubstream|driveseed|nexdrive)\./i.test(u)) {
+                    candidates.push(u);
+                }
+            }
+        }
+        if (!candidates.length) return results;
+
+        const started = Date.now();
+        try {
+            const resolvedMap = await resolveManyLinks(candidates, { budgetMs, maxLinks });
+            if (!resolvedMap.size) return results;
+
+            let touched = false;
+            const enriched = results.map((r) => {
+                const urls = (r.links || []).map((l) => String(l?.url || ''));
+                if (!urls.some((u) => resolvedMap.has(u))) return r;
+                touched = true;
+                const withDirect = applyResolvedLinks(r, resolvedMap);
+                return { ...withDirect, links: trimEnrichedLinks(withDirect.links) };
+            });
+
+            logger.info(
+                `HDHub bypass: ${resolvedMap.size} link(s) → direct in ${Date.now() - started}ms`
+                + `${touched ? '' : ' (no rows matched)'}`,
+            );
+            return touched ? enriched : results;
+        } catch (err) {
+            logger.warn(`HDHub bypass failed (non-fatal): ${err?.message || err}`);
+            return results;
+        }
     }
 
     async _fetchJson(urlStr) {
@@ -216,17 +309,29 @@ class HdHubMoviesService {
                 const started = Date.now();
                 const payload = await this._fetchJson(apiUrl);
                 const normalized = this._normalizeResults(payload);
-                const results = normalized.slice(0, maxResults);
-                logger.info(
-                    `HDHub API: ${results.length}/${normalized.length} normalized from ` +
-                        `${payload?.count ?? payload?.results?.length ?? 0} raw for "${q}" ` +
-                        `in ${Date.now() - started}ms (attempt ${attempt})`,
+                let results = normalized.slice(0, maxResults);
+
+                // Bypass intermediate pages — but never blow the overall HD timeout:
+                // budget = min(bypass budget, remaining time before controller cancels us)
+                const elapsed = Date.now() - started;
+                const remainMs = this._requestTimeoutMs() - elapsed - 1_500;
+                const bypassBudget = Math.min(
+                    config.MOVIE_HD_BYPASS_BUDGET_MS || 8_000,
+                    Math.max(0, remainMs),
                 );
-                if (normalized.length) {
+                results = await this._enrichWithDirectLinks(results, bypassBudget);
+
+                logger.info(
+                    `HDHub API: ${results.length}/${normalized.length} normalized from `
+                        + `${payload?.count ?? payload?.results?.length ?? 0} raw for "${q}" `
+                        + `in ${Date.now() - started}ms (attempt ${attempt})`,
+                );
+                if (results.length) {
                     if (this._searchCache.size >= SEARCH_CACHE_MAX) {
                         this._searchCache.delete(this._searchCache.keys().next().value);
                     }
-                    this._searchCache.set(cacheKey, { results: normalized, at: Date.now() });
+                    // Cache the enriched results so cache hits serve direct links too
+                    this._searchCache.set(cacheKey, { results, at: Date.now() });
                 }
                 return results;
             } catch (err) {
@@ -247,7 +352,7 @@ class HdHubMoviesService {
 
     async _headCheck() {
         try {
-            const base = this._apiBase().replace(/\/api\/movies$/, '') || 'https://free-udemy-courses-bot.onrender.com';
+            const base = this._apiBase().replace(/\/api\/movies$/, '') || 'https://free-udemy-courses-bot2.onrender.com';
             const res = await axios.head(base, { timeout: 8000, validateStatus: () => true });
             return res.status >= 200 && res.status < 400;
         } catch {
