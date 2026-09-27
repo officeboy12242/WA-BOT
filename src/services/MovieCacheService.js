@@ -123,6 +123,8 @@ class MovieCacheService {
             this.collection.createIndex({ hit_count: -1 }, { name: 'movie_cache_hits' }),
         ]);
 
+        await this._ensureTtlIndex();
+
         // Backfill compact keys for older vault rows
         const missing = await this.collection
             .find({ query_compact: { $exists: false } }, { projection: { query_key: 1 } })
@@ -145,6 +147,40 @@ class MovieCacheService {
 
     _staleMs() {
         return config.MOVIE_CACHE_STALE_MS || 7 * 24 * 60 * 60 * 1000;
+    }
+
+    _ttlMs() {
+        return config.MOVIE_CACHE_TTL_MS || 2 * 24 * 60 * 60 * 1000;
+    }
+
+    /**
+     * Hard 2-day expiry via MongoDB TTL index on expire_at.
+     * The TTL monitor runs every ~60s and removes expired docs server-side,
+     * so the vault self-clears even across restarts and idle periods.
+     */
+    async _ensureTtlIndex() {
+        try {
+            const ttlSeconds = Math.floor(this._ttlMs() / 1000);
+            await this.collection.createIndex(
+                { expire_at: 1 },
+                { name: 'movie_cache_ttl', expireAfterSeconds: 0, sparse: true },
+            );
+            // Stamp expire_at on legacy rows that predate the TTL field.
+            const res = await this.collection.updateMany(
+                { expire_at: { $exists: false } },
+                [{ $set: {
+                    expire_at: { $add: [
+                        { $toDate: '$last_fetched_at' },
+                        ttlSeconds * 1000,
+                    ] },
+                } }],
+            );
+            if (res?.modifiedCount) {
+                logger.info(`Movie vault TTL: stamped expire_at on ${res.modifiedCount} legacy row(s)`);
+            }
+        } catch (err) {
+            logger.warn(`Movie vault TTL index setup failed: ${err?.message || err}`);
+        }
     }
 
     _revalidateMs() {
@@ -254,6 +290,7 @@ class MovieCacheService {
                     sources: mergedSources,
                     result_count: merged.length,
                     last_fetched_at: now,
+                    expire_at: new Date(now.getTime() + this._ttlMs()),
                 },
                 $setOnInsert: {
                     created_at: now,

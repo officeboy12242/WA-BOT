@@ -75,6 +75,8 @@ export const config = {
     MOVIE_CACHE_FRESH_MS: Math.max(60_000, parseInt(process.env.MOVIE_CACHE_FRESH_MS, 10) || 24 * 60 * 60 * 1000),
     /** Vault stale grace — serve instantly if APIs fail (default 7d). */
     MOVIE_CACHE_STALE_MS: Math.max(3600_000, parseInt(process.env.MOVIE_CACHE_STALE_MS, 10) || 7 * 24 * 60 * 60 * 1000),
+    /** Hard auto-expiry: Mongo TTL deletes cache entries this long after last refresh (default 2 days). */
+    MOVIE_CACHE_TTL_MS: Math.max(3600_000, parseInt(process.env.MOVIE_CACHE_TTL_MS, 10) || 2 * 24 * 60 * 60 * 1000),
     /** Background refresh vault after this age (default 6h) while still serving cached links. */
     MOVIE_CACHE_REVALIDATE_MS: Math.max(60_000, parseInt(process.env.MOVIE_CACHE_REVALIDATE_MS, 10) || 6 * 60 * 60 * 1000),
     /** Nightly pre-warm top searches into vault (default 3:30 AM IST). */
