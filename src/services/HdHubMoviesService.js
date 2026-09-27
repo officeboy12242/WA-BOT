@@ -11,7 +11,7 @@ import axios from 'axios';
 import { logger } from '../utils/logger.js';
 import { audioFromFilename } from '../utils/movieMetadata.js';
 import { config } from '../config/config.js';
-import { resolveManyLinks, applyResolvedLinks } from './HdHubBypassService.js';
+import { enrichResultsWithDirectLinks } from './HdHubBypassService.js';
 
 const DEFAULT_API_URL = 'https://free-udemy-courses-bot2.onrender.com/api/movies';
 const SEARCH_CACHE_MAX = 80;
@@ -186,51 +186,10 @@ class HdHubMoviesService {
 
     /**
      * Resolve intermediate pages (hubcloud/hubcdn/hubdrive) into direct server
-     * links (R2 / 10Gbps / FSLv2 / FuckingFast) in one parallel batch.
-     * `budgetMs` is the max wall-clock this may add (already clamped by caller).
+     * links (R2 / 10Gbps / FSLv2 / FuckingFast) via the shared bypass enricher.
      */
     async _enrichWithDirectLinks(results, budgetMs) {
-        if (config.MOVIE_HD_BYPASS_ENABLED === false) return results;
-        if (!budgetMs || budgetMs < 4_000) return results;
-        if (!Array.isArray(results) || !results.length) return results;
-
-        const maxLinks = config.MOVIE_HD_BYPASS_MAX_LINKS || 10;
-
-        // Collect intermediate links from HDHub-family rows only (by URL host)
-        const candidates = [];
-        for (const r of results) {
-            for (const l of r.links || []) {
-                const u = String(l?.url || '');
-                if (/https?:\/\/[^/]*(hubcloud|hubcdn|hubdrive|hubstream|driveseed|nexdrive)\./i.test(u)) {
-                    candidates.push(u);
-                }
-            }
-        }
-        if (!candidates.length) return results;
-
-        const started = Date.now();
-        try {
-            const resolvedMap = await resolveManyLinks(candidates, { budgetMs, maxLinks });
-            if (!resolvedMap.size) return results;
-
-            let touched = false;
-            const enriched = results.map((r) => {
-                const urls = (r.links || []).map((l) => String(l?.url || ''));
-                if (!urls.some((u) => resolvedMap.has(u))) return r;
-                touched = true;
-                const withDirect = applyResolvedLinks(r, resolvedMap);
-                return { ...withDirect, links: trimEnrichedLinks(withDirect.links) };
-            });
-
-            logger.info(
-                `HDHub bypass: ${resolvedMap.size} link(s) → direct in ${Date.now() - started}ms`
-                + `${touched ? '' : ' (no rows matched)'}`,
-            );
-            return touched ? enriched : results;
-        } catch (err) {
-            logger.warn(`HDHub bypass failed (non-fatal): ${err?.message || err}`);
-            return results;
-        }
+        return enrichResultsWithDirectLinks(results, budgetMs);
     }
 
     async _fetchJson(urlStr) {

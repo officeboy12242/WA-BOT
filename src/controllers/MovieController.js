@@ -13,6 +13,7 @@ import { config } from '../config/config.js';
 import { atozService } from '../services/AtoZService.js';
 import { hdHubMoviesService } from '../services/HdHubMoviesService.js';
 import { mkvbaseService } from '../services/MkvbaseService.js';
+import { enrichResultsWithDirectLinks } from '../services/HdHubBypassService.js';
 import { pronoobDriveService } from '../services/PronoobDriveService.js';
 import { movieCacheService, cloneMovieResults } from '../services/MovieCacheService.js';
 import { urlShortener } from '../utils/urlShortener.js';
@@ -1303,9 +1304,14 @@ class MovieController {
 
         // Our own Mkvbase vault API first — pinned above scraped sources in results.
         const vaultTimeout = config.MKVBASE_TIMEOUT_MS || 6_000;
+        // Vault links are hubcloud/drive pages — bypass them into direct
+        // server links (R2/10Gbps/FSLv2/FuckingFast) in the same parallel batch.
+        const vaultBypassBudgetMs = config.MOVIE_HD_BYPASS_BUDGET_MS || 8_000;
         const vaultPromise = this._withTimeout(
-            mkvbaseService.searchMovies(query, 10),
-            vaultTimeout,
+            mkvbaseService
+                .searchMovies(query, 10)
+                .then((rows) => enrichResultsWithDirectLinks(rows, vaultBypassBudgetMs)),
+            vaultTimeout + vaultBypassBudgetMs,
             'vault timeout',
         ).catch((err) => {
             logger.warn(`Mkvbase vault search failed for "${query}": ${err?.message || err}`);

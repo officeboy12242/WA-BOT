@@ -16,6 +16,7 @@
 
 import axios from 'axios';
 import { logger } from '../utils/logger.js';
+import { config } from '../config/config.js';
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
 
@@ -278,5 +279,89 @@ export function hasBypassableLinks(result) {
     return Array.isArray(result?.links) && result.links.some((l) => isBypassableUrl(String(l?.url || '')));
 }
 
-export const hdHubBypassService = { resolveManyLinks, applyResolvedLinks, hasBypassableLinks };
+
+// Labels produced by the bypass for direct server links
+const SERVER_LABEL_RE = /(R2|10Gbps|FSLv2|FuckingFast)/i;
+
+/**
+ * Cap an enriched link list for WhatsApp: at most 2 direct servers per quality,
+ * dedupe exact URLs, cap total per result (servers win over mirrors).
+ */
+function trimEnrichedLinks(links, { maxPerResult = 14, maxServersPerQuality = 2 } = {}) {
+    const seen = new Set();
+    const out = [];
+    let runCount = 0; // consecutive server links for the current quality entry
+
+    for (const link of links) {
+        const key = String(link?.url || '');
+        if (!key || seen.has(key)) continue;
+        const isServer = SERVER_LABEL_RE.test(String(link?.label || ''));
+
+        if (isServer) {
+            runCount += 1;
+            if (runCount > maxServersPerQuality) continue;
+        } else {
+            runCount = 0;
+        }
+
+        seen.add(key);
+        out.push(link);
+    }
+
+    if (out.length <= maxPerResult) return out;
+
+    // Over cap: keep all direct server links first, then mirrors in original order
+    const servers = out.filter((l) => SERVER_LABEL_RE.test(String(l?.label || '')));
+    const mirrors = out.filter((l) => !SERVER_LABEL_RE.test(String(l?.label || '')));
+    return [...servers.slice(0, maxPerResult), ...mirrors].slice(0, maxPerResult);
+}
+
+/**
+ * Enrich ANY set of grouped results (HDHub API rows, ProNooB Drive vault rows, ...)
+ * by resolving bypassable intermediate links in ONE parallel batch under budgetMs.
+ * Non-bypassable results/links pass through untouched. Never throws.
+ * @param {Array<{title:string, source?:string, links:Array<{url:string}>}>} results
+ * @param {number} budgetMs wall-clock budget for the whole batch
+ */
+export async function enrichResultsWithDirectLinks(results, budgetMs = 8_000) {
+    try {
+        if (config.MOVIE_HD_BYPASS_ENABLED === false) return results;
+        if (!budgetMs || budgetMs < 4_000) return results;
+        if (!Array.isArray(results) || !results.length) return results;
+
+        const maxLinks = config.MOVIE_HD_BYPASS_MAX_LINKS || 10;
+        const candidates = [];
+        for (const r of results) {
+            for (const l of r?.links || []) {
+                const u = String(l?.url || '');
+                if (isBypassableUrl(u)) candidates.push(u);
+            }
+        }
+        if (!candidates.length) return results;
+
+        const started = Date.now();
+        const resolvedMap = await resolveManyLinks(candidates, { budgetMs, maxLinks });
+        if (!resolvedMap.size) return results;
+
+        let touched = false;
+        const enriched = results.map((r) => {
+            const urls = (r?.links || []).map((l) => String(l?.url || ''));
+            if (!urls.some((u) => resolvedMap.has(u))) return r;
+            touched = true;
+            const withDirect = applyResolvedLinks(r, resolvedMap);
+            return { ...withDirect, links: trimEnrichedLinks(withDirect.links) };
+        });
+
+        logger.info(
+            `[HdHubBypass] enriched ${resolvedMap.size} link(s) across ${enriched.length} result(s)`
+            + ` in ${Date.now() - started}ms`,
+        );
+        return touched ? enriched : results;
+    } catch (err) {
+        logger.warn(`[HdHubBypass] enrich failed (non-fatal): ${err?.message || err}`);
+        return results;
+    }
+}
+
+export const hdHubBypassService = { resolveManyLinks, applyResolvedLinks, enrichResultsWithDirectLinks, hasBypassableLinks };
 export default hdHubBypassService;
