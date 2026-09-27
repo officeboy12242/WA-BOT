@@ -97,21 +97,36 @@ function dedupeLinks(links) {
 /** Extract classified server links from a hubcloud.php-style page. */
 function extractServerLinks(html) {
     const out = [];
-    const anchorRe = /<a[^>]+href="(https?:\/\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
-    let m;
-    while ((m = anchorRe.exec(html)) !== null) {
-        const href = m[1];
-        const text = m[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    const anchorRe = /<a\b[^>]*href="https?:[^"]*"[^>]*>/gi;
+    const seen = new Set();
+    let am;
+    let dbgCount = 0;
+    while ((am = anchorRe.exec(html)) !== null) {
+        dbgCount++;
+        const tag = am[0];
+        const hrefM = tag.match(/href="(https?:[^"]+)"/i);
+        if (!hrefM) continue;
+        const href = hrefM[1];
+        const afterOpen = html.slice(am.index + tag.length);
+        const closeIdx = afterOpen.search(/<\/a>/i);
+        const text = closeIdx === -1 ? '' : afterOpen.slice(0, closeIdx).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
         if (/t\.me|telegram|watch online|login|winexch|a-ads|snvhost|tinyurl|one\.one\.one|google\./i.test(`${href} ${text}`)) continue;
         if (/hubcloud\.[a-z.]+\/(drive|tg)\//i.test(href)) continue;
         const cls = classifyServer(href, text);
         if (!cls) continue;
-        const pd = href.match(/pixeldrain\.[a-z.]+\/u\/([A-Za-z0-9]+)/i);
-        out.push({
-            label: cls.label,
-            serverKey: cls.key,
-            url: pd ? `https://pixeldrain.com/api/file/${pd[1]}` : href,
-        });
+        const idM = tag.match(/id="([^"]+)"/i);
+        let finalUrl = href;
+        if (idM) {
+            const BS = String.fromCharCode(92);
+            const esc = idM[1].replace(/[^a-zA-Z0-9]/g, (c) => BS + c);
+            const jsRe = new RegExp(`var${BS}s+${BS}w+${BS}s*=${BS}s*"([^"]+)"[^<]*document${BS}.getElementById${BS}("${esc}"${BS})`, 'i');
+            const js = html.match(jsRe);
+            if (js && /^https?:\/\//i.test(js[1])) finalUrl = js[1];
+        }
+        const k = finalUrl.replace(/[?#].*$/, '');
+        if (seen.has(k)) continue;
+        seen.add(k);
+        out.push({ label: cls.label, serverKey: cls.key, url: finalUrl });
     }
     return out;
 }
