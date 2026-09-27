@@ -798,6 +798,36 @@ class GroupManager {
         );
     }
 
+    async setBypassAuto(groupId, groupName, enabled, activatedBy) {
+        await this.groups.updateOne(
+            { group_id: groupId },
+            {
+                $set: {
+                    group_name: groupName,
+                    bypass_auto: enabled,
+                    bypass_auto_by: activatedBy,
+                    bypass_auto_at: new Date(),
+                },
+                $setOnInsert: {
+                    group_id: groupId,
+                    is_active: false,
+                },
+            },
+            { upsert: true }
+        );
+        logger.info(
+            `${enabled ? '🔗 Bypass auto ON' : '🔗 Bypass auto OFF'}: ${groupName} (${groupId}) by ${activatedBy}`
+        );
+    }
+
+    async isBypassAutoEnabled(groupId) {
+        const row = await this.groups.findOne(
+            { group_id: groupId },
+            { projection: { bypass_auto: 1 } }
+        );
+        return row?.bypass_auto === true;
+    }
+
     async isInstaAutoEnabled(groupId) {
         const row = await this.groups.findOne(
             { group_id: groupId },

@@ -353,6 +353,28 @@ export const COMMAND_REGISTRY = [
         category: 'fun',
     },
     {
+        names: ['/bypass'],
+        key: 'bypass',
+        scope: 'any',
+        role: 'anyone',
+        help: 'Bypass HDHub4u/HubCloud/GDFlix link to direct download links (3/day free)',
+        category: 'movie',
+    },
+    {
+        names: ['/bypasson'],
+        key: 'bypasson',
+        scope: 'group_only',
+        role: 'staff',
+        help: 'Auto-bypass HDHub4u/HubCloud/GDFlix links pasted in this group',
+    },
+    {
+        names: ['/bypassoff'],
+        key: 'bypassoff',
+        scope: 'group_only',
+        role: 'staff',
+        help: 'Stop auto-bypass in this group',
+    },
+    {
         names: ['/instaon'],
         key: 'instaon',
         scope: 'group_only',
@@ -930,6 +952,7 @@ export const HELP_CATEGORY = {
     movie: 'movie', upcoming: 'movie', genre: 'movie',
 
     // Media download / convert
+    bypass: 'movie',
     insta: 'media', tw: 'media', toimg: 'media',
 
     // Stickers
@@ -956,6 +979,7 @@ export const HELP_CATEGORY = {
     courson: 'group', coursesoff: 'group', githubon: 'group', githuboff: 'group',
     awesomeon: 'group', awesomeoff: 'group', aiupdateson: 'group', aiupdatesoff: 'group',
     instaon: 'group', instaoff: 'group',
+    bypasson: 'group', bypassoff: 'group',
     stickeron: 'group', stickeroff: 'group', movieon: 'group', movieoff: 'group',
     summaryon: 'group', summaryoff: 'group', autochat: 'group', trending: 'group', setwc: 'group',
 

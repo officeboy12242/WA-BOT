@@ -65,6 +65,7 @@ const SERVER_PATTERNS = [
     { key: 'r2', re: /\.cloudflarestorage\.com/i, label: 'R2 ⚡' },
     { key: '10gbps', re: /gpdl\.hubcloud\.|10\s*gbps/i, label: '10Gbps ⚡' },
     { key: 'fslv2', re: /lenin\.buzz|fslv?2/i, label: 'FSLv2 ⚡' },
+    { key: 'pixeldrain', re: /pixeldrain/i, label: 'PixelDrain' },
     { key: 'fuckingfast', re: /fuckingfast/i, label: 'FuckingFast' },
 ];
 
@@ -104,20 +105,29 @@ function extractServerLinks(html) {
         if (/hubcloud\.[a-z.]+\/(drive|tg)\//i.test(href)) continue;
         const cls = classifyServer(href, text);
         if (!cls) continue;
-        out.push({ label: cls.label, serverKey: cls.key, url: href });
+        const pd = href.match(/pixeldrain\.[a-z.]+\/u\/([A-Za-z0-9]+)/i);
+        out.push({ label: cls.label, serverKey: cls.key, url: pd ? 'https://pixeldrain.com/api/file/' + pd[1] : href });
     }
     return out;
 }
 
-/** hubcdn.wiki /file/ page → direct R2 r2.dev URL hidden in the reurl b64 param. */
+/** hubcdn.wiki /file/ page → direct R2 r2.dev URL hidden in the reurl param. */
 async function bypassHubcdn(urlStr, timeoutMs) {
     const html = await fetchPage(urlStr, { timeoutMs });
     const m = html.match(/reurl\s*=\s*"([^"]+)"/i);
     if (!m) return [];
-    const decoded = decodeB64(m[1]);
-    // decoded: https://hubcdn.club/dl/?link=https%3A%2F%2Fpub-….r2.dev%2F<hex>
-    const inner = decoded.match(/link=([^&]+)/i);
-    const target = inner ? decodeURIComponent(inner[1]) : (decoded.startsWith('http') ? decoded : '');
+    let decoded = m[1];
+    // Form A (old): reurl is itself base64 of hubcdn.club/dl/?link=<R2>
+    if (!/^https?:\/\//i.test(decoded)) decoded = decodeB64(decoded);
+    // Form B (new): reurl is an ad-wrapped URL like https://inventoryidea.com/?r=<b64>
+    const rParam = decoded.match(/[?&]r=([A-Za-z0-9+/=_-]+)/);
+    if (rParam) {
+        const inner = decodeB64(rParam[1]);
+        if (inner.startsWith('http')) decoded = inner;
+    }
+    // unwrap the final hop: hubcdn.club/dl/?link=<R2 url>
+    const linkParam = decoded.match(/[?&]link=([^&]+)/i);
+    const target = linkParam ? decodeURIComponent(linkParam[1]) : (decoded.startsWith('http') ? decoded : '');
     if (!target || !/^https?:\/\//i.test(target)) return [];
     return [{ label: 'R2 ⚡', serverKey: 'r2', url: target }];
 }
@@ -178,7 +188,7 @@ function perAttemptTimeout(budgetMs) {
 /** True when the URL host is one of the HDHub-family file pages we can bypass. */
 export function isBypassableUrl(urlStr) {
     const host = hostOf(String(urlStr || ''));
-    return /(^|\.)(hubcloud|hubdrive|hubcdn|hubstream|hdhubdrive|driveseed|hdstream4u|nexdrive)\.[a-z.]+$/i.test(host);
+    return /(^|\.)(hubcloud|hubdrive|hubcdn|hubstream|hdhubdrive|driveseed|hdstream4u|nexdrive|gdflix)\.[a-z.]+$/i.test(host);
 }
 
 /** Resolve ONE intermediate link to direct server links. Never throws. */
@@ -189,7 +199,8 @@ async function resolveLink(rawUrl, budgetMs) {
     const host = hostOf(urlStr);
 
     try {
-        if (/hubcdn\./i.test(host)) return await bypassHubcdn(urlStr, timeoutMs);
+        if (/gdflix\./i.test(host)) return await bypassGdflix(urlStr, timeoutMs);
+                if (/hubcdn\./i.test(host)) return await bypassHubcdn(urlStr, timeoutMs);
         if (/hubdrive\.|hdstream4u\./i.test(host)) return await bypassHubdrive(urlStr, timeoutMs);
         if (/hubcloud\.|hubstream\.|driveseed\./i.test(host)) return await bypassHubcloud(urlStr, timeoutMs);
         if (/nexdrive\./i.test(host)) return await bypassNexdrive(urlStr, timeoutMs);
@@ -199,6 +210,68 @@ async function resolveLink(rawUrl, budgetMs) {
     } catch (err) {
         logger.warn(`[HdHubBypass] ${host} resolve failed: ${err?.message || err}`);
         return [];
+    }
+}
+
+/** GDFlix page mirrors, classified by host. */
+function gdflixMirrorLabel(urlStr) {
+    if (/instant\.busycdn/i.test(urlStr)) return 'Instant ⚡';
+    if (/filesgram/i.test(urlStr)) return 'Filesgram';
+    if (/multiup/i.test(urlStr)) return 'MultiUp';
+    if (/drivebot\.sbs/i.test(urlStr)) return 'DriveBot';
+    if (/tgredirect/i.test(urlStr)) return 'Telegram';
+    return '';
+}
+
+/** GDFlix /file/ pages expose pre-generated mirror links (no captcha needed). */
+async function bypassGdflix(urlStr, timeoutMs) {
+    const html = await fetchPage(urlStr, { timeoutMs });
+    const out = [];
+    const seen = new Set();
+    const push = (u) => {
+        const label = gdflixMirrorLabel(u);
+        if (!label) return;
+        const k = u.replace(/[?#].*$/, '');
+        if (!seen.has(k)) { seen.add(k); out.push({ label, serverKey: 'mirror', url: u }); }
+    };
+    for (const m of html.matchAll(/(?:data-url|data-href|href)="(https?:[^"\s]+)"/gi)) push(m[1]);
+    for (const m of html.matchAll(/["'](https?:[^"'\s]*?(?:busycdn|filesgram|multiup|drivebot|tgredirect)[^"'\s]*)["']/gi)) push(m[1]);
+    return out;
+}
+
+/**
+ * Resolve ONE user-supplied link to direct server links (for the /bypass command).
+ * Handles hubcloud-family pages and GDFlix file pages. Never throws.
+ * @returns {Promise<{title:string, links:Array<{label:string, url:string}>}>}
+ */
+export async function bypassSingleLink(rawUrl, budgetMs = 12_000) {
+    const urlStr = canonicalizeHost(String(rawUrl || '').trim());
+    if (!/^https?:\/\//i.test(urlStr)) return { title: '', links: [] };
+    const timeoutMs = perAttemptTimeout(budgetMs);
+    const host = hostOf(urlStr);
+    try {
+        let links = [];
+        if (/gdflix\./i.test(host)) {
+            links = await bypassGdflix(urlStr, timeoutMs);
+        } else if (/hubcdn\./i.test(host)) {
+            links = await bypassHubcdn(urlStr, timeoutMs);
+        } else if (/hubdrive\.|hdstream4u\./i.test(host)) {
+            links = await bypassHubdrive(urlStr, timeoutMs);
+        } else {
+            links = await bypassHubcloud(urlStr, timeoutMs);
+        }
+        links = dedupeLinks(links);
+        // Page title for a nice header (best-effort)
+        let title = '';
+        try {
+            const html = await fetchPage(urlStr, { timeoutMs: Math.min(timeoutMs, 5000) });
+            const m = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+            if (m) title = m[1].trim().slice(0, 90);
+        } catch {}
+        return { title, links };
+    } catch (err) {
+        logger.warn(`[HdHubBypass] single-link ${host} failed: ${err?.message || err}`);
+        return { title: '', links: [] };
     }
 }
 

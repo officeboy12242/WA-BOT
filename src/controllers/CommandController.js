@@ -5,6 +5,7 @@
 
 import path from 'path';
 import { checkCommandAccess } from '../commands/access.js';
+import { bypassController } from './BypassController.js';
 import { findCommand, findSimilarCommands } from '../commands/registry.js';
 import { ImportProgressStore } from '../utils/importProgress.js';
 import { logger } from '../utils/logger.js';
@@ -795,6 +796,12 @@ export const COMMAND_HANDLERS = {
     cmdlog: ({ sock, chatId, args, ctx }) => handleCmdLog(sock, chatId, args, ctx),
 
     /* ── Instagram / News / Movie ── */
+    bypass: ({ sock, chatId, senderJid, args, originalMsg, pushName }) =>
+        bypassController.handleBypass(sock, chatId, senderJid, args, originalMsg, pushName),
+    bypasson: ({ sock, chatId, senderJid, originalMsg }) =>
+        bypassController.handleBypassOn(sock, chatId, senderJid, originalMsg),
+    bypassoff: ({ sock, chatId, senderJid, originalMsg }) =>
+        bypassController.handleBypassOff(sock, chatId, senderJid, originalMsg),
     insta: ({ sock, chatId, args, originalMsg }) => _handleInsta(sock, chatId, args, originalMsg),
     tw: ({ sock, chatId, args, originalMsg }) => handleTwitter(sock, chatId, args, originalMsg),
     news: ({ sock, chatId, senderJid, ctx }) => handleNews(sock, chatId, senderJid, ctx),
@@ -1054,6 +1061,17 @@ class CommandController {
 
     setInterviewQuestionService(interviewQuestionService) {
         this.interviewQuestionService = interviewQuestionService;
+    }
+
+    async initBypassController(mongoDb, groupManager) {
+        bypassController.mongoDb = mongoDb;
+        bypassController.groupManager = groupManager;
+        await bypassController.init();
+        this.bypassController = bypassController;
+    }
+
+    getBypassController() {
+        return this.bypassController || bypassController;
     }
 
     setBanDatabase(banDatabase) {

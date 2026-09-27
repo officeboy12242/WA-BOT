@@ -313,6 +313,9 @@ class WhatsAppCourseBot {
             this.commandController.setInterviewQuestionService(this.interviewQuestionService);
             this.commandController.setBanDatabase(this.banDatabase);
 
+            // /bypass — HDHub/HubCloud/GDFlix link bypasser (own limits collection)
+            await this.commandController.initBypassController(mongoDb, this.groupManager);
+
             // /roast — AI resume roast (multi-LLM router, per-phone daily limit)
             this.roastService = new RoastService({ mongoDb, cfg: config });
             await this.roastService.init();

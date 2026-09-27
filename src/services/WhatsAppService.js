@@ -842,6 +842,17 @@ class WhatsAppService {
                     });
             }
         }
+        // /bypasson groups: auto-bypass the first HDHub/HubCloud/GDFlix link
+        if (textForUrls.length > 0 && this.commandController?.getBypassController) {
+            const bc = this.commandController.getBypassController();
+            if (bc?.maybeAutoBypass) {
+                void bc
+                    .maybeAutoBypass(this.sock, chatId, textForUrls, senderJid, msg)
+                    .catch((err) => {
+                        logger.error('Bypass auto error:', err?.message || err);
+                    });
+            }
+        }
     }
 
     /** DMs: always auto. Groups: only when `/instaon` was used in that group. */
