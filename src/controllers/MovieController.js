@@ -24,7 +24,7 @@ import { audioFromFilename, qualityFromFilename } from '../utils/movieMetadata.j
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const QR_IMAGE_PATH = resolve(__dirname, '../../assets/payment_qr.jpg');
 
-const DAILY_LIMIT = 5;
+const DAILY_LIMIT = config.MOVIE_DAILY_LIMIT || 3;
 const AUTO_DELETE_MS = 5 * 60 * 60 * 1000; // 5 hours
 const SUMMARY_HOUR = 23;
 const SUMMARY_MINUTE = 55;

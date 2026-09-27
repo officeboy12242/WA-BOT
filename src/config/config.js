@@ -52,6 +52,8 @@ export const config = {
     SELF_PING_URL: process.env.SELF_PING_URL?.trim() || '',
     /** How often to self-ping (ms, default 4 min — well under the 1h free-tier idle timer). */
     SELF_PING_INTERVAL_MS: Math.max(60_000, parseInt(process.env.SELF_PING_INTERVAL_MS, 10) || 4 * 60_000),
+    /** Free-tier /movie searches per user per day (default 3). */
+    MOVIE_DAILY_LIMIT: Math.max(1, parseInt(process.env.MOVIE_DAILY_LIMIT, 10) || 3),
     /** Global concurrent /movie searches (1–6). */
     MOVIE_SEARCH_MAX: Math.max(1, Math.min(6, parseInt(process.env.MOVIE_SEARCH_MAX, 10) || 4)),
     /** Redis URL enables BullMQ job driver (Phase 3). */
