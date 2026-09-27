@@ -1472,10 +1472,17 @@ class MovieController {
         if (cached?.results?.length) {
             const needsRefresh = movieCacheService.shouldRevalidate(cached);
 
+            // Cache entries may predate vault-first ordering — re-pin ProNooB Drive on serve.
+            const cacheResults = cloneMovieResults(cached.results);
+            const vaultPinned = [
+                ...cacheResults.filter((r) => String(r?.source || '') === 'ProNooB Drive'),
+                ...cacheResults.filter((r) => String(r?.source || '') !== 'ProNooB Drive'),
+            ];
+
             await progress.flush({
                 percent: cached.fresh ? 75 : 68,
                 cacheMode: true,
-                resultCount: cached.results.length,
+                resultCount: cacheResults.length,
                 ageHours: cached.ageHours,
                 staleCache: cached.stale,
                 fuzzyMatch: cached.fuzzy,
@@ -1488,12 +1495,12 @@ class MovieController {
             }
 
             logger.info(
-                `Movie vault HIT for "${query}" — ${cached.results.length} title(s)`
+                `Movie vault HIT for "${query}" — ${cacheResults.length} title(s)`
                 + `${cached.fuzzy ? ' (fuzzy)' : ''}${needsRefresh ? ' + bg refresh' : ''}`,
             );
 
             return {
-                results: cached.results,
+                results: vaultPinned,
                 sources: [...cached.sources, 'Vault'],
                 servedFromCache: true,
                 staleCache: cached.stale,
