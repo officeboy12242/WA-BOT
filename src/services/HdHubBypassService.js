@@ -20,6 +20,7 @@
  */
 
 import axios from 'axios';
+import https from 'https';
 import { logger } from '../utils/logger.js';
 import { config } from '../config/config.js';
 
@@ -52,16 +53,38 @@ function canonicalizeHost(urlStr) {
         .replace(/\/\/hubcdn\.(wiki|club)\//i, '//hubcdn.wiki/');
 }
 
-/** GET a page as text (axios). */
+let _relaxedAgent = null;
+function relaxedHttpsAgent() {
+    if (!_relaxedAgent) _relaxedAgent = new https.Agent({ rejectUnauthorized: false });
+    return _relaxedAgent;
+}
+
+const TLS_CERT_ERR = /unable to verify|self.signed|cert(ificate)? (has expired|chain)|depth_zero|err_tls/i;
+
+/** GET a page as text (axios). Several scrape targets (hubcloud.ist et al)
+ * serve an incomplete TLS chain that browsers tolerate but Node rejects;
+ * retry once with a relaxed agent when that exact failure happens. */
 async function fetchPage(urlStr, { referer, timeoutMs } = {}) {
-    const { data } = await axios.get(urlStr, {
+    const headers = { ...DEFAULT_HEADERS, ...(referer ? { Referer: referer } : {}) };
+    const opts = {
         timeout: timeoutMs,
         maxRedirects: 5,
         maxContentLength: 3 * 1024 * 1024,
-        headers: { ...DEFAULT_HEADERS, ...(referer ? { Referer: referer } : {}) },
-        validateStatus: (s) => s >= 200 && s < 400,
-    });
-    return typeof data === 'string' ? data : String(data);
+        headers,
+        // hubcloud.ist et al serve full page HTML with status 403 (WAF quirk) —
+        // accept it; extraction simply finds nothing when the body is junk.
+        validateStatus: (s) => (s >= 200 && s < 400) || s === 403,
+    };
+    try {
+        const { data } = await axios.get(urlStr, opts);
+        return typeof data === 'string' ? data : String(data);
+    } catch (err) {
+        const msg = String(err?.message || err?.code || '');
+        if (!TLS_CERT_ERR.test(msg)) throw err;
+        logger.warn(`[HdHubBypass] ${hostOf(urlStr)} TLS chain issue, retrying relaxed`);
+        const { data } = await axios.get(urlStr, { ...opts, httpsAgent: relaxedHttpsAgent() });
+        return typeof data === 'string' ? data : String(data);
+    }
 }
 
 /** Server classification from the hubcloud.php page (order = user priority). */
@@ -196,6 +219,24 @@ function downloadAnchorFromHtml(html, pageUrl) {
     return href;
 }
 
+/**
+ * hubcloud.php worker URL from a /video/ page: a button anchor pointing at
+ * hubcloud.php on ANY domain (e.g. sportverse.cc/hubcloud.php?host=hubvid&id=…
+ * &token=…). /video/ pages have no a#download — this is their worker link.
+ */
+function workerAnchorFromHtml(html) {
+    const anchors = html.matchAll(/<a[^>]+href="(https?:[^"\s]*hubcloud\.php\?[^"]*)"[^>]*>/gi);
+    for (const a of anchors) {
+        const tag = a[0];
+        const href = a[1];
+        // skip obvious ad buttons (btn2 class rows are ads on these pages)
+        if (/class="[^"]*btn2/i.test(tag)) continue;
+        if (/rel="[^"]*nofollow/i.test(tag) && !/btn-primary/i.test(tag)) continue;
+        return href;
+    }
+    return null;
+}
+
 /** hubdrive HTML → direct servers (some pages embed them) or the hubcloud.php hop. */
 async function bypassHubdriveFromHtml(html, pageUrl, timeoutMs) {
     const direct = extractServerLinks(html);
@@ -211,9 +252,9 @@ async function bypassHubdriveFromHtml(html, pageUrl, timeoutMs) {
     return [];
 }
 
-/** hubcloud /drive/ HTML → hubcloud.php fetch → final servers. */
+/** hubcloud /drive/ or /video/ HTML → hubcloud.php fetch → final servers. */
 async function bypassHubcloudFromHtml(html, pageUrl, timeoutMs) {
-    const php = downloadAnchorFromHtml(html, pageUrl);
+    const php = downloadAnchorFromHtml(html, pageUrl) || workerAnchorFromHtml(html);
     if (!php) return [];
     const html2 = await fetchPage(php, { referer: pageUrl, timeoutMs });
     return extractServerLinks(html2);
@@ -227,10 +268,10 @@ async function bypassHubcdn(urlStr, timeoutMs) {
     return bypassHubcdnFromHtml(html);
 }
 
-/** hubcloud.ist /drive/ page → the gamerxyt.com hubcloud.php URL (or null). */
+/** hubcloud.ist /drive/ or /video/ page → the hubcloud.php worker URL (or null). */
 async function hubcloudDriveToPhp(urlStr, timeoutMs) {
     const html = await fetchPage(urlStr, { timeoutMs });
-    return downloadAnchorFromHtml(html, urlStr);
+    return downloadAnchorFromHtml(html, urlStr) || workerAnchorFromHtml(html);
 }
 
 /** hubdrive /file/ page → direct servers. */

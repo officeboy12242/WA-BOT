@@ -83,10 +83,14 @@ await bypassController.handleBypass(sock, CHAT, SENDER, [
 const multiText = sent.map((x) => x.content.text || '').find((t) => /BYPASS SUCCESSFUL|BYPASS FAILED/.test(t));
 assert.ok(multiText, 'multi-link result expected');
 if (/BYPASS SUCCESSFUL/.test(multiText)) {
-    assert.match(multiText, /link\(s\) · \d+ direct links/, 'multi-link summary line expected');
     const used = await bypassController.getUserBypassCount(TEST_USER);
     assert.ok(used >= 1 && used <= 2, `credits consumed should be 1 or 2, got ${used}`);
-    assert.match(multiText, new RegExp('Bypasses left today: \*' + (3 - used) + '\*'), 'remaining reflects successes');
+    // summary line only exists when BOTH links resolved (controller prints it
+    // for results.length > 1); live target may be down, so 1-of-2 is acceptable
+    if (used === 2) {
+        assert.match(multiText, /link\(s\) · \d+ direct links/, 'multi-link summary line expected');
+    }
+    assert.match(multiText, new RegExp('Bypasses left today: \\*' + (3 - used) + '\\*'), 'remaining reflects successes');
 }
 
 // cleanup test data
