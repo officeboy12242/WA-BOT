@@ -241,11 +241,14 @@ function workerAnchorFromHtml(html) {
 async function bypassHubdriveFromHtml(html, pageUrl, timeoutMs) {
     const direct = extractServerLinks(html);
     if (direct.length) return direct;
-    const m = html.match(/href="(https?:\/\/[^"]*hubcloud[^"]*)"/i);
-    if (m) {
-        const php = await hubcloudDriveToPhp(m[1], timeoutMs);
+    const hrefs = [...html.matchAll(/href="(https?:\/\/[^"]*hubcloud[^"]*)"/gi)].map((mm) => mm[1]);
+    const pick = hrefs.find((u) => /hubcloud\.[a-z.]+\/drive\//i.test(u))
+        || hrefs.find((u) => !/\/(tg|admin)\//i.test(u))
+        || hrefs[0];
+    if (pick) {
+        const php = await hubcloudDriveToPhp(pick, timeoutMs);
         if (php) {
-            const html2 = await fetchPage(php, { referer: m[1], timeoutMs });
+            const html2 = await fetchPage(php, { referer: pick, timeoutMs });
             return extractServerLinks(html2);
         }
     }
@@ -301,6 +304,22 @@ async function bypassNexdrive(urlStr, timeoutMs) {
 function perAttemptTimeout(budgetMs) {
     return Math.max(3_000, Math.min(9_000, Math.floor(budgetMs)));
 }
+
+/** Append a throwaway query param so edge caches (CF caches these pages even
+ * with no-store) and per-IP rate limits serve us a FRESH variant on retry. */
+function cacheBust(urlStr) {
+    try {
+        const u = new URL(urlStr);
+        u.searchParams.set('r', String(Date.now() % 1_000_000));
+        return u.href;
+    } catch {
+        return urlStr;
+    }
+}
+
+/** True when the page family is worth one retry on an empty extraction
+ * (hubcloud/hubdrive edges intermittently serve rate-limit/WAF junk pages). */
+const RETRY_ON_EMPTY_RE = /hubdrive\.|hubcloud\./i;
 
 /** True when the URL host is one of the bypassable file-page families. */
 export function isBypassableUrl(urlStr) {
@@ -358,16 +377,22 @@ async function resolveForUser(urlStr, host, timeoutMs) {
         return { title: '', links: [] };
     }
     const title = (html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1] || '').trim().slice(0, 90);
+    const extract = (h) => {
+        if (/gdflix\./i.test(host)) return bypassGdflixFromHtml(h);
+        if (/hubcdn\./i.test(host)) return bypassHubcdnFromHtml(h);
+        if (/hubdrive\.|hdstream4u\./i.test(host)) return bypassHubdriveFromHtml(h, urlStr, timeoutMs);
+        return bypassHubcloudFromHtml(h, urlStr, timeoutMs);
+    };
     let links = [];
     try {
-        if (/gdflix\./i.test(host)) {
-            links = bypassGdflixFromHtml(html);
-        } else if (/hubcdn\./i.test(host)) {
-            links = bypassHubcdnFromHtml(html);
-        } else if (/hubdrive\.|hdstream4u\./i.test(host)) {
-            links = await bypassHubdriveFromHtml(html, urlStr, timeoutMs);
-        } else {
-            links = await bypassHubcloudFromHtml(html, urlStr, timeoutMs);
+        links = await extract(html);
+        // One backoff + cache-bust retry when a hubdrive/hubcloud page yielded
+        // nothing — recovers transient rate-limit/WAF/cache-junk responses.
+        if (!links.length && RETRY_ON_EMPTY_RE.test(host)) {
+            await new Promise((r) => setTimeout(r, 700));
+            const html2 = await fetchPage(cacheBust(urlStr), { timeoutMs });
+            links = await extract(html2);
+            if (links.length) logger.info(`[HdHubBypass] ${host} recovered on retry`);
         }
     } catch (err) {
         logger.warn(`[HdHubBypass] ${host} extract failed: ${err?.message || err}`);
