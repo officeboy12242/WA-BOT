@@ -655,8 +655,24 @@ class AdminPanel {
                         res.end('⏰ This link has expired (links last 7 hours). Search again with /movie');
                         return;
                     }
-                    res.writeHead(302, { Location: longUrl });
-                    res.end();
+                    // 302 Location must be a valid absolute URL — server pages
+                    // sometimes embed filenames with raw spaces/unicode. If the
+                    // URL can't be normalized, fall back to a meta-refresh page
+                    // (browsers tolerate odd characters in an href attribute).
+                    let safe = null;
+                    try {
+                        safe = new URL(String(longUrl).trim().replace(/[\u0000-\u001f\u007f]/g, '')).href;
+                    } catch {
+                        try { safe = new URL(encodeURI(String(longUrl).trim())).href; } catch { safe = null; }
+                    }
+                    if (safe) {
+                        res.writeHead(302, { Location: safe });
+                        res.end();
+                    } else {
+                        const esc = String(longUrl).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+                        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+                        res.end(`<meta http-equiv="refresh" content="0; url='${esc}'"><p>Redirecting… <a href="${esc}">click here</a> if nothing happens.</p>`);
+                    }
                 } catch (err) {
                     logger.error(`Short link redirect error: ${err.message}`);
                     res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });

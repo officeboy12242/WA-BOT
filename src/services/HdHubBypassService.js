@@ -104,6 +104,23 @@ function classifyServer(urlStr, labelText = '') {
     return null;
 }
 
+/** Server pages embed filenames with raw spaces/unicode in URLs. Those
+ * break shorteners and 302 Location headers downstream ('redirect failed'),
+ * so normalize every extracted URL: encode unsafe path chars, strip junk. */
+function sanitizeUrl(urlStr) {
+    let u = String(urlStr || '').trim().replace(/[\u0000-\u001f\u007f]/g, '');
+    if (!/^https?:\/\//i.test(u)) return u;
+    try {
+        return new URL(u).href;
+    } catch {
+        try {
+            return new URL(encodeURI(u)).href;
+        } catch {
+            return u.replace(/ /g, '%20');
+        }
+    }
+}
+
 function dedupeLinks(links) {
     const seen = new Set();
     const out = [];
@@ -146,6 +163,7 @@ function extractServerLinks(html) {
             const js = html.match(jsRe);
             if (js && /^https?:\/\//i.test(js[1])) finalUrl = js[1];
         }
+        finalUrl = sanitizeUrl(finalUrl);
         const k = finalUrl.replace(/[?#].*$/, '');
         if (seen.has(k)) continue;
         seen.add(k);
@@ -173,7 +191,7 @@ function bypassHubcdnFromHtml(html) {
     const linkParam = decoded.match(/[?&]link=([^&]+)/i);
     const target = linkParam ? decodeURIComponent(linkParam[1]) : (decoded.startsWith('http') ? decoded : '');
     if (!target || !/^https?:\/\//i.test(target)) return [];
-    return [{ label: 'R2 ⚡', serverKey: 'r2', url: target }];
+    return [{ label: 'R2 ⚡', serverKey: 'r2', url: sanitizeUrl(target) }];
 }
 
 /** GDFlix page mirrors, classified by host. */
@@ -191,6 +209,7 @@ function bypassGdflixFromHtml(html) {
     const out = [];
     const seen = new Set();
     const push = (u) => {
+        u = sanitizeUrl(u);
         const label = gdflixMirrorLabel(u);
         if (!label) return;
         const k = u.replace(/[?#].*$/, '');
@@ -298,7 +317,8 @@ function extractUrlsFromText(text) {
 function serverLinksFromText(text) {
     const out = [];
     const seen = new Set();
-    for (const u of extractUrlsFromText(text)) {
+    for (const raw of extractUrlsFromText(text)) {
+        const u = sanitizeUrl(raw);
         if (/t\.me|telegram|winexch|a-ads|snvhost|tinyurl|google\.\//i.test(u)) continue;
         if (/hubcloud\.[a-z.]+\/(drive|tg)\//i.test(u)) continue;
         const cls = classifyServer(u);
