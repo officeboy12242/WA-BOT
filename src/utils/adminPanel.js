@@ -642,7 +642,15 @@ class AdminPanel {
 
             // Short link redirect (no auth — public movie download links)
             if (pathname.startsWith('/d/')) {
-                const code = pathname.slice(3).split('/')[0];
+                // Tolerate mangling from WhatsApp's autolinker / manual retyping:
+                //   - %-decoded path (a pasted URL ending in an encoded char can
+                //     truncate mid-%-sequence, e.g. "…%2" or a stray %20)
+                //   - trailing punctuation, parens, dots, and comma/semicolon
+                //     tail-splits that capture apps glue onto the URL
+                //   - spaces/CR/LF that leaked into the segment
+                // Codes are base64url only, so anything else is noise.
+                const rawCode = decodeURIComponent(pathname.slice(3).split('/')[0] || '');
+                const code = rawCode.replace(/[^A-Za-z0-9_-]/g, '');
                 if (!this.shortLinkService) {
                     res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' });
                     res.end('Short links not ready');
