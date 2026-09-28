@@ -312,20 +312,62 @@ function serverLinksFromText(text) {
 }
 
 /** r.jina.ai renders pages through headless browsers — rides out Cloudflare
- * challenges and datacenter-IP blocks that hit Koyeb/Render egress. */
+ * challenges and datacenter-IP blocks that hit Koyeb/Render egress. Must use
+ * native fetch with a MINIMAL header set: axios's default Accept/Accept-Encoding
+ * headers change jina's cache key and pin a stale CF-challenge page. */
 async function fetchViaJina(urlStr, timeoutMs) {
-    const { data } = await axios.get(`https://r.jina.ai/${urlStr}`, {
-        timeout: Math.max(6_000, timeoutMs),
-        maxContentLength: 2 * 1024 * 1024,
-        headers: { 'User-Agent': UA, Accept: 'text/plain' },
-        validateStatus: () => true,
-    });
-    return typeof data === 'string' ? data : String(data || '');
+    for (let attempt = 0; attempt < 2; attempt++) {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), Math.max(6_000, timeoutMs));
+        let text = '';
+        try {
+            const res = await fetch(`https://r.jina.ai/${urlStr}`, {
+                headers: { 'User-Agent': UA },
+                signal: ctrl.signal,
+            });
+            text = await res.text();
+        } catch {
+            text = '';
+        } finally {
+            clearTimeout(t);
+        }
+        if (!/just a moment|challenge-platform/i.test(text) || attempt === 1) return text;
+        await new Promise((r) => setTimeout(r, 900));
+    }
+    return '';
 }
 
-/** Last-resort resolution through the jina proxy: page → hubcloud hop → php. */
+/** urltomarkdown.herokuapp.com renders a page to markdown — second reader
+ * option that currently clears hubdrive.pics's Cloudflare when jina can't. */
+async function fetchViaUrltomarkdown(urlStr, timeoutMs) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), Math.max(8_000, timeoutMs));
+    try {
+        const res = await fetch(`https://urltomarkdown.herokuapp.com/?url=${encodeURIComponent(urlStr)}`, {
+            headers: { 'User-Agent': UA },
+            signal: ctrl.signal,
+        });
+        return await res.text();
+    } finally {
+        clearTimeout(t);
+    }
+}
+
+/** Render a page to readable text via whichever reader proxy currently works
+ * (their headless egress pools get CF-flagged at different times). */
+async function renderPageText(urlStr, timeoutMs) {
+    for (const reader of [fetchViaUrltomarkdown, fetchViaJina]) {
+        try {
+            const text = await reader(urlStr, timeoutMs);
+            if (text && !/just a moment|challenge-platform/i.test(text)) return text;
+        } catch {}
+    }
+    return '';
+}
+
+/** Last-resort resolution through the reader proxies: page → hubcloud hop → php. */
 async function resolveViaJina(pageUrl, timeoutMs) {
-    const page = await fetchViaJina(pageUrl, timeoutMs);
+    const page = await renderPageText(pageUrl, timeoutMs);
     if (!page) return [];
     const urls = extractUrlsFromText(page);
     const hub = urls.find((u) => /hubcloud\.[a-z.]+\/drive\//i.test(u))
@@ -333,14 +375,14 @@ async function resolveViaJina(pageUrl, timeoutMs) {
     let servers = serverLinksFromText(page);
     const php = urls.find((u) => /hubcloud\.php\?/i.test(u));
     if (php) {
-        const phpText = await fetchViaJina(php, timeoutMs);
+        const phpText = await renderPageText(php, timeoutMs);
         servers = servers.concat(serverLinksFromText(phpText));
     } else if (hub) {
-        const hubText = await fetchViaJina(hub, timeoutMs);
+        const hubText = await renderPageText(hub, timeoutMs);
         const hubUrls = extractUrlsFromText(hubText);
         const php2 = hubUrls.find((u) => /hubcloud\.php\?/i.test(u));
         if (php2) {
-            const phpText2 = await fetchViaJina(php2, timeoutMs);
+            const phpText2 = await renderPageText(php2, timeoutMs);
             servers = servers.concat(serverLinksFromText(phpText2));
         } else {
             servers = servers.concat(serverLinksFromText(hubText));
@@ -469,7 +511,35 @@ export async function debugResolve(rawUrl, timeoutMs = 9_000) {
     const proxy = await (async () => {
         try { return await resolveViaJina(url, timeoutMs); } catch { return []; }
     })();
-    return { steps, jinaFallbackLinks: proxy.length, jinaLabels: proxy.map((l) => l.label) };
+    let hybrid = [];
+    if (/hubdrive|hdstream4u/i.test(h)) {
+        const hs = { label: 'hybrid(reader→direct)' };
+        steps.push(hs);
+        try {
+            const md = await renderPageText(url, timeoutMs);
+            hs.mdBytes = String(md || '').length;
+            const driveUrl = extractUrlsFromText(md).find((u) => /hubcloud\.[a-z.]+\/drive\//i.test(u));
+            hs.driveUrl = driveUrl || null;
+            if (driveUrl) {
+                const php = await hubcloudDriveToPhp(driveUrl, timeoutMs);
+                hs.php = php || null;
+                if (php) {
+                    const html2 = await fetchPage(php, { referer: driveUrl, timeoutMs });
+                    hybrid = extractServerLinks(html2);
+                    hs.servers = hybrid.length;
+                }
+            }
+        } catch (e) {
+            hs.error = String(e?.message || e).slice(0, 120);
+        }
+    }
+    return {
+        steps,
+        jinaFallbackLinks: proxy.length,
+        jinaLabels: proxy.map((l) => l.label),
+        hybridLinks: hybrid.length,
+        hybridLabels: hybrid.map((l) => l.label),
+    };
 }
 
 /**
@@ -517,11 +587,33 @@ async function resolveForUser(urlStr, host, timeoutMs) {
         // Final fallback: render the chain through the jina proxy (Cloudflare
         // challenges / datacenter-IP blocks defeat direct fetches).
         if (!links.length && RETRY_ON_EMPTY_RE.test(host)) {
-            try {
-                links = await resolveViaJina(urlStr, timeoutMs);
-                if (links.length) logger.info(`[HdHubBypass] ${host} resolved via jina proxy`);
-            } catch (e) {
-                logger.warn(`[HdHubBypass] ${host} jina fallback failed: ${e?.message || e}`);
+            // Hybrid (hubdrive-family): hubdrive.pics CF-challenges datacenter
+            // IPs, but the hubcloud hop is reachable — render ONLY the hubdrive
+            // page via jina, then fetch the hubcloud chain directly.
+            if (/hubdrive\.|hdstream4u\./i.test(host)) {
+                try {
+                    const md = await renderPageText(urlStr, timeoutMs);
+                    const driveUrl = extractUrlsFromText(md).find((u) => /hubcloud\.[a-z.]+\/drive\//i.test(u));
+                    if (driveUrl) {
+                        const php = await hubcloudDriveToPhp(driveUrl, timeoutMs);
+                        if (php) {
+                            const html2 = await fetchPage(php, { referer: driveUrl, timeoutMs });
+                            links = extractServerLinks(html2);
+                            if (links.length) logger.info(`[HdHubBypass] ${host} resolved via jina+direct hybrid`);
+                        }
+                    }
+                } catch (e) {
+                    logger.warn(`[HdHubBypass] ${host} hybrid fallback failed: ${e?.message || e}`);
+                }
+            }
+            // Hail-mary for the other families: full chain through the proxy.
+            if (!links.length) {
+                try {
+                    links = await resolveViaJina(urlStr, timeoutMs);
+                    if (links.length) logger.info(`[HdHubBypass] ${host} resolved via jina proxy`);
+                } catch (e) {
+                    logger.warn(`[HdHubBypass] ${host} jina fallback failed: ${e?.message || e}`);
+                }
             }
         }
     } catch (err) {
