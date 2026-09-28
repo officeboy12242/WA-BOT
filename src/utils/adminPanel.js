@@ -770,6 +770,32 @@ class AdminPanel {
                 return;
             }
 
+            // API: Bypass diagnostics — per-hop fetch status for one link
+            // (why did this hubdrive/hubcloud link fail to resolve?)
+            if (pathname === '/debug/bypass' && req.method === 'GET') {
+                if (!this._verifyToken(req)) {
+                    res.writeHead(401, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Unauthorized' }));
+                    return;
+                }
+                const target = url.searchParams.get('url');
+                if (!target) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'add ?url=<link>' }));
+                    return;
+                }
+                try {
+                    const { debugResolve } = await import('../services/HdHubBypassService.js');
+                    const report = await debugResolve(target, 9_000);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify(report, null, 2));
+                } catch (e) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: String(e?.message || e) }));
+                }
+                return;
+            }
+
             // API: Get detailed metrics (for monitoring dashboards)
             if (pathname === '/api/metrics' || pathname === '/metrics') {
                 const metrics = getSystemMetrics();
