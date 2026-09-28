@@ -386,10 +386,12 @@ async function resolveForUser(urlStr, host, timeoutMs) {
     let links = [];
     try {
         links = await extract(html);
-        // One backoff + cache-bust retry when a hubdrive/hubcloud page yielded
-        // nothing — recovers transient rate-limit/WAF/cache-junk responses.
-        if (!links.length && RETRY_ON_EMPTY_RE.test(host)) {
-            await new Promise((r) => setTimeout(r, 700));
+        // Up to 2 backoff + cache-bust retries when a hubdrive/hubcloud page
+        // yields nothing — recovers transient rate-limit/WAF/cache-junk and
+        // short network-filter blocks on the hubcloud hop.
+        for (const waitMs of [900, 1800]) {
+            if (links.length || !RETRY_ON_EMPTY_RE.test(host)) break;
+            await new Promise((r) => setTimeout(r, waitMs));
             const html2 = await fetchPage(cacheBust(urlStr), { timeoutMs });
             links = await extract(html2);
             if (links.length) logger.info(`[HdHubBypass] ${host} recovered on retry`);
